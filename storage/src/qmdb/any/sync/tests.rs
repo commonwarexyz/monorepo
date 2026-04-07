@@ -451,10 +451,16 @@ where
         let target_ops = H::create_ops(num_ops);
 
         // Create two databases with their own configs
-        let target_config = H::config(&context.next_u64().to_string(), &context);
+        let target_config = H::config(
+            &context.next_u64().to_string(),
+            &context.with_label("target_cfg"),
+        );
         let mut target_db =
             H::init_db_with_config(context.with_label("target"), target_config).await;
-        let sync_config = H::config(&context.next_u64().to_string(), &context);
+        let sync_config = H::config(
+            &context.next_u64().to_string(),
+            &context.with_label("client_cfg"),
+        );
         let client_context = context.with_label("client");
         let mut sync_db = H::init_db_with_config(client_context.clone(), sync_config.clone()).await;
 

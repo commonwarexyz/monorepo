@@ -44,13 +44,21 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
     fn test_config(pooler: &impl BufferPooler) -> Config {
+        test_config_labeled(pooler, "default")
+    }
+
+    fn test_config_labeled(pooler: &impl BufferPooler, label: &str) -> Config {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                &pooler.with_label(label),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
         }
     }
 
@@ -281,10 +289,13 @@ mod tests {
             let hasher = Standard::<Sha256>::new();
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mut mmr =
-                Mmr::<_, Digest>::init(context.with_label("init"), &hasher, test_config(&context))
-                    .await
-                    .unwrap();
+            let mut mmr = Mmr::<_, Digest>::init(
+                context.with_label("init"),
+                &hasher,
+                test_config_labeled(&context, "init"),
+            )
+            .await
+            .unwrap();
             let mut batch = mmr.new_batch();
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -302,7 +313,11 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    &context.with_label("ref_cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let mut ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)
                 .await
@@ -324,7 +339,7 @@ mod tests {
             // init_sync with range starting beyond the existing data triggers the
             // "fresh start" path (clear_to_size).
             let sync_cfg = SyncConfig::<Digest> {
-                config: test_config(&context),
+                config: test_config_labeled(&context, "sync"),
                 range: Location::new(100)..Location::new(200),
                 pinned_nodes: Some(pinned),
             };

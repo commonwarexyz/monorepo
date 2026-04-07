@@ -316,7 +316,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver,
         max_message_size: u32,
         base_port: u16,
         n: usize,

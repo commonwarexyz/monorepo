@@ -918,7 +918,8 @@ pub(crate) mod test {
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.
-            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
+            let config =
+                fixed_db_config::<OneCap>(&seed.to_string(), &context.with_label("one_cap"));
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap>::init(
                 context.with_label("first"),
                 config,
@@ -929,7 +930,8 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
-            let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+            let config =
+                fixed_db_config::<TwoCap>(&seed.to_string(), &context.with_label("two_cap"));
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap>::init(
                 context.with_label("second"),
                 config,
