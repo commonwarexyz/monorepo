@@ -30,7 +30,7 @@ pub struct ReporterReplicaStateData {
 }
 
 /// Serializable trace document for quint test generation.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TraceData {
     pub n: usize,
     pub faults: usize,

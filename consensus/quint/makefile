@@ -7,8 +7,14 @@ FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
 MIN_REQUIRED_CONTAINERS ?= 3
 MAX_REQUIRED_CONTAINERS ?= 10
+MUTATED_TRACES_DIR ?= ../fuzz/artifacts/mutated_traces
+MUTATED_TRACES_SEED_DIR ?=
+MUTATOR_ITERATIONS ?= 1000
+MUTATOR_SEED ?= 0
+MUTATOR_MUT_PER_TRACE ?= 2
+MUTATOR_RESEED_FREQ ?= 100
 
-.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
+.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist mutate_traces replay_mutated_traces clean_mutated_traces
 
 typecheck:
 	quint typecheck types.qnt
@@ -143,6 +149,47 @@ tv_live_watch: clean_traces
 
 test_encoder:
 	cargo test -p commonware-consensus-fuzz -- test_encoder_roundtrip
+
+# Run the trace mutator. Loads JSON seeds from
+# consensus/fuzz/src/tracing/tests/fixtures/ (the path is hard-coded in the
+# binary via CARGO_MANIFEST_DIR), validates each candidate via `quint test`,
+# and writes accepted mutated traces to $(MUTATED_TRACES_DIR).
+mutate_traces:
+	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
+	MUTATOR_SEED=$(MUTATOR_SEED) \
+	MUTATOR_MUT_PER_TRACE=$(MUTATOR_MUT_PER_TRACE) \
+	MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
+	MUTATED_TRACES_SEED_DIR=$(MUTATED_TRACES_SEED_DIR) \
+	MUTATOR_DEBUG=true \
+	cargo run -p commonware-consensus-fuzz --bin trace_mutator
+
+# Replay every JSON trace in $(MUTATED_TRACES_DIR) through the real
+# implementation via the `replay_trace` binary. Fails if any trace fails
+# to replay; reports total/passed/failed at the end.
+replay_mutated_traces:
+	@if [ ! -d "$(MUTATED_TRACES_DIR)" ]; then \
+		echo "No mutated traces directory: $(MUTATED_TRACES_DIR)"; \
+		exit 1; \
+	fi; \
+	failed=0; total=0; \
+	for f in $(MUTATED_TRACES_DIR)/*.json; do \
+		[ -f "$$f" ] || continue; \
+		total=$$((total + 1)); \
+		echo "=== Replaying $$f ==="; \
+		if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
+			echo "PASS"; \
+		else \
+			echo "FAIL"; \
+			failed=$$((failed + 1)); \
+		fi; \
+		echo; \
+	done; \
+	echo "Results: $$((total - failed))/$$total passed"; \
+	[ $$failed -eq 0 ]
+
+clean_mutated_traces:
+	rm -rf $(MUTATED_TRACES_DIR)
+
 ITF_DIR ?= itf_traces
 ITF_SAMPLES ?= 50
 ITF_STEPS ?= 200
