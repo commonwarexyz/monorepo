@@ -206,7 +206,7 @@ fn bench_global_freelist_case(
             measure(
                 iters,
                 threading,
-                || BufferPoolThreadCache::flush(),
+                BufferPoolThreadCache::flush,
                 |_| {
                     let buffer = pool
                         .try_alloc(size)

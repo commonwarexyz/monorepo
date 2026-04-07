@@ -1,9 +1,10 @@
 use commonware_runtime::benchmarks::iobuf::{FreelistBench, FreelistEntry};
+use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
 use std::{
     hint::{black_box, spin_loop},
-    sync::{Arc, Barrier, Mutex},
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
 };
@@ -162,10 +163,7 @@ fn bench_case<S: BatchFreelist>(
             measure(
                 iters,
                 threading,
-                {
-                    let shared = shared.clone();
-                    move || WorkerState::new(shared.clone(), batch)
-                },
+                move || WorkerState::new(Arc::clone(&shared), batch),
                 |state| state.step(),
             )
         })
@@ -268,7 +266,7 @@ impl BatchFreelist for MutexVecBatchFreelist {
     }
 
     fn take_batch(&self, out: &mut Vec<u32>, max: usize) {
-        let mut slots = self.0.lock().expect("mutex freelist poisoned");
+        let mut slots = self.0.lock();
         let count = max.saturating_sub(out.len()).min(slots.len());
         let split = slots.len() - count;
         out.extend_from_slice(&slots[split..]);
@@ -276,7 +274,7 @@ impl BatchFreelist for MutexVecBatchFreelist {
     }
 
     fn put_batch(&self, slots: &mut Vec<u32>) {
-        let mut inner = self.0.lock().expect("mutex freelist poisoned");
+        let mut inner = self.0.lock();
         inner.extend(slots.drain(..));
     }
 }
