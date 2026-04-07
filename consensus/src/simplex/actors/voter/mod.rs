@@ -337,7 +337,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -578,7 +578,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -851,7 +851,7 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Sometimes,
+                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -979,7 +979,7 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Sometimes,
+                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -1121,7 +1121,7 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Sometimes,
+                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -1256,7 +1256,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (100_000.0, 0.0), // Very slow verification
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1657,7 +1657,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2077,7 +2077,7 @@ mod tests {
                 Duration::from_millis(500),
                 Duration::from_secs(1000),
                 Duration::from_secs(1000),
-                mocks::application::Certifier::Sometimes,
+                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -2185,7 +2185,7 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Sometimes,
+                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -3135,7 +3135,7 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_mins(60),
-                mocks::application::Certifier::Sometimes,
+                mocks::application::Certifier::Always,
             )
             .await;
 
