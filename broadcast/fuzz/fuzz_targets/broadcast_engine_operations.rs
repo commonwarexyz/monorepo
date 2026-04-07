@@ -13,6 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -186,7 +187,7 @@ fn fuzz(input: FuzzInput) {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
             peers.clone(),
         )

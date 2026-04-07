@@ -610,7 +610,7 @@ mod tests {
             Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
             peers,
         )
@@ -634,7 +634,7 @@ mod tests {
             Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
             primary,
             secondary,

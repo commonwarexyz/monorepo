@@ -682,13 +682,14 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZUsize;
     use std::time::Duration;
 
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
+            let mut oracle = setup_network(context.clone(), NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -812,7 +813,7 @@ mod tests {
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
+            let mut oracle = setup_network(context.clone(), NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -900,7 +901,7 @@ mod tests {
     fn test_marshaled_rejects_mismatched_context() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
+            let mut oracle = setup_network(context.clone(), NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,

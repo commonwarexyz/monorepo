@@ -61,7 +61,7 @@ mod tests {
         Blocker, Manager as _, Recipients, Sender as _,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{ordered::Set, NZU32};
+    use commonware_utils::{ordered::Set, NZUsize, NZU32};
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -102,7 +102,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();

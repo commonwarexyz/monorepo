@@ -1376,7 +1376,7 @@ mod tests {
     use crate::{Manager as _, Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
-    use commonware_utils::ordered::Set;
+    use commonware_utils::{ordered::Set, NZUsize};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1392,7 +1392,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
 
@@ -1441,7 +1441,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let primary = ed25519::PrivateKey::from_seed(11).public_key();
@@ -1483,7 +1483,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1613,7 +1613,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1687,7 +1687,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1774,7 +1774,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1824,7 +1824,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: commonware_utils::NZUsize!(1),
+            tracked_peer_sets: NZUsize!(1),
         };
         let runner = deterministic::Runner::default();
 
@@ -1859,7 +1859,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: commonware_utils::NZUsize!(3),
+            tracked_peer_sets: NZUsize!(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -1937,7 +1937,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: commonware_utils::NZUsize!(3),
+            tracked_peer_sets: NZUsize!(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -2033,7 +2033,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -2112,7 +2112,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(2),
+                tracked_peer_sets: NZUsize!(2),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);

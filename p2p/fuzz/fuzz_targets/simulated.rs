@@ -7,6 +7,7 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -111,7 +112,7 @@ fn fuzz(input: FuzzInput) {
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
         disconnect_on_block: false,
-        tracked_peer_sets: commonware_utils::NZUsize!(1),
+        tracked_peer_sets: NZUsize!(1),
     };
 
     let executor = deterministic::Runner::seeded(input.seed);

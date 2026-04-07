@@ -281,7 +281,10 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
-    use commonware_utils::ordered::{Map, Set};
+    use commonware_utils::{
+        ordered::{Map, Set},
+        NZUsize,
+    };
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -296,7 +299,7 @@ mod tests {
         (
             Config {
                 crypto,
-                tracked_peer_sets: commonware_utils::NZUsize!(2),
+                tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
                 allow_dns: true,
@@ -810,7 +813,7 @@ mod tests {
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
-            cfg.tracked_peer_sets = commonware_utils::NZUsize!(1);
+            cfg.tracked_peer_sets = NZUsize!(1);
 
             let TestHarness {
                 mut mailbox,

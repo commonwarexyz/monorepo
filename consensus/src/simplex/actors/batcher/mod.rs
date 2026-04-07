@@ -73,7 +73,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex};
+    use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex, NZUsize};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     type Broadcasts = Arc<Mutex<Vec<(Sha256Digest, Round, Vec<PublicKey>)>>>;
@@ -119,7 +119,7 @@ mod tests {
             NConfig {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
             peers,
         )

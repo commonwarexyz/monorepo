@@ -306,7 +306,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect};
+    use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
     use futures::future::Either;
     use std::{
         collections::HashSet,
@@ -328,7 +328,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
-            tracked_peer_sets: commonware_utils::NZUsize!(2),
+            tracked_peer_sets: NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,

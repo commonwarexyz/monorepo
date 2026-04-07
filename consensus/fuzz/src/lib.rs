@@ -224,7 +224,7 @@ async fn setup_network<P: simplex::Simplex>(
         NetworkConfig {
             max_size: 1024 * 1024,
             disconnect_on_block: false,
-            tracked_peer_sets: commonware_utils::NZUsize!(1),
+            tracked_peer_sets: NZUsize!(1),
         },
         participants.clone(),
     )

@@ -16,6 +16,7 @@ use commonware_runtime::{
 use commonware_utils::{
     channel::{mpsc, oneshot},
     ordered::Set,
+    NZUsize,
 };
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
@@ -304,7 +305,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
         Config {
             max_size: u32::MAX,
             disconnect_on_block: true,
-            tracked_peer_sets: commonware_utils::NZUsize!(1),
+            tracked_peer_sets: NZUsize!(1),
         },
     );
     network.start();

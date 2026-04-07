@@ -1758,7 +1758,7 @@ mod tests {
                         simulated::Config {
                             max_size: MAX_SHARD_SIZE as u32,
                             disconnect_on_block: true,
-                            tracked_peer_sets: commonware_utils::NZUsize!(1),
+                            tracked_peer_sets: NZUsize!(1),
                         },
                         peer_keys.clone(),
                         np_keys.clone(),
@@ -3693,7 +3693,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                    tracked_peer_sets: NZUsize!(1),
                 },
             );
             network.start();
@@ -3828,7 +3828,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                    tracked_peer_sets: NZUsize!(1),
                 },
             );
             network.start();
@@ -4706,7 +4706,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                    tracked_peer_sets: NZUsize!(2),
                 },
             );
             network.start();
@@ -4840,7 +4840,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                    tracked_peer_sets: NZUsize!(1),
                 },
             );
             network.start();
@@ -4930,7 +4930,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                    tracked_peer_sets: NZUsize!(2),
                 },
             );
             network.start();
@@ -5065,7 +5065,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                    tracked_peer_sets: NZUsize!(2),
                 },
             );
             network.start();

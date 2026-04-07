@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect, NZU32,
+    NZUsize, TryCollect, NZU32,
 };
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -56,7 +56,7 @@ const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
 const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
-const TRACKED_PEER_SETS: NonZeroUsize = commonware_utils::NZUsize!(5);
+const TRACKED_PEER_SETS: NonZeroUsize = NZUsize!(5);
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
@@ -314,8 +314,7 @@ impl NetworkScheme for Lookup {
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets =
-            commonware_utils::NZUsize!(2 * peer.topo.tracked_peer_sets.get());
+        config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());
 
         // Create the network and oracle
         let (mut network, mut oracle) =

@@ -272,7 +272,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
-    use commonware_utils::ordered::Set;
+    use commonware_utils::{ordered::Set, NZUsize};
     use std::{io, num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
@@ -289,7 +289,7 @@ mod tests {
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(1),
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();

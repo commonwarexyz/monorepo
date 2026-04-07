@@ -103,7 +103,7 @@ mod tests {
         Blocker, Manager as _, Provider, TrackedPeers,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, ordered::Set, NZU32};
+    use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -156,7 +156,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: commonware_utils::NZUsize!(3),
+                tracked_peer_sets: NZUsize!(3),
             },
         );
         network.start();
@@ -447,7 +447,7 @@ mod tests {
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                    tracked_peer_sets: NZUsize!(1),
                 },
             );
             network.start();
@@ -1850,7 +1850,7 @@ mod tests {
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                    tracked_peer_sets: NZUsize!(1),
                 },
             );
             network.start();
@@ -1956,7 +1956,7 @@ mod tests {
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                    tracked_peer_sets: NZUsize!(2),
                 },
             );
             network.start();
@@ -2089,7 +2089,7 @@ mod tests {
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                    tracked_peer_sets: NZUsize!(2),
                 },
             );
             network.start();
