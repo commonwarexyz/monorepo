@@ -548,7 +548,12 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+        self.execution = Execution::Dedicated(None);
+        self
+    }
+
+    fn pinned(mut self, core: usize) -> Self {
+        self.execution = Execution::Dedicated(Some(core));
         self
     }
 
@@ -601,11 +606,15 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        if matches!(past, Execution::Dedicated) {
+        if let Execution::Dedicated(core) = past {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
+                    // Pin before running any work on this thread
+                    if let Some(core) = core {
+                        utils::thread::pin_to_core(core);
+                    }
                     handle.block_on(f);
                 }
             });

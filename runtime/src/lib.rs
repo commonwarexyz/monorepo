@@ -179,6 +179,12 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
+        /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given core
+        /// (best-effort, Linux only). The core value wraps around the number of available CPUs.
+        ///
+        /// Implies [`Spawner::dedicated`].
+        fn pinned(self, core: usize) -> Self;
+
         /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
         fn instrumented(self) -> Self;
 
