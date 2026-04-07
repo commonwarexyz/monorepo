@@ -21,10 +21,9 @@
 //!
 //! # Peer Set Updates
 //!
-//! Per-sender caches are retained only for peers in the latest primary set. Until a non-empty
-//! `latest.primary` snapshot exists, nothing is buffered and local broadcasts are not sent.
-//! If the transport keeps an overlap window of older peer sets, those peers may still remain
-//! connected, but their buffered-message deque is evicted as soon as they leave `latest.primary`.
+//! Per-sender caches follow `latest.primary`. Broadcasts use the mailbox `recipients` regardless of
+//! local insertion. Eviction drops deques when a peer leaves `latest.primary`, even if an overlap
+//! window keeps them connected.
 //!
 //! Messages referenced by multiple senders stay cached until the last per-sender deque that
 //! contains them is evicted.
@@ -1101,10 +1100,10 @@ mod tests {
                 "message should be evicted: peer A is not in the latest peer set"
             );
 
-            // Peer A is no longer in `latest.primary`, so the engine does not transmit or buffer.
+            // Peer A is no longer in `latest.primary`, so A does not buffer; send still runs.
             let fresh = TestMessage::shared(b"post-eviction-latest-test");
             let result = mailbox_a.broadcast(Recipients::All, fresh.clone()).await;
-            assert_eq!(result.await.unwrap().len(), 0);
+            assert_eq!(result.await.unwrap().len(), 2);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert!(
@@ -1197,8 +1196,8 @@ mod tests {
             let result = mailbox_a.broadcast(Recipients::All, msg.clone()).await;
             assert_eq!(
                 result.await.unwrap().len(),
-                0,
-                "ineligible sender should not transmit"
+                2,
+                "Recipients::All still delivers to other peers; cache policy is separate"
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -1283,7 +1282,11 @@ mod tests {
 
             let before = TestMessage::shared(b"before-tracking");
             let result = mailbox_a.broadcast(Recipients::All, before.clone()).await;
-            assert_eq!(result.await.unwrap().len(), 0);
+            assert_eq!(
+                result.await.unwrap().len(),
+                0,
+                "simulated network drops until a peer set is tracked"
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert_eq!(
@@ -1293,7 +1296,7 @@ mod tests {
             );
             assert!(
                 mailbox_b.get(before.digest()).await.is_none(),
-                "without a registered peer set, broadcasts should not reach remote peers"
+                "without latest.primary, remote peers do not cache inbound messages"
             );
 
             oracle

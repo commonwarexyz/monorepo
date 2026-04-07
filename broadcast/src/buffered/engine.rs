@@ -244,12 +244,10 @@ where
         responder: oneshot::Sender<Vec<P>>,
     ) {
         // `digest` keys the shared item table and refcounts; same digest from our key is one row.
+        // Buffering follows `latest.primary` (insert may be `Ineligible`); we still send using
+        // `recipients` regardless of local insertion.
         let digest = msg.digest();
-        let outcome = self.insert_message(self.public_key.clone(), digest, msg.clone());
-        if matches!(outcome, InsertMessageResult::Ineligible) {
-            responder.send_lossy(vec![]);
-            return;
-        }
+        let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
         let sent_to = sender
