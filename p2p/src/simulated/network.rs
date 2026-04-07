@@ -91,6 +91,13 @@ struct PeerSetsAtIndex<P: PublicKey> {
     secondary: Set<P>,
 }
 
+/// Reference counts for how many retained peer sets list a peer as primary vs secondary.
+#[derive(Clone, Copy, Default)]
+struct PeerRefCounts {
+    primary: usize,
+    secondary: usize,
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -145,11 +152,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Primary and secondary peer sets indexed by peer-set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
 
-    // Reference count for each peer (number of primary peer sets they belong to).
-    primary_refs: BTreeMap<P, usize>,
-
-    // Reference count for each peer (number of secondary peer sets they belong to).
-    secondary_refs: BTreeMap<P, usize>,
+    // Per-peer reference counts across retained peer sets (entry removed when both are zero).
+    peer_ref_counts: BTreeMap<P, PeerRefCounts>,
 
     // Maximum number of peer sets to retain.
     tracked_peer_sets: NonZeroUsize,
@@ -205,8 +209,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
-                primary_refs: BTreeMap::new(),
-                secondary_refs: BTreeMap::new(),
+                peer_ref_counts: BTreeMap::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -283,7 +286,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         // Create and store new primary peer set.
         for public_key in primary.iter() {
             self.ensure_peer_exists(public_key).await;
-            *self.primary_refs.entry(public_key.clone()).or_insert(0) += 1;
+            self.peer_ref_counts
+                .entry(public_key.clone())
+                .or_default()
+                .primary += 1;
         }
 
         // Secondary peers: Peers in both roles count only as primary.
@@ -295,7 +301,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
         for public_key in secondary_filtered.iter() {
             self.ensure_peer_exists(public_key).await;
-            *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
+            self.peer_ref_counts
+                .entry(public_key.clone())
+                .or_default()
+                .secondary += 1;
         }
         self.peer_sets.insert(
             id,
@@ -311,26 +320,37 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             debug!(index = removed_index, "removed oldest tracked peer sets");
 
             for public_key in sets.primary.iter() {
-                let refs = self.primary_refs.get_mut(public_key).unwrap();
-                *refs = refs.checked_sub(1).expect("reference count underflow");
-
-                if *refs == 0 {
-                    self.primary_refs.remove(public_key);
+                let counts = self
+                    .peer_ref_counts
+                    .get_mut(public_key)
+                    .expect("reference map out of sync with peer sets");
+                counts.primary = counts
+                    .primary
+                    .checked_sub(1)
+                    .expect("reference count underflow");
+                if counts.primary == 0 && counts.secondary == 0 {
+                    self.peer_ref_counts.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any primary peer set"
+                        "removed peer no longer in any retained peer set"
                     );
                 }
             }
 
             for public_key in sets.secondary.iter() {
-                let refs = self.secondary_refs.get_mut(public_key).unwrap();
-                *refs = refs.checked_sub(1).expect("reference count underflow");
-                if *refs == 0 {
-                    self.secondary_refs.remove(public_key);
+                let counts = self
+                    .peer_ref_counts
+                    .get_mut(public_key)
+                    .expect("reference map out of sync with peer sets");
+                counts.secondary = counts
+                    .secondary
+                    .checked_sub(1)
+                    .expect("reference count underflow");
+                if counts.primary == 0 && counts.secondary == 0 {
+                    self.peer_ref_counts.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any secondary peer set"
+                        "removed peer no longer in any retained peer set"
                     );
                 }
             }
@@ -578,16 +598,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Primary and secondary peers across all retained peer sets (reference-counted union).
     fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
         let primary = self
-            .primary_refs
-            .keys()
-            .cloned()
+            .peer_ref_counts
+            .iter()
+            .filter(|(_, c)| c.primary > 0)
+            .map(|(k, _)| k.clone())
             .try_collect()
             .expect("BTreeMap keys are unique");
         let secondary = Set::from_iter_dedup(
-            self.secondary_refs
-                .keys()
-                .filter(|k| !self.primary_refs.contains_key(k))
-                .cloned(),
+            self
+                .peer_ref_counts
+                .iter()
+                .filter(|(_, c)| c.secondary > 0 && c.primary == 0)
+                .map(|(k, _)| k.clone()),
         );
         TrackedPeers::new(primary, secondary)
     }
@@ -609,18 +631,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// secondary still receive [`Recipients::All`] traffic, which matches how tests use this
     /// network.
     fn all_connected_peers(&self) -> Vec<P> {
-        let mut out: Vec<P> = self.primary_refs.keys().cloned().collect();
-        for peer in self.secondary_refs.keys() {
-            if !self.primary_refs.contains_key(peer) {
-                out.push(peer.clone());
-            }
-        }
-        out
+        self.peer_ref_counts.keys().cloned().collect()
     }
 
     /// Returns whether the peer is currently allowed to use the network.
     fn is_connectable(&self, peer: &P) -> bool {
-        self.primary_refs.contains_key(peer) || self.secondary_refs.contains_key(peer)
+        self.peer_ref_counts.contains_key(peer)
     }
 }
 
