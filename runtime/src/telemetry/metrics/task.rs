@@ -30,6 +30,7 @@ impl Label {
             kind: Kind::Task,
             execution: match execution {
                 crate::Execution::Dedicated => Execution::Dedicated,
+                crate::Execution::Colocated => Execution::Colocated,
                 crate::Execution::Shared(blocking) => {
                     if blocking {
                         Execution::SharedBlocking
@@ -65,4 +66,7 @@ pub enum Execution {
     SharedBlocking,
     /// Task runs on a dedicated thread.
     Dedicated,
+    /// Task is co-located on the same thread as its dedicated ancestor. Falls
+    /// back to the shared runtime if the ancestor is not dedicated.
+    Colocated,
 }
