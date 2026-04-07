@@ -395,7 +395,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
-                // Broadcast updated peer list to LimitedSender subscribers
+                // Broadcast updated tracked membership to SubscribeConnected subscribers
                 self.broadcast_peer_list().await;
             }
             ingress::Message::Register {
@@ -405,11 +405,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                let (_, is_new) = self.ensure_peer_exists(&public_key).await;
-
-                if is_new {
-                    self.broadcast_peer_list().await;
-                }
+                let _ = self.ensure_peer_exists(&public_key).await;
 
                 // Get clock for the rate limiter
                 let clock = self
@@ -475,11 +471,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                let (_, is_new) = self.ensure_peer_exists(&public_key).await;
-
-                if is_new {
-                    self.broadcast_peer_list().await;
-                }
+                let _ = self.ensure_peer_exists(&public_key).await;
 
                 // Update bandwidth limits
                 let now = self.context.current();
@@ -499,12 +491,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If sender or receiver does not exist, then create it.
-                let (_, sender_is_new) = self.ensure_peer_exists(&sender).await;
-                let (receiver_socket, receiver_is_new) = self.ensure_peer_exists(&receiver).await;
-
-                if sender_is_new || receiver_is_new {
-                    self.broadcast_peer_list().await;
-                }
+                let _ = self.ensure_peer_exists(&sender).await;
+                let (receiver_socket, _) = self.ensure_peer_exists(&receiver).await;
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -569,9 +557,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    /// Broadcast updated peer list to all peer subscribers.
+    /// Broadcast updated peer list to all [`ingress::Message::SubscribeConnected`] subscribers.
     ///
-    /// This is called when the peer list changes.
+    /// This runs when tracked membership changes ([`ingress::Message::Track`]), not when peers
+    /// are first discovered via register, links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
