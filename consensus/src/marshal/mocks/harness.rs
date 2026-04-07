@@ -1685,6 +1685,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             }
             let acknowledged = application
                 .acknowledge_next()
+                .await
                 .expect("pending ack should be present");
             assert_eq!(acknowledged, expected);
         }
@@ -1765,11 +1766,20 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             vec![Height::new(1), Height::new(2), Height::new(3)]
         );
 
-        // Acknowledge all pending blocks without yielding so marshal can drain
-        // them in one ack arm and sync metadata once.
-        assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-        assert_eq!(application.acknowledge_next(), Some(Height::new(2)));
-        assert_eq!(application.acknowledge_next(), Some(Height::new(3)));
+        // Acknowledge all pending blocks in order; each `acknowledge_next` yields once so marshal
+        // can interleave work between acks.
+        assert_eq!(
+            application.acknowledge_next().await,
+            Some(Height::new(1))
+        );
+        assert_eq!(
+            application.acknowledge_next().await,
+            Some(Height::new(2))
+        );
+        assert_eq!(
+            application.acknowledge_next().await,
+            Some(Height::new(3))
+        );
 
         // Yield to marshal.
         context.sleep(Duration::from_millis(10)).await;
