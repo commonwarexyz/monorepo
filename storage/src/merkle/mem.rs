@@ -398,7 +398,16 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .zip(&batch.ancestor_overwrites)
         {
             seg_pos += appended.len() as u64;
-            if skip_ancestors && seg_pos <= *self.size() {
+            // Overwrite-only ancestors don't advance seg_pos, so they can't be
+            // distinguished from their predecessor by size. Use strict < to
+            // avoid skipping them at the boundary. Re-applying committed
+            // overwrites is harmless (idempotent).
+            let committed = if appended.is_empty() {
+                skip_ancestors && seg_pos < *self.size()
+            } else {
+                skip_ancestors && seg_pos <= *self.size()
+            };
+            if committed {
                 continue;
             }
             for (&pos, &digest) in overwrites.iter() {
@@ -1112,6 +1121,51 @@ mod tests {
         );
     }
 
+    /// Overwrite-only ancestor B must not be skipped when applying C after A.
+    fn apply_batch_overwrite_only_ancestor<F: Family>() {
+        let hasher: H = Standard::new();
+        let mut mem = build_raw::<F>(&hasher, 10);
+
+        let pos0 = Position::<F>::try_from(Location::new(0)).unwrap();
+
+        // A: add 5 leaves.
+        let a = {
+            let mut b = mem.new_batch();
+            for i in 100u64..105 {
+                b = b.add(&hasher, &i.to_be_bytes());
+            }
+            b.merkleize(&mem, &hasher)
+        };
+
+        // B: overwrite leaf 0, no appends.
+        let b = a
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"updated-0")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+
+        // C: add 5 more leaves.
+        let c = {
+            let mut batch = b.new_batch();
+            for i in 200u64..205 {
+                batch = batch.add(&hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mem, &hasher)
+        };
+
+        // Apply A, then C (skipping B's apply_batch).
+        mem.apply_batch(&a).unwrap();
+        mem.apply_batch(&c).unwrap();
+
+        // B's overwrite must have been applied.
+        let updated = hasher.leaf_digest(pos0, b"updated-0");
+        assert_eq!(
+            mem.get_node(pos0),
+            Some(updated),
+            "overwrite-only ancestor B's overwrites were skipped"
+        );
+    }
+
     // --- MMR tests ---
 
     #[test]
@@ -1201,6 +1255,10 @@ mod tests {
     #[test]
     fn mmr_apply_batch_detects_dropped_ancestor() {
         apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_overwrite_only_ancestor() {
+        apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1292,5 +1350,9 @@ mod tests {
     #[test]
     fn mmb_apply_batch_detects_dropped_ancestor() {
         apply_batch_detects_dropped_ancestor::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_overwrite_only_ancestor() {
+        apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
     }
 }
