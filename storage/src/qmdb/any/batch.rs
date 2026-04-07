@@ -241,7 +241,7 @@ where
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
     /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
-    ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
+    pub(crate) ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for

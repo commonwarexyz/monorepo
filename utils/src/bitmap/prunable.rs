@@ -185,6 +185,15 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push(bit);
     }
 
+    /// Extend the bitmap to `new_len` total bits (including pruned bits),
+    /// filling new positions with zero. No-op if `new_len <= self.len()`.
+    pub fn extend_to(&mut self, new_len: u64) {
+        let current = self.len();
+        if new_len > current {
+            self.bitmap.extend_to(new_len - self.pruned_bits());
+        }
+    }
+
     /// Remove and return the last bit from the bitmap.
     ///
     /// # Warning
@@ -309,7 +318,7 @@ impl<const N: usize> Prunable<N> {
     /// # Panics
     ///
     /// Panics if the chunk is pruned or out of bounds.
-    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
+    pub fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
             chunk_index >= self.pruned_chunks,
             "cannot set pruned chunk {chunk_index} (pruned_chunks: {})",
