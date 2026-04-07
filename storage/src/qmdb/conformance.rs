@@ -602,6 +602,7 @@ async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Val
     .await;
 }
 
+// Macro rather than a generic function because immutable Db types don't implement DbAny.
 macro_rules! assert_immutable_order_independent {
     ($fwd:ident, $rev:ident) => {{
         let mut ops: Vec<_> = (0..20).map(|i| (to_digest(i), to_val(i, 0))).collect();
