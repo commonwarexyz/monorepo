@@ -78,7 +78,7 @@ const INLINE_PUT_BATCH_MASKS: usize = 64;
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
 /// degenerating into a single hot atomic word.
-pub(crate) struct Freelist {
+pub struct Freelist {
     /// Cache-line-padded striped bitmap of free slots.
     ///
     /// Padding matters here because threads often target different words in
@@ -110,7 +110,7 @@ impl Freelist {
     /// `preferred_words` is a scalability hint, not an exact size. The freelist
     /// will use at least enough words to represent every slot, and may use more
     /// words to spread contention across cache lines for small capacities.
-    pub(crate) fn new(capacity: usize, preferred_words: usize) -> Self {
+    pub fn new(capacity: usize, preferred_words: usize) -> Self {
         assert!(capacity > 0, "freelist capacity must be non-zero");
         assert!(
             preferred_words > 0,
@@ -196,7 +196,7 @@ impl Freelist {
     /// bit is set with `Release` ordering. A successful `take` performs the
     /// matching `Acquire` operation before reading the buffer back out.
     #[inline]
-    pub(crate) fn put(&self, slot: u32, buffer: AlignedBuffer) {
+    pub fn put(&self, slot: u32, buffer: AlignedBuffer) {
         // SAFETY: the caller owns this slot id while it is off-set, so no
         // other thread can access the slot storage until the slot bit is set.
         unsafe {
@@ -217,7 +217,7 @@ impl Freelist {
     /// Batch insertion groups returned slots by bitmap word so each touched
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
-    pub(crate) fn put_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
+    pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
         let mut entries = entries.into_iter();
         self.put_batch_iter(&mut entries);
     }
@@ -229,7 +229,7 @@ impl Freelist {
     /// important: unlike a full-word CAS loop, two threads removing different
     /// bits from the same word can both succeed.
     #[inline]
-    pub(crate) fn take(&self) -> Option<(u32, AlignedBuffer)> {
+    pub fn take(&self) -> Option<(u32, AlignedBuffer)> {
         let thread_id = SlotBitmapProbe::thread_id();
         let start_word = thread_id & self.word_mask;
         let bit_offset = ((thread_id >> self.word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32;
@@ -273,11 +273,7 @@ impl Freelist {
     /// For `max > 1`, the implementation tries to claim several bits from the
     /// same word in a single atomic `fetch_and`, which amortizes the shared
     /// synchronization cost across the batch.
-    pub(crate) fn take_batch(
-        &self,
-        max: usize,
-        mut put_entry: impl FnMut(u32, AlignedBuffer),
-    ) -> usize {
+    pub fn take_batch(&self, max: usize, mut put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
         self.take_batch_with(max, &mut put_entry)
     }
 

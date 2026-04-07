@@ -518,10 +518,22 @@ impl SizeClass {
         self.global.put(slot, buffer);
     }
 
+    /// Inserts several tracked buffers into the global freelist.
+    #[inline]
+    fn put_global_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
+        self.global.put_batch(entries);
+    }
+
     /// Removes a tracked buffer from the global freelist.
     #[inline]
     fn take_global(&self) -> Option<(u32, AlignedBuffer)> {
         self.global.take()
+    }
+
+    /// Removes up to `max` tracked buffers from the global freelist.
+    #[inline]
+    fn take_global_batch(&self, max: usize, put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
+        self.global.take_batch(max, put_entry)
     }
 
     /// Atomically reserves capacity to create one new tracked buffer.
@@ -601,13 +613,12 @@ impl TlsSizeClassCache {
 
         // Spill half the cache to global to make room.
         let spill = self.entries.len().min(self.capacity / 2).max(1);
-        for _ in 0..spill {
-            let spilled = self
-                .entries
-                .pop()
-                .expect("spill count must not exceed cached entries");
-            spilled.class.put_global(spilled.slot, spilled.buffer);
-        }
+        let split = self.entries.len() - spill;
+        entry.class.put_global_batch(
+            self.entries
+                .drain(split..)
+                .map(|spilled| (spilled.slot, spilled.buffer)),
+        );
 
         self.entries.push(entry);
     }
@@ -615,9 +626,15 @@ impl TlsSizeClassCache {
 
 impl Drop for TlsSizeClassCache {
     fn drop(&mut self) {
-        for entry in self.entries.drain(..) {
-            entry.class.put_global(entry.slot, entry.buffer);
-        }
+        let Some(entry) = self.entries.pop() else {
+            return;
+        };
+        entry.class.put_global_batch(
+            self.entries
+                .drain(..)
+                .map(|entry| (entry.slot, entry.buffer))
+                .chain(std::iter::once((entry.slot, entry.buffer))),
+        );
     }
 }
 
@@ -705,16 +722,18 @@ impl BufferPoolThreadCache {
             return;
         }
         Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
-            while cache.len() + 1 < target {
-                let Some((slot, buffer)) = class.take_global() else {
-                    break;
-                };
+            let refill = target.saturating_sub(cache.len() + 1);
+            if refill == 0 {
+                return;
+            }
+
+            class.take_global_batch(refill, |slot, buffer| {
                 cache.push(TlsSizeClassCacheEntry {
                     buffer,
                     class: class.clone(),
                     slot,
                 });
-            }
+            });
         });
     }
 

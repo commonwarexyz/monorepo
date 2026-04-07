@@ -1,22 +1,11 @@
+use super::utils::{measure, Threading};
 use commonware_runtime::{
-    tokio, BufferPool, BufferPoolConfig, BufferPoolThreadCache, BufferPooler, IoBufMut, Runner as _,
+    tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
-use std::{
-    hint::{black_box, spin_loop},
-    num::NonZeroUsize,
-    sync::{Arc, Barrier},
-    thread,
-    time::{Duration, Instant},
-};
-
-const MIN_BENCH_THREADS: usize = 2;
-const MAX_BENCH_THREADS: usize = 8;
+use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
-
-const GLOBAL_FREELIST_SIZES: &[usize] = &[1024, 4096, 65536];
-const GLOBAL_FREELIST_SLOTS: &[usize] = &[16, 64, 512];
 
 #[derive(Clone, Copy)]
 enum Metric {
@@ -48,58 +37,16 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Pattern {
-    Lockstep,
-    Staggered,
-}
-
-impl Pattern {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Lockstep => "lockstep",
-            Self::Staggered => "staggered",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Threading {
-    Single,
-    Multi { threads: usize, pattern: Pattern },
-}
-
-impl Threading {
-    const fn threads(self) -> usize {
-        match self {
-            Self::Single => 1,
-            Self::Multi { threads, .. } => threads,
-        }
-    }
-}
-
 pub fn bench(c: &mut Criterion) {
     let page_size = page_size();
-    let threads = std::thread::available_parallelism().map_or(MIN_BENCH_THREADS, |n| {
-        n.get().clamp(MIN_BENCH_THREADS, MAX_BENCH_THREADS)
-    });
-    let threadings: &[Threading] = &[
-        Threading::Single,
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Lockstep,
-        },
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Staggered,
-        },
-    ];
+    let threadings = Threading::standard();
+    let threads = threadings[1].threads();
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
         let alignment = pool.config().alignment.get();
 
-        for &threading in threadings {
+        for &threading in &threadings {
             for metric in [Metric::Raw, Metric::Adjusted] {
                 bench_case(
                     c,
@@ -133,20 +80,6 @@ pub fn bench(c: &mut Criterion) {
                     },
                     page_size,
                 );
-            }
-        }
-    }
-
-    bench_global_freelist(c, threadings);
-}
-
-fn bench_global_freelist(c: &mut Criterion, threadings: &[Threading]) {
-    for &size in GLOBAL_FREELIST_SIZES {
-        for &slots in GLOBAL_FREELIST_SLOTS {
-            let pool = build_global_freelist_pool(size, slots);
-
-            for &threading in threadings {
-                bench_global_freelist_case(c, size, threading, slots, pool.clone());
             }
         }
     }
@@ -192,96 +125,6 @@ fn bench_case(
     });
 }
 
-fn bench_global_freelist_case(
-    c: &mut Criterion,
-    size: usize,
-    threading: Threading,
-    slots: usize,
-    pool: BufferPool,
-) {
-    let name = global_freelist_bench_name(size, threading, slots);
-    c.bench_function(&name, |b| {
-        b.iter_custom(|iters| {
-            let pool = pool.clone();
-            measure(
-                iters,
-                threading,
-                BufferPoolThreadCache::flush,
-                |_| {
-                    let buffer = pool
-                        .try_alloc(size)
-                        .expect("buffer pool exhausted during global freelist benchmark");
-                    drop(black_box(buffer));
-                },
-            )
-        })
-    });
-}
-
-/// Measure `iters` repetitions of `step`.
-///
-/// `setup` runs per-worker before timing starts and returns state passed to
-/// each `step` invocation. For multi-threaded runs, all workers synchronize
-/// via a barrier after setup so timing captures concurrent execution only.
-fn measure<T>(
-    iters: u64,
-    threading: Threading,
-    setup: impl Fn() -> T + Sync,
-    step: impl Fn(&mut T) + Sync,
-) -> Duration {
-    let Threading::Multi { threads, pattern } = threading else {
-        let mut state = setup();
-        let start = Instant::now();
-        for _ in 0..iters {
-            step(&mut state);
-        }
-        return start.elapsed();
-    };
-
-    let start = thread::scope(|scope| {
-        let ready = Arc::new(Barrier::new(threads + 1));
-        let launch = Arc::new(Barrier::new(threads + 1));
-
-        for thread_id in 0..threads {
-            let ready = ready.clone();
-            let launch = launch.clone();
-            let setup = &setup;
-            let step = &step;
-            scope.spawn(move || {
-                let mut state = setup();
-                ready.wait();
-                launch.wait();
-                for iter in 0..iters {
-                    step(&mut state);
-
-                    if matches!(pattern, Pattern::Staggered) {
-                        // Desynchronize threads so they don't all hit the
-                        // allocator at once. This spreads access times apart
-                        // without adding enough delay to dominate the
-                        // measurement.
-                        let spins = (iter as usize).wrapping_add(1).wrapping_mul(
-                            thread_id
-                                .wrapping_mul(MAX_BENCH_THREADS - 1)
-                                .wrapping_add(1),
-                        ) & 0xF;
-
-                        for _ in 0..spins {
-                            spin_loop();
-                        }
-                    }
-                }
-            });
-        }
-
-        ready.wait();
-        let start = Instant::now();
-        launch.wait();
-        start
-    });
-
-    start.elapsed()
-}
-
 #[inline]
 fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
     if size == 0 {
@@ -325,18 +168,6 @@ fn bench_name(mode: Mode, metric: Metric, size: usize, threading: Threading) -> 
     name
 }
 
-fn global_freelist_bench_name(size: usize, threading: Threading, slots: usize) -> String {
-    let threads = threading.threads();
-    let mut name = format!(
-        "{}::global_freelist/size={size} threads={threads} slots={slots}",
-        module_path!(),
-    );
-    if let Threading::Multi { pattern, .. } = threading {
-        name.push_str(&format!(" pattern={}", pattern.as_str()));
-    }
-    name
-}
-
 fn build_pool(size: usize, threads: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(1024)
@@ -344,22 +175,6 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_max_size(NZUsize!(size.max(1024)))
         .with_max_per_class(NZUsize!(threads * 4))
         .with_thread_cache_for_parallelism(NZUsize!(threads))
-        .with_prefill(true);
-
-    let runner_cfg = tokio::Config::default()
-        .with_worker_threads(1)
-        .with_network_buffer_pool_config(cfg);
-
-    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
-}
-
-fn build_global_freelist_pool(size: usize, slots: usize) -> BufferPool {
-    let cfg = BufferPoolConfig::for_network()
-        .with_pool_min_size(0)
-        .with_min_size(NZUsize!(size))
-        .with_max_size(NZUsize!(size))
-        .with_max_per_class(NZUsize!(slots))
-        .with_thread_cache_disabled()
         .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()

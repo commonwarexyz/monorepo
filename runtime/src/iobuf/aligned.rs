@@ -26,7 +26,7 @@ use std::{
 ///
 /// This is the raw storage primitive used by both untracked aligned buffers
 /// and pooled buffers.
-pub(crate) struct AlignedBuffer {
+pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
 }
@@ -49,7 +49,7 @@ impl AlignedBuffer {
     /// Panics if:
     /// - `capacity == 0`
     /// - `alignment` is not a power of two
-    pub(crate) fn new(capacity: usize, alignment: usize) -> Self {
+    pub fn new(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
             alignment.is_power_of_two(),

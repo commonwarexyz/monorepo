@@ -21,9 +21,13 @@ pub(crate) use aligned::AlignedBuffer;
 use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
-pub(crate) use freelist::Freelist;
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
+
+#[cfg(feature = "bench")]
+pub mod bench {
+    pub use super::{aligned::AlignedBuffer, freelist::Freelist};
+}
 
 /// Immutable byte buffer.
 ///

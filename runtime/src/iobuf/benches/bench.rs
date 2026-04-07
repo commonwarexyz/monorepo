@@ -40,6 +40,7 @@ use criterion::{criterion_group, criterion_main};
 
 mod freelist;
 mod pool;
+mod utils;
 
 criterion_group!(benches, pool::bench, freelist::bench);
 

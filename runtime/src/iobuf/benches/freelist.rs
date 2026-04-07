@@ -1,18 +1,15 @@
-use commonware_runtime::benchmarks::iobuf::{FreelistBench, FreelistEntry};
+use super::utils::{measure, Threading};
+use commonware_runtime::iobuf::bench::{AlignedBuffer, Freelist};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
-use std::{
-    hint::{black_box, spin_loop},
-    sync::{Arc, Barrier},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{hint::black_box, sync::Arc};
 
-const MIN_BENCH_THREADS: usize = 2;
-const MAX_BENCH_THREADS: usize = 8;
 const SLOTS: &[usize] = &[16, 64, 512];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
+const BENCH_BUFFER_CAPACITY: usize = 64;
+const BENCH_BUFFER_ALIGNMENT: usize = 64;
+const BENCH_PREFERRED_WORDS: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Implementation {
@@ -27,36 +24,6 @@ impl Implementation {
             Self::Freelist => "freelist",
             Self::MutexVec => "mutex_vec",
             Self::ArrayQueue => "array_queue",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Pattern {
-    Lockstep,
-    Staggered,
-}
-
-impl Pattern {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Lockstep => "lockstep",
-            Self::Staggered => "staggered",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Threading {
-    Single,
-    Multi { threads: usize, pattern: Pattern },
-}
-
-impl Threading {
-    const fn threads(self) -> usize {
-        match self {
-            Self::Single => 1,
-            Self::Multi { threads, .. } => threads,
         }
     }
 }
@@ -93,20 +60,7 @@ impl<S: BatchFreelist> WorkerState<S> {
 }
 
 pub fn bench(c: &mut Criterion) {
-    let threads = std::thread::available_parallelism().map_or(MIN_BENCH_THREADS, |n| {
-        n.get().clamp(MIN_BENCH_THREADS, MAX_BENCH_THREADS)
-    });
-    let threadings: &[Threading] = &[
-        Threading::Single,
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Lockstep,
-        },
-        Threading::Multi {
-            threads,
-            pattern: Pattern::Staggered,
-        },
-    ];
+    let threadings = Threading::standard();
 
     for implementation in [
         Implementation::Freelist,
@@ -114,20 +68,16 @@ pub fn bench(c: &mut Criterion) {
         Implementation::ArrayQueue,
     ] {
         for &slots in SLOTS {
-            for &threading in threadings {
+            for &threading in &threadings {
                 for &batch in BATCH_SIZES {
                     if batch > slots / threading.threads() {
                         continue;
                     }
 
                     match implementation {
-                        Implementation::Freelist => bench_case::<FreelistBatchFreelist>(
-                            c,
-                            implementation,
-                            slots,
-                            threading,
-                            batch,
-                        ),
+                        Implementation::Freelist => {
+                            bench_case::<Freelist>(c, implementation, slots, threading, batch)
+                        }
                         Implementation::MutexVec => bench_case::<MutexVecBatchFreelist>(
                             c,
                             implementation,
@@ -180,61 +130,6 @@ fn fill_batch<S: BatchFreelist>(shared: &S, out: &mut Vec<S::Entry>, target: usi
             "freelist must provide enough slots for the configured batch"
         );
     }
-}
-
-fn measure<T>(
-    iters: u64,
-    threading: Threading,
-    setup: impl Fn() -> T + Sync,
-    step: impl Fn(&mut T) + Sync,
-) -> Duration {
-    let Threading::Multi { threads, pattern } = threading else {
-        let mut state = setup();
-        let start = Instant::now();
-        for _ in 0..iters {
-            step(&mut state);
-        }
-        return start.elapsed();
-    };
-
-    let start = thread::scope(|scope| {
-        let ready = Arc::new(Barrier::new(threads + 1));
-        let launch = Arc::new(Barrier::new(threads + 1));
-
-        for thread_id in 0..threads {
-            let ready = ready.clone();
-            let launch = launch.clone();
-            let setup = &setup;
-            let step = &step;
-            scope.spawn(move || {
-                let mut state = setup();
-                ready.wait();
-                launch.wait();
-                for iter in 0..iters {
-                    step(&mut state);
-
-                    if matches!(pattern, Pattern::Staggered) {
-                        let spins = (iter as usize).wrapping_add(1).wrapping_mul(
-                            thread_id
-                                .wrapping_mul(MAX_BENCH_THREADS - 1)
-                                .wrapping_add(1),
-                        ) & 0xF;
-
-                        for _ in 0..spins {
-                            spin_loop();
-                        }
-                    }
-                }
-            });
-        }
-
-        ready.wait();
-        let start = Instant::now();
-        launch.wait();
-        start
-    });
-
-    start.elapsed()
 }
 
 fn bench_name(
@@ -310,20 +205,44 @@ impl BatchFreelist for ArrayQueueBatchFreelist {
     }
 }
 
-struct FreelistBatchFreelist(FreelistBench);
+struct FreelistEntry {
+    slot: u32,
+    buffer: AlignedBuffer,
+}
 
-impl BatchFreelist for FreelistBatchFreelist {
+// SAFETY: this entry uniquely owns its buffer and slot id, so moving it across
+// threads is equivalent to moving a uniquely-owned heap allocation.
+unsafe impl Send for FreelistEntry {}
+
+impl BatchFreelist for Freelist {
     type Entry = FreelistEntry;
 
     fn with_capacity(capacity: usize) -> Self {
-        Self(FreelistBench::with_capacity(capacity))
+        let freelist = Self::new(capacity, BENCH_PREFERRED_WORDS);
+        for slot in 0..capacity {
+            freelist.put(
+                slot as u32,
+                AlignedBuffer::new(BENCH_BUFFER_CAPACITY, BENCH_BUFFER_ALIGNMENT),
+            );
+        }
+        freelist
     }
 
     fn take_batch(&self, out: &mut Vec<FreelistEntry>, max: usize) {
-        self.0.take_batch(out, max);
+        let remaining = max.saturating_sub(out.len());
+        if remaining == 0 {
+            return;
+        }
+
+        Self::take_batch(self, remaining, |slot, buffer| {
+            out.push(FreelistEntry { slot, buffer });
+        });
     }
 
     fn put_batch(&self, entries: &mut Vec<FreelistEntry>) {
-        self.0.put_batch(entries);
+        Self::put_batch(
+            self,
+            entries.drain(..).map(|entry| (entry.slot, entry.buffer)),
+        );
     }
 }
