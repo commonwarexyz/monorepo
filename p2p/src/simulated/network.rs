@@ -258,7 +258,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn register_tracked_peer_set(&mut self, id: u64, peers: TrackedPeers<P>) -> bool {
         let primary = peers.primary;
         let secondary = peers.secondary;
-
         let tracked_peer_sets = self.tracked_peer_sets;
 
         // Check if peer set already exists
