@@ -28,7 +28,7 @@ const MIN_BENCH_THREADS: usize = 2;
 const MAX_BENCH_THREADS: usize = 8;
 
 #[derive(Clone, Copy)]
-pub(crate) enum Pattern {
+pub enum Pattern {
     /// All workers enter the hot path together, maximizing contention.
     Lockstep,
     /// Workers add a small spin delay to decorrelate access timing.
@@ -36,7 +36,7 @@ pub(crate) enum Pattern {
 }
 
 impl Pattern {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Lockstep => "lockstep",
             Self::Staggered => "staggered",
@@ -45,13 +45,13 @@ impl Pattern {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Threading {
+pub enum Threading {
     Single,
     Multi { threads: usize, pattern: Pattern },
 }
 
 impl Threading {
-    pub(crate) fn standard() -> [Self; 3] {
+    pub fn standard() -> [Self; 3] {
         let threads = std::thread::available_parallelism().map_or(MIN_BENCH_THREADS, |n| {
             n.get().clamp(MIN_BENCH_THREADS, MAX_BENCH_THREADS)
         });
@@ -68,7 +68,7 @@ impl Threading {
         ]
     }
 
-    pub(crate) const fn threads(self) -> usize {
+    pub const fn threads(self) -> usize {
         match self {
             Self::Single => 1,
             Self::Multi { threads, .. } => threads,
@@ -81,7 +81,7 @@ impl Threading {
 /// `setup` runs per-worker before timing starts and returns state passed to
 /// each `step` invocation. For multi-threaded runs, all workers synchronize
 /// via a barrier after setup so timing captures concurrent execution only.
-pub(crate) fn measure<T>(
+pub fn measure<T>(
     iters: u64,
     threading: Threading,
     setup: impl Fn() -> T + Sync,
