@@ -243,9 +243,7 @@ where
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
-        // `digest` keys the shared item table and refcounts; same digest from our key is one row.
-        // Buffering follows `latest.primary` (insert may be `Ineligible`); we still send using
-        // `recipients` regardless of local insertion.
+        // Store the message, continue even if it was already stored
         let digest = msg.digest();
         let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
