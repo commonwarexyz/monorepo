@@ -1,6 +1,7 @@
 //! Batch mutation API for Any QMDBs.
 
 use crate::{
+    Context,
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
@@ -9,21 +10,19 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            db::Db,
-            operation::{update, Operation},
-            ordered::{find_next_key, find_prev_key},
             ValueEncoding,
+            db::Db,
+            operation::{Operation, update},
+            ordered::{find_next_key, find_prev_key},
         },
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
     },
-    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use core::ops::Range;
-use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -52,11 +51,7 @@ pub(crate) struct SequentialScan;
 
 impl<F: Family> FloorScan<F> for SequentialScan {
     fn next_candidate(&mut self, floor: Location<F>, tip: u64) -> Option<Location<F>> {
-        if *floor < tip {
-            Some(floor)
-        } else {
-            None
-        }
+        if *floor < tip { Some(floor) } else { None }
     }
 }
 
@@ -336,7 +331,7 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Read an operation at a given location from the correct source.
+    /// Return an operation immediately when it is already in memory.
     ///
     /// The operation space is divided into three contiguous regions:
     ///
@@ -350,30 +345,55 @@ where
     /// higher value if ancestors were freed (see `into_parts`).
     ///
     /// For top-level batches, the ancestor region is empty (`db_size == base_size`).
-    async fn read_op<E, C, I>(
+    fn read_cached_op(
         &self,
         loc: Location<F>,
         current_ops: &[Operation<F, U>],
-        db: &Db<F, E, C, I, H, U>,
-    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>>
+    ) -> Option<Operation<F, U>>
     where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
+        Operation<F, U>: Clone,
     {
         let loc_val = *loc;
 
         if loc_val >= self.base_size {
             // This batch's own operations (user mutations, or earlier floor-raise ops).
-            Ok(current_ops[(loc_val - self.base_size) as usize].clone())
-        } else if loc_val >= self.db_size {
-            // Parent batch chain's operations (in-memory). Use journal ancestor items.
-            Ok(read_chain_item(&self.ancestor_items, loc_val, self.db_size).clone())
-        } else {
-            // Base DB's journal (on-disk async read).
-            let reader = db.log.reader().await;
-            Ok(reader.read(loc_val).await?)
+            return Some(current_ops[(loc_val - self.base_size) as usize].clone());
         }
+
+        if loc_val >= self.db_size {
+            // Parent batch chain's operations (in-memory). Use journal ancestor items.
+            return Some(read_chain_item(&self.ancestor_items, loc_val, self.db_size).clone());
+        }
+
+        None
+    }
+
+    /// Read operations from committed storage and in-memory sources in location order.
+    ///
+    /// `reader` is acquired once by the caller and reused for every committed-DB read. This
+    /// avoids building a future per location and repeatedly reacquiring the journal reader.
+    async fn read_locations<R>(
+        &self,
+        locations: &[Location<F>],
+        current_ops: &[Operation<F, U>],
+        reader: &R,
+    ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>>
+    where
+        R: Reader<Item = Operation<F, U>>,
+    {
+        if locations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut ops = Vec::with_capacity(locations.len());
+        for &loc in locations {
+            if let Some(op) = self.read_cached_op(loc, current_ops) {
+                ops.push(op);
+                continue;
+            }
+            ops.push(reader.read(*loc).await?);
+        }
+        Ok(ops)
     }
 
     /// Gather existing-key locations for all keys in `mutations`.
@@ -487,19 +507,22 @@ where
     /// allowing implementations to skip locations known to be inactive without reading them.
     /// Returns `true` if an active op was found and moved, `false` if the floor reached
     /// `fixed_tip`.
-    async fn advance_floor_once<E, C, I, S: FloorScan<F>>(
+    async fn advance_floor_once<E, C, I, S, R>(
         &self,
         floor: &mut Location<F>,
         fixed_tip: u64,
         ops: &mut Vec<Operation<F, U>>,
         diff: &mut BTreeMap<U::Key, DiffEntry<F, U::Value>>,
         scan: &mut S,
+        reader: &R,
         db: &Db<F, E, C, I, H, U>,
     ) -> Result<bool, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
+        S: FloorScan<F>,
+        R: Reader<Item = Operation<F, U>>,
     {
         loop {
             let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
@@ -507,7 +530,11 @@ where
             };
             *floor = Location::new(*candidate + 1);
 
-            let op = self.read_op(candidate, ops, db).await?;
+            let op = if let Some(op) = self.read_cached_op(candidate, ops) {
+                op
+            } else {
+                reader.read(*candidate).await?
+            };
             let Some(key) = op.key().cloned() else {
                 continue; // skip CommitFloor and other non-keyed ops
             };
@@ -536,7 +563,7 @@ where
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, S: FloorScan<F>>(
+    async fn finish<E, C, I, S, R>(
         self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: BTreeMap<U::Key, DiffEntry<F, U::Value>>,
@@ -544,12 +571,15 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut scan: S,
+        reader: &R,
         db: &Db<F, E, C, I, H, U>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
+        S: FloorScan<F>,
+        R: Reader<Item = Operation<F, U>>,
     {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
@@ -564,7 +594,9 @@ where
             let fixed_tip = self.base_size + ops.len() as u64;
             for _ in 0..total_steps {
                 if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
+                    .advance_floor_once(
+                        &mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, reader, db,
+                    )
                     .await?
                 {
                     break;
@@ -649,16 +681,19 @@ where
                     items.push(Arc::clone(parent_items));
                 }
 
-                // Build diffs in root-to-tip order, excluding empty diffs (matching
-                // the journal's convention of skipping empty ancestors).
-                let mut diffs: Vec<_> = p
-                    .ancestors
-                    .iter()
-                    .rev()
-                    .filter(|a| !a.diff.is_empty())
-                    .map(|a| Arc::clone(&a.diff))
-                    .collect();
-                if !p.diff.is_empty() {
+                // Build diffs in root-to-tip order for the ancestors that actually
+                // contributed journal items. A batch may have an empty diff but still
+                // contribute a CommitFloor item, so filtering by `diff.is_empty()`
+                // breaks alignment with `ancestor_items`.
+                let mut diffs = Vec::with_capacity(items.len());
+                let mut previous_end = db_size;
+                for ancestor in p.ancestors.iter().rev() {
+                    if ancestor.end_index > previous_end {
+                        diffs.push(Arc::clone(&ancestor.diff));
+                    }
+                    previous_end = ancestor.end_index;
+                }
+                if p.total_size > previous_end {
                     diffs.push(Arc::clone(&p.diff));
                 }
 
@@ -759,11 +794,11 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+        let reader = db.log.reader().await;
 
-        // Resolve existing keys (async I/O, parallelized).
+        // Resolve existing keys with a single committed-journal reader.
         let locations = m.gather_existing_locations(&mutations, db, false);
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
-        let results = try_join_all(futures).await?;
+        let results = m.read_locations(&locations, &[], &reader).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -855,8 +890,17 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
-            .await
+        m.finish(
+            ops,
+            diff,
+            active_keys_delta,
+            user_steps,
+            metadata,
+            scan,
+            &reader,
+            db,
+        )
+        .await
     }
 }
 
@@ -897,13 +941,14 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+        let reader = db.log.reader().await;
 
-        // Resolve existing keys (async I/O).
+        // Resolve existing keys with a single committed-journal reader.
         let locations = m.gather_existing_locations(&mutations, db, true);
 
         // Read and unwrap Update operations (snapshot only references Updates).
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
-        let update_results: Vec<_> = try_join_all(futures)
+        let update_results: Vec<_> = m
+            .read_locations(&locations, &[], &reader)
             .await?
             .into_iter()
             .map(|op| match op {
@@ -973,11 +1018,7 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = {
-            let reader = db.log.reader().await;
-            let futures = prev_locations.iter().map(|loc| reader.read(**loc));
-            try_join_all(futures).await?
-        };
+        let prev_results = m.read_locations(&prev_locations, &[], &reader).await?;
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -1011,7 +1052,11 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op: Operation<F, update::Ordered<K, V>> = m.read_op(*loc, &[], db).await?;
+                let op = if let Some(op) = m.read_cached_op(*loc, &[]) {
+                    op
+                } else {
+                    reader.read(**loc).await?
+                };
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("ancestor diff Active should reference Update op"),
@@ -1135,8 +1180,17 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
-            .await
+        m.finish(
+            ops,
+            diff,
+            active_keys_delta,
+            user_steps,
+            metadata,
+            scan,
+            &reader,
+            db,
+        )
+        .await
     }
 }
 
@@ -1515,8 +1569,8 @@ mod tests {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_cryptography::{Sha256, sha256};
+    use commonware_runtime::{Runner as _, deterministic};
 
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
@@ -1598,6 +1652,130 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    #[test]
+    fn read_locations_resolves_committed_ancestor_and_current_sources() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let key_db = colliding_digest(0x30, 0);
+            let value_db = colliding_digest(0x30, 1);
+            let key_parent = colliding_digest(0x31, 0);
+            let value_parent = colliding_digest(0x31, 1);
+            let key_current = colliding_digest(0x32, 0);
+            let value_current = colliding_digest(0x32, 1);
+
+            let seed = db
+                .new_batch()
+                .write(key_db, Some(value_db))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+
+            let parent = db
+                .new_batch()
+                .write(key_parent, Some(value_parent))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent_loc = parent.diff.get(&key_parent).unwrap().loc().unwrap();
+
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key_current, Some(value_current));
+            let (_mutations, merkleizer) = child.into_parts();
+
+            let current_loc = Location::new(merkleizer.base_size);
+            let current_ops = vec![Operation::Update(update::Unordered(
+                key_current,
+                value_current,
+            ))];
+
+            let reader = db.log.reader().await;
+            let ops = merkleizer
+                .read_locations(
+                    &[committed_loc, parent_loc, current_loc],
+                    &current_ops,
+                    &reader,
+                )
+                .await
+                .unwrap();
+            drop(reader);
+
+            assert_eq!(
+                ops,
+                vec![
+                    Operation::Update(update::Unordered(key_db, value_db)),
+                    Operation::Update(update::Unordered(key_parent, value_parent)),
+                    Operation::Update(update::Unordered(key_current, value_current)),
+                ]
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn child_of_empty_parent_merkleizes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("child-of-empty-parent", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let parent = db.new_batch().merkleize(&db, None).await.unwrap();
+            assert!(parent.diff.is_empty());
+
+            let key = colliding_digest(0x40, 0);
+            let value = colliding_digest(0x40, 1);
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            db.apply_batch(parent).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+
+            db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test]
