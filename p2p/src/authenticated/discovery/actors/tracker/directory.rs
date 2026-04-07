@@ -377,15 +377,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers across all retained primary and secondary peer sets.
+    /// Returns all peers across all retained peer sets.
+    ///
+    /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
+    /// [`PeerSetUpdate::all`]: a peer with any primary membership is listed only under `primary`,
+    /// even if they also appear as secondary in another retained set.
     pub fn all(&self) -> TrackedPeers<C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
         for (k, record) in &self.peers {
             if record.primaries() > 0 {
                 primary.push(k.clone());
-            }
-            if record.secondaries() > 0 {
+            } else if record.secondaries() > 0 {
                 secondary.push(k.clone());
             }
         }
@@ -738,6 +741,57 @@ mod tests {
             let agg = directory.all();
             assert!(agg.primary.position(&pk_b).is_some());
             assert!(agg.secondary.position(&pk_b).is_none());
+        });
+    }
+
+    #[test]
+    fn test_all_cross_index_primary_wins_for_overlap_peer() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: NZUsize!(3),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+        let pk_a = PrivateKey::from_seed(31).public_key();
+        let pk_b = PrivateKey::from_seed(32).public_key();
+        let pk_overlap = PrivateKey::from_seed(33).public_key();
+        let pk_sec = PrivateKey::from_seed(34).public_key();
+
+        runtime.start(|context| async move {
+            // pk_overlap is a primary member in set 0 and listed again as secondary in set 1.
+            let mut directory = Directory::init(context, vec![], my_info, config, releaser);
+
+            assert!(directory.track(
+                0,
+                [pk_a.clone(), pk_overlap.clone()].try_into().unwrap(),
+                OrderedSet::default(),
+            ));
+            assert!(directory.track(
+                1,
+                [pk_b.clone()].try_into().unwrap(),
+                [pk_overlap.clone(), pk_sec.clone()].try_into().unwrap(),
+            ));
+
+            let agg = directory.all();
+            assert!(
+                agg.primary.position(&pk_overlap).is_some(),
+                "any primary membership across retained sets -> aggregate primary only"
+            );
+            assert!(
+                agg.secondary.position(&pk_overlap).is_none(),
+                "aggregate secondary must not duplicate keys that have a primary role somewhere"
+            );
+            assert!(
+                agg.secondary.position(&pk_sec).is_some(),
+                "peers who are only secondary across sets stay under aggregate secondary"
+            );
         });
     }
 

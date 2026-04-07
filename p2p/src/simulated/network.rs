@@ -596,6 +596,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     /// Primary and secondary peers across all retained peer sets (reference-counted union).
+    ///
+    /// Primary wins over secondary for the same public key: `secondary` includes only peers whose
+    /// only role across retained sets is secondary (same as [`crate::Provider::subscribe`] for [`PeerSetUpdate::all`]).
     fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
         let primary = self
             .peer_ref_counts
@@ -1836,6 +1839,71 @@ mod tests {
             assert!(update.latest.secondary.is_empty());
             assert_eq!(update.all.primary, Set::try_from([pk1, pk2, pk4]).unwrap());
             assert!(update.all.secondary.is_empty());
+        });
+    }
+
+    /// [`PeerSetUpdate::all`] uses primary-wins across *retained* indices: a peer who is primary in one
+    /// peer set and secondary in another is listed only under `all.primary` (not in `all.secondary`).
+    #[test]
+    fn test_peer_set_update_all_cross_index_primary_wins() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let pk_a = ed25519::PrivateKey::from_seed(21).public_key();
+            let pk_b = ed25519::PrivateKey::from_seed(22).public_key();
+            // Appears as primary in set 10 and (redundantly) as secondary in set 11.
+            let pk_overlap = ed25519::PrivateKey::from_seed(23).public_key();
+            // Secondary-only in set 11; should still appear under aggregate secondary.
+            let pk_sec = ed25519::PrivateKey::from_seed(24).public_key();
+
+            let mut manager = oracle.manager();
+            let mut subscription = manager.subscribe().await;
+
+            manager
+                .track(
+                    10,
+                    TrackedPeers::new(
+                        Set::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
+                        Set::default(),
+                    ),
+                )
+                .await;
+            let _ = subscription.recv().await.unwrap();
+
+            manager
+                .track(
+                    11,
+                    TrackedPeers::new(
+                        Set::try_from([pk_b.clone()]).unwrap(),
+                        Set::try_from([pk_overlap.clone(), pk_sec.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+
+            assert_eq!(update.latest.primary, Set::try_from([pk_b.clone()]).unwrap());
+            // At index 11 alone, pk_overlap is secondary-only (primary at 11 is pk_b).
+            assert!(update.latest.secondary.position(&pk_overlap).is_some());
+            assert!(update.latest.secondary.position(&pk_sec).is_some());
+
+            // Across retained sets: pk_overlap is primary in set 10 -> aggregate lists them only under primary.
+            assert!(update.all.primary.position(&pk_a).is_some());
+            assert!(update.all.primary.position(&pk_b).is_some());
+            assert!(update.all.primary.position(&pk_overlap).is_some());
+            assert!(
+                update.all.secondary.position(&pk_overlap).is_none(),
+                "aggregate secondary must omit peers who have any primary membership"
+            );
+            assert!(update.all.secondary.position(&pk_sec).is_some());
         });
     }
 

@@ -363,15 +363,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers across all retained primary and secondary peer sets.
+    /// Returns all peers across all retained peer sets.
+    ///
+    /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
+    /// [`PeerSetUpdate::all`]: a peer with any primary membership is listed only under `primary`,
+    /// even if they also appear as secondary in another retained set.
     pub fn all(&self) -> TrackedPeers<C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
         for (k, record) in &self.peers {
             if record.primary_sets() > 0 {
                 primary.push(k.clone());
-            }
-            if record.secondary_sets() > 0 {
+            } else if record.secondary_sets() > 0 {
                 secondary.push(k.clone());
             }
         }
@@ -933,6 +936,77 @@ mod tests {
             assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
             assert!(directory.listenable().contains(&new_addr.ip()));
             assert!(!directory.listenable().contains(&old_addr.ip()));
+        });
+    }
+
+    #[test]
+    fn test_all_cross_index_primary_wins_for_overlap_peer() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_a = ed25519::PrivateKey::from_seed(31).public_key();
+        let pk_b = ed25519::PrivateKey::from_seed(32).public_key();
+        let pk_overlap = ed25519::PrivateKey::from_seed(33).public_key();
+        let pk_sec = ed25519::PrivateKey::from_seed(34).public_key();
+
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4001);
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 4002);
+        let addr_overlap_p = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 4003);
+        let addr_overlap_s = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 5003);
+        let addr_sec = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)), 4004);
+
+        runtime.start(|context| async move {
+            // pk_overlap: primary in set 0 (address addr_overlap_p), secondary in set 1 (addr_overlap_s).
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            assert!(directory
+                .track(
+                    10,
+                    [
+                        (pk_a.clone(), addr(addr_a)),
+                        (pk_overlap.clone(), addr(addr_overlap_p)),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                    Map::default(),
+                )
+                .is_some());
+            assert!(directory
+                .track(
+                    11,
+                    [(pk_b.clone(), addr(addr_b))].try_into().unwrap(),
+                    [
+                        (pk_overlap.clone(), addr(addr_overlap_s)),
+                        (pk_sec.clone(), addr(addr_sec)),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .is_some());
+
+            let agg = directory.all();
+            assert!(
+                agg.primary.position(&pk_overlap).is_some(),
+                "any primary membership across retained sets -> aggregate primary only"
+            );
+            assert!(
+                agg.secondary.position(&pk_overlap).is_none(),
+                "aggregate secondary must not duplicate keys that have a primary role somewhere"
+            );
+            assert!(
+                agg.secondary.position(&pk_sec).is_some(),
+                "peers who are only secondary across sets stay under aggregate secondary"
+            );
         });
     }
 
