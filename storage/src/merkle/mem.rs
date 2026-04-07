@@ -1081,7 +1081,7 @@ mod tests {
 
     /// Dropping an uncommitted ancestor before merkleizing a descendant must not
     /// lose the ancestor's data. The descendant's ancestors should be
-    /// complete regardless of Weak chain liveness.
+    /// complete regardless of ancestor lifetime.
     fn apply_batch_after_ancestor_dropped<F: Family>() {
         let hasher: H = Standard::new();
         let mut mem = Mem::<F, D>::new(&hasher);
@@ -1089,7 +1089,7 @@ mod tests {
         // Chain: Mem -> A -> B -> C
         let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
         let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
-        drop(a); // A freed — B.parent Weak<A> is now dead
+        drop(a); // A freed before C is merkleized
         let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
 
         // Apply C directly. A's data should be present via B's stored ancestors.

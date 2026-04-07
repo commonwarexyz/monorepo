@@ -2194,7 +2194,7 @@ pub mod tests {
             }
             let c_m = c.merkleize(&db, None).await.unwrap();
 
-            // Drop A and B without committing. Their Weak refs in C are now dead.
+            // Drop A and B without committing.
             drop(a_m);
             drop(b_m);
 

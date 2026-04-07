@@ -2007,7 +2007,7 @@ pub(super) mod test {
         let b = a.new_batch::<Sha256>().set(key2, v2).merkleize(&db, None);
         let c = b.new_batch::<Sha256>().set(key3, v3).merkleize(&db, None);
 
-        // Drop A and B without committing. Their Weak refs in C are now dead.
+        // Drop A and B without committing.
         drop(a);
         drop(b);
 
