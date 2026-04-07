@@ -148,7 +148,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Reference count for each peer (number of secondary peer sets they belong to).
     secondary_refs: BTreeMap<P, usize>,
 
-    // Maximum number of peer sets to track
+    // Maximum number of peer sets to retain.
     tracked_peer_sets: NonZeroUsize,
 
     // A map of peers blocking each other
@@ -157,7 +157,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // State of the transmitter
     transmitter: transmitter::State<P>,
 
-    // Subscribers to primary peer set updates (used by Manager::subscribe())
+    // Subscribers to primary peer set updates (used by `Manager::subscribe`).
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
@@ -580,7 +580,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         self.peer_subscribers = live_subscribers;
     }
 
-    /// Primary and secondary peers aggregated across all retained peer sets (ref-count union).
+    /// Primary and secondary peers across all retained peer sets (reference-counted union).
     fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
         let primary = self
             .primary_refs
@@ -610,12 +610,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         })
     }
 
-    /// Get all peers that should be exposed to `Recipients::All`.
+    /// Peers used when expanding [`Recipients::All`].
     ///
-    /// The simulated network treats all peers registered in peer sets as reachable. Primary
-    /// peers remain the ones targeted for primary-only behavior such as
-    /// dialing, but secondaries still receive broadcast traffic, matching the
-    /// expectations of higher-level tests built on this abstraction.
+    /// Every peer registered in a retained peer set is treated as reachable for broadcast.
+    /// Primary peers still drive primary-only behavior such as dialing; peers listed only as
+    /// secondary still receive [`Recipients::All`] traffic, which matches how tests use this
+    /// network.
     fn all_connected_peers(&self) -> Vec<P> {
         let mut out: Vec<P> = self.primary_refs.keys().cloned().collect();
         for peer in self.secondary_refs.keys() {

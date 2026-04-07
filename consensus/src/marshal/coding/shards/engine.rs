@@ -7,7 +7,9 @@
 //!
 //! The shard engine serves two primary functions:
 //! 1. Broadcast: When a node proposes a block, the engine broadcasts
-//!    erasure-coded shards to all participants and tracked non-participants.
+//!    erasure-coded shards to all participants and to non-participants in
+//!    aggregate membership (peers in [`commonware_p2p::PeerSetUpdate::all`]
+//!    but not in the epoch participant list).
 //!    The leader sends each participant their indexed shard.
 //! 2. Block Reconstruction: When a node receives shards from peers, the engine
 //!    validates them and reconstructs the original block once enough valid
@@ -322,7 +324,8 @@ where
     /// Provider for peer set information.
     peer_provider: D,
 
-    /// Latest union of peer membership from the peer set subscription (`PeerSetUpdate::all`).
+    /// Latest union of peer membership from the peer set subscription
+    /// ([`commonware_p2p::PeerSetUpdate::all`]).
     aggregate_peers: Set<P>,
 
     /// Latest primary peers allowed to retain pre-leader shard buffers.
@@ -761,7 +764,7 @@ where
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
     ///
     /// - Participants receive the shard matching their participant index.
-    /// - Tracked non-participants receive the leader's shard.
+    /// - Non-participants in aggregate membership receive the leader's shard.
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -818,7 +821,7 @@ where
                 .await;
         }
 
-        // Send the leader's shard to aggregate-membership peers outside the participant set.
+        // Send the leader's shard to peers in aggregate membership who are not participants.
         let non_participants: Vec<P> = self
             .aggregate_peers
             .iter()
@@ -842,7 +845,7 @@ where
         debug!(?commitment, "broadcasted shards");
     }
 
-    /// Broadcasts a [`Shard`] to all participants.
+    /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
     async fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -853,7 +856,7 @@ where
             debug!(
                 ?commitment,
                 peers = peers.len(),
-                "broadcasted shard to all participants"
+                "broadcasted shard to all peers"
             );
         }
     }

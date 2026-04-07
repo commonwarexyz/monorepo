@@ -25,7 +25,7 @@
 //! an overlap window of older peer sets, those peers may still remain connected, but their
 //! buffered-message deque is evicted as soon as they leave `latest.primary`.
 //!
-//! Messages referenced by multiple senders stay cached until the last tracked sender deque that
+//! Messages referenced by multiple senders stay cached until the last per-sender deque that
 //! contains them is evicted.
 
 mod config;
