@@ -25,6 +25,13 @@ struct Waiter<M> {
     responder: oneshot::Sender<M>,
 }
 
+/// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
+enum InsertMessageResult {
+    Inserted,
+    Duplicate,
+    Ineligible,
+}
+
 /// Instance of the main engine for the module.
 ///
 /// It is responsible for:
@@ -278,25 +285,19 @@ where
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
         let digest = msg.digest();
-        let tracked =
-            peer == self.public_key || self.latest_primary_peers.position(&peer).is_some();
-        let duplicate = tracked
-            && self
-                .deques
-                .get(&peer)
-                .is_some_and(|deque| deque.iter().any(|cached| cached == &digest));
-
-        if self.insert_message(peer.clone(), digest, msg) {
-            self.metrics.receive.inc(Status::Success);
-            return;
+        match self.insert_message(peer.clone(), digest, msg) {
+            InsertMessageResult::Inserted => {
+                self.metrics.receive.inc(Status::Success);
+            }
+            InsertMessageResult::Duplicate => {
+                debug!(?peer, "message already stored");
+                self.metrics.receive.inc(Status::Dropped);
+            }
+            InsertMessageResult::Ineligible => {
+                debug!(?peer, "message from peer outside latest.primary not cached");
+                self.metrics.receive.inc(Status::Dropped);
+            }
         }
-
-        if duplicate {
-            debug!(?peer, "message already stored");
-        } else {
-            debug!(?peer, "message from peer outside latest.primary not cached");
-        }
-        self.metrics.receive.inc(Status::Dropped);
     }
 
     ////////////////////////////////////////
@@ -307,7 +308,7 @@ where
     ///
     /// Waiters are notified even when a sender is no longer eligible to keep a
     /// buffered cache entry resident.
-    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> bool {
+    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
         // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
             for waiter in waiters {
@@ -316,7 +317,7 @@ where
         }
 
         if peer != self.public_key && self.latest_primary_peers.position(&peer).is_none() {
-            return false;
+            return InsertMessageResult::Ineligible;
         }
 
         // Get the relevant deque for the peer. Remote peers only reach this point if they are in
@@ -332,7 +333,7 @@ where
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
             }
-            return false;
+            return InsertMessageResult::Duplicate;
         };
 
         // - Insert the digest into the peer cache
@@ -358,7 +359,7 @@ where
             decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
-        true
+        InsertMessageResult::Inserted
     }
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
