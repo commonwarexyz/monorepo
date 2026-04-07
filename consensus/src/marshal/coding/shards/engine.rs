@@ -5085,7 +5085,9 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
             let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
 
-            // Evicted node is peer 1; peer 1 is later removed from latest.primary.
+            // Receiver (`peer_keys[1]`) is evicted from `latest.primary` after shards are buffered.
+            // The leader (`peer_keys[0]`) has no link to the receiver, so reconstruction cannot use a
+            // leader-delivered shard or a self-buffered shard; it must use gossip from peers 2/4/5/6 only.
             let receiver_idx = 1usize;
             let receiver_pk = peer_keys[receiver_idx].clone();
             let leader_pk = peer_keys[0].clone();
@@ -5124,6 +5126,7 @@ mod tests {
                 .await
                 .expect("registration should succeed");
 
+            // Only secondary peers that will forward shards are connected to the receiver (not the leader).
             for sender in [&peer2_pk, &peer4_pk, &peer5_pk, &peer6_pk] {
                 oracle
                     .add_link(sender.clone(), receiver_pk.clone(), DEFAULT_LINK)
@@ -5131,6 +5134,7 @@ mod tests {
                     .expect("link should be added");
             }
 
+            // Start with the full committee so the receiver's signer scheme matches the coded block.
             oracle.manager().track(0, participants.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -5170,7 +5174,8 @@ mod tests {
 
             let block_sub = mailbox.subscribe(commitment).await;
 
-            // Buffer four peer shards before the leader is discovered.
+            // Pre-`Discovered` path: four shards from peers that will still be in `latest.primary` after
+            // the receiver is evicted (indices 2, 4, 5, 6). Together they are enough to reconstruct.
             peer2_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
@@ -5205,6 +5210,8 @@ mod tests {
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
+            // Evict the receiver from `latest.primary`: buffered shards from remaining primaries must
+            // still count toward reconstruction once the leader is known.
             let latest_primary: Set<P> = Set::from_iter_dedup(
                 peer_keys
                     .iter()
@@ -5214,6 +5221,8 @@ mod tests {
             oracle.manager().track(1, latest_primary).await;
             context.sleep(Duration::from_millis(10)).await;
 
+            // Leader announcement drains overlap-buffered peer shards; the evicted receiver should
+            // still reach quorum without ever receiving the leader's direct shard.
             mailbox
                 .discovered(
                     commitment,
