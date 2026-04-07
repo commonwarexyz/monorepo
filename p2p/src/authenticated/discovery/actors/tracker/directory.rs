@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
+use super::{bit_set::BitSet, metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::{
         dialing::{earliest, DialStatus, Dialable, ReserveResult},
@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 
 /// Primary and secondary sets registered under a single peer-set index.
 struct PeerSetsAtIndex<C: PublicKey> {
-    primary: Set<C>,
+    primary: BitSet<C>,
     secondary: OrderedSet<C>,
 }
 
@@ -248,7 +248,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         );
 
         // Register each primary in `peers`, then set the BitVec knowledge slot by index.
-        let mut primary_set = Set::new(primaries);
+        let mut primary_set = BitSet::new(primaries);
         for i in 0..primary_set.len() {
             let primary = primary_set[i].clone();
             let record = self.peers.entry(primary).or_insert_with(|| {

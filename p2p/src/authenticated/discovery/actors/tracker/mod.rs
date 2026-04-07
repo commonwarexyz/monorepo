@@ -11,7 +11,7 @@ mod metadata;
 mod metrics;
 mod record;
 mod reservation;
-mod set;
+mod bit_set;
 
 pub use actor::Actor;
 pub use ingress::{Message, Oracle};
