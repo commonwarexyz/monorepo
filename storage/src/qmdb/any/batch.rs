@@ -683,18 +683,21 @@ where
 
         // Process creates: remaining mutations (fresh keys) plus parent-deleted
         // keys being re-created. Both get an Update op and active_keys_delta += 1.
-        // Merge into a single BTreeMap so iteration order is deterministic
+        // Merge into a single sorted Vec so iteration order is deterministic
         // regardless of whether the parent is pending or committed.
-        let mut creates: BTreeMap<K, (V::Value, Option<Location<F>>)> = BTreeMap::new();
+        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> = Vec::with_capacity(
+            mutations.len() + parent_deleted_creates.len(),
+        );
         for (key, value) in mutations {
             if let Some(value) = value {
-                creates.insert(key, (value, None));
+                creates.push((key, value, None));
             }
         }
         for (key, (value, base_old_loc)) in parent_deleted_creates {
-            creates.insert(key, (value, base_old_loc));
+            creates.push((key, value, base_old_loc));
         }
-        for (key, (value, base_old_loc)) in creates {
+        creates.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        for (key, value, base_old_loc) in creates {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             ops.push(Operation::Update(update::Unordered(
                 key.clone(),
@@ -806,22 +809,27 @@ where
 
         // Remaining mutations are creates. Each entry carries the value and
         // base_old_loc (None for fresh creates, Some for parent-deleted recreates).
-        let mut created: BTreeMap<K, (V::Value, Option<Location<F>>)> = BTreeMap::new();
+        // Merge into a single sorted Vec so iteration order is deterministic
+        // regardless of whether the parent is pending or committed.
+        let mut created: Vec<(K, V::Value, Option<Location<F>>)> = Vec::with_capacity(
+            mutations.len() + parent_deleted_creates.len(),
+        );
         for (key, value) in mutations {
             let Some(value) = value else {
                 continue; // delete of non-existent key
             };
-            created.insert(key.clone(), (value, None));
-            next_candidates.insert(key);
+            next_candidates.insert(key.clone());
+            created.push((key, value, None));
         }
         for (key, (value, base_old_loc)) in parent_deleted_creates {
             next_candidates.insert(key.clone());
-            created.insert(key, (value, base_old_loc));
+            created.push((key, value, base_old_loc));
         }
+        created.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
-        for key in deleted.keys().chain(created.keys()) {
+        for key in deleted.keys().chain(created.iter().map(|(k, _, _)| k)) {
             let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
                 continue;
             };
@@ -850,7 +858,10 @@ where
         // to the base-DB-only prev_translated_key lookup above.
         for (key, entry) in &*m.base_diff {
             // Skip keys already handled by this batch's mutations.
-            if updated.contains_key(key) || created.contains_key(key) || deleted.contains_key(key) {
+            if updated.contains_key(key)
+                || created.binary_search_by(|(k, _, _)| k.cmp(key)).is_ok()
+                || deleted.contains_key(key)
+            {
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
@@ -875,7 +886,9 @@ where
             next_candidates.remove(key);
         }
         for (key, entry) in &*m.base_diff {
-            if matches!(entry, DiffEntry::Deleted { .. }) && !created.contains_key(key) {
+            if matches!(entry, DiffEntry::Deleted { .. })
+                && created.binary_search_by(|(k, _, _)| k.cmp(key)).is_err()
+            {
                 prev_candidates.remove(key);
                 next_candidates.remove(key);
             }
@@ -931,7 +944,7 @@ where
         let mut created_keys: Vec<K> = Vec::with_capacity(created.len());
 
         // Process creates.
-        for (key, (value, base_old_loc)) in created {
+        for (key, value, base_old_loc) in created {
             created_keys.push(key.clone());
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             let next_key = find_next_key(&key, &next_candidates);
