@@ -257,7 +257,7 @@ impl<C: PublicKey> Oracle<C> {
 impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
             .0
             .request(|responder| Message::PeerSet {

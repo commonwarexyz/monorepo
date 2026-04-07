@@ -250,8 +250,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
-    /// Get the peers for a given id.
-    async fn peer_set(&self, id: u64) -> Option<Set<P>> {
+    /// Get the primary peers for a given ID.
+    async fn primary_peers(&self, id: u64) -> Option<Set<P>> {
         self.sender
             .0
             .request(|response| Message::PeerSet { id, response })
@@ -297,8 +297,8 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
-        self.oracle.peer_set(id).await
+    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+        self.oracle.primary_peers(id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
@@ -346,8 +346,8 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
-        self.oracle.peer_set(id).await
+    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+        self.oracle.primary_peers(id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<P> {

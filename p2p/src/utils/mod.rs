@@ -38,7 +38,7 @@ impl<P: PublicKey> StaticProvider<P> {
 impl<P: PublicKey> Provider for StaticProvider<P> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<P>> {
+    async fn primary_peers(&mut self, id: u64) -> Option<Set<P>> {
         assert_eq!(id, self.id);
         Some(self.peers.clone())
     }

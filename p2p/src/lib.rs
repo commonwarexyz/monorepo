@@ -298,7 +298,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Fetch the ordered set of primary peers for a given ID.
-        fn peer_set(
+        fn primary_peers(
             &mut self,
             id: u64,
         ) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;

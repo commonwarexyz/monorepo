@@ -1449,7 +1449,7 @@ mod tests {
     }
 
     /// [`Network::new_with_split_peers`] registers id `0` with separate primary and secondary sets,
-    /// exposes the same split from [`Manager::peer_set`], and emits a matching [`PeerSetUpdate`] on subscribe.
+    /// exposes the same split from [`Manager::primary_peers`], and emits a matching [`PeerSetUpdate`] on subscribe.
     #[test]
     fn test_new_with_split_peers_seeds_initial_update() {
         let executor = deterministic::Runner::default();
@@ -1473,7 +1473,7 @@ mod tests {
             network_context.spawn(|_| network.run());
 
             let mut manager = oracle.manager();
-            let peer_set = manager.peer_set(0).await.unwrap();
+            let peer_set = manager.primary_peers(0).await.unwrap();
             assert_eq!(peer_set, Set::try_from([primary.clone()]).unwrap());
 
             let mut updates = manager.subscribe().await;
