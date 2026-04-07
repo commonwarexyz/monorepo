@@ -330,6 +330,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), false).await;
 
@@ -562,6 +563,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -834,6 +836,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -954,6 +957,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -1089,6 +1093,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -1213,6 +1218,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -1386,6 +1392,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -1597,6 +1604,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -1821,6 +1829,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2012,6 +2021,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -2111,6 +2121,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -2225,6 +2236,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -2442,6 +2454,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -2646,6 +2659,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -2820,6 +2834,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -3028,6 +3043,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -3175,6 +3191,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -3464,6 +3481,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -3733,6 +3751,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -3926,6 +3945,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -4097,6 +4117,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
@@ -4203,6 +4224,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -4324,6 +4346,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -4478,6 +4501,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -4623,6 +4647,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -4762,6 +4787,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -5045,6 +5071,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -5247,6 +5274,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -5384,6 +5412,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
@@ -5511,6 +5540,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -5654,6 +5684,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -5785,6 +5816,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -5935,6 +5967,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle =
                 start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
