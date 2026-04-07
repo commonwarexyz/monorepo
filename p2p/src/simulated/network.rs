@@ -254,11 +254,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         (network, oracle)
     }
 
-    /// Register a peer set directly in the network state.
-    ///
-    /// This mirrors the bookkeeping performed for [`ingress::Message::Track`]
-    /// and is used by constructor helpers that seed the initial topology before
-    /// the network event loop starts.
+    /// Apply a tracked peer set to network state.
     async fn register_tracked_peer_set(&mut self, id: u64, peers: TrackedPeers<P>) -> bool {
         let primary = peers.primary;
         let secondary = peers.secondary;
