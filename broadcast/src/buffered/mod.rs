@@ -7,26 +7,19 @@
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
 //!
-//! # Details
+//! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of
 //! messages per peer. When the cache is full, the oldest message is removed to make room for the
 //! new one.
 //!
-//! The [Mailbox] is used to make requests to the [Engine]. It implements the
-//! [crate::Broadcaster] trait. This is used to have the engine send a message to all
-//! other peers in the network in a best-effort manner. It also has a method to request a message by
-//! digest. The engine will return the message immediately if it is in the cache, or wait for it to
-//! be received over the network if it is not.
-//!
-//! # Peer Set Updates
-//!
-//! Per-sender caches follow `latest.primary`. Broadcasts use the mailbox `recipients` regardless of
-//! local insertion. Eviction drops deques when a peer leaves `latest.primary`, even if an overlap
-//! window keeps them connected.
-//!
 //! Messages referenced by multiple senders stay cached until the last per-sender deque that
-//! contains them is evicted.
+//! contains them is evicted (meaning redundant messages are only stored once).
+//!
+//! # Peer Management
+//!
+//! Only peers in `latest.primary` may buffer messages (see [commonware_p2p::Provider]). When a peer
+//! is no longer in `latest.primary`, all its buffered messages are evicted.
 
 mod config;
 pub use config::Config;
