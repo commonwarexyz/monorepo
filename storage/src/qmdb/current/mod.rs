@@ -1422,7 +1422,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition, &context.with_label("reopen_cfg")),
             )
             .await
             .unwrap();
@@ -1451,7 +1451,7 @@ pub mod tests {
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen_initial"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition, &context.with_label("reopen_initial_cfg")),
             )
             .await
             .unwrap();
@@ -1535,7 +1535,10 @@ pub mod tests {
 
             let mut reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen_pruned_recovery"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(
+                    partition,
+                    &context.with_label("reopen_pruned_cfg"),
+                ),
             )
             .await
             .unwrap();
@@ -1564,7 +1567,10 @@ pub mod tests {
             drop(reopened);
             let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen_pruned_after_new_write"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(
+                    partition,
+                    &context.with_label("reopen_after_write_cfg"),
+                ),
             )
             .await
             .unwrap();

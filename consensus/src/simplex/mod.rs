@@ -4838,6 +4838,7 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
+                let context = context.with_label(&format!("validator_{}", *validator));
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");

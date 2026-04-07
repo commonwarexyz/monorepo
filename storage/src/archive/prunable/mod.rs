@@ -246,7 +246,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    &context.with_label("first"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -277,7 +281,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    &context.with_label("second"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -527,7 +535,11 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    &context.with_label("init1"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -588,7 +600,11 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    &context.with_label("init2"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,

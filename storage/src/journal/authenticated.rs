@@ -819,7 +819,11 @@ mod tests {
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                &pooler.with_label("merkle"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
         }
     }
 
@@ -829,7 +833,11 @@ mod tests {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                &pooler.with_label("journal"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
         }
     }
 
@@ -1097,12 +1105,11 @@ mod tests {
     async fn test_rewind_inner<F: Family + PartialEq>(context: Context) {
         // Test 1: Matching operation is kept
         {
-            let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_match"),
-                journal_config("rewind-match", &context),
-            )
-            .await
-            .unwrap();
+            let ctx = context.with_label("rewind_match");
+            let mut journal =
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-match", &ctx))
+                    .await
+                    .unwrap();
 
             // Add operations where operation 3 is a commit
             for i in 0..3 {
@@ -1128,12 +1135,11 @@ mod tests {
 
         // Test 2: Last matching operation is chosen when multiple match
         {
-            let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_multiple"),
-                journal_config("rewind-multiple", &context),
-            )
-            .await
-            .unwrap();
+            let ctx = context.with_label("rewind_multiple");
+            let mut journal =
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-multiple", &ctx))
+                    .await
+                    .unwrap();
 
             // Add multiple commits
             journal.append(&create_operation::<F>(0)).await.unwrap();
@@ -1162,12 +1168,11 @@ mod tests {
 
         // Test 3: Rewind to pruning boundary when no match
         {
-            let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_no_match"),
-                journal_config("rewind-no-match", &context),
-            )
-            .await
-            .unwrap();
+            let ctx = context.with_label("rewind_no_match");
+            let mut journal =
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-no-match", &ctx))
+                    .await
+                    .unwrap();
 
             // Add operations with no commits
             for i in 0..10 {
@@ -1182,12 +1187,11 @@ mod tests {
 
         // Test 4: Rewind with existing pruning boundary
         {
-            let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_with_pruning"),
-                journal_config("rewind-with-pruning", &context),
-            )
-            .await
-            .unwrap();
+            let ctx = context.with_label("rewind_with_pruning");
+            let mut journal =
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-with-pruning", &ctx))
+                    .await
+                    .unwrap();
 
             // Add operations and a commit at position 10 (past first section boundary of 7)
             for i in 0..10 {
@@ -1222,9 +1226,10 @@ mod tests {
 
         // Test 5: Rewind with no matches after pruning boundary
         {
+            let ctx = context.with_label("rewind_no_match_pruned");
             let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_no_match_pruned"),
-                journal_config("rewind-no-match-pruned", &context),
+                ctx.clone(),
+                journal_config("rewind-no-match-pruned", &ctx),
             )
             .await
             .unwrap();
@@ -1260,12 +1265,11 @@ mod tests {
 
         // Test 6: Empty journal
         {
-            let mut journal = ContiguousJournal::init(
-                context.with_label("rewind_empty"),
-                journal_config("rewind-empty", &context),
-            )
-            .await
-            .unwrap();
+            let ctx = context.with_label("rewind_empty");
+            let mut journal =
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-empty", &ctx))
+                    .await
+                    .unwrap();
 
             // Rewind empty journal should be no-op
             let final_size = journal
@@ -1278,10 +1282,11 @@ mod tests {
 
         // Test 7: Position based authenticated journal rewind.
         {
-            let merkle_cfg = merkle_config("rewind", &context);
-            let journal_cfg = journal_config("rewind", &context);
+            let ctx = context.with_label("rewind_auth");
+            let merkle_cfg = merkle_config("rewind", &ctx);
+            let journal_cfg = journal_config("rewind", &ctx);
             let mut journal =
-                TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |op| op.is_commit())
+                TestJournal::<F>::new(ctx, merkle_cfg, journal_cfg, |op| op.is_commit())
                     .await
                     .unwrap();
 

@@ -2,9 +2,10 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, Metrics};
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
+use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{hash_map::Entry, HashMap},
     future::Future,
@@ -162,6 +163,9 @@ pub struct CacheRef {
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
 
+    /// Number of page faults (cache misses that enter the fault handler).
+    page_faults: Counter,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
@@ -171,13 +175,21 @@ impl CacheRef {
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
-    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    pub fn new(
+        context: &impl Metrics,
+        pool: BufferPool,
+        page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
         let page_size_u64 = page_size.get() as u64;
+        let page_faults = Counter::default();
+        context.register("page_faults", "Number of page faults", page_faults.clone());
 
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            page_faults,
             pool,
         }
     }
@@ -189,7 +201,12 @@ impl CacheRef {
         page_size: NonZeroU16,
         capacity: NonZeroUsize,
     ) -> Self {
-        Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
+        Self::new(
+            pooler,
+            pooler.storage_buffer_pool().clone(),
+            page_size,
+            capacity,
+        )
     }
 
     /// The page size used by this page cache.
@@ -202,6 +219,12 @@ impl CacheRef {
     #[inline]
     pub const fn pool(&self) -> &BufferPool {
         &self.pool
+    }
+
+    /// Returns the number of page faults (cache misses) that have occurred.
+    #[cfg(test)]
+    pub fn page_faults(&self) -> u64 {
+        self.page_faults.get()
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
@@ -285,6 +308,7 @@ impl CacheRef {
 
         let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
         let offset_in_page = offset_in_page as usize;
+        self.page_faults.inc();
         trace!(page_num, blob_id, "page fault");
 
         // Create or clone a future that retrieves the desired page from the underlying blob. This
@@ -759,6 +783,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
+            assert_eq!(cache_ref.page_faults(), 0);
             for i in 0..11 {
                 // Read expects logical bytes only (CRCs are stripped).
                 let mut buf = vec![0; PAGE_SIZE.get() as usize];
@@ -768,6 +793,8 @@ mod tests {
                     .unwrap();
                 assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
             }
+            // 11 pages read, each was a cache miss.
+            assert_eq!(cache_ref.page_faults(), 11);
 
             // Repeat the read to exercise reading from the page cache. Must start at 1 because
             // page 0 should be evicted.
@@ -779,6 +806,8 @@ mod tests {
                     .unwrap();
                 assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
             }
+            // All 10 pages were cached, no new faults.
+            assert_eq!(cache_ref.page_faults(), 11);
 
             // Cleanup.
             blob.sync().await.unwrap();

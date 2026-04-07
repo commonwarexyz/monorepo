@@ -498,7 +498,7 @@ mod tests {
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
                                 journal_page_cache: CacheRef::from_pooler(
-                                    &context,
+                                    &validator_context,
                                     PAGE_SIZE,
                                     PAGE_CACHE_SIZE,
                                 ),
@@ -652,7 +652,7 @@ mod tests {
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_page_cache: CacheRef::from_pooler(
-                                &context,
+                                &validator_context,
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             ),
@@ -739,7 +739,7 @@ mod tests {
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_page_cache: CacheRef::from_pooler(
-                                &context,
+                                &validator_context,
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             ),
