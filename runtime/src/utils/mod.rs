@@ -33,8 +33,8 @@ pub(crate) mod supervision;
 /// The execution mode of a task.
 #[derive(Copy, Clone, Debug)]
 pub enum Execution {
-    /// Task runs on a dedicated thread, optionally pinned to a core
-    /// (best-effort, Linux only). The core value wraps around available CPUs.
+    /// Task runs on a dedicated thread, optionally pinned to a core. Core pinning is
+    /// currently Linux only and a no-op on other platforms.
     Dedicated(Option<usize>),
     /// Task runs on the shared executor. `true` marks short blocking work that should
     /// use the runtime's blocking-friendly pool.

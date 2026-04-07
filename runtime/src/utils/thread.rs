@@ -114,7 +114,7 @@ where
         .expect("failed to spawn thread")
 }
 
-/// Returns the number of online CPUs, or `None` if it cannot be determined.
+/// Returns the number of available CPUs, or `None` if it cannot be determined.
 #[cfg(target_os = "linux")]
 pub fn available_cores() -> Option<usize> {
     // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
@@ -127,7 +127,7 @@ pub fn available_cores() -> Option<usize> {
     }
 }
 
-/// Returns the number of online CPUs, or `None` if it cannot be determined.
+/// Returns the number of available CPUs, or `None` if it cannot be determined.
 ///
 /// Always returns `None` on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
@@ -135,8 +135,14 @@ pub const fn available_cores() -> Option<usize> {
     None
 }
 
-/// Best-effort attempt to pin the current thread to the given core.
-/// The `core` value wraps around the number of available CPUs.
+/// Pins the current thread to the given core.
+///
+/// If the CPU count cannot be queried or `sched_setaffinity` fails, a warning
+/// is logged once and the thread continues unpinned.
+///
+/// # Panics
+///
+/// Panics if `core` is greater than or equal to the number of available CPUs.
 #[cfg(target_os = "linux")]
 pub(crate) fn pin_to_core(core: usize) {
     static WARN_CPUS: Once = Once::new();
@@ -148,12 +154,15 @@ pub(crate) fn pin_to_core(core: usize) {
         });
         return;
     };
-    let cpu = core % num_cores;
+    assert!(
+        core < num_cores,
+        "core {core} out of range ({num_cores} available)"
+    );
 
     // SAFETY: `cpu_set` is zeroed and then a single valid CPU index is set.
     unsafe {
         let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(cpu, &mut cpu_set);
+        libc::CPU_SET(core, &mut cpu_set);
         let result = libc::sched_setaffinity(
             0, // current thread
             std::mem::size_of::<libc::cpu_set_t>(),
@@ -161,12 +170,14 @@ pub(crate) fn pin_to_core(core: usize) {
         );
         if result != 0 {
             WARN_AFFINITY.call_once(|| {
-                tracing::warn!(cpu, "sched_setaffinity failed, skipping core pinning");
+                tracing::warn!(core, "sched_setaffinity failed, skipping core pinning");
             });
         }
     }
 }
 
-/// No-op on non-Linux platforms. See the Linux implementation for details.
+/// Pins the current thread to the given core.
+///
+/// No-op on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub(crate) const fn pin_to_core(_core: usize) {}

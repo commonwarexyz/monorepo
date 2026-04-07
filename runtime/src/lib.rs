@@ -179,12 +179,19 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
-        /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given core
-        /// (best-effort, Linux only). The core value wraps around the number of available CPUs.
+        /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given core.
         ///
-        /// Use [`available_cores`] to query the number of online CPUs.
+        /// Core pinning is currently Linux only and a no-op on other platforms. Pinning may
+        /// silently fail in restricted environments (e.g. containers with cgroup CPU limits),
+        /// this method will still succeed but the thread will run unpinned.
+        ///
+        /// Use [`available_cores`] to query the number of available CPUs.
         ///
         /// Implies [`Spawner::dedicated`].
+        ///
+        /// # Panics
+        ///
+        /// Panics if `core` is greater than or equal to the number of available CPUs.
         fn pinned(self, core: usize) -> Self;
 
         /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
