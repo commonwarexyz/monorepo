@@ -239,25 +239,30 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Create and store new primary peer set.
-        let mut primary_set = Set::new(primaries.clone());
-        for primary in primaries.iter() {
-            let record = self.peers.entry(primary.clone()).or_insert_with(|| {
-                self.metrics.tracked.inc();
-                Record::unknown()
-            });
-            record.increment_primary();
-            primary_set.update(primary, !record.want(self.dial_fail_limit));
-        }
-
-        // Create and store new secondary peer set. Peers listed in both roles keep only primary
-        // (handled above); they must not appear in the stored secondary set or secondary counts.
+        // Peers listed in both roles keep only primary; secondaries must not duplicate primaries.
         let secondary_ordered: OrderedSet<C> = OrderedSet::from_iter_dedup(
             secondaries
                 .iter()
                 .filter(|s| primaries.position(s).is_none())
                 .cloned(),
         );
+
+        // Register each primary in `peers`, then set the BitVec knowledge slot by index.
+        let mut primary_set = Set::new(primaries);
+        for i in 0..primary_set.len() {
+            let primary = primary_set[i].clone();
+            let record = self.peers.entry(primary).or_insert_with(|| {
+                self.metrics.tracked.inc();
+                Record::unknown()
+            });
+            record.increment_primary();
+            assert!(
+                primary_set.update_at(i, !record.want(self.dial_fail_limit)),
+                "index in 0..primary_set.len() must map to a knowledge bit"
+            );
+        }
+
+        // Create and store new secondary peer set.
         for secondary in secondary_ordered.iter() {
             let record = self.peers.entry(secondary.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();

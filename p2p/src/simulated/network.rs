@@ -108,7 +108,7 @@ pub struct Config {
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
 
-    /// The maximum number of peer sets to track (`tracked_peer_sets`). When a new peer set is
+    /// The maximum number of peer sets to retain (`tracked_peer_sets`). When a new peer set is
     /// registered and this limit is exceeded, the oldest peer set is removed. Peers that are no
     /// longer in any retained peer set will have their links removed and messages to them will be
     /// dropped.

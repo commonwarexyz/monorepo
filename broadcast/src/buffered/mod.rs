@@ -1203,6 +1203,48 @@ mod tests {
         });
     }
 
+    /// Local `broadcast` queued before the engine run loop starts must still be cached when the
+    /// peer is already in `latest.primary` (regression for biased handling of `peer_set_subscription`
+    /// vs mailbox).
+    #[test_traced]
+    fn test_broadcast_queued_before_start_respects_initial_latest_primary() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            // Add a sole peer (self) to the network
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.clone(), 1, 1.0).await;
+            let peer = peers[0].clone();
+            let network = registrations.remove(&peer).unwrap();
+            let config = Config {
+                public_key: peer.clone(),
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
+            };
+            let (engine, mailbox) =
+                Engine::<_, PublicKey, TestMessage, _>::new(context.with_label("peer"), config);
+
+            // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
+            let msg = TestMessage::shared(b"queued-before-start");
+            let result = mailbox.broadcast(Recipients::All, msg.clone()).await;
+
+            // Start the engine (now that a message is enqueued)
+            engine.start(network);
+
+            assert!(
+                result.await.unwrap().is_empty(),
+                "single-peer broadcast should have no recipients"
+            );
+            assert_eq!(
+                mailbox.get(msg.digest()).await,
+                Some(msg),
+                "sender is already in the initial latest.primary set, so its local broadcast should be cached"
+            );
+        });
+    }
+
     #[test_traced]
     fn test_engine_starts_before_initial_peer_set_and_delivers_after_tracking() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));

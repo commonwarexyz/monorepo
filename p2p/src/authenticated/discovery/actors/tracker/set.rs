@@ -30,6 +30,15 @@ impl<P: PublicKey> Set<P> {
         false
     }
 
+    /// Same as [`Set::update`] for the peer at `index` in the ordered list.
+    pub fn update_at(&mut self, index: usize, known: bool) -> bool {
+        if index < self.ordered.len() {
+            self.knowledge.set(index as u64, known);
+            return true;
+        }
+        false
+    }
+
     /// Returns the number of peers in the set.
     pub const fn len(&self) -> usize {
         self.ordered.len()
@@ -165,6 +174,24 @@ mod tests {
             BitMap::from(vec![false, false, false]),
             "Knowledge should be unchanged after failed update"
         );
+    }
+
+    #[test]
+    fn test_update_at_matches_update_by_peer() {
+        let peers = create_test_peers();
+        let mut set = Set::new(peers.try_into().unwrap());
+        let middle = ed25519::PrivateKey::from_seed(2).public_key();
+
+        assert!(set.update_at(1, true));
+        assert_eq!(
+            set.knowledge(),
+            BitMap::from(vec![false, true, false]),
+            "index 1 should match the middle sorted peer"
+        );
+
+        assert!(set.update(&middle, false));
+        assert!(!set.update_at(10, true), "out-of-range index");
+        assert_eq!(set.knowledge(), BitMap::from(vec![false, false, false]));
     }
 
     #[test]

@@ -181,7 +181,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Create and store new primary peer set (all peers are registered regardless of address
         // validity).
         let mut reset_peers = Vec::new();
-        let primary_keys = primaries.keys().clone();
         for (primary, addr) in &primaries {
             let record = match self.peers.entry(primary.clone()) {
                 Entry::Occupied(entry) => {
@@ -198,13 +197,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             };
             record.increment_primary();
         }
-        let primary_keys_set = primaries.into_keys();
 
         // Create and store new secondary peer set.
         for (secondary, addr) in &secondaries {
             // When a peer appears in both roles for the same index, keep only the primary role
             // (and the primary registration above); do not count them as secondary.
-            if primary_keys.position(secondary).is_some() {
+            if primaries.position(secondary).is_some() {
                 continue;
             }
             let record = match self.peers.entry(secondary.clone()) {
@@ -226,9 +224,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             secondaries
                 .keys()
                 .iter()
-                .filter(|k| primary_keys.position(k).is_none())
+                .filter(|k| primaries.position(k).is_none())
                 .cloned(),
         );
+        let primary_keys_set = primaries.into_keys();
         self.peer_sets.insert(
             index,
             PeerSetsAtIndex {
