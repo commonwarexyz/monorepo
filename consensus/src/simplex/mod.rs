@@ -4683,7 +4683,9 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    // This test only exercises reporter filtering. Keep certification
+                    // uniform so leader-owned views do not diverge from follower views.
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),

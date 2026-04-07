@@ -5604,70 +5604,70 @@ mod tests {
             )
             .await;
 
-            // Advance to view 3
-            let view_3 = View::new(3);
+            // Advance to view 4 so the stuck round is not leader-owned by this validator.
+            let view_4 = View::new(4);
             let parent_payload = advance_to_view(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
                 quorum,
-                view_3,
+                view_4,
             )
             .await;
 
-            let proposal_3 = Proposal::new(
-                Round::new(Epoch::new(333), view_3),
-                view_3.previous().unwrap(),
-                Sha256::hash(b"view_3_proposal"),
+            let proposal_4 = Proposal::new(
+                Round::new(Epoch::new(333), view_4),
+                view_4.previous().unwrap(),
+                Sha256::hash(b"view_4_proposal"),
             );
             let leader = participants[1].clone();
-            let contents = (proposal_3.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal_3.payload, contents));
-            mailbox.proposal(proposal_3.clone()).await;
+            let contents = (proposal_4.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal_4.payload, contents));
+            mailbox.proposal(proposal_4.clone()).await;
 
-            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization_3))
+                .resolved(Certificate::Notarization(notarization_4))
                 .await;
 
             // Wait for the first nullify vote (confirms stuck state)
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_3 =>
+                        batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 =>
                             break,
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
-                        panic!("expected nullify vote for view 3");
+                        panic!("expected nullify vote for view 4");
                     },
                 }
             }
 
             // Now simulate what the "advanced" validators (f+1 honest with context) are doing:
-            // They certified view 3 and advanced to view 4, where they're making progress.
-            // Send a notarization for view 4 to the stuck validator.
-            let view_4 = View::new(4);
-            let proposal_4 = Proposal::new(
-                Round::new(Epoch::new(333), view_4),
-                view_3, // Parent is view 3 (certified by the advanced validators)
-                Sha256::hash(b"view_4_proposal"),
+            // They certified view 4 and advanced to view 5, where they're making progress.
+            // Send a notarization for view 5 to the stuck validator.
+            let view_5 = View::new(5);
+            let proposal_5 = Proposal::new(
+                Round::new(Epoch::new(333), view_5),
+                view_4, // Parent is view 4 (certified by the advanced validators)
+                Sha256::hash(b"view_5_proposal"),
             );
-            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+            let (_, notarization_5) = build_notarization(&schemes, &proposal_5, quorum);
 
-            // Send the view 4 notarization to the stuck validator
+            // Send the view 5 notarization to the stuck validator
             mailbox
-                .resolved(Certificate::Notarization(notarization_4))
+                .resolved(Certificate::Notarization(notarization_5))
                 .await;
 
             // The stuck validator should still not advance.
             //
-            // Receiving a notarization for view 4 doesn't help because:
+            // Receiving a notarization for view 5 doesn't help because:
             // 1. add_notarization() does not call enter_view() - it only adds to certification_candidates
-            // 2. To advance past view 3, the validator needs EITHER:
-            //    a. Certification of view 3 to succeed (impossible - no context)
-            //    b. A nullification certificate for view 3 (impossible - only f votes)
+            // 2. To advance past view 4, the validator needs EITHER:
+            //    a. Certification of view 4 to succeed (impossible - no context)
+            //    b. A nullification certificate for view 4 (impossible - only f votes)
             //    c. A finalization certificate (requires Byzantine to vote finalize)
             let advanced = loop {
                 select! {
@@ -5677,15 +5677,15 @@ mod tests {
                                 current, response, ..
                             } => {
                                 response.send(None).unwrap();
-                                if current > view_3 {
+                                if current > view_4 {
                                     break true;
                                 }
                             }
                             batcher::Message::Constructed(Vote::Nullify(n)) => {
-                                // Still voting nullify for view 3 - expected
+                                // Still voting nullify for view 4 - expected
                                 assert_eq!(
                                     n.view(),
-                                    view_3,
+                                    view_4,
                                     "should only vote nullify for stuck view"
                                 );
                             }
@@ -5700,11 +5700,11 @@ mod tests {
 
             assert!(
                 !advanced,
-                "receiving a notarization for view 4 should NOT rescue the stuck validator - \
-                 they still can't certify view 3 (no context) and can't form a nullification \
-                 (not enough votes). The f+1 honest validators who advanced to view 4 cannot \
-                 retroactively help because they can only vote nullify for their current view (4), \
-                 not for view 3."
+                "receiving a notarization for view 5 should NOT rescue the stuck validator - \
+                 they still can't certify view 4 (no context) and can't form a nullification \
+                 (not enough votes). The f+1 honest validators who advanced to view 5 cannot \
+                 retroactively help because they can only vote nullify for their current view (5), \
+                 not for view 4."
             );
 
             // HOWEVER: A finalization certificate WOULD rescue the stuck validator.
@@ -5712,9 +5712,9 @@ mod tests {
             // the finalization would abort the stuck certification and advance the view.
             //
             // Let's demonstrate this escape route works (if Byzantine cooperate):
-            let (_, finalization_4) = build_finalization(&schemes, &proposal_4, quorum);
+            let (_, finalization_5) = build_finalization(&schemes, &proposal_5, quorum);
             mailbox
-                .resolved(Certificate::Finalization(finalization_4))
+                .resolved(Certificate::Finalization(finalization_5))
                 .await;
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
@@ -5726,7 +5726,7 @@ mod tests {
                         } = msg.unwrap()
                         {
                             response.send(None).unwrap();
-                            if current > view_4 {
+                            if current > view_5 {
                                 break true;
                             }
                         }

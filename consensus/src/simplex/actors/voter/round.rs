@@ -371,8 +371,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        self.proposal.set_proposed_locally(self.is_leader());
-        match self.proposal.update(&proposal, true) {
+        let proposed_locally = self.is_leader();
+        let leader = match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
                 self.leader_deadline = None;
@@ -393,7 +393,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 equivocator
             }
             ProposalChange::Skipped => None,
-        }
+        };
+        self.proposal.set_proposed_locally(proposed_locally);
+        leader
     }
 
     /// Adds a verified notarization certificate to the round.
