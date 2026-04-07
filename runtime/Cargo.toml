@@ -50,12 +50,10 @@ features = ["js"]
 axum.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
+crossbeam-queue = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-crossbeam-queue.workspace = true
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -71,7 +69,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
 ]
-bench = []
+bench = ["dep:crossbeam-queue"]
 external = [ "pin-project" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]
