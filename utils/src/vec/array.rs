@@ -294,14 +294,15 @@ impl<T, const N: usize> ArrayVec<T, N> {
             return;
         }
 
-        // SAFETY: The assertion above guarantees `new_len <= capacity()`.
         while self.len + 1 < new_len {
+            // SAFETY: The assertion above guarantees `new_len <= capacity()`,
+            // and the loop only runs while `len + 1 < new_len`.
             unsafe {
                 self.push_unchecked(value.clone());
             }
         }
 
-        // Move the original for the last slot instead of cloning + dropping.
+        // SAFETY: The loop above stops with exactly one slot remaining.
         unsafe {
             self.push_unchecked(value);
         }
@@ -838,6 +839,7 @@ mod tests {
         }
 
         unsafe fn advance_mut(&mut self, cnt: usize) {
+            // SAFETY: Forwards to the inner `BytesMut` with the same `cnt`.
             unsafe {
                 self.inline.advance_mut(cnt);
             }
