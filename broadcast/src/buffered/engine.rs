@@ -170,6 +170,14 @@ where
             on_stopped => {
                 debug!("shutdown");
             },
+            // Handle peer set subscription messages
+            Some(update) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                // Evict by latest primary only; see buffered module docs.
+                self.update_latest_primary_peers(update.latest.primary);
+            },
             // Handle mailbox messages
             Some(msg) = self.mailbox_receiver.recv() else {
                 error!("mailbox receiver failed");
@@ -192,13 +200,6 @@ where
                     trace!("mailbox: get");
                     self.handle_get(digest, responder);
                 }
-            },
-            Some(update) = peer_set_subscription.recv() else {
-                debug!("peer set subscription closed");
-                break;
-            } => {
-                // Evict by latest primary only; see buffered module docs.
-                self.update_latest_primary_peers(update.latest.primary);
             },
             // Handle incoming messages
             msg = receiver.recv() => {
