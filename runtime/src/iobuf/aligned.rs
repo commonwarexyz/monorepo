@@ -126,12 +126,13 @@ impl Owner for UntrackedOwner {
 #[derive(Clone)]
 pub(crate) struct TrackedOwner {
     class: Arc<SizeClass>,
+    slot: u32,
 }
 
 impl Owner for TrackedOwner {
     #[inline]
     fn release(self, buffer: AlignedBuffer) {
-        BufferPoolThreadCache::push(self.class, buffer);
+        BufferPoolThreadCache::push(self.class, self.slot, buffer);
     }
 }
 
@@ -678,9 +679,9 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
 
 impl BufMut<TrackedOwner> {
     #[inline]
-    pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>) -> Self {
+    pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>, slot: u32) -> Self {
         Self {
-            inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class })),
+            inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class, slot })),
             cursor: 0,
             len: 0,
         }

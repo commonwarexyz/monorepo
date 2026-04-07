@@ -23,7 +23,7 @@ commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
-crossbeam-queue.workspace = true
+crossbeam-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
@@ -53,6 +53,9 @@ criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+crossbeam-queue.workspace = true
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }

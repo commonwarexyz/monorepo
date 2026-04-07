@@ -14,11 +14,14 @@
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
 mod aligned;
+mod freelist;
 mod pool;
 
-use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
+pub(crate) use aligned::AlignedBuffer;
+use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
+pub(crate) use freelist::Freelist;
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 

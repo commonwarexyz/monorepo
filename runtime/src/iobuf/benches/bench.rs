@@ -38,8 +38,9 @@
 
 use criterion::{criterion_group, criterion_main};
 
+mod freelist;
 mod pool;
 
-criterion_group!(benches, pool::bench);
+criterion_group!(benches, pool::bench, freelist::bench);
 
 criterion_main!(benches);
