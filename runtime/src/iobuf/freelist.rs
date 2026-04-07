@@ -337,16 +337,12 @@ impl Freelist {
     }
 
     fn take_batch_with(&self, max: usize, put_entry: &mut dyn FnMut(u32, AlignedBuffer)) -> usize {
-        match max {
-            0 => return 0,
-            1 => {
-                let Some((slot, buffer)) = self.take() else {
-                    return 0;
-                };
-                put_entry(slot, buffer);
-                return 1;
-            }
-            _ => {}
+        if max == 1 {
+            let Some((slot, buffer)) = self.take() else {
+                return 0;
+            };
+            put_entry(slot, buffer);
+            return 1;
         }
 
         let thread_id = SlotBitmapProbe::thread_id();

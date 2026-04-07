@@ -227,16 +227,13 @@ impl FreelistImplementation for Freelist {
 
     #[inline]
     fn take_batch(&self, out: &mut Vec<Entry>, max: usize) {
-        Freelist::take_batch(self, max, |slot, buffer| {
+        self.take_batch(max, |slot, buffer| {
             out.push(Entry { slot, buffer });
         });
     }
 
     #[inline]
     fn put_batch(&self, entries: &mut Vec<Entry>) {
-        Self::put_batch(
-            self,
-            entries.drain(..).map(|entry| (entry.slot, entry.buffer)),
-        );
+        self.put_batch(entries.drain(..).map(|entry| (entry.slot, entry.buffer)));
     }
 }
