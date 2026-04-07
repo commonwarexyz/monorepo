@@ -3194,12 +3194,9 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) = Network::new_with_peers(
-                network_context.clone(),
-                cfg,
-                [pk1.clone(), pk2.clone()],
-            )
-            .await;
+            let (network, oracle) =
+                Network::new_with_peers(network_context.clone(), cfg, [pk1.clone(), pk2.clone()])
+                    .await;
             network.start();
 
             // Register with a very restrictive quota: 1 message per second
@@ -3276,12 +3273,9 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) = Network::new_with_peers(
-                network_context.clone(),
-                cfg,
-                [pk1.clone(), pk2.clone()],
-            )
-            .await;
+            let (network, oracle) =
+                Network::new_with_peers(network_context.clone(), cfg, [pk1.clone(), pk2.clone()])
+                    .await;
             let handle = network.start();
             let mut manager = oracle.manager();
 
@@ -3350,8 +3344,7 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             let (network, oracle) =
-                Network::new_with_peers(network_context, cfg, [pk1.clone(), pk2.clone()])
-                    .await;
+                Network::new_with_peers(network_context, cfg, [pk1.clone(), pk2.clone()]).await;
             let handle = network.start();
 
             // Register channels
