@@ -533,8 +533,8 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
-                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                default_leader, make_raw_block, setup_network_with_participants, Ctx,
+                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::MockVerifyingApp,
         },
@@ -581,12 +581,14 @@ mod tests {
     fn test_certify_returns_immediately_after_verify_fetches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
@@ -657,12 +659,14 @@ mod tests {
     fn test_certify_succeeds_without_verify_task() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
