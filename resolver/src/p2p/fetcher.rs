@@ -497,9 +497,6 @@ where
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
-    ///
-    /// Active requests are intentionally preserved. A peer-set update is treated as a cutover for
-    /// new outbound sends, not as a cancellation of responses already in flight.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.participants.reconcile(keep, self.initial.as_millis());
 
