@@ -312,9 +312,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             index,
             latest: TrackedPeers::new(
                 self.get_set(&index).cloned().unwrap(),
-                self.get_secondary_set(&index)
-                    .cloned()
-                    .unwrap_or_default(),
+                self.get_secondary_set(&index).cloned().unwrap_or_default(),
             ),
             all: self.all(),
         })
@@ -480,7 +478,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
-    /// Unblock all peers whose block has expired and update the knowledge bitmap.
+    /// Unblock all peers whose block has expired and update primary peer-set knowledge bitmaps.
     pub fn unblock_expired(&mut self) {
         let now = self.context.current();
         while let Some((_, &blocked_until)) = self.blocked.peek() {
@@ -491,7 +489,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(?peer, "unblocked peer");
             self.metrics.blocked.remove(&metrics::Peer::new(&peer));
 
-            // Update knowledge bitmaps
+            // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
             if let Some(record) = self.peers.get(&peer) {
                 let want = record.want(self.dial_fail_limit);
                 for set in self.primary_sets.values_mut() {
