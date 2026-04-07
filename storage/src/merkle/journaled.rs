@@ -786,7 +786,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         batch::MerkleizedBatch::from_mem(&inner.mem)
     }
 
-    /// Borrow the committed Mem through the read lock.
+    /// Borrow the committed Mem through the read lock. Holds the lock for
+    /// the duration of the closure.
     pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
         let inner = self.inner.read();
         f(&inner.mem)
