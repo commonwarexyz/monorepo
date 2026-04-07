@@ -947,7 +947,6 @@ mod tests {
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
-
             context.sleep(A_JIFFY).await;
 
             // Peer A broadcasts a message.
@@ -1061,7 +1060,6 @@ mod tests {
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
-
             context.sleep(A_JIFFY).await;
 
             // Peer A broadcasts a message. B caches it.
@@ -1180,7 +1178,6 @@ mod tests {
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
-
             context.sleep(A_JIFFY).await;
 
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
@@ -1352,7 +1349,6 @@ mod tests {
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
-
             context.sleep(A_JIFFY).await;
 
             // Both A and C broadcast the same message.
