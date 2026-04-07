@@ -455,7 +455,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
-                let _ = response.send(self.peer_sets.get(&id).map(|e| e.primary.clone()));
+                let _ = response.send(
+                    self.peer_sets
+                        .get(&id)
+                        .map(|e| TrackedPeers::new(e.primary.clone(), e.secondary.clone())),
+                );
             }
             ingress::Message::Subscribe { response } => {
                 // Create a new subscription channel
@@ -1449,7 +1453,7 @@ mod tests {
     }
 
     /// [`Network::new_with_split_peers`] registers id `0` with separate primary and secondary sets,
-    /// exposes the same split from [`Manager::primary_peers`], and emits a matching [`PeerSetUpdate`] on subscribe.
+    /// exposes the same split from [`Manager::peer_set`], and emits a matching [`PeerSetUpdate`] on subscribe.
     #[test]
     fn test_new_with_split_peers_seeds_initial_update() {
         let executor = deterministic::Runner::default();
@@ -1473,8 +1477,12 @@ mod tests {
             network_context.spawn(|_| network.run());
 
             let mut manager = oracle.manager();
-            let peer_set = manager.primary_peers(0).await.unwrap();
-            assert_eq!(peer_set, Set::try_from([primary.clone()]).unwrap());
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(peer_set.primary, Set::try_from([primary.clone()]).unwrap());
+            assert_eq!(
+                peer_set.secondary,
+                Set::try_from([secondary.clone()]).unwrap()
+            );
 
             let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();

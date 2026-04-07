@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
-    ordered::{Map, Set},
+    ordered::Map,
 };
 use rand_distr::Normal;
 use std::time::Duration;
@@ -26,7 +26,7 @@ pub enum Message<P: PublicKey, E: Clock> {
     },
     PeerSet {
         id: u64,
-        response: oneshot::Sender<Option<Set<P>>>,
+        response: oneshot::Sender<Option<TrackedPeers<P>>>,
     },
     Subscribe {
         response: oneshot::Sender<PeerSetSubscription<P>>,
@@ -250,8 +250,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
-    /// Get the primary peers for a given ID.
-    async fn primary_peers(&self, id: u64) -> Option<Set<P>> {
+    /// Get the primary and secondary peers for a given ID.
+    async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
         self.sender
             .0
             .request(|response| Message::PeerSet { id, response })
@@ -297,8 +297,8 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
-    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
-        self.oracle.primary_peers(id).await
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
@@ -346,8 +346,8 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
 
-    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
-        self.oracle.primary_peers(id).await
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<P> {

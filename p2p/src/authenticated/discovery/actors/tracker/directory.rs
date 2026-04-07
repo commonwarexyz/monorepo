@@ -300,6 +300,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peer_sets.get(index).map(|e| e.primary.deref())
     }
 
+    /// Gets the peer set (primary and secondary) at the given index.
+    pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
+        Some(TrackedPeers::new(
+            self.get_primary_set(index)?.clone(),
+            self.get_secondary_set(index).cloned().unwrap_or_default(),
+        ))
+    }
+
     /// Gets a secondary peer set by index.
     pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.peer_sets.get(index).map(|e| &e.secondary)

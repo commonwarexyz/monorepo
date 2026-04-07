@@ -282,6 +282,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peer_sets.get(index).map(|e| &e.primary)
     }
 
+    /// Gets the peer set (primary and secondary) at the given index.
+    pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
+        Some(TrackedPeers::new(
+            self.get_primary_set(index)?.clone(),
+            self.get_secondary_set(index).cloned().unwrap_or_default(),
+        ))
+    }
+
     /// Returns the latest primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.peer_sets.keys().last().copied()

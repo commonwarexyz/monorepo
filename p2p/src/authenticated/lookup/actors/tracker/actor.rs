@@ -188,8 +188,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
             }
             Message::PeerSet { index, responder } => {
-                // Send the peer set at the given index.
-                let _ = responder.send(self.directory.get_primary_set(&index).cloned());
+                let _ = responder.send(self.directory.get_peer_set(&index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel

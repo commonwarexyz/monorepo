@@ -7,12 +7,12 @@ use crate::{
         Mailbox,
     },
     types::Address,
-    AddressableTrackedPeers, Ingress, PeerSetSubscription,
+    AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot},
-    ordered::{Map, Set},
+    ordered::Map,
 };
 use std::net::IpAddr;
 
@@ -30,12 +30,12 @@ pub enum Message<C: PublicKey> {
     Overwrite { peers: Map<C, Address> },
 
     // ---------- Used by peer set provider ----------
-    /// Fetch the peer set at a given index.
+    /// Fetch primary and secondary peers for a given ID.
     PeerSet {
         /// The index of the peer set to fetch.
         index: u64,
-        /// One-shot channel to send the peer set.
-        responder: oneshot::Sender<Option<Set<C>>>,
+        /// One-shot channel to send the tracked peers.
+        responder: oneshot::Sender<Option<TrackedPeers<C>>>,
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
@@ -206,7 +206,7 @@ impl<C: PublicKey> Oracle<C> {
 impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
-    async fn primary_peers(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         self.sender
             .0
             .request(|responder| Message::PeerSet {

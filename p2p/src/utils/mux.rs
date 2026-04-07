@@ -551,11 +551,11 @@ mod tests {
         b: PublicKey,
     ) {
         let mut manager = oracle.manager();
-        let peers = manager.primary_peers(0).await.unwrap_or_default();
+        let peers = manager.peer_set(0).await.unwrap_or_default();
         manager
             .track(
                 0,
-                Set::from_iter_dedup(peers.iter().cloned().chain([a.clone(), b.clone()])),
+                Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
             )
             .await;
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
