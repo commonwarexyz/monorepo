@@ -1,5 +1,7 @@
 //! Helpers for resolving the configured thread stack size.
 
+#[cfg(target_os = "linux")]
+use std::sync::Once;
 use std::{env, sync::OnceLock, thread};
 
 /// Cached configured thread stack size.
@@ -137,8 +139,13 @@ pub const fn available_cores() -> Option<usize> {
 /// The `core` value wraps around the number of available CPUs.
 #[cfg(target_os = "linux")]
 pub(crate) fn pin_to_core(core: usize) {
+    static WARN_CPUS: Once = Once::new();
+    static WARN_AFFINITY: Once = Once::new();
+
     let Some(num_cores) = available_cores() else {
-        tracing::warn!("failed to query CPU count, skipping core pinning");
+        WARN_CPUS.call_once(|| {
+            tracing::warn!("failed to query CPU count, skipping core pinning");
+        });
         return;
     };
     let cpu = core % num_cores;
@@ -153,7 +160,9 @@ pub(crate) fn pin_to_core(core: usize) {
             &cpu_set,
         );
         if result != 0 {
-            tracing::warn!(cpu, "sched_setaffinity failed, skipping core pinning");
+            WARN_AFFINITY.call_once(|| {
+                tracing::warn!(cpu, "sched_setaffinity failed, skipping core pinning");
+            });
         }
     }
 }
