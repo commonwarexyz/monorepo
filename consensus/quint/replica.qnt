@@ -503,7 +503,6 @@ module replica {
             {
                 ...self,
                 view: new_view,
-                propose_sent: false,
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout
             }
@@ -742,7 +741,6 @@ module replica {
                 leader_proposal_conflicted: VIEWS.mapBy(_ => false),
                 certify: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
-                propose_sent: false,
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
                 certification_timeout: VIEWS.mapBy(_ => Some(false))
             }),
@@ -854,7 +852,7 @@ module replica {
         )
         all {
             id == leader.get(self.view),
-            not(self.propose_sent),
+            is_none(self.proposal.get(self.view)),
             not(broadcast_nullify(id, self.view)),
             proposal_ok,
 
@@ -870,7 +868,6 @@ module replica {
                         record_local_proposal(self, proposal),
                         proposal
                     ),
-                    propose_sent: true,
                     leader_timeout: self.leader_timeout.set(self.view, None)
                }
             ),

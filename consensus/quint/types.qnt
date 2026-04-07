@@ -178,8 +178,6 @@ module types {
         ghost_last_seen_notarization: ViewNumber,
         // not in the original spec, the last view this replica has finalized
         last_finalized: ViewNumber,
-        // not in the original spec, whether this replica has sent a proposal
-        propose_sent: bool,
         // round proposal currently remembered for each view
         proposal: ViewNumber -> Option[Proposal],
         // leader proposal learned for each view from leader vote/proposal or recovered certificates

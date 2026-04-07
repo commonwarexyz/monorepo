@@ -158,7 +158,7 @@ module tests {
             assert(not(broadcast_nullify("n0", FIRST_VIEW))),
             assert(replica_state.get("n0").leader_timeout.get(FIRST_VIEW) == Some(false)),
             assert(replica_state.get("n0").certification_timeout.get(FIRST_VIEW) == Some(false)),
-            assert(replica_state.get("n0").propose_sent == false),
+            assert(replica_state.get("n0").proposal.get(FIRST_VIEW) == None),
             assert(replica_state.get("n0").view == FIRST_VIEW),
             assert(not(sent_notarize_votes.exists(v => v.sig == "n0" and v.proposal.view == FIRST_VIEW))),
             unchanged_all,

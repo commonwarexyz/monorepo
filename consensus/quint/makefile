@@ -208,7 +208,7 @@ generate_itf_test:
 	@echo "Generated ITF traces in $(ITF_DIR)/"
 
 conformance_roundtrip: clean_mbt_traces clean_fuzz_traces clean_traces
-	$(MAKE) FUZZ_RUNS=1000 get_fuzz_traces
+	$(MAKE) FUZZ_RUNS=10000 get_fuzz_traces
 	$(MAKE) build_quint_tests_from_fuzz_traces
 	OUT_ITF_DIR=$(ITF_DIR) ./scripts/test_traces.sh
 	$(MAKE) convert_itf
