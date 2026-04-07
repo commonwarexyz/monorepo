@@ -2,7 +2,7 @@
 use crate::BatchVerifier;
 use crate::Secret;
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
+use alloc::borrow::Cow;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -15,9 +15,11 @@ use core::{
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
-use std::borrow::{Cow, ToOwned};
+use std::borrow::Cow;
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
+#[allow(dead_code)]
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
@@ -40,8 +42,12 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        self.key.expose(|key| Self::PublicKey {
-            key: key.verification_key().to_owned(),
+        self.key.expose(|key| {
+            let vk = key.verification_key();
+            Self::PublicKey {
+                raw: vk.to_bytes(),
+                cached: vk.into(),
+            }
         })
     }
 }
@@ -120,15 +126,53 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+///
+/// Stores the raw 32-byte encoding. The decoded [`ed25519_consensus::VerificationKey`]
+/// (which caches the decompressed Edwards point) is only kept when the key was
+/// constructed from an already-decoded source (e.g. from a [`PrivateKey`]).
+/// This avoids a redundant decompression when the key is later fed into a batch
+/// verifier that will decompress it anyway.
+#[derive(Clone)]
 pub struct PublicKey {
-    key: ed25519_consensus::VerificationKey,
+    raw: [u8; PUBLIC_KEY_LENGTH],
+    /// Cached decoded key, populated lazily on first individual verification.
+    cached: OnceLock<ed25519_consensus::VerificationKey>,
+}
+
+impl Eq for PublicKey {}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
 }
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        value.key.expose(|key| Self {
-            key: key.verification_key(),
+        value.key.expose(|key| {
+            let vk = key.verification_key();
+            Self {
+                raw: vk.to_bytes(),
+                cached: vk.into(),
+            }
         })
     }
 }
@@ -144,20 +188,31 @@ impl crate::Verifier for PublicKey {
 }
 
 impl PublicKey {
+    /// Returns the cached [`VerificationKey`], decompressing and caching on first call.
+    fn verification_key(&self) -> Option<&VerificationKey> {
+        if let Some(key) = self.cached.get() {
+            return Some(key);
+        }
+        let key = VerificationKey::try_from(self.raw).ok()?;
+        Some(self.cached.get_or_init(|| key))
+    }
+
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+        let Some(key) = self.verification_key() else {
+            return false;
+        };
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key
-            .verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
+        key.verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
             .is_ok()
     }
 }
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.as_bytes().write(buf);
+        self.raw.write(buf);
     }
 }
 
@@ -166,14 +221,10 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = VerificationKey::try_from(raw);
-        #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-
-        Ok(Self { key })
+        Ok(Self {
+            raw,
+            cached: OnceLock::new(),
+        })
     }
 }
 
@@ -187,20 +238,23 @@ impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        self.key.as_ref()
+        &self.raw
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.key.as_ref()
+        &self.raw
     }
 }
 
 impl From<VerificationKey> for PublicKey {
     fn from(key: VerificationKey) -> Self {
-        Self { key }
+        Self {
+            raw: key.to_bytes(),
+            cached: key.into(),
+        }
     }
 }
 
@@ -386,7 +440,7 @@ impl Batch {
             .map(|ns| Cow::Owned(union_unique(ns, message)))
             .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
-            public_key.key.into(),
+            ed25519_consensus::VerificationKeyBytes::from(public_key.raw),
             ed25519_consensus::Signature::from(signature.raw),
             &payload,
         ));
@@ -805,7 +859,7 @@ mod tests {
         let signing_key = ed25519_consensus::SigningKey::new(test_rng());
         let expected_public = signing_key.verification_key();
         let private_key = PrivateKey::from(signing_key);
-        assert_eq!(private_key.public_key().key, expected_public);
+        assert_eq!(private_key.public_key().raw, expected_public.to_bytes());
     }
 
     #[test]
