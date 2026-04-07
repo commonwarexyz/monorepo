@@ -31,10 +31,10 @@
 //!   the peer set composition stays the same. Untracked or unchanged peers are silently skipped (so the application doesn't
 //!   need to track what their last submitted peer set was).
 //!
-//! Secondary peers are accepted for inbound connections and may receive
-//! `Recipients::All` traffic on established connections, but outbound dialing,
-//! peer-set subscriptions, and generic resolver request targeting remain
-//! primary-only.
+//! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate)
+//! notifications, are accepted for inbound connections, and may receive
+//! `Recipients::All` traffic on established connections, but outbound dialing
+//! remains primary-oriented.
 //!
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! primary or secondary peers will be rejected.

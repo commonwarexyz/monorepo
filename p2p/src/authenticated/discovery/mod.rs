@@ -45,8 +45,9 @@
 //! tracking multiple peer sets concurrently (up to `tracked_peer_sets`), each identified by its
 //! `index`. This is useful, for instance, during transitions like distributed key generation
 //! (DKG) where connections to both old and new peer sets are needed simultaneously.
-//! Secondary peers are connectable, but they are excluded from peer-set subscriptions and the
-//! gossip bit-vector namespace used for primary peer sets.
+//! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate) notifications and can
+//! use established transport connections, including discovery gossip once connected, but outbound
+//! dialing and the gossip bit-vector namespace stay primary-oriented.
 //!
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it

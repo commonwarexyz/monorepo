@@ -232,9 +232,17 @@ stability_scope!(BETA {
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
 
     /// Primary and secondary peers registered together for [`Manager::track`].
+    ///
+    /// Primary peers participate in primary-only transport policies such as
+    /// outbound dialing. Secondary peers remain transport-eligible and are
+    /// preserved separately in [`PeerSetUpdate`] notifications, but callers
+    /// should not assume they are included anywhere a consumer intentionally
+    /// reads only `latest.primary`.
     #[derive(Clone, Debug)]
     pub struct TrackedPeers<P: PublicKey> {
+        /// Peers eligible for primary-only policies.
         pub primary: Set<P>,
+        /// Additional transport-eligible peers tracked separately from `primary`.
         pub secondary: Set<P>,
     }
 
@@ -260,9 +268,17 @@ stability_scope!(BETA {
     }
 
     /// Primary and secondary peers registered together for [`AddressableManager::track`].
+    ///
+    /// Role semantics match [`TrackedPeers`]: primary peers participate in
+    /// primary-only policies such as outbound dialing, while secondary peers
+    /// remain transport-eligible and preserved separately in
+    /// [`PeerSetUpdate`] notifications.
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
+        /// Addresses for peers eligible for primary-only policies.
         pub primary: Map<P, Address>,
+        /// Addresses for additional transport-eligible peers tracked separately
+        /// from `primary`.
         pub secondary: Map<P, Address>,
     }
 
@@ -298,8 +314,9 @@ stability_scope!(BETA {
         /// Returns a receiver of [`PeerSetUpdate`] notifications. The aggregate
         /// primary and secondary sets preserve role information. If a peer is
         /// tracked as both primary and secondary, it will appear in both sets.
-        /// Callers that need a deduplicated recipient list should union the sets
-        /// explicitly.
+        /// Callers that need a deduplicated recipient list should union the
+        /// sets explicitly, while callers that intentionally exclude
+        /// secondaries should read `latest.primary`.
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;

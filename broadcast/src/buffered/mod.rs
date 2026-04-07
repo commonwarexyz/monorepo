@@ -1199,7 +1199,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_engine_starts_before_initial_peer_set_and_applies_later_update() {
+    fn test_engine_starts_before_initial_peer_set_and_delivers_after_tracking() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
@@ -1265,7 +1265,7 @@ mod tests {
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
 
-            let before = TestMessage::shared(b"before-initial-peer-set");
+            let before = TestMessage::shared(b"before-tracking");
             let result = mailbox_a.broadcast(Recipients::All, before.clone()).await;
             assert_eq!(result.await.unwrap().len(), 0);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -1273,11 +1273,11 @@ mod tests {
             assert_eq!(
                 mailbox_a.get(before.digest()).await,
                 Some(before.clone()),
-                "local broadcasts should not wait for the first peer set"
+                "local broadcasts should remain retrievable before any peers are tracked"
             );
             assert!(
                 mailbox_b.get(before.digest()).await.is_none(),
-                "remote peers should not cache messages before the first peer set arrives"
+                "without a tracked peer set, broadcasts should not reach remote peers"
             );
 
             oracle
@@ -1289,7 +1289,7 @@ mod tests {
                 .await;
             context.sleep(A_JIFFY).await;
 
-            let after = TestMessage::shared(b"after-initial-peer-set");
+            let after = TestMessage::shared(b"after-tracking");
             let result = mailbox_a.broadcast(Recipients::All, after.clone()).await;
             assert_eq!(result.await.unwrap().len(), 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
