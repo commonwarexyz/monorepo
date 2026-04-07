@@ -129,7 +129,7 @@ pub fn available_cores() -> Option<usize> {
 ///
 /// Always returns `None` on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub fn available_cores() -> Option<usize> {
+pub const fn available_cores() -> Option<usize> {
     None
 }
 
@@ -160,4 +160,4 @@ pub(crate) fn pin_to_core(core: usize) {
 
 /// No-op on non-Linux platforms. See the Linux implementation for details.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn pin_to_core(_core: usize) {}
+pub(crate) const fn pin_to_core(_core: usize) {}
