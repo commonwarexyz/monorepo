@@ -1768,18 +1768,9 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
 
         // Acknowledge all pending blocks in order; each `acknowledge_next` yields once so marshal
         // can interleave work between acks.
-        assert_eq!(
-            application.acknowledge_next().await,
-            Some(Height::new(1))
-        );
-        assert_eq!(
-            application.acknowledge_next().await,
-            Some(Height::new(2))
-        );
-        assert_eq!(
-            application.acknowledge_next().await,
-            Some(Height::new(3))
-        );
+        assert_eq!(application.acknowledge_next().await, Some(Height::new(1)));
+        assert_eq!(application.acknowledge_next().await, Some(Height::new(2)));
+        assert_eq!(application.acknowledge_next().await, Some(Height::new(3)));
 
         // Yield to marshal.
         context.sleep(Duration::from_millis(10)).await;

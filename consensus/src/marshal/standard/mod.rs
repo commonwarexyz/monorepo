@@ -42,49 +42,49 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable,
         marshal::{
-            Identifier,
             config::Config,
             core::{Actor, Mailbox},
             mocks::{
                 harness::{
-                    self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, InlineHarness, K, LINK,
-                    NAMESPACE, NUM_VALIDATORS, P, PAGE_CACHE_SIZE, PAGE_SIZE, S, StandardHarness,
-                    TestHarness, UNRELIABLE_LINK, V, ValidatorSetup, default_leader, make_raw_block,
-                    setup_network, setup_network_links, TEST_QUOTA,
+                    self, default_leader, make_raw_block, setup_network, setup_network_links, Ctx,
+                    DeferredHarness, InlineHarness, StandardHarness, TestHarness, ValidatorSetup,
+                    B, BLOCKS_PER_EPOCH, D, K, LINK, NAMESPACE, NUM_VALIDATORS, P, PAGE_CACHE_SIZE,
+                    PAGE_SIZE, S, TEST_QUOTA, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
             resolver::handler,
+            Identifier,
         },
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-    };
-    use commonware_cryptography::{
-        Digestible, Hasher as _,
-        certificate::{ConstantProvider, Scheme as _, mocks::Fixture},
-        sha256::Sha256,
+        Automaton, CertifiableAutomaton, Heightable,
     };
     use bytes::Bytes;
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
-    use commonware_macros::{test_group, test_traced};
-    use commonware_p2p::{Manager, simulated::Oracle};
-    use commonware_resolver::Resolver;
-    use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        Clock, Metrics, Runner, Spawner, buffer::paged::CacheRef, deterministic,
-        deterministic::FaultConfig,
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+        sha256::Sha256,
+        Digestible, Hasher as _,
     };
-    use commonware_storage::archive::{Archive as _, immutable};
+    use commonware_macros::{test_group, test_traced};
+    use commonware_p2p::{simulated::Oracle, Manager};
+    use commonware_parallel::Sequential;
+    use commonware_resolver::Resolver;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, deterministic::FaultConfig, Clock, Metrics, Runner,
+        Spawner,
+    };
+    use commonware_storage::archive::{immutable, Archive as _};
     use commonware_utils::{
         channel::{mpsc, oneshot},
         vec::NonEmptyVec,
-        NZU64, NZUsize,
+        NZUsize, NZU64,
     };
     use std::{
         collections::HashMap,
@@ -628,11 +628,7 @@ mod tests {
             }
         }
 
-        async fn fetch_targeted(
-            &mut self,
-            key: Self::Key,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) {
+        async fn fetch_targeted(&mut self, key: Self::Key, _targets: NonEmptyVec<Self::PublicKey>) {
             self.spawn_deliver(key);
         }
 
@@ -782,7 +778,10 @@ mod tests {
         let finalized_blocks = immutable::Archive::init(
             context.with_label("finalized_blocks"),
             immutable::Config {
-                metadata_partition: format!("{}-finalized_blocks-metadata", config.partition_prefix),
+                metadata_partition: format!(
+                    "{}-finalized_blocks-metadata",
+                    config.partition_prefix
+                ),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
                     config.partition_prefix
@@ -790,9 +789,15 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!("{}-finalized_blocks-freezer-key", config.partition_prefix),
+                freezer_key_partition: format!(
+                    "{}-finalized_blocks-freezer-key",
+                    config.partition_prefix
+                ),
                 freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!("{}-finalized_blocks-freezer-value", config.partition_prefix),
+                freezer_value_partition: format!(
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
+                ),
                 freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
@@ -863,7 +868,11 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
                 let validator = participants[0].clone();
                 let mut oracle = setup_network(context.clone(), None);
 

@@ -43,11 +43,7 @@
 //! ```
 
 pub use crate::storage::faulty::Config as FaultConfig;
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, METRICS_PREFIX,
-    Metrics as _, Panicked, Spawner as _,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -58,26 +54,31 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        Panicker, Registry, ScopeGuard, add_attribute,
+        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
+        Panicker, Registry, ScopeGuard,
     },
-    validate_label,
+    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
+    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
 use commonware_utils::{
-    SystemTimeExt, hex,
+    hex,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
+    SystemTimeExt,
 };
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    Future,
     future::Either,
-    task::{ArcWake, waker},
+    task::{waker, ArcWake},
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -86,7 +87,7 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry as PrometheusRegistry},
 };
-use rand::{CryptoRng, RngCore, SeedableRng, prelude::SliceRandom, rngs::StdRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
@@ -96,13 +97,13 @@ use std::{
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{Instrument, info_span, trace};
+use tracing::{info_span, trace, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
@@ -1680,17 +1681,17 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{Blob, Metrics, Resolver, Runner as _, Storage, deterministic, reschedule};
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
     use commonware_utils::channel::oneshot;
-    #[cfg(feature = "external")]
-    use futures::StreamExt;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
+    #[cfg(feature = "external")]
+    use futures::StreamExt;
     use futures::{stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {

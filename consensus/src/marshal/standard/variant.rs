@@ -4,11 +4,11 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    Block,
     marshal::core::{Buffer, Variant},
     types::Round,
+    Block,
 };
-use commonware_broadcast::{Broadcaster, buffered};
+use commonware_broadcast::{buffered, Broadcaster};
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
