@@ -1694,6 +1694,16 @@ mod tests {
         });
     }
 
+    fn test_spawn_pinned<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.pinned(0).spawn(|_| async move { 42 });
+            assert!(matches!(handle.await, Ok(42)));
+        });
+    }
+
     fn test_spawn<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
@@ -3326,6 +3336,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_pinned() {
+        let executor = deterministic::Runner::default();
+        test_spawn_pinned(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn() {
         let runner = deterministic::Runner::default();
         test_spawn(runner);
@@ -3672,6 +3688,79 @@ mod tests {
     fn test_tokio_spawn_dedicated() {
         let executor = tokio::Runner::default();
         test_spawn_dedicated(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_pinned() {
+        let executor = tokio::Runner::default();
+        test_spawn_pinned(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_pinned_dedicated_thread() {
+        // Verify that pinned implies dedicated.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let root_thread = std::thread::current().id();
+            let task_thread = context
+                .pinned(0)
+                .spawn(|_| async move { std::thread::current().id() })
+                .await
+                .unwrap();
+            // The task should run on a different thread than the root thread.
+            assert_ne!(root_thread, task_thread);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tokio_spawn_pinned_correct_core() {
+        // Verify that a pinned task is actually running on the expected core,
+        // for every available core.
+        let num_cores = crate::available_cores().unwrap();
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            for core in 0..num_cores {
+                let actual = context
+                    .clone()
+                    .pinned(core)
+                    .spawn(|_| async move {
+                        // SAFETY: `sched_getcpu` is a read-only query with no
+                        // preconditions.
+                        unsafe { libc::sched_getcpu() as usize }
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(actual, core);
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tokio_spawn_pinned_same_core() {
+        // Verify that two separate tasks pinned to the same core run on
+        // different threads but report the same CPU.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let t1 = context.clone().pinned(1).spawn(|_| async move {
+                // SAFETY: `sched_getcpu` is a read-only query with no
+                // preconditions.
+                (std::thread::current().id(), unsafe { libc::sched_getcpu() })
+            });
+            let t2 = context.clone().pinned(1).spawn(|_| async move {
+                // SAFETY: `sched_getcpu` is a read-only query with no
+                // preconditions.
+                (std::thread::current().id(), unsafe { libc::sched_getcpu() })
+            });
+            let (r1, r2) = futures::future::join(t1, t2).await;
+            let (thread1, cpu1) = r1.unwrap();
+            let (thread2, cpu2) = r2.unwrap();
+            // Different dedicated threads.
+            assert_ne!(thread1, thread2);
+            // Same core.
+            assert_eq!(cpu1, cpu2);
+        });
     }
 
     #[test]
