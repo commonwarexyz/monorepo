@@ -500,7 +500,7 @@ impl crate::Runner for Runner {
             tree: Tree::root(),
             execution: Execution::default(),
             traced: false,
-            colocated: false,
+            on_dedicated_thread: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -540,7 +540,7 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
-    colocated: bool,
+    on_dedicated_thread: bool,
 }
 
 impl Clone for Context {
@@ -558,7 +558,7 @@ impl Clone for Context {
             tree: child,
             execution: Execution::default(),
             traced: false,
-            colocated: self.colocated,
+            on_dedicated_thread: self.on_dedicated_thread,
         }
     }
 }
@@ -599,14 +599,15 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         let traced = self.traced;
-        let was_colocated = self.colocated;
         self.execution = Execution::default();
         self.traced = false;
 
-        // Set the child's colocated flag based on spawn mode
-        self.colocated = match past {
+        // The child runs on a dedicated thread if it is spawned as dedicated
+        // (new thread) or colocated onto an existing dedicated thread.
+        let parent_on_dedicated = self.on_dedicated_thread;
+        self.on_dedicated_thread = match past {
             Execution::Dedicated => true,
-            Execution::Colocated if was_colocated => true,
+            Execution::Colocated if parent_on_dedicated => true,
             _ => false,
         };
 
@@ -643,7 +644,7 @@ impl crate::Spawner for Context {
                     handle.block_on(local.run_until(f));
                 }
             });
-        } else if matches!(past, Execution::Colocated) && was_colocated {
+        } else if matches!(past, Execution::Colocated) && parent_on_dedicated {
             tokio::task::spawn_local(f);
         } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
