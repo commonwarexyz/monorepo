@@ -33,28 +33,24 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data. These ancestor segments are inherited
-//! from the parent's stored segments during [`UnmerkleizedBatch::merkleize`], so
+//! plus `Arc` refs to each ancestor's data. These ancestors are inherited
+//! from the parent's stored ancestors during [`UnmerkleizedBatch::merkleize`], so
 //! they are always complete regardless of whether ancestors have been dropped.
-//! [`Mem::apply_batch`] uses these segments to replay uncommitted ancestors without
+//! [`Mem::apply_batch`] uses these ancestors to replay uncommitted ancestors without
 //! requiring the ancestor batches to still be alive.
 //!
-//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize to resolve sibling nodes in the parent chain).
-//!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`.
-//! The child's ancestor segments are built from the parent's stored
-//! `ancestor_appended` / `ancestor_overwrites` plus the parent's own data.
-//! After merkleize, the parent `Arc` is downgraded to `Weak`.
+//! The child's `ancestors` vec is built from the parent's stored
+//! `ancestors` plus the parent's own data.
 //!
 //! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
-//! holds at most one ancestor segment (its immediate parent's data, as an `Arc` ref).
-//! When that batch is applied and dropped, the ancestor segment is freed. Memory per
+//! holds at most one ancestor entry (its immediate parent's data, as an `Arc` ref).
+//! When that batch is applied and dropped, the ancestor entry is freed. Memory per
 //! batch is O(batch size), never growing with chain depth.
 //!
-//! [`MerkleizedBatch::get_node`] resolves positions stored in the batch chain only.
-//! For positions in the committed structure, callers fall through to [`Mem::get_node`]
-//! (or an adapter that layers a batch over a `Mem`).
+//! [`MerkleizedBatch::get_node`] resolves positions by searching own data first,
+//! then the ancestors. For positions in the committed structure, callers
+//! fall through to [`Mem::get_node`] (or an adapter that layers a batch over a `Mem`).
 //!
 //! # Example (MMR)
 //!
@@ -79,7 +75,7 @@ use crate::merkle::{
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Weak},
+    sync::Arc,
     vec::Vec,
 };
 use commonware_cryptography::Digest;
@@ -318,20 +314,17 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        // Inherit ancestor segments from the parent's stored data + the parent's own data.
-        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_segments(&self.parent);
+        let ancestors = collect_ancestors(&self.parent);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
-            parent: Some(Arc::downgrade(&self.parent)),
             appended: Arc::new(self.appended),
             overwrites: Arc::new(self.overwrites),
             root,
             parent_size,
             base_size: self.parent.base_size,
             pruning_boundary: self.parent.pruning_boundary(),
-            ancestor_appended,
-            ancestor_overwrites,
+            ancestors,
             #[cfg(feature = "std")]
             pool: self.pool,
         })
@@ -419,26 +412,36 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     }
 }
 
-/// Collect ancestor segments from the parent's stored data.
-/// Returns (appended, overwrites) in root-to-tip order. Skips empty segments
-/// (e.g. root batches from `from_mem`).
+/// Data from a single ancestor batch in the chain.
+#[derive(Clone, Debug)]
+pub(crate) struct Ancestor<F: Family, D: Digest> {
+    /// Nodes appended by this ancestor.
+    pub(crate) appended: Arc<Vec<D>>,
+    /// Node positions overwritten by this ancestor.
+    pub(crate) overwrites: Arc<BTreeMap<Position<F>, D>>,
+    /// Number of nodes before this ancestor's appends.
+    pub(crate) parent_size: Position<F>,
+}
+
+/// Collect ancestors from the parent's stored data.
 ///
-/// Uses the parent's already-collected `ancestor_appended`/`ancestor_overwrites`
-/// (which were captured when the parent was merkleized and its own ancestors were
-/// alive), then appends the parent's own data. No Weak walk needed.
-#[allow(clippy::type_complexity)]
-fn collect_ancestor_segments<F: Family, D: Digest>(
+/// Uses the parent's already-collected ancestors (which were captured when the
+/// parent was merkleized and its own ancestors were alive), then appends the parent's
+/// own data. Root-to-tip order. Skips empty ancestors (e.g. root batches from `from_mem`).
+fn collect_ancestors<F: Family, D: Digest>(
     parent: &Arc<MerkleizedBatch<F, D>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
-    let mut appended = parent.ancestor_appended.clone();
-    let mut overwrites = parent.ancestor_overwrites.clone();
+) -> Vec<Ancestor<F, D>> {
+    let mut ancestors = parent.ancestors.clone();
 
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
-        appended.push(Arc::clone(&parent.appended));
-        overwrites.push(Arc::clone(&parent.overwrites));
+        ancestors.push(Ancestor {
+            appended: Arc::clone(&parent.appended),
+            overwrites: Arc::clone(&parent.overwrites),
+            parent_size: parent.parent_size,
+        });
     }
 
-    (appended, overwrites)
+    ancestors
 }
 
 // ---------------------------------------------------------------------------
@@ -449,9 +452,6 @@ fn collect_ancestor_segments<F: Family, D: Digest>(
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest> {
-    /// The parent batch in the chain, if any.
-    parent: Option<Weak<Self>>,
-
     /// This batch's appended nodes only (not accumulated from ancestors).
     pub(crate) appended: Arc<Vec<D>>,
 
@@ -472,13 +472,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest> {
     /// unchanged by all descendants, like `base_size`.
     pruning_boundary: Location<F>,
 
-    /// Arc refs to each ancestor's appended nodes, collected during merkleize while
-    /// ancestors are alive. Root-to-tip order.
-    pub(crate) ancestor_appended: Vec<Arc<Vec<D>>>,
-
-    /// Arc refs to each ancestor's overwrites, collected during merkleize while
-    /// ancestors are alive. Root-to-tip order.
-    pub(crate) ancestor_overwrites: Vec<Arc<BTreeMap<Position<F>, D>>>,
+    /// Ancestors collected during merkleize. Root-to-tip order.
+    pub(crate) ancestors: Vec<Ancestor<F, D>>,
 
     #[cfg(feature = "std")]
     pub(crate) pool: Option<ThreadPool>,
@@ -488,15 +483,13 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     /// Create a root batch representing the committed state of `mem`.
     pub fn from_mem(mem: &Mem<F, D>) -> Arc<Self> {
         Arc::new(Self {
-            parent: None,
             appended: Arc::new(Vec::new()),
             overwrites: Arc::new(BTreeMap::new()),
             root: *mem.root(),
             parent_size: mem.size(),
             base_size: mem.size(),
             pruning_boundary: Readable::pruning_boundary(mem),
-            ancestor_appended: Vec::new(),
-            ancestor_overwrites: Vec::new(),
+            ancestors: Vec::new(),
             #[cfg(feature = "std")]
             pool: None,
         })
@@ -507,7 +500,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         Position::new(*self.parent_size + self.appended.len() as u64)
     }
 
-    /// Resolve a node: own data -> Weak parent chain.
+    /// Resolve a node: own data -> ancestors.
     ///
     /// Returns `None` for positions that only exist in the committed [`Mem`].
     /// Callers that need committed data should fall back to [`Mem::get_node`]
@@ -523,17 +516,17 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
             let i = (*pos - *self.parent_size) as usize;
             return self.appended.get(i).copied();
         }
-        // Walk Weak parent chain.
-        let mut current = self.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if let Some(d) = batch.overwrites.get(&pos) {
+        // Search ancestors tip-to-root so the nearest ancestor's data wins.
+        for ancestor in self.ancestors.iter().rev() {
+            if let Some(d) = ancestor.overwrites.get(&pos) {
                 return Some(*d);
             }
-            if pos >= batch.parent_size {
-                let i = (*pos - *batch.parent_size) as usize;
-                return batch.appended.get(i).copied();
+            if pos >= ancestor.parent_size {
+                let idx = (*pos - *ancestor.parent_size) as usize;
+                if let Some(d) = ancestor.appended.get(idx) {
+                    return Some(*d);
+                }
             }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         None
     }

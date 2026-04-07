@@ -388,27 +388,23 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         };
 
-        // Apply ancestor segments in root-to-tip order. Already-committed
-        // segments (whose appended nodes are already in the Mem) are skipped
-        // by tracking a running position through the ancestor chain.
-        let mut seg_pos = *batch.base_size;
-        for (appended, overwrites) in batch
-            .ancestor_appended
-            .iter()
-            .zip(&batch.ancestor_overwrites)
-        {
-            seg_pos += appended.len() as u64;
-            if skip_ancestors && seg_pos <= *self.size() {
+        // Apply ancestors in root-to-tip order. Already-committed ancestors
+        // (whose appended nodes are already in the Mem) are skipped by tracking
+        // a running position through the chain.
+        let mut ancestor_pos = *batch.base_size;
+        for ancestor in &batch.ancestors {
+            ancestor_pos += ancestor.appended.len() as u64;
+            if skip_ancestors && ancestor_pos <= *self.size() {
                 continue;
             }
-            for (&pos, &digest) in overwrites.iter() {
+            for (&pos, &digest) in ancestor.overwrites.iter() {
                 if pos < self.pruning_boundary {
                     continue;
                 }
                 let index = self.pos_to_index(pos);
                 self.nodes[index] = digest;
             }
-            for &digest in appended.iter() {
+            for &digest in ancestor.appended.iter() {
                 self.nodes.push_back(digest);
             }
         }
@@ -1065,7 +1061,7 @@ mod tests {
         let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
 
         // Apply A, then apply C directly (skipping B's apply_batch).
-        // C's ancestor segments carry [A.data, B.data]. A is already committed
+        // C's ancestors carry [A.data, B.data]. A is already committed
         // so only B + C should be applied.
         mem.apply_batch(&a).unwrap();
         mem.apply_batch(&c).unwrap();
@@ -1084,7 +1080,7 @@ mod tests {
     }
 
     /// Dropping an uncommitted ancestor before merkleizing a descendant must not
-    /// lose the ancestor's data. The descendant's ancestor segments should be
+    /// lose the ancestor's data. The descendant's ancestors should be
     /// complete regardless of Weak chain liveness.
     fn apply_batch_after_ancestor_dropped<F: Family>() {
         let hasher: H = Standard::new();

@@ -126,7 +126,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D>>,
     /// The items to append from this batch.
     items: Arc<Vec<Item>>,
-    /// Ancestor item segments collected at merkleize time (root-to-tip order).
+    /// Ancestor items collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
 
@@ -415,17 +415,17 @@ where
             .into());
         };
 
-        // Apply ancestor item segments in root-to-tip order. Already-committed
-        // segments are skipped by tracking cumulative leaf count.
+        // Apply ancestor items in root-to-tip order. Already-committed
+        // ancestors are skipped by tracking cumulative leaf count.
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
-        let mut seg_leaf_end = base_leaves;
-        for seg in &batch.ancestor_items {
-            seg_leaf_end += seg.len() as u64;
-            if skip_ancestors && seg_leaf_end <= committed_leaves {
+        let mut ancestor_leaf_end = base_leaves;
+        for ancestor_items in &batch.ancestor_items {
+            ancestor_leaf_end += ancestor_items.len() as u64;
+            if skip_ancestors && ancestor_leaf_end <= committed_leaves {
                 continue;
             }
-            self.journal.append_many(seg).await?;
+            self.journal.append_many(ancestor_items).await?;
         }
         if !batch.items.is_empty() {
             self.journal.append_many(&batch.items).await?;

@@ -9,8 +9,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
-use core::iter;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -50,9 +49,6 @@ where
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<V>>>,
 
-    /// The parent batch in the chain, if any.
-    pub(super) parent: Option<Weak<Self>>,
-
     /// Total operations before this batch's own ops (DB + ancestor batches).
     pub(super) base_size: u64,
 
@@ -64,29 +60,13 @@ where
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// Used by `apply_batch` to validate partial ancestor commits.
-    pub(super) ancestor_seg_ends: Vec<u64>,
+    pub(super) ancestor_end_indices: Vec<u64>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
-where
-    Operation<V>: EncodeShared,
-{
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
-        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        iter::from_fn(move || {
-            let batch = next.take()?;
-            next = batch.parent.as_ref().and_then(Weak::upgrade);
-            Some(batch)
-        })
-    }
-}
-
-/// Read a single operation from the parent chain at the given location.
+/// Read a single operation from this batch or its ancestor items at the given location.
 ///
-/// Returns `None` if the location cannot be found in the live parent chain (e.g. the
-/// owning ancestor was committed and freed). Callers should fall through to the committed
-/// DB in that case.
+/// Returns `None` if the location cannot be found (e.g. it belongs to the committed DB).
+/// Callers should fall through to the committed DB in that case.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
     batch: &MerkleizedBatch<F, D, V>,
     loc: u64,
@@ -94,20 +74,21 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
 where
     Operation<V>: EncodeShared,
 {
-    // Each batch's items span [size - items.len(), size). We compute the range from the
-    // journal (strong Arcs, always intact) rather than from the QMDB-layer Weak parent
-    // (which may be dead).
+    // Check this batch's own items first.
     let self_end = batch.journal_batch.size();
     let self_base = self_end - batch.journal_batch.items().len() as u64;
     if loc >= self_base && loc < self_end {
         return Some(batch.journal_batch.items()[(loc - self_base) as usize].clone());
     }
-    for ancestor in batch.ancestors() {
-        let end = ancestor.journal_batch.size();
-        let base = end - ancestor.journal_batch.items().len() as u64;
-        if loc >= base && loc < end {
-            return Some(ancestor.journal_batch.items()[(loc - base) as usize].clone());
+    // Check ancestor items (root-to-tip order in ancestor_items).
+    // Ancestors cover [db_size, base_size).
+    let mut ancestor_base = batch.db_size;
+    for ancestor_items in &batch.journal_batch.ancestor_items {
+        let ancestor_end = ancestor_base + ancestor_items.len() as u64;
+        if loc >= ancestor_base && loc < ancestor_end {
+            return Some(ancestor_items[(loc - ancestor_base) as usize].clone());
         }
+        ancestor_base = ancestor_end;
     }
     None
 }
@@ -211,21 +192,20 @@ where
         }
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let mut ancestor_seg_ends = self
+        let mut ancestor_end_indices = self
             .parent
             .as_ref()
-            .map_or_else(Vec::new, |p| p.ancestor_seg_ends.clone());
+            .map_or_else(Vec::new, |p| p.ancestor_end_indices.clone());
         if let Some(parent) = &self.parent {
-            ancestor_seg_ends.push(parent.total_size);
+            ancestor_end_indices.push(parent.total_size);
         }
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
-            parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
             db_size: self.db_size,
-            ancestor_seg_ends,
+            ancestor_end_indices,
         })
     }
 }
