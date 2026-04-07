@@ -309,8 +309,6 @@ impl CacheRef {
 
         let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
         let offset_in_page = offset_in_page as usize;
-        self.page_faults.inc();
-        trace!(page_num, blob_id, "page fault");
 
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
@@ -324,6 +322,10 @@ impl CacheRef {
             if count != 0 {
                 return Ok(count);
             }
+
+            // Only count as a page fault after confirming the page is not in cache.
+            self.page_faults.inc();
+            trace!(page_num, blob_id, "page fault");
 
             let key = (blob_id, page_num);
             match cache.page_fetches.entry(key) {
