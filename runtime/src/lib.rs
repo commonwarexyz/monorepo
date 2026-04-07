@@ -179,6 +179,13 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
+        /// Return a [`Spawner`] that co-locates the next spawned task on the same thread
+        /// as its dedicated ancestor.
+        ///
+        /// If the current context is not running inside a [`Spawner::dedicated`] task,
+        /// the task falls back to the shared executor.
+        fn colocated(self) -> Self;
+
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller

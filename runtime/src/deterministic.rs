@@ -1138,6 +1138,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn colocated(mut self) -> Self {
+        self.execution = Execution::Colocated;
+        self
+    }
+
     fn shared(mut self, blocking: bool) -> Self {
         self.execution = Execution::Shared(blocking);
         self

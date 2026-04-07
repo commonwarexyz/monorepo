@@ -500,6 +500,7 @@ impl crate::Runner for Runner {
             tree: Tree::root(),
             execution: Execution::default(),
             traced: false,
+            colocated: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -539,6 +540,7 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
+    colocated: bool,
 }
 
 impl Clone for Context {
@@ -556,6 +558,7 @@ impl Clone for Context {
             tree: child,
             execution: Execution::default(),
             traced: false,
+            colocated: self.colocated,
         }
     }
 }
@@ -570,6 +573,11 @@ impl Context {
 impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn colocated(mut self) -> Self {
+        self.execution = Execution::Colocated;
         self
     }
 
@@ -591,8 +599,17 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         let traced = self.traced;
+        let was_colocated = self.colocated;
         self.execution = Execution::default();
         self.traced = false;
+
+        // Set the child's colocated flag based on spawn mode
+        self.colocated = match past {
+            Execution::Dedicated => true,
+            Execution::Colocated if was_colocated => true,
+            _ => false,
+        };
+
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -622,9 +639,12 @@ impl crate::Spawner for Context {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
-                    handle.block_on(f);
+                    let local = tokio::task::LocalSet::new();
+                    handle.block_on(local.run_until(f));
                 }
             });
+        } else if matches!(past, Execution::Colocated) && was_colocated {
+            tokio::task::spawn_local(f);
         } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime
