@@ -329,6 +329,13 @@ stability_scope!(BETA {
         ///
         /// Overlapping keys in [`TrackedPeers`] are allowed; primary takes precedence for role
         /// and for the stored secondary list (see [`TrackedPeers`]).
+        ///
+        /// ## Primary vs Secondary Peers
+        ///
+        /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
+        /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
+        /// When both are registered, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// often both gossiping data to them and answering requests from them).
         fn track<R>(
             &mut self,
             id: u64,
@@ -352,6 +359,13 @@ stability_scope!(BETA {
         /// both primary and secondary peers.
         ///
         /// The same key may appear in both maps; see [`AddressableTrackedPeers`].
+        ///
+        /// ## Primary vs Secondary Peers
+        ///
+        /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
+        /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
+        /// When both are registered, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// often both gossiping data to them and answering requests from them).
         fn track<R>(
             &mut self,
             id: u64,
