@@ -197,7 +197,6 @@ fn to_digest(i: u64) -> Digest {
 }
 
 fn to_val(i: u64, salt: u64) -> Digest {
-    // Hash both i and salt together. The salt ensures to_val(i, 0) != to_digest(i).
     Sha256::hash(&[i.to_be_bytes(), salt.wrapping_add(1).to_be_bytes()].concat())
 }
 
