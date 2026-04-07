@@ -3750,12 +3750,13 @@ mod tests {
         // different threads but report the same CPU.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let t1 = context.clone().pinned(1).spawn(|_| async move {
+            let core = crate::available_cores().unwrap() - 1;
+            let t1 = context.clone().pinned(core).spawn(|_| async move {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
                 (std::thread::current().id(), unsafe { libc::sched_getcpu() })
             });
-            let t2 = context.clone().pinned(1).spawn(|_| async move {
+            let t2 = context.clone().pinned(core).spawn(|_| async move {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
                 (std::thread::current().id(), unsafe { libc::sched_getcpu() })
