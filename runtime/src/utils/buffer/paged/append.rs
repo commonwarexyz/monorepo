@@ -991,7 +991,7 @@ mod tests {
                     .with_max_per_class(NZUsize!(2)),
                 &mut registry,
             );
-            let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
+            let cache_ref = CacheRef::new(&context, pool.clone(), PAGE_SIZE, NZUsize!(1));
 
             let (blob, blob_size) = context
                 .open("test_partition", b"release_tip_backing")
