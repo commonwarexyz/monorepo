@@ -1890,7 +1890,10 @@ mod tests {
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
 
-            assert_eq!(update.latest.primary, Set::try_from([pk_b.clone()]).unwrap());
+            assert_eq!(
+                update.latest.primary,
+                Set::try_from([pk_b.clone()]).unwrap()
+            );
             // At index 11 alone, pk_overlap is secondary-only (primary at 11 is pk_b).
             assert!(update.latest.secondary.position(&pk_overlap).is_some());
             assert!(update.latest.secondary.position(&pk_sec).is_some());
