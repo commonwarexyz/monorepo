@@ -20,8 +20,8 @@
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
 //! dialable addresses [std::net::SocketAddr] for the peers in that set.
-//! Registration happens via [`Manager::track`](crate::Manager::track), which accepts either a bare
-//! primary-peer set or a [`TrackedPeers`](crate::TrackedPeers) value containing both primary and
+//! Registration happens via [`Manager::track`](crate::Manager::track), which accepts either a list of
+//! primary peers or a [`TrackedPeers`](crate::TrackedPeers) value containing both primary and
 //! secondary peers.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
@@ -47,7 +47,7 @@
 //! (DKG) where connections to both old and new peer sets are needed simultaneously.
 //! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate) notifications and can
 //! use established transport connections, including discovery gossip once connected, but outbound
-//! dialing and the gossip bit-vector namespace stay primary-oriented.
+//! dialing and the gossip bit-vector namespace are restricted to primary peers.
 //!
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
