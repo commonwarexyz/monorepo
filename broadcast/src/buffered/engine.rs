@@ -151,8 +151,6 @@ where
             network.0,
             network.1,
         );
-        // Subscribe immediately; keep draining the mailbox even if no peer set exists yet.
-        // Inbound caching stays gated on `latest.primary` (see `insert_message`).
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
