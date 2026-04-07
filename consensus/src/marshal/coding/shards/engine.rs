@@ -4867,6 +4867,9 @@ mod tests {
             };
 
             let (mut engine, _mailbox) = ShardEngine::new(context.with_label("engine"), config);
+
+            // Only `sender_pk` is in `latest.primary`, so only that peer may retain a pre-leader
+            // buffer row (`buffer_peer_shard` / `peer_buffers`).
             engine.update_latest_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
 
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -4878,6 +4881,8 @@ mod tests {
             let commitment = coded_block.commitment();
             let shard = coded_block.shard(0).expect("missing shard");
 
+            // Pre-leader path: buffer one shard before any `ReconstructionState` exists for this
+            // commitment.
             engine.buffer_peer_shard(sender_pk.clone(), shard);
             assert_eq!(
                 engine.peer_buffers.get(&sender_pk).map(VecDeque::len),
@@ -4885,6 +4890,9 @@ mod tests {
                 "peer buffer should contain the buffered shard"
             );
 
+            // No reconstruction state yet: `ingest_buffered_shards` drains matching shards from the
+            // per-peer queues then returns without applying them, leaving an empty deque under the
+            // same map key while the sender stays in `latest.primary`.
             let progressed = engine.ingest_buffered_shards(commitment).await;
             assert!(
                 !progressed,
@@ -4902,6 +4910,8 @@ mod tests {
                 "retained peer buffer should now be empty"
             );
 
+            // Empty primary: no peer may retain buffers; `update_latest_primary_peers` drops the
+            // empty deque entry for `sender_pk`.
             engine.update_latest_primary_peers(Set::default());
             assert!(
                 !engine.peer_buffers.contains_key(&sender_pk),
@@ -4931,6 +4941,8 @@ mod tests {
             private_keys.sort_by_key(|s| s.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
+            // Epoch 0: first five peers. Epoch 1: swap out `peer_keys[0]` for `peer_keys[5]` so the
+            // cutover changes who is in `latest.primary` while `tracked_peer_sets` retains overlap.
             let epoch0_set: Set<P> = Set::from_iter_dedup(peer_keys[..5].iter().cloned());
             let epoch1_set: Set<P> = Set::from_iter_dedup([
                 peer_keys[1].clone(),
@@ -4961,6 +4973,7 @@ mod tests {
                 .await
                 .expect("link should be added");
 
+            // Peer-set id 0: epoch 0 primaries before any cutover.
             oracle.manager().track(0, epoch0_set.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -4986,6 +4999,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
+            // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
@@ -5001,7 +5015,7 @@ mod tests {
                 .shard(receiver_participant.get() as u16)
                 .expect("missing shard");
 
-            // Buffer an epoch 0 shard before the leader is known.
+            // Inbound: epoch-0 leader shard arrives before `Discovered` (pre-leader buffer path).
             leader_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
@@ -5012,10 +5026,14 @@ mod tests {
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
-            // Advance the latest primary set to epoch 1 before the epoch 0 leader is discovered.
+            // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
+            // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
+            // reconstruction.
             oracle.manager().track(1, epoch1_set).await;
             context.sleep(Duration::from_millis(10)).await;
 
+            // Leader announcement for the old commitment: should not complete reconstruction from
+            // dropped pre-cutover buffers.
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment).await;
             mailbox
                 .discovered(
