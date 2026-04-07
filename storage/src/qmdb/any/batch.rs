@@ -509,6 +509,7 @@ where
     /// allowing implementations to skip locations known to be inactive without reading them.
     /// Returns `true` if an active op was found and moved, `false` if the floor reached
     /// `fixed_tip`.
+    #[allow(clippy::too_many_arguments)]
     async fn advance_floor_once<E, C, I, S, R>(
         &self,
         floor: &mut Location<F>,
