@@ -1397,8 +1397,12 @@ where
     /// `finalized_blocks` at its eventual height. The block might still be available
     /// elsewhere by commitment (buffer, cache, or peer fetch).
     ///
-    /// Returns `Some(wrote)` if this height is missing from finalized block storage and
-    /// corresponds to a known finalization. Returns `None` if there is nothing to do.
+    /// The caller only uses this helper for heights that are known to be in the
+    /// trailing missing suffix after the last contiguous `finalized_blocks` range,
+    /// so we do not need to probe `finalized_blocks` again here.
+    ///
+    /// Returns `Some(wrote)` if this height corresponds to a known finalization.
+    /// Returns `None` if there is nothing to do at this height.
     async fn repair_trailing_finalized_height<Buf: Buffer<V>>(
         &mut self,
         height: Height,
@@ -1406,9 +1410,6 @@ where
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Option<bool> {
-        if self.get_finalized_block(height).await.is_some() {
-            return None;
-        }
         let finalization = self.get_finalization_by_height(height).await?;
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);
