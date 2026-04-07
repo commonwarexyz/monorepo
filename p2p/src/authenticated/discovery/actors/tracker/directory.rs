@@ -391,9 +391,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
         for (k, record) in &self.peers {
-            if record.primaries() > 0 {
+            if record.primary_sets() > 0 {
                 primary.push(k.clone());
-            } else if record.secondaries() > 0 {
+            } else if record.secondary_sets() > 0 {
                 secondary.push(k.clone());
             }
         }
@@ -735,9 +735,9 @@ mod tests {
             assert!(secondary.position(&pk_c).is_some());
             assert!(secondary.position(&pk_b).is_none());
 
-            assert_eq!(directory.peers.get(&pk_b).unwrap().primaries(), 1);
-            assert_eq!(directory.peers.get(&pk_b).unwrap().secondaries(), 0);
-            assert_eq!(directory.peers.get(&pk_c).unwrap().secondaries(), 1);
+            assert_eq!(directory.peers.get(&pk_b).unwrap().primary_sets(), 1);
+            assert_eq!(directory.peers.get(&pk_b).unwrap().secondary_sets(), 0);
+            assert_eq!(directory.peers.get(&pk_c).unwrap().secondary_sets(), 1);
 
             let latest = directory.latest_update().unwrap();
             assert!(latest.latest.secondary.position(&pk_b).is_none());
