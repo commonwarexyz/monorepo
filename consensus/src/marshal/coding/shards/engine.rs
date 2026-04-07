@@ -105,6 +105,9 @@
 //!       Block      State
 //! ```
 //!
+//! _Per-peer buffers are only kept for peers in `latest.primary`, matching [`commonware_broadcast::buffered`].
+//! When a peer is no longer in `latest.primary`, all its buffered shards are evicted._
+//!
 //! # Peer Validation and Blocking Rules
 //!
 //! The engine enforces strict validation to prevent Byzantine attacks:
@@ -130,15 +133,6 @@
 //! queues until consensus signals the leader via [`Discovered`]. Once leader
 //! is known, buffered shards for that commitment are ingested into the active
 //! state machine._
-//!
-//! _Per-peer buffers are retained only for senders in the latest primary peer
-//! set, matching [`commonware_broadcast::buffered`]. Peers present only in
-//! older overlap sets or only as secondary in the latest set are evicted from
-//! those queues even if they remain in the aggregate membership set. Once the
-//! latest primary set advances, buffered shards from overlap-only peers are
-//! discarded even for older-epoch commitments whose leader is discovered later.
-//! Finishing those commitments after the cutover therefore depends on shards
-//! supplied by the latest primary set or on data already reconstructed locally._
 //!
 //! [`Discovered`]: super::Message::Discovered
 
