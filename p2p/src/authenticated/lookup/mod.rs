@@ -23,7 +23,7 @@
 //!
 //! - [`AddressableManager::track`](crate::AddressableManager::track): Register a new peer set at a
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
-//!   This accepts either a bare primary-peer map or an
+//!   This accepts either a list of primary peers or an
 //!   [`AddressableTrackedPeers`](crate::AddressableTrackedPeers) value containing both primary and
 //!   secondary peers.
 //! - [`AddressableManager::overwrite`](crate::AddressableManager::overwrite): Update multiple
@@ -34,7 +34,7 @@
 //! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate)
 //! notifications, are accepted for inbound connections, and may receive
 //! `Recipients::All` traffic on established connections, but outbound dialing
-//! remains primary-oriented.
+//! is restricted to primary peers.
 //!
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! primary or secondary peers will be rejected.
