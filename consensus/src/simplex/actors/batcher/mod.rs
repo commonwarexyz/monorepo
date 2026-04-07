@@ -208,6 +208,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -379,6 +380,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -542,6 +544,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -695,6 +698,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             // Setup reporter mock
@@ -879,6 +883,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1111,6 +1116,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1339,6 +1345,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1518,6 +1525,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1747,6 +1755,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1951,6 +1960,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2149,6 +2159,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2358,6 +2369,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2484,6 +2496,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2613,6 +2626,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -2769,6 +2783,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -2893,6 +2908,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -3037,6 +3053,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -3165,6 +3182,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -3292,6 +3310,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             // Setup reporter mock
@@ -3485,6 +3504,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
@@ -3737,6 +3757,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
@@ -3948,6 +3969,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Create simulated network
             let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
