@@ -675,6 +675,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
         let (channel, origin, recipients, message, reply) = task;
+
+        // If tracking peer sets, ensure recipient and sender are in a tracked peer set
         if !self.is_connectable(&origin) {
             warn!(
                 ?origin,
@@ -1391,6 +1393,8 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    /// [`Network::new_with_peers`] seeds peers; controls can register channels and add a link once;
+    /// a duplicate link between the same pair returns [`Error::LinkExists`].
     #[test]
     fn test_register_and_link() {
         let executor = deterministic::Runner::default();
@@ -1440,6 +1444,8 @@ mod tests {
         });
     }
 
+    /// [`Network::new_with_split_peers`] registers id `0` with separate primary and secondary sets,
+    /// exposes the same split from [`Manager::peer_set`], and emits a matching [`PeerSetUpdate`] on subscribe.
     #[test]
     fn test_new_with_split_peers_seeds_initial_update() {
         let executor = deterministic::Runner::default();
@@ -1482,6 +1488,8 @@ mod tests {
         });
     }
 
+    /// Split sender/receiver routes each half to a different neighbor: primary out goes only to `peer_a`,
+    /// secondary out only to `peer_b`, and inbound mail is demuxed by sender id.
     #[test]
     fn test_split_channel_single() {
         let executor = deterministic::Runner::default();
@@ -1612,6 +1620,7 @@ mod tests {
         });
     }
 
+    /// When both split halves use [`SplitTarget::Both`], a single inbound message is delivered to primary and secondary receivers.
     #[test]
     fn test_split_channel_both() {
         let executor = deterministic::Runner::default();
@@ -1686,6 +1695,8 @@ mod tests {
         });
     }
 
+    /// [`SplitTarget::None`] and a send router returning `None` drop traffic: inbound is not delivered to either half,
+    /// and outbound sends report no recipients.
     #[test]
     fn test_split_channel_none() {
         let executor = deterministic::Runner::default();
@@ -1773,6 +1784,8 @@ mod tests {
         });
     }
 
+    /// [`Manager::track`] indices may arrive out of order: older indices are ignored; subscribers see updates in commit order
+    /// and [`PeerSetUpdate::all`] accumulates primaries across applied sets.
     #[test]
     fn test_unordered_peer_sets() {
         let executor = deterministic::Runner::default();
@@ -1825,6 +1838,7 @@ mod tests {
         });
     }
 
+    /// [`Network::get_next_socket`] hands out the current address then advances port, wrapping IPv4 and port at boundaries.
     #[test]
     fn test_get_next_socket() {
         let cfg = Config {
@@ -1860,6 +1874,7 @@ mod tests {
         });
     }
 
+    /// Many sequential sends to one recipient arrive in order when symmetric per-link bandwidth limits apply.
     #[test]
     fn test_fifo_burst_same_recipient() {
         let cfg = Config {
@@ -1938,6 +1953,8 @@ mod tests {
         });
     }
 
+    /// [`Recipients::All`] to two links shares the sender cap: both deliveries are delayed in line with the shared bandwidth model,
+    /// not delivered back-to-back.
     #[test]
     fn test_broadcast_respects_transmit_latency() {
         let cfg = Config {
@@ -2032,12 +2049,12 @@ mod tests {
         });
     }
 
+    /// A peer listed in both primary and secondary appears only in [`PeerSetUpdate::latest`] primary; aggregate secondary omits
+    /// primary keys. [`Recipients::All`] from another peer lists the overlap peer once and still reaches secondary-only peers.
     #[test]
     fn test_overlapping_primary_secondary_no_duplicate_recipients() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // pk2 is in both primary and secondary. Subscription and Recipients::All must not
-            // duplicate pk2; pk3 stays secondary-only in stored sets.
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
@@ -2127,6 +2144,8 @@ mod tests {
         });
     }
 
+    /// After advancing tracked peer sets, secondaries from an older snapshot remain addressable until evicted from history:
+    /// a new primary can still reach them, while a newer-only primary does not receive messages intended for that retained secondary view.
     #[test]
     fn test_secondary_sets_remain_until_eviction() {
         let executor = deterministic::Runner::default();
