@@ -1,53 +1,12 @@
 //! A fixed-capacity, inline vector.
 //!
-//! # Overview
+//! [`ArrayVec`] stores up to `N` elements inline (no heap allocation for the
+//! backing storage). Capacity is capped at `u16::MAX` to prevent accidentally
+//! large inline buffers. Lengths and indices are [`usize`] to match slices
+//! and [`Vec`].
 //!
-//! [`ArrayVec`] stores up to `N` elements inline, without heap allocation for
-//! the container itself. This makes it useful for small, capacity-bounded
-//! buffers where the maximum number of elements is known at compile time.
-//!
-//! Unlike a heap-backed [`Vec`], the storage for an [`ArrayVec`] is embedded
-//! directly inside the value:
-//!
-//! - placing an [`ArrayVec`] in a local variable puts its backing storage on the
-//!   stack,
-//! - placing it inside another struct embeds the storage in that struct, and
-//! - placing it behind a [`Box`] puts the backing storage on the heap.
-//!
-//! For that reason, this type is best described as an _inline_ vector rather
-//! than a "stack vector", even though stack allocation is a common use case.
-//!
-//! # Capacity Constraints
-//!
-//! [`ArrayVec`] is intentionally designed for small inline buffers:
-//!
-//! - the inline capacity is capped at `u16::MAX`,
-//! - capacities greater than `u16::MAX` are rejected when the type is used, and
-//! - lengths and indices use [`usize`] to match slices and [`Vec`].
-//!
-//! The `u16` cap is deliberate. Allowing capacities like `u32::MAX` would make
-//! it too easy to instantiate absurdly large inline buffers such as
-//! `ArrayVec<u8, 4_294_967_295>`, which would require multiple gigabytes of
-//! storage.
-//!
-//! Even with the `u16` cap, large element types can still produce very large
-//! inline values. Choose capacities conservatively, and treat this type as a
-//! tool for small, bounded buffers rather than a general replacement for
-//! [`Vec`].
-//!
-//! # Safety Notes
-//!
-//! This type intentionally uses unsafe code internally. The unsafe code is
-//! limited to the standard partial-initialization machinery required for an
-//! inline collection:
-//!
-//! - only the prefix `0..len` is initialized,
-//! - writes only target uninitialized slots,
-//! - removals and inserts move elements with raw pointer operations, and
-//! - `Drop` only drops the initialized prefix.
-//!
-//! This avoids the `T: Default` bound used by fully safe designs such as
-//! `tinyvec`, while still providing a fully safe public API.
+//! Internally uses unsafe partial-initialization (only `0..len` is
+//! initialized) to avoid requiring `T: Default`. The public API is fully safe.
 //!
 //! # Examples
 //!
@@ -96,18 +55,17 @@ use core::{
 };
 use thiserror::Error;
 
-/// Errors that can occur when constructing an [`ArrayVec`] from existing data.
+/// Errors returned when constructing an [`ArrayVec`].
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// The source collection contained more elements than the inline capacity.
+    /// The source contained more elements than the inline capacity allows.
     #[error("array length exceeds ArrayVec capacity")]
     CapacityExceeded,
 }
 
-/// A fixed-capacity vector that stores elements inline.
+/// A fixed-capacity vector that stores up to `N` elements inline.
 ///
-/// The capacity is encoded in the type via `N`, while a constructor-enforced
-/// cap of `u16::MAX` keeps the type in the "small inline buffer" range.
+/// Capacity is capped at `u16::MAX` to prevent oversized inline buffers.
 pub struct ArrayVec<T, const N: usize> {
     len: usize,
     items: [MaybeUninit<T>; N],
@@ -131,7 +89,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         }
     }
 
-    /// Creates a full [`ArrayVec`] from an array of exactly matching capacity.
+    /// Creates a full [`ArrayVec`] from a `[T; N]` array.
     pub fn from_array(items: [T; N]) -> Self {
         let () = Self::ASSERT_CAPACITY;
         Self {
@@ -151,7 +109,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         self.len += 1;
     }
 
-    /// Returns the number of initialized elements.
+    /// Returns the number of elements.
     #[inline]
     pub const fn len(&self) -> usize {
         self.len
@@ -169,7 +127,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         N
     }
 
-    /// Returns the initialized prefix as a slice.
+    /// Returns the elements as a slice.
     #[inline]
     pub const fn as_slice(&self) -> &[T] {
         // SAFETY: The `ArrayVec` invariant guarantees that exactly the prefix
@@ -177,7 +135,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         unsafe { slice::from_raw_parts(self.items.as_ptr().cast(), self.len) }
     }
 
-    /// Returns the initialized prefix as a mutable slice.
+    /// Returns the elements as a mutable slice.
     #[inline]
     pub const fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: The `ArrayVec` invariant guarantees that exactly the prefix
@@ -191,7 +149,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         self.get(0)
     }
 
-    /// Returns the first element mutably, if any.
+    /// Returns a mutable reference to the first element, if any.
     #[inline]
     pub fn first_mut(&mut self) -> Option<&mut T> {
         self.get_mut(0)
@@ -203,7 +161,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         self.len.checked_sub(1).and_then(|index| self.get(index))
     }
 
-    /// Returns the last element mutably, if any.
+    /// Returns a mutable reference to the last element, if any.
     #[inline]
     pub fn last_mut(&mut self) -> Option<&mut T> {
         self.len
@@ -211,7 +169,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
             .and_then(|index| self.get_mut(index))
     }
 
-    /// Returns the element at `index`, if it exists.
+    /// Returns a reference to the element at `index`, if in bounds.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&T> {
         if index >= self.len {
@@ -223,7 +181,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         unsafe { Some(self.items.get_unchecked(index).assume_init_ref()) }
     }
 
-    /// Returns the element at `index` mutably, if it exists.
+    /// Returns a mutable reference to the element at `index`, if in bounds.
     #[inline]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         if index >= self.len {
@@ -235,7 +193,8 @@ impl<T, const N: usize> ArrayVec<T, N> {
         unsafe { Some(self.items.get_unchecked_mut(index).assume_init_mut()) }
     }
 
-    /// Attempts to append an element to the back of the vector.
+    /// Pushes an element, returning `Err(value)` if the vector is full.
+    #[inline]
     pub fn try_push(&mut self, value: T) -> Result<(), T> {
         if self.len == N {
             return Err(value);
@@ -249,19 +208,20 @@ impl<T, const N: usize> ArrayVec<T, N> {
         Ok(())
     }
 
-    /// Appends an element to the back of the vector.
+    /// Pushes an element to the back.
     ///
     /// # Panics
     ///
-    /// Panics if the vector is already full.
+    /// Panics if the vector is full.
+    #[inline]
     pub fn push(&mut self, value: T) {
         self.try_push(value)
             .unwrap_or_else(|_| panic!("ArrayVec::push: capacity exceeded"));
     }
 
-    /// Attempts to insert an element at `index`.
+    /// Inserts an element at `index`, shifting `index..len` right.
     ///
-    /// Elements in `index..len` are shifted one slot to the right.
+    /// Returns `Err(value)` if the vector is full.
     ///
     /// # Panics
     ///
@@ -286,20 +246,18 @@ impl<T, const N: usize> ArrayVec<T, N> {
         Ok(())
     }
 
-    /// Inserts an element at `index`.
+    /// Inserts an element at `index`, shifting `index..len` right.
     ///
     /// # Panics
     ///
-    /// Panics if `index > len()` or the vector is already full.
+    /// Panics if `index > len()` or the vector is full.
     pub fn insert(&mut self, index: usize, value: T) {
         self.try_insert(index, value)
             .unwrap_or_else(|_| panic!("ArrayVec::insert: capacity exceeded"));
     }
 
-    /// Attempts to extend the vector from an iterator.
-    ///
-    /// If the iterator does not fit, already-pushed items remain in the
-    /// vector and the first rejected item is returned.
+    /// Extends from an iterator, returning the first rejected item on
+    /// overflow. Items pushed before the overflow remain in the vector.
     pub fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), T> {
         for item in iter {
             self.try_push(item)?;
@@ -307,12 +265,11 @@ impl<T, const N: usize> ArrayVec<T, N> {
         Ok(())
     }
 
-    /// Extends the vector from an iterator.
+    /// Extends from an iterator.
     ///
     /// # Panics
     ///
-    /// Panics if the iterator yields more items than fit in the remaining
-    /// capacity.
+    /// Panics if the iterator yields more items than the remaining capacity.
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.try_extend(iter)
             .unwrap_or_else(|_| panic!("ArrayVec::extend: capacity exceeded"));
@@ -337,12 +294,16 @@ impl<T, const N: usize> ArrayVec<T, N> {
             return;
         }
 
-        while self.len < new_len {
-            // SAFETY: The assertion above guarantees `new_len <= capacity()`,
-            // and the loop only runs while `len < new_len`.
+        // SAFETY: The assertion above guarantees `new_len <= capacity()`.
+        while self.len + 1 < new_len {
             unsafe {
                 self.push_unchecked(value.clone());
             }
+        }
+
+        // Move the original for the last slot instead of cloning + dropping.
+        unsafe {
+            self.push_unchecked(value);
         }
     }
 
@@ -375,6 +336,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
     }
 
     /// Removes the last element and returns it, if any.
+    #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -387,11 +349,12 @@ impl<T, const N: usize> ArrayVec<T, N> {
         unsafe { Some(self.items.get_unchecked(self.len).assume_init_read()) }
     }
 
-    /// Removes and returns the element at `index`, shifting the tail left.
+    /// Removes the element at `index`, shifting `(index+1)..len` left.
     ///
     /// # Panics
     ///
     /// Panics if `index >= len()`.
+    #[inline]
     pub fn remove(&mut self, index: usize) -> T {
         assert!(index < self.len, "index out of bounds");
 
@@ -407,14 +370,14 @@ impl<T, const N: usize> ArrayVec<T, N> {
         }
     }
 
-    /// Removes and returns the element at `index`, replacing it with the last
-    /// element.
+    /// Removes the element at `index` by swapping it with the last element.
     ///
-    /// This is `O(1)` but does not preserve order.
+    /// `O(1)` but does not preserve order.
     ///
     /// # Panics
     ///
     /// Panics if `index >= len()`.
+    #[inline]
     pub fn swap_remove(&mut self, index: usize) -> T {
         assert!(index < self.len, "index out of bounds");
         let last = self.len - 1;
@@ -432,43 +395,49 @@ impl<T, const N: usize> ArrayVec<T, N> {
         }
     }
 
-    /// Drops all elements after `len`.
+    /// Shortens the vector to `len` elements, dropping the rest.
+    #[inline]
     pub fn truncate(&mut self, len: usize) {
         let current = self.len;
         if len >= current {
             return;
         }
 
-        // SAFETY: The range `len..current` is initialized. Dropping it shrinks
-        // the initialized prefix to `0..len`.
+        // Set length first so a panicking destructor doesn't cause
+        // double-drops when `ArrayVec::drop` runs during unwinding.
+        self.len = len;
+
+        // SAFETY: The range `len..current` was initialized before the length
+        // was decreased.
         unsafe {
             ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
                 self.items.as_mut_ptr().add(len).cast::<T>(),
                 current - len,
             ));
         }
-
-        self.len = len;
     }
 
     /// Removes all elements.
+    #[inline]
     pub fn clear(&mut self) {
         self.truncate(0);
     }
 
-    /// Consumes the [`ArrayVec`] and returns its elements in a heap-backed
-    /// [`Vec`].
+    /// Converts into a heap-allocated [`Vec`].
     pub fn into_vec(self) -> Vec<T> {
         let this = ManuallyDrop::new(self);
         let mut vec = Vec::with_capacity(this.len);
 
-        for index in 0..this.len {
-            // SAFETY: Only the prefix `0..len` is initialized, and `this` is
-            // wrapped in `ManuallyDrop`, so reading moves each element out
-            // exactly once.
-            unsafe {
-                vec.push(this.items.get_unchecked(index).assume_init_read());
-            }
+        // SAFETY: Source (`this.items`) and destination (`vec`) don't overlap.
+        // Exactly `this.len` elements are initialized, and `this` is wrapped
+        // in `ManuallyDrop` so the source won't be double-freed.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                this.items.as_ptr().cast::<T>(),
+                vec.as_mut_ptr(),
+                this.len,
+            );
+            vec.set_len(this.len);
         }
 
         vec
@@ -794,8 +763,7 @@ impl<'a, T: arbitrary::Arbitrary<'a>, const N: usize> arbitrary::Arbitrary<'a> f
     }
 }
 
-/// Creates an [`ArrayVec`] with exact inline capacity inferred from the macro
-/// input.
+/// Creates an [`ArrayVec`] whose inline capacity matches the input.
 ///
 /// # Forms
 ///
