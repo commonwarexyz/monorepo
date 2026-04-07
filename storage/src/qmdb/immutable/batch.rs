@@ -187,12 +187,12 @@ where
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         let ancestors = self.parent.as_ref().map_or_else(Vec::new, |parent| {
-            let mut segs = vec![Ancestor {
+            let mut out = vec![Ancestor {
                 diff: Arc::clone(&parent.diff),
                 end_index: parent.total_size,
             }];
-            segs.extend(parent.ancestors.iter().cloned());
-            segs
+            out.extend(parent.ancestors.iter().cloned());
+            out
         });
 
         Arc::new(MerkleizedBatch {
