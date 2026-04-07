@@ -217,67 +217,9 @@ impl Freelist {
     /// Batch insertion groups returned slots by bitmap word so each touched
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
+    #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, AlignedBuffer)>) {
         let mut entries = entries.into_iter();
-        self.put_batch_iter(&mut entries);
-    }
-
-    /// Takes any one free slot from the global freelist.
-    ///
-    /// The search starts from a stable per-thread home word and scans the other
-    /// stripes only on miss. Within a word, `fetch_and` claims one bit. That is
-    /// important: unlike a full-word CAS loop, two threads removing different
-    /// bits from the same word can both succeed.
-    #[inline]
-    pub fn take(&self) -> Option<(u32, AlignedBuffer)> {
-        let thread_id = SlotBitmapProbe::thread_id();
-        let start_word = thread_id & self.word_mask;
-        let bit_offset = ((thread_id >> self.word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32;
-
-        for scanned in 0..self.words.len() {
-            let word_index = (start_word + scanned) & self.word_mask;
-            let word_ref = &self.words[word_index];
-            let mut word = word_ref.load(Ordering::Relaxed);
-
-            while word != 0 {
-                // Probe a thread-specific bit order inside the chosen word so
-                // colliding threads do not all stampede bit 0 first.
-                let bit = SlotBitmapProbe::select_set_bit(word, bit_offset);
-                let mask = 1u64 << bit;
-                let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
-                if observed & mask != 0 {
-                    let slot = self.slot_index(word_index, bit);
-                    // SAFETY: a successful bit clear removes this slot from
-                    // the free set, so we now have exclusive access to the
-                    // initialized buffer that was published by the matching
-                    // put.
-                    let buffer = unsafe { (*self.storage(slot).get()).assume_init_read() };
-                    return Some((slot, buffer));
-                }
-
-                // Another thread removed that bit first. Reuse the returned word
-                // value instead of restarting the whole scan from the beginning.
-                word = observed & !mask;
-            }
-        }
-
-        None
-    }
-
-    /// Takes up to `max` free slots from the global freelist.
-    ///
-    /// `put_entry` receives each claimed `(slot, buffer)` pair. This avoids
-    /// internal allocation and lets callers fill an existing spill/refill
-    /// buffer directly.
-    ///
-    /// For `max > 1`, the implementation tries to claim several bits from the
-    /// same word in a single atomic `fetch_and`, which amortizes the shared
-    /// synchronization cost across the batch.
-    pub fn take_batch(&self, max: usize, mut put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
-        self.take_batch_with(max, &mut put_entry)
-    }
-
-    fn put_batch_iter(&self, entries: &mut dyn Iterator<Item = (u32, AlignedBuffer)>) {
         let Some((slot, buffer)) = entries.next() else {
             return;
         };
@@ -336,7 +278,59 @@ impl Freelist {
         }
     }
 
-    fn take_batch_with(&self, max: usize, put_entry: &mut dyn FnMut(u32, AlignedBuffer)) -> usize {
+    /// Takes any one free slot from the global freelist.
+    ///
+    /// The search starts from a stable per-thread home word and scans the other
+    /// stripes only on miss. Within a word, `fetch_and` claims one bit. That is
+    /// important: unlike a full-word CAS loop, two threads removing different
+    /// bits from the same word can both succeed.
+    #[inline]
+    pub fn take(&self) -> Option<(u32, AlignedBuffer)> {
+        let thread_id = SlotBitmapProbe::thread_id();
+        let start_word = thread_id & self.word_mask;
+        let bit_offset = ((thread_id >> self.word_shift) & (SLOT_BITMAP_WORD_BITS - 1)) as u32;
+
+        for scanned in 0..self.words.len() {
+            let word_index = (start_word + scanned) & self.word_mask;
+            let word_ref = &self.words[word_index];
+            let mut word = word_ref.load(Ordering::Relaxed);
+
+            while word != 0 {
+                // Probe a thread-specific bit order inside the chosen word so
+                // colliding threads do not all stampede bit 0 first.
+                let bit = SlotBitmapProbe::select_set_bit(word, bit_offset);
+                let mask = 1u64 << bit;
+                let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
+                if observed & mask != 0 {
+                    let slot = self.slot_index(word_index, bit);
+                    // SAFETY: a successful bit clear removes this slot from
+                    // the free set, so we now have exclusive access to the
+                    // initialized buffer that was published by the matching
+                    // put.
+                    let buffer = unsafe { (*self.storage(slot).get()).assume_init_read() };
+                    return Some((slot, buffer));
+                }
+
+                // Another thread removed that bit first. Reuse the returned word
+                // value instead of restarting the whole scan from the beginning.
+                word = observed & !mask;
+            }
+        }
+
+        None
+    }
+
+    /// Takes up to `max` free slots from the global freelist.
+    ///
+    /// `put_entry` receives each claimed `(slot, buffer)` pair. This avoids
+    /// internal allocation and lets callers fill an existing spill/refill
+    /// buffer directly.
+    ///
+    /// For `max > 1`, the implementation tries to claim several bits from the
+    /// same word in a single atomic `fetch_and`, which amortizes the shared
+    /// synchronization cost across the batch.
+    #[inline]
+    pub fn take_batch(&self, max: usize, mut put_entry: impl FnMut(u32, AlignedBuffer)) -> usize {
         if max == 1 {
             let Some((slot, buffer)) = self.take() else {
                 return 0;
