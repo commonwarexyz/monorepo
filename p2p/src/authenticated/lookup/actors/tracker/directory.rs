@@ -279,7 +279,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Gets a primary peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
+    pub fn get_primary_set(&self, index: &u64) -> Option<&Set<C>> {
         self.peer_sets.get(index).map(|e| &e.primary)
     }
 
@@ -294,7 +294,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(PeerSetUpdate {
             index,
             latest: TrackedPeers::new(
-                self.get_set(&index).cloned().unwrap(),
+                self.get_primary_set(&index).cloned().unwrap(),
                 self.get_secondary_set(&index).cloned().unwrap_or_default(),
             ),
             all: self.all(),
@@ -847,7 +847,7 @@ mod tests {
             assert!(reset_peers.is_empty());
             assert_eq!(directory.latest_set_index(), Some(0));
             assert_eq!(
-                directory.get_set(&0).unwrap(),
+                directory.get_primary_set(&0).unwrap(),
                 &[pk_1.clone()].try_into().unwrap()
             );
             assert!(directory.eligible(&pk_1));
@@ -921,7 +921,7 @@ mod tests {
             assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
             assert_eq!(directory.latest_set_index(), Some(1));
             assert_eq!(
-                directory.get_set(&1).unwrap(),
+                directory.get_primary_set(&1).unwrap(),
                 &[pk_1.clone()].try_into().unwrap()
             );
             assert_eq!(

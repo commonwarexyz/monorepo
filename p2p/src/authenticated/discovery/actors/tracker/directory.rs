@@ -291,7 +291,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Gets a primary peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
+    pub fn get_primary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.peer_sets.get(index).map(|e| e.primary.deref())
     }
 
@@ -311,7 +311,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(PeerSetUpdate {
             index,
             latest: TrackedPeers::new(
-                self.get_set(&index).cloned().unwrap(),
+                self.get_primary_set(&index).cloned().unwrap(),
                 self.get_secondary_set(&index).cloned().unwrap_or_default(),
             ),
             all: self.all(),

@@ -605,8 +605,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .try_collect()
             .expect("BTreeMap keys are unique");
         let secondary = Set::from_iter_dedup(
-            self
-                .peer_ref_counts
+            self.peer_ref_counts
                 .iter()
                 .filter(|(_, c)| c.secondary > 0 && c.primary == 0)
                 .map(|(k, _)| k.clone()),
