@@ -1,7 +1,7 @@
 //! Helpers for resolving the configured thread stack size.
 
 #[cfg(target_os = "linux")]
-use std::sync::Once;
+use commonware_utils::sync::Once;
 use std::{env, sync::OnceLock, thread};
 
 /// Cached configured thread stack size.
