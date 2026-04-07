@@ -4,9 +4,6 @@
 use commonware_utils::sync::Once;
 use std::{env, sync::OnceLock, thread};
 
-/// Cached configured thread stack size.
-static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
-
 /// Rust's default thread stack size.
 ///
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
@@ -34,7 +31,10 @@ fn rust_min_stack() -> Option<usize> {
 ///
 /// On other platforms, or if the platform-specific query fails, this falls back
 /// to [RUST_DEFAULT_THREAD_STACK_SIZE].
+///
+/// The result is cached after the first call.
 pub(crate) fn system_thread_stack_size() -> usize {
+    static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
     *SYSTEM_THREAD_STACK_SIZE.get_or_init(|| {
         rust_min_stack()
             .or(system_thread_stack_size_impl())
@@ -115,16 +115,21 @@ where
 }
 
 /// Returns the number of available CPUs, or `None` if it cannot be determined.
+///
+/// The result is cached after the first call.
 #[cfg(target_os = "linux")]
 pub fn available_cores() -> Option<usize> {
-    // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
-    // preconditions.
-    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    if n <= 0 {
-        None
-    } else {
-        Some(n as usize)
-    }
+    static CORES: OnceLock<Option<usize>> = OnceLock::new();
+    *CORES.get_or_init(|| {
+        // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
+        // preconditions.
+        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if n <= 0 {
+            None
+        } else {
+            Some(n as usize)
+        }
+    })
 }
 
 /// Returns the number of available CPUs, or `None` if it cannot be determined.
