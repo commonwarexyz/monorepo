@@ -181,13 +181,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
-    /// Returns true if the leader is the local participant.
-    fn is_leader(&self) -> bool {
-        self.leader()
-            .as_ref()
-            .is_some_and(|leader| self.is_signer(leader.idx))
-    }
-
     /// Removes the leader and certification deadlines so timeouts stop firing.
     pub const fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
@@ -204,9 +197,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             .expect("leader index comes from elector, must be within bounds");
         debug!(round=?self.round, %leader, ?key, "leader elected");
         self.leader = Some(Leader { idx: leader, key });
-        if self.proposal().is_some() {
-            self.proposal.set_proposed_locally(self.is_leader());
-        }
     }
 
     /// Returns the notarization certificate if we already reconstructed one.
@@ -229,11 +219,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
-    /// Returns whether this round belongs to a view led by the local participant.
-    pub const fn proposed_locally(&self) -> bool {
-        self.proposal.proposed_locally()
-    }
-
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
@@ -250,8 +235,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_nullify {
             return false;
         }
-        self.proposal
-            .set_verified_proposal(proposal, self.is_leader());
+        self.proposal.built(proposal);
         self.leader_deadline = None;
         true
     }
@@ -371,8 +355,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        let proposed_locally = self.is_leader();
-        let leader = match self.proposal.update(&proposal, true) {
+        match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
                 self.leader_deadline = None;
@@ -393,9 +376,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 equivocator
             }
             ProposalChange::Skipped => None,
-        };
-        self.proposal.set_proposed_locally(proposed_locally);
-        leader
+        }
     }
 
     /// Adds a verified notarization certificate to the round.
@@ -552,8 +533,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     "replaying notarize from another signer"
                 );
 
-                self.proposal
-                    .set_verified_proposal(notarize.proposal.clone(), self.is_leader());
+                // While we may not be the leader here, we still call
+                // built because the effect is the same (there is a proposal
+                // and it is verified).
+                self.proposal.built(notarize.proposal.clone());
                 self.broadcast_notarize = true;
             }
             Artifact::Nullify(nullify) => {
@@ -1100,72 +1083,10 @@ mod tests {
         // Has notarization and proposal came from certificate
         // try_certify returns the proposal from the certificate
         assert!(round.try_certify().is_some());
-        assert!(!round.proposed_locally());
     }
 
     #[test]
-    fn recovered_local_leader_proposal_stays_local() {
-        let mut rng = test_rng();
-        let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([8u8; 32]));
-
-        let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(Participant::new(0));
-
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
-                .unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
-
-        assert!(round.proposed_locally());
-        assert!(round.try_certify().is_some());
-    }
-
-    #[test]
-    fn delayed_leader_assignment_marks_recovered_proposal_local() {
-        let mut rng = test_rng();
-        let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([10u8; 32]));
-
-        let mut round = Round::new(local_scheme, round_info, now);
-
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
-                .unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
-        assert!(!round.proposed_locally());
-
-        round.set_leader(Participant::new(0));
-
-        assert!(round.proposed_locally());
-    }
-
-    #[test]
-    fn replayed_notarize_does_not_mark_follower_view_local() {
+    fn replayed_notarize_keeps_proposal_verified() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
@@ -1183,73 +1104,6 @@ mod tests {
 
         assert_eq!(round.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
-        assert!(!round.proposed_locally());
-    }
-
-    #[test]
-    fn locally_built_proposals_stay_marked_local_for_certification() {
-        let mut rng = test_rng();
-        let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([7u8; 32]));
-
-        let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(Participant::new(0));
-        assert!(round.proposed(proposal.clone()));
-        assert!(round.proposed_locally());
-
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
-                .unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
-
-        assert!(round.try_certify().is_some());
-        assert!(round.proposed_locally());
-    }
-
-    #[test]
-    fn recovered_conflicting_certificate_keeps_leader_local_marker() {
-        let mut rng = test_rng();
-        let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let local_proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([5u8; 32]));
-        let conflicting = Proposal::new(round_info, View::new(0), Sha256Digest::from([6u8; 32]));
-
-        let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(Participant::new(0));
-        assert!(round.proposed(local_proposal));
-        assert!(round.proposed_locally());
-
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, conflicting.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
-                .unwrap();
-        let (added, equivocator) = round.add_notarization(notarization);
-        assert!(added);
-        assert!(equivocator.is_some());
-
-        assert_eq!(round.proposal.status(), ProposalStatus::Equivocated);
-        assert!(round.proposed_locally());
     }
 
     #[test]
