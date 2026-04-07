@@ -148,6 +148,16 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
+    /// An ancestor batch was dropped before this batch was applied, causing
+    /// data loss. All ancestors must be kept alive until descendants are applied.
+    #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
+    AncestorDropped {
+        /// The expected size after applying all ancestors + this batch.
+        expected: Position<F>,
+        /// The actual size (less than expected due to missing ancestor data).
+        actual: Position<F>,
+    },
+
     /// The proof is invalid.
     #[error("invalid proof")]
     InvalidProof,

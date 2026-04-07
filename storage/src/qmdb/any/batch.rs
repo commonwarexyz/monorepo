@@ -1139,6 +1139,10 @@ where
     Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this batch as its parent.
+    ///
+    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
+    /// loss detected at `apply_batch` time.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U>
     where
         H: Hasher<Digest = D>,

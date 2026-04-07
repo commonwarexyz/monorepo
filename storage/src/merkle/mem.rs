@@ -425,6 +425,17 @@ impl<F: Family, D: Digest> Mem<F, D> {
             self.nodes.push_back(digest);
         }
 
+        // Detect missing ancestor data. If an uncommitted ancestor was dropped
+        // before this batch was merkleized, its appended nodes are absent and the
+        // Mem ends up smaller than expected. This does not catch dropped
+        // overwrite-only ancestors (they don't change the size).
+        if self.size() != batch.size() {
+            return Err(Error::AncestorDropped {
+                expected: batch.size(),
+                actual: self.size(),
+            });
+        }
+
         self.root = batch.root();
         Ok(())
     }
@@ -1083,6 +1094,24 @@ mod tests {
         assert_eq!(mem.root(), reference.root());
     }
 
+    /// Dropping an uncommitted ancestor before merkleizing a descendant must
+    /// be detected at apply time, not silently corrupt data.
+    fn apply_batch_detects_dropped_ancestor<F: Family>() {
+        let hasher: H = Standard::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
+
+        let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+        drop(a); // A dropped before C is merkleized — its data is lost
+        let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
+
+        let result = mem.apply_batch(&c);
+        assert!(
+            matches!(result, Err(Error::AncestorDropped { .. })),
+            "expected AncestorDropped, got {result:?}"
+        );
+    }
+
     // --- MMR tests ---
 
     #[test]
@@ -1168,6 +1197,10 @@ mod tests {
     #[test]
     fn mmr_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_detects_dropped_ancestor() {
+        apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1255,5 +1288,9 @@ mod tests {
     #[test]
     fn mmb_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_detects_dropped_ancestor() {
+        apply_batch_detects_dropped_ancestor::<crate::mmb::Family>();
     }
 }

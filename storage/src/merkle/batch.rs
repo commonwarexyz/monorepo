@@ -563,6 +563,10 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     }
 
     /// Create a child batch on top of this merkleized batch.
+    ///
+    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
+    /// loss detected at `apply_batch` time.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D> {
         let batch = UnmerkleizedBatch::new(Arc::clone(self));
         #[cfg(feature = "std")]
