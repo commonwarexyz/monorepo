@@ -188,6 +188,8 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
+    verify_observer: Option<Box<dyn Fn(H::Digest) + Send + 'static>>,
+
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
     pending_certifications: Vec<oneshot::Sender<bool>>,
@@ -227,6 +229,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
+                verify_observer: None,
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -243,6 +246,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
         self.drop_verifications = drop;
+    }
+
+    pub fn set_verify_observer(&mut self, observer: Box<dyn Fn(H::Digest) + Send + 'static>) {
+        self.verify_observer = Some(observer);
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -398,6 +405,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     } => {
                         if self.drop_verifications {
                             continue;
+                        }
+                        if let Some(observer) = &self.verify_observer {
+                            observer(payload);
                         }
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;

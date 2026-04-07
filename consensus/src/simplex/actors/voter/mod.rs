@@ -86,6 +86,7 @@ mod tests {
     };
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
+    use rstest::rstest;
     use std::{
         num::{NonZeroU16, NonZeroU32},
         sync::Arc,
@@ -3817,6 +3818,356 @@ mod tests {
         );
         no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecoveredCertificateKind {
+        Notarization,
+        Finalization,
+    }
+
+    #[derive(Clone, Copy)]
+    enum RestartVerifyCase {
+        ProposalReturns,
+        DurableLocalNotarize,
+        RecoveredCertificate(RecoveredCertificateKind),
+    }
+
+    async fn wait_for_startup_update<S: Scheme<Sha256Digest>>(
+        batcher_receiver: &mut mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+    ) -> (View, Participant) {
+        loop {
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    leader,
+                    response,
+                    ..
+                } => {
+                    response.send(None).unwrap();
+                    return (current, leader);
+                }
+                batcher::Message::Constructed(_) => {}
+            }
+        }
+    }
+
+    fn no_self_verify_after_restart<S, F>(mut fixture: F, case: RestartVerifyCase)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_self_verify_after_restart".to_vec();
+        let partition = "no_self_verify_after_restart".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            let (_, leader) = wait_for_startup_update(&mut batcher_receiver).await;
+            assert_eq!(leader, Participant::new(4));
+
+            let target_view = View::new(2);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            let proposal = match case {
+                RestartVerifyCase::DurableLocalNotarize => loop {
+                    select! {
+                        msg = batcher_receiver.recv() => match msg.unwrap() {
+                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Constructed(_) => {}
+                        },
+                        message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                            let (_, message) = message.unwrap();
+                            let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                            if let Vote::Notarize(notarize) = vote {
+                                if notarize.view() == target_view {
+                                    break notarize.proposal;
+                                }
+                            }
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("expected durable local notarize vote for leader-owned restart view {target_view}");
+                        },
+                    }
+                },
+                RestartVerifyCase::ProposalReturns
+                | RestartVerifyCase::RecoveredCertificate(_) => loop {
+                    select! {
+                        msg = batcher_receiver.recv() => match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Notarize(notarize))
+                                if notarize.view() == target_view =>
+                            {
+                                break notarize.proposal;
+                            }
+                            batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                            batcher::Message::Constructed(_) => {}
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("expected local notarize vote for leader-owned restart view {target_view}");
+                        },
+                    }
+                },
+            };
+
+            handle.abort();
+
+            let verify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
+            let tracker = verify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
+            app_actor.set_verify_observer(Box::new(move |digest| {
+                tracker.lock().push(digest);
+            }));
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) =
+                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            let (current, leader) = wait_for_startup_update(&mut batcher_receiver).await;
+            assert_eq!(current, target_view, "restart should stay in the leader-owned view");
+            assert_eq!(
+                leader,
+                Participant::new(0),
+                "restart should remain in a leader-owned view"
+            );
+
+            match case {
+                RestartVerifyCase::ProposalReturns | RestartVerifyCase::DurableLocalNotarize => {
+                    mailbox.proposal(proposal).await;
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+                RestartVerifyCase::RecoveredCertificate(RecoveredCertificateKind::Notarization) => {
+                    let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+                    mailbox
+                        .recovered(Certificate::Notarization(notarization))
+                        .await;
+
+                    loop {
+                        select! {
+                            msg = batcher_receiver.recv() => match msg.unwrap() {
+                                batcher::Message::Constructed(Vote::Finalize(finalize))
+                                    if finalize.view() == target_view =>
+                                {
+                                    break;
+                                }
+                                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                                batcher::Message::Constructed(_) => {}
+                            },
+                            _ = context.sleep(Duration::from_secs(1)) => {
+                                panic!("expected local finalize after recovered notarization for view {target_view}");
+                            },
+                        }
+                    }
+                }
+                RestartVerifyCase::RecoveredCertificate(RecoveredCertificateKind::Finalization) => {
+                    let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                    mailbox
+                        .recovered(Certificate::Finalization(finalization))
+                        .await;
+
+                    loop {
+                        select! {
+                            msg = batcher_receiver.recv() => match msg.unwrap() {
+                                batcher::Message::Update {
+                                    current,
+                                    finalized,
+                                    response,
+                                    ..
+                                } => {
+                                    response.send(None).unwrap();
+                                    if finalized >= target_view || current > target_view {
+                                        break;
+                                    }
+                                }
+                                batcher::Message::Constructed(_) => {}
+                            },
+                            _ = context.sleep(Duration::from_secs(1)) => {
+                                panic!("expected recovered finalization to advance view {target_view}");
+                            },
+                        }
+                    }
+                }
+            }
+
+            assert!(
+                verify_calls.lock().is_empty(),
+                "application verify should not run for a leader-owned proposal after restart"
+            );
+        });
+    }
+
+    fn run_no_self_verify_after_restart_case(case: RestartVerifyCase) {
+        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>, case);
+        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>, case);
+        no_self_verify_after_restart(bls12381_multisig::fixture::<MinPk, _>, case);
+        no_self_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>, case);
+        no_self_verify_after_restart(ed25519::fixture, case);
+        no_self_verify_after_restart(secp256r1::fixture, case);
+    }
+
+    #[rstest]
+    #[case::proposal_returns(RestartVerifyCase::ProposalReturns)]
+    #[case::durable_local_notarize(RestartVerifyCase::DurableLocalNotarize)]
+    #[case::recovered_notarization(RestartVerifyCase::RecoveredCertificate(
+        RecoveredCertificateKind::Notarization,
+    ))]
+    #[case::recovered_finalization(RestartVerifyCase::RecoveredCertificate(
+        RecoveredCertificateKind::Finalization,
+    ))]
+    fn test_no_self_verify_after_restart(#[case] case: RestartVerifyCase) {
+        run_no_self_verify_after_restart_case(case);
     }
 
     /// Test that in-flight certification requests are cancelled when finalization occurs.
