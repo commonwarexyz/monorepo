@@ -433,11 +433,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
         // Exactly `this.len` elements are initialized, and `this` is wrapped
         // in `ManuallyDrop` so the source won't be double-freed.
         unsafe {
-            ptr::copy_nonoverlapping(
-                this.items.as_ptr().cast::<T>(),
-                vec.as_mut_ptr(),
-                this.len,
-            );
+            ptr::copy_nonoverlapping(this.items.as_ptr().cast::<T>(), vec.as_mut_ptr(), this.len);
             vec.set_len(this.len);
         }
 
