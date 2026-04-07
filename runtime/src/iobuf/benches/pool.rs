@@ -79,13 +79,17 @@ impl Mode {
 pub fn bench(c: &mut Criterion) {
     let page_size = page_size();
     let threadings = Threading::standard();
-    let threads = threadings[1].threads();
+    let threads = threadings
+        .iter()
+        .map(|threading| threading.threads())
+        .max()
+        .unwrap_or(1);
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
         let alignment = pool.config().alignment.get();
 
-        for &threading in &threadings {
+        for threading in threadings {
             for metric in [Metric::Raw, Metric::Adjusted] {
                 bench_case(
                     c,
