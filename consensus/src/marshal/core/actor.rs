@@ -1,52 +1,51 @@
 use super::{
-    cache,
+    Buffer, IntoBlock, Variant, cache,
     mailbox::{Mailbox, Message},
-    Buffer, IntoBlock, Variant,
 };
 use crate::{
+    Block, Epochable, Heightable, Reporter,
     marshal::{
+        Config, Identifier as BlockID, Update,
         resolver::handler::{self, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Update,
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{Finalization, Notarization, Subject, verify_certificates},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
     Digestible,
+    certificate::{Provider, Scheme as CertificateScheme},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
+    telemetry::metrics::status::GaugeExt,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
     metadata::{self, Metadata},
 };
 use commonware_utils::{
+    Acknowledgement, BoxedError,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join, FutureExt};
+use futures::{FutureExt, future::join_all, try_join};
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -204,10 +203,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -269,10 +268,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -369,9 +368,9 @@ where
     ) -> Handle<()>
     where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+                Key = handler::Request<V::Commitment>,
+                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
@@ -385,9 +384,9 @@ where
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+                Key = handler::Request<V::Commitment>,
+                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         // Create a local pool for waiter futures.
@@ -939,7 +938,7 @@ where
                 // Persist the block, also storing the finalization if we have it.
                 let height = block.height();
                 let digest = block.digest();
-                let finalization = self.cache.get_finalization_for(digest).await;
+                let finalization = self.get_known_finalization(height, digest).await;
                 let wrote = self
                     .store_finalization(height, digest, block, finalization, application, buffer)
                     .await;
@@ -1373,6 +1372,56 @@ where
         }
     }
 
+    /// Find a known finalization for the given block from either the cache or the
+    /// height-indexed archive.
+    async fn get_known_finalization(
+        &self,
+        height: Height,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
+        if let Some(finalization) = self.cache.get_finalization_for(digest).await {
+            return Some(finalization);
+        }
+        let finalization = self.get_finalization_by_height(height).await?;
+        (V::commitment_to_inner(finalization.proposal.payload) == digest).then_some(finalization)
+    }
+
+    /// Repair or request a trailing finalized block for a single height.
+    ///
+    /// Returns `Some(wrote)` if this height is missing from finalized block storage and
+    /// corresponds to a known finalization. Returns `None` if there is nothing to do.
+    async fn repair_trailing_finalized_height<Buf: Buffer<V>>(
+        &mut self,
+        height: Height,
+        buffer: &mut Buf,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) -> Option<bool> {
+        if self.get_finalized_block(height).await.is_some() {
+            return None;
+        }
+        let finalization = self.get_finalization_by_height(height).await?;
+        let commitment = finalization.proposal.payload;
+        let digest = V::commitment_to_inner(commitment);
+        if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+            let wrote = self
+                .store_finalization(
+                    height,
+                    digest,
+                    block,
+                    Some(finalization),
+                    application,
+                    buffer,
+                )
+                .await;
+            return Some(wrote);
+        }
+        resolver
+            .fetch(Request::<V::Commitment>::Block(commitment))
+            .await;
+        Some(false)
+    }
+
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
     /// After persisting the block, attempt to dispatch the next contiguous block to the application.
@@ -1531,10 +1580,12 @@ where
     ) -> bool {
         let mut wrote = false;
         let start = self.last_processed_height.next();
+        let mut trailing_start = start;
         'cache_repair: loop {
-            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
-                // No gaps detected
-                return wrote;
+            let (gap_start, next_range_start) = self.finalized_blocks.next_gap(start);
+            let Some(gap_end) = next_range_start else {
+                trailing_start = gap_start.map(Height::next).unwrap_or(start);
+                break;
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
@@ -1556,7 +1607,9 @@ where
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
-                    let finalization = self.cache.get_finalization_for(parent_digest).await;
+                    let finalization = self
+                        .get_known_finalization(block.height(), parent_digest)
+                        .await;
                     wrote |= self
                         .store_finalization(
                             block.height(),
@@ -1597,6 +1650,27 @@ where
             .collect::<Vec<_>>();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
+        }
+
+        // If finalizations extend beyond our highest contiguous finalized block range,
+        // request the trailing missing blocks directly by commitment.
+        let Some(tip) = self.finalizations_by_height.last_index() else {
+            return wrote;
+        };
+        let mut height = trailing_start;
+        let mut remaining = self.max_repair.get();
+        while height <= tip && remaining > 0 {
+            if let Some(repaired) = self
+                .repair_trailing_finalized_height(height, buffer, resolver, application)
+                .await
+            {
+                wrote |= repaired;
+                remaining -= 1;
+            }
+            if height == tip {
+                break;
+            }
+            height = height.next();
         }
         wrote
     }
