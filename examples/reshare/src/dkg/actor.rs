@@ -304,14 +304,13 @@ where
 
             // Primary peers are the dealers for the active epoch. Secondary peers are the
             // active-epoch players and the next players we allow to connect early.
+            // Dealers may also appear among players; `track` keeps primary role only.
             self.manager
                 .track(
                     epoch.get(),
                     TrackedPeers::new(
                         dealers.clone(),
-                        Set::from_iter_dedup(
-                            players.iter().cloned().chain(next_players.iter().cloned()),
-                        ),
+                        Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
                     ),
                 )
                 .await;

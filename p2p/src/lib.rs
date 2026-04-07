@@ -238,6 +238,9 @@ stability_scope!(BETA {
     /// preserved separately in [`PeerSetUpdate`] notifications, but callers
     /// should not assume they are included anywhere a consumer intentionally
     /// reads only `latest.primary`.
+    ///
+    /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
+    /// treats the peer as primary only (it is omitted from the stored secondary set).
     #[derive(Clone, Debug)]
     pub struct TrackedPeers<P: PublicKey> {
         /// Peers eligible for primary-only policies.
@@ -273,6 +276,9 @@ stability_scope!(BETA {
     /// primary-only policies such as outbound dialing, while secondary peers
     /// remain transport-eligible and preserved separately in
     /// [`PeerSetUpdate`] notifications.
+    ///
+    /// If the same public key appears in both maps, the primary entry is authoritative
+    /// for address and role (the key is not registered as secondary).
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
@@ -310,12 +316,10 @@ stability_scope!(BETA {
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver of [`PeerSetUpdate`] notifications. The aggregate
-        /// primary and secondary sets preserve role information. If a peer is
-        /// present in both primary and secondary roles, it will appear in both sets.
-        /// Callers that need a deduplicated recipient list should union the
-        /// sets explicitly, while callers that intentionally exclude
-        /// secondaries should read `latest.primary`.
+        /// Returns a receiver of [`PeerSetUpdate`] notifications. Each update's
+        /// `latest` reflects how [`Manager::track`] stored the set: a peer listed in
+        /// both roles appears only under `latest.primary`. The `all` field aggregates
+        /// across retained sets with the same rule (secondary excludes keys present as primary).
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
@@ -333,6 +337,9 @@ stability_scope!(BETA {
         ///
         /// Callers may pass either a bare [`Set`] (registering only primary peers)
         /// or a [`TrackedPeers`] value containing both primary and secondary peers.
+        ///
+        /// Overlapping keys in [`TrackedPeers`] are allowed; primary takes precedence for role
+        /// and for the stored secondary list (see [`TrackedPeers`]).
         fn track<R>(
             &mut self,
             id: u64,
@@ -355,6 +362,8 @@ stability_scope!(BETA {
         /// Callers may pass either a bare [`Map`] (registering only primary peers)
         /// or an [`AddressableTrackedPeers`] value containing both primary and
         /// secondary peers.
+        ///
+        /// The same key may appear in both maps; see [`AddressableTrackedPeers`].
         fn track<R>(
             &mut self,
             id: u64,

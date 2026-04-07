@@ -80,6 +80,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     primary_sets: BTreeMap<u64, Set<C>>,
 
     /// Secondary peer sets indexed by their ID.
+    ///
+    /// Unlike [`Self::primary_sets`], secondaries do not participate in BitVec knowledge gossip;
+    /// they are stored as plain ordered sets (same type as [`TrackedPeers::secondary`]).
     secondary_sets: BTreeMap<u64, OrderedSet<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
@@ -248,21 +251,31 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
         self.primary_sets.insert(index, primary_set);
 
-        // Create and store new secondary peer set.
-        for secondary in secondaries.iter() {
+        // Create and store new secondary peer set. Peers listed in both roles keep only primary
+        // (handled above); they must not appear in the stored secondary set or secondary counts.
+        let secondary_ordered: OrderedSet<C> = OrderedSet::from_iter_dedup(
+            secondaries
+                .iter()
+                .filter(|s| primaries.position(s).is_none())
+                .cloned(),
+        );
+        for secondary in secondary_ordered.iter() {
             let record = self.peers.entry(secondary.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
             record.increment_secondary();
         }
-        self.secondary_sets.insert(index, secondaries);
+        self.secondary_sets.insert(index, secondary_ordered);
 
         // Remove oldest tracked peer sets if necessary.
         while self.primary_sets.len() > self.max_sets.get() {
             let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
             let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
-            assert_eq!(primary_index, secondary_index);
+            assert_eq!(
+                primary_index, secondary_index,
+                "primary and secondary peer sets must be evicted in lockstep"
+            );
             debug!(index = primary_index, "removed oldest tracked peer sets");
             primary_set.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
@@ -299,7 +312,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             index,
             latest: TrackedPeers::new(
                 self.get_set(&index).cloned().unwrap(),
-                self.get_secondary_set(&index).cloned().unwrap_or_default(),
+                self.get_secondary_set(&index)
+                    .cloned()
+                    .unwrap_or_default(),
             ),
             all: self.all(),
         })
@@ -369,10 +384,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
         for (k, record) in &self.peers {
-            if record.primary_sets() > 0 {
+            if record.primaries() > 0 {
                 primary.push(k.clone());
             }
-            if record.secondary_sets() > 0 {
+            if record.secondaries() > 0 {
                 secondary.push(k.clone());
             }
         }
@@ -674,6 +689,55 @@ mod tests {
             assert!(directory.track(2, [primary_2].try_into().unwrap(), OrderedSet::default()));
             assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
+        });
+    }
+
+    #[test]
+    fn test_track_primary_secondary_overlap_excludes_from_secondary_storage() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: NZUsize!(3),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+        let pk_a = PrivateKey::from_seed(1).public_key();
+        let pk_b = PrivateKey::from_seed(2).public_key();
+        let pk_c = PrivateKey::from_seed(3).public_key();
+
+        runtime.start(|context| async move {
+            // pk_b in both roles; pk_c secondary-only. Stored secondary, record counts, latest, and
+            // all() list pk_b as primary only.
+            let mut directory = Directory::init(context, vec![], my_info, config, releaser);
+
+            assert!(directory.track(
+                0,
+                [pk_a.clone(), pk_b.clone()].try_into().unwrap(),
+                [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
+            ));
+
+            let secondary = directory.get_secondary_set(&0).unwrap();
+            assert_eq!(secondary.len(), 1);
+            assert!(secondary.position(&pk_c).is_some());
+            assert!(secondary.position(&pk_b).is_none());
+
+            assert_eq!(directory.peers.get(&pk_b).unwrap().primaries(), 1);
+            assert_eq!(directory.peers.get(&pk_b).unwrap().secondaries(), 0);
+            assert_eq!(directory.peers.get(&pk_c).unwrap().secondaries(), 1);
+
+            let latest = directory.latest_update().unwrap();
+            assert!(latest.latest.secondary.position(&pk_b).is_none());
+            assert!(latest.latest.primary.position(&pk_b).is_some());
+
+            let agg = directory.all();
+            assert!(agg.primary.position(&pk_b).is_some());
+            assert!(agg.secondary.position(&pk_b).is_none());
         });
     }
 

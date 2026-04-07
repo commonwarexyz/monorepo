@@ -290,12 +290,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
         self.primary_sets.insert(id, primary.clone());
 
-        // Create and store new secondary peer set.
-        for public_key in secondary.iter() {
+        // Create and store new secondary peer set. Peers in both roles count only as primary.
+        let secondary_filtered = Set::from_iter_dedup(
+            secondary
+                .iter()
+                .filter(|s| primary.position(s).is_none())
+                .cloned(),
+        );
+        for public_key in secondary_filtered.iter() {
             self.ensure_peer_exists(public_key).await;
             *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
         }
-        self.secondary_sets.insert(id, secondary.clone());
+        self.secondary_sets.insert(id, secondary_filtered);
 
         // Remove oldest tracked peer sets if we exceed the limit.
         while self.primary_sets.len() > tracked_peer_sets.get() {
@@ -588,12 +594,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .cloned()
             .try_collect()
             .expect("BTreeMap keys are unique");
-        let secondary = self
-            .secondary_refs
-            .keys()
-            .cloned()
-            .try_collect()
-            .expect("BTreeMap keys are unique");
+        let secondary = Set::from_iter_dedup(
+            self.secondary_refs
+                .keys()
+                .filter(|k| !self.primary_refs.contains_key(k))
+                .cloned(),
+        );
         TrackedPeers::new(primary, secondary)
     }
 
@@ -2030,6 +2036,8 @@ mod tests {
     fn test_overlapping_primary_secondary_no_duplicate_recipients() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // pk2 is in both primary and secondary. Subscription and Recipients::All must not
+            // duplicate pk2; pk3 stays secondary-only in stored sets.
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
@@ -2043,7 +2051,6 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
 
-            // pk2 appears in both primary and secondary
             let mut manager = oracle.manager();
             manager
                 .track(
@@ -2054,6 +2061,22 @@ mod tests {
                     ),
                 )
                 .await;
+
+            let mut updates = manager.subscribe().await;
+            let update = updates.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert!(update.latest.primary.position(&pk2).is_some());
+            assert!(
+                update.latest.secondary.position(&pk2).is_none(),
+                "overlap peer must not appear in latest.secondary"
+            );
+            assert!(update.latest.secondary.position(&pk3).is_some());
+            assert!(update.all.primary.position(&pk2).is_some());
+            assert!(
+                update.all.secondary.position(&pk2).is_none(),
+                "aggregate secondary must not list peers who are primary"
+            );
+            assert!(update.all.secondary.position(&pk3).is_some());
 
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
@@ -2089,7 +2112,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // pk2 should only appear once in the sent-to list.
             let pk2_count = sent_to.iter().filter(|pk| *pk == &pk2).count();
             assert_eq!(pk2_count, 1, "pk2 received duplicate sends");
             assert!(sent_to.iter().any(|pk| pk == &pk3));

@@ -151,19 +151,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                let primary = peers.primary;
-                let secondary = peers.secondary;
-
                 // Ensure that the primary peer set is not too large.
                 // Panic since there is no way to recover from this.
                 //
                 // Secondary peers are not checked here because max_peer_set_size
                 // exists to cap the bitvec size, which only covers primary peers.
                 let max = self.max_peer_set_size;
-                let plen = primary.len();
+                let primary = peers.primary;
+                let secondary = peers.secondary;
                 assert!(
-                    plen as u64 <= max,
-                    "primary peer set too large: {plen} > {max}"
+                    primary.len() as u64 <= max,
+                    "primary peer set too large: {} > {max}",
+                    primary.len()
                 );
 
                 // Attempt to update peer set membership.
@@ -980,6 +979,7 @@ mod tests {
     fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Same key in both sets; track() counts primary only. Peer stays eligible and acceptable.
             let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
@@ -1004,12 +1004,15 @@ mod tests {
             assert_eq!(update.index, 0);
             assert_eq!(update.latest.primary.len(), 1);
             assert!(update.latest.primary.position(&pk).is_some());
-            assert_eq!(
-                update.latest.secondary,
-                Set::try_from([pk.clone()]).unwrap()
+            assert!(
+                update.latest.secondary.is_empty(),
+                "overlap peer is stored as primary only"
             );
             assert_eq!(update.all.primary, update.latest.primary);
-            assert_eq!(update.all.secondary, Set::try_from([pk.clone()]).unwrap());
+            assert!(
+                update.all.secondary.is_empty(),
+                "aggregate secondary excludes keys that are primary"
+            );
             assert!(mailbox.acceptable(pk).await);
         });
     }

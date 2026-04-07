@@ -151,10 +151,8 @@ where
             network.0,
             network.1,
         );
-        // Subscribe immediately, but keep draining mailbox and network traffic even if no peer set
-        // has been registered yet. Remote senders are gated by the latest primary set, so polling
-        // here avoids unnecessary backpressure without making traffic from peers outside that set
-        // resident.
+        // Subscribe immediately; keep draining the mailbox even if no peer set exists yet.
+        // Inbound caching stays gated on `latest.primary` (see `insert_message`).
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -240,7 +238,7 @@ where
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
-        // Store the message, continue even if it was already stored
+        // `digest` keys the shared item table and refcounts; same digest from our key is one row.
         let digest = msg.digest();
         self.insert_message(self.public_key.clone(), digest, msg.clone());
 

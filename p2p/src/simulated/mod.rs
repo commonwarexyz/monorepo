@@ -2570,6 +2570,53 @@ mod tests {
     }
 
     #[test]
+    fn test_manager_track_tracked_peers_overlap_primary_wins() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // pk2 is in both primary and secondary TrackedPeers; stored secondary is pk3 only.
+            // latest and aggregate.secondary omit pk2; aggregate.primary still includes pk2.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(3),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            let mut manager = oracle.manager();
+
+            manager
+                .track(
+                    9,
+                    TrackedPeers::new(
+                        Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
+                        Set::try_from([pk2.clone(), pk3.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            assert_eq!(
+                manager.peer_set(9).await.unwrap(),
+                Set::try_from([pk1.clone(), pk2.clone()]).unwrap()
+            );
+
+            let mut subscription = manager.subscribe().await;
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 9);
+            assert!(update.latest.primary.position(&pk2).is_some());
+            assert!(update.latest.secondary.position(&pk2).is_none());
+            assert!(update.latest.secondary.position(&pk3).is_some());
+            assert!(update.all.secondary.position(&pk2).is_none());
+            assert!(update.all.primary.position(&pk2).is_some());
+        });
+    }
+
+    #[test]
     fn test_socket_manager_track_accepts_addressable_tracked_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2603,6 +2650,46 @@ mod tests {
                 manager.peer_set(7).await.unwrap(),
                 Set::try_from([pk1]).unwrap()
             );
+        });
+    }
+
+    #[test]
+    fn test_socket_manager_track_addressable_overlap_primary_wins() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Same key in primary and secondary maps; primary address and role win (secondary ignored).
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(3),
+                },
+            );
+            network.start();
+
+            let pk = PrivateKey::from_seed(1).public_key();
+            let addr_primary: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let addr_secondary: Address = SocketAddr::from(([127, 0, 0, 1], 5000)).into();
+            let mut manager = oracle.socket_manager();
+            let mut subscription = manager.subscribe().await;
+
+            manager
+                .track(
+                    11,
+                    AddressableTrackedPeers::new(
+                        Map::<_, Address>::try_from([(pk.clone(), addr_primary.clone())]).unwrap(),
+                        Map::<_, Address>::try_from([(pk.clone(), addr_secondary)]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.secondary.is_empty());
+            assert!(update.all.secondary.is_empty());
+            assert_eq!(update.latest.primary, Set::try_from([pk.clone()]).unwrap());
         });
     }
 

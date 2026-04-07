@@ -58,10 +58,10 @@ pub struct Record<C: PublicKey> {
     status: Status,
 
     /// Number of primary peer sets this peer is part of.
-    primary_sets: usize,
+    primaries: usize,
 
     /// Number of secondary peer sets this peer is part of.
-    secondary_sets: usize,
+    secondaries: usize,
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
@@ -81,8 +81,8 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Unknown,
             status: Status::Inert,
-            primary_sets: 0,
-            secondary_sets: 0,
+            primaries: 0,
+            secondaries: 0,
             persistent: false,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -94,8 +94,8 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Myself(info),
             status: Status::Inert,
-            primary_sets: 0,
-            secondary_sets: 0,
+            primaries: 0,
+            secondaries: 0,
             persistent: true,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -107,8 +107,8 @@ impl<C: PublicKey> Record<C> {
         Self {
             address: Address::Bootstrapper(ingress.into()),
             status: Status::Inert,
-            primary_sets: 0,
-            secondary_sets: 0,
+            primaries: 0,
+            secondaries: 0,
             persistent: true,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -149,27 +149,27 @@ impl<C: PublicKey> Record<C> {
 
     /// Increase the count of primary peer sets this peer is part of.
     pub const fn increment_primary(&mut self) {
-        self.primary_sets = self.primary_sets.checked_add(1).unwrap();
+        self.primaries = self.primaries.checked_add(1).unwrap();
     }
 
     /// Decrease the count of primary peer sets this peer is part of.
     pub const fn decrement_primary(&mut self) {
-        self.primary_sets = self.primary_sets.checked_sub(1).unwrap();
+        self.primaries = self.primaries.checked_sub(1).unwrap();
     }
 
     /// Increase the count of secondary peer sets this peer is part of.
     pub const fn increment_secondary(&mut self) {
-        self.secondary_sets = self.secondary_sets.checked_add(1).unwrap();
+        self.secondaries = self.secondaries.checked_add(1).unwrap();
     }
 
     /// Decrease the count of secondary peer sets this peer is part of.
     pub const fn decrement_secondary(&mut self) {
-        self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
+        self.secondaries = self.secondaries.checked_sub(1).unwrap();
     }
 
     /// Whether this peer should be dialed outbound (primary or persistent peers).
     pub const fn is_outbound_target(&self) -> bool {
-        self.primary_sets > 0 || self.persistent
+        self.primaries > 0 || self.persistent
     }
 
     /// Attempt to reserve the peer for connection.
@@ -241,13 +241,13 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Returns the number of secondary peer sets this peer is part of.
-    pub const fn secondary_sets(&self) -> usize {
-        self.secondary_sets
+    pub const fn secondaries(&self) -> usize {
+        self.secondaries
     }
 
     /// Returns the number of primary peer sets this peer is part of.
-    pub const fn primary_sets(&self) -> usize {
-        self.primary_sets
+    pub const fn primaries(&self) -> usize {
+        self.primaries
     }
 
     /// Check whether this record is dialable at the given time.
@@ -326,8 +326,8 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if the record can safely be deleted.
     pub const fn deletable(&self) -> bool {
-        self.primary_sets == 0
-            && self.secondary_sets == 0
+        self.primaries == 0
+            && self.secondaries == 0
             && !self.persistent
             && matches!(self.status, Status::Inert)
     }
@@ -342,7 +342,7 @@ impl<C: PublicKey> Record<C> {
         match self.address {
             Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
-                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
+                self.primaries > 0 || self.secondaries > 0 || self.persistent
             }
         }
     }
@@ -402,7 +402,7 @@ mod tests {
         let record = Record::<PublicKey>::unknown();
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.primaries, 0);
         assert!(!record.persistent);
         assert!(record.ingress().is_none());
         assert!(record.sharable().is_none());
@@ -420,7 +420,7 @@ mod tests {
             matches!(&record.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info))
         );
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.primaries, 0);
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&my_info.ingress));
         assert!(compare_optional_peer_info(
@@ -440,7 +440,7 @@ mod tests {
         let record = Record::<PublicKey>::bootstrapper(socket);
         assert!(matches!(&record.address, Address::Bootstrapper(i) if *i == ingress));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.primaries, 0);
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&ingress));
         assert!(record.sharable().is_none());
@@ -606,7 +606,7 @@ mod tests {
     #[should_panic]
     fn test_decrement_panics_at_zero() {
         let mut record = Record::<PublicKey>::unknown();
-        assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.primaries, 0);
         record.decrement_primary(); // Panics
     }
 
@@ -877,7 +877,7 @@ mod tests {
 
             // Non-persistent records depend on sets count and status
             let mut record = Record::<PublicKey>::unknown(); // Not persistent
-            assert_eq!(record.primary_sets, 0);
+            assert_eq!(record.primaries, 0);
             assert_eq!(record.status, Status::Inert);
             assert!(record.deletable()); // primary_sets = 0, !persistent, Inert
 

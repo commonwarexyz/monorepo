@@ -200,10 +200,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Create and store new secondary peer set.
         for (secondary, addr) in &secondaries {
-            // When a peer appears in both roles for the same index, the primary address remains
-            // authoritative.
+            // When a peer appears in both roles for the same index, keep only the primary role
+            // (and the primary registration above); do not count them as secondary.
             if primary_keys.position(secondary).is_some() {
-                self.peers.get_mut(secondary).unwrap().increment_secondary();
                 continue;
             }
             let record = match self.peers.entry(secondary.clone()) {
@@ -221,7 +220,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             };
             record.increment_secondary();
         }
-        self.secondary_sets.insert(index, secondaries.into_keys());
+        self.secondary_sets.insert(
+            index,
+            Set::from_iter_dedup(
+                secondaries
+                    .keys()
+                    .iter()
+                    .filter(|k| primary_keys.position(k).is_none())
+                    .cloned(),
+            ),
+        );
 
         // Remove oldest tracked peer sets if necessary.
         while self.primary_sets.len() > self.max_sets.get() {
@@ -820,6 +828,8 @@ mod tests {
         let secondary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
 
         runtime.start(|context| async move {
+            // Same pk in primary and secondary maps with different addresses; primary wins. all() and
+            // get_secondary_set reflect primary-only role for that pk.
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let reset_peers = directory
@@ -842,6 +852,10 @@ mod tests {
                 Some(Ingress::Socket(primary_addr))
             );
             assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
+            assert!(
+                directory.all().secondary.is_empty(),
+                "all(): overlap peer must not be listed as secondary"
+            );
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
             assert_eq!(
                 directory.dial(&pk_1).unwrap().1,
@@ -849,6 +863,15 @@ mod tests {
             );
             assert!(directory.listenable().contains(&primary_addr.ip()));
             assert!(!directory.listenable().contains(&secondary_addr.ip()));
+
+            assert_eq!(
+                directory.get_secondary_set(&0).cloned().unwrap_or_default(),
+                Set::default(),
+                "overlap peer must not appear in stored secondary set"
+            );
+            let rec = directory.peers.get(&pk_1).unwrap();
+            assert_eq!(rec.primary_sets(), 1);
+            assert_eq!(rec.secondary_sets(), 0);
         });
     }
 

@@ -468,42 +468,6 @@ where
                 self.update_latest_primary_peers(update.latest.primary);
                 self.aggregate_peers = all_peers;
             },
-            Some((peer, shard)) = receiver.recv() else {
-                debug!("receiver closed, stopping shard engine");
-                return;
-            } => {
-                // Track shard receipt per peer.
-                self.metrics
-                    .shards_received
-                    .get_or_create(&Peer::new(&peer))
-                    .inc();
-
-                let commitment = shard.commitment();
-                if !self.should_handle_network_shard(commitment) {
-                    continue;
-                }
-
-                if let Some(state) = self.state.get_mut(&commitment) {
-                    let round = state.round();
-                    let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
-                        warn!(%commitment, "no scheme for epoch, ignoring shard");
-                        continue;
-                    };
-                    let progressed = state
-                        .on_network_shard(
-                            peer,
-                            shard,
-                            InsertCtx::new(scheme.as_ref(), &self.strategy),
-                            &mut self.blocker,
-                        )
-                        .await;
-                    if progressed {
-                        self.try_advance(&mut sender, commitment).await;
-                    }
-                } else {
-                    self.buffer_peer_shard(peer, shard);
-                }
-            },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
@@ -554,6 +518,42 @@ where
                 }
                 Message::Prune { through } => {
                     self.prune(through);
+                }
+            },
+            Some((peer, shard)) = receiver.recv() else {
+                debug!("receiver closed, stopping shard engine");
+                return;
+            } => {
+                // Track shard receipt per peer.
+                self.metrics
+                    .shards_received
+                    .get_or_create(&Peer::new(&peer))
+                    .inc();
+
+                let commitment = shard.commitment();
+                if !self.should_handle_network_shard(commitment) {
+                    continue;
+                }
+
+                if let Some(state) = self.state.get_mut(&commitment) {
+                    let round = state.round();
+                    let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+                        warn!(%commitment, "no scheme for epoch, ignoring shard");
+                        continue;
+                    };
+                    let progressed = state
+                        .on_network_shard(
+                            peer,
+                            shard,
+                            InsertCtx::new(scheme.as_ref(), &self.strategy),
+                            &mut self.blocker,
+                        )
+                        .await;
+                    if progressed {
+                        self.try_advance(&mut sender, commitment).await;
+                    }
+                } else {
+                    self.buffer_peer_shard(peer, shard);
                 }
             },
         }
@@ -693,7 +693,7 @@ where
 
     /// Buffer a shard from a peer until a leader is known.
     fn buffer_peer_shard(&mut self, peer: P, shard: Shard<C, H>) {
-        if !self.should_buffer_peer(&peer) {
+        if self.latest_primary_peers.position(&peer).is_none() {
             debug!(
                 ?peer,
                 "pre-leader shard from peer outside latest.primary not buffered"
@@ -711,10 +711,6 @@ where
         self.peer_buffers
             .retain(|peer, _| peers.position(peer).is_some());
         self.latest_primary_peers = peers;
-    }
-
-    fn should_buffer_peer(&self, peer: &P) -> bool {
-        self.latest_primary_peers.position(peer).is_some()
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
