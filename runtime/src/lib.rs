@@ -862,6 +862,11 @@ mod tests {
         },
         task::{Context as TContext, Poll, Waker},
     };
+    #[cfg(target_os = "linux")]
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::atomic::AtomicBool,
+    };
     use tracing::{error, Level};
     use utils::reschedule;
 
@@ -1709,6 +1714,27 @@ mod tests {
             let handle = context.pinned(0).spawn(|_| async move { 42 });
             assert!(matches!(handle.await, Ok(42)));
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_spawn_pinned_invalid_core_panics_before_future<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let invalid_core = crate::available_cores().expect("cpu count unavailable");
+        let started = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            runner.start(move |context| async move {
+                let _ = context.pinned(invalid_core).spawn(move |_| async move {
+                    started_clone.store(true, Ordering::SeqCst);
+                    42
+                });
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!started.load(Ordering::SeqCst));
     }
 
     fn test_spawn<R: Runner>(runner: R)
@@ -3348,6 +3374,13 @@ mod tests {
         test_spawn_pinned(executor);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_deterministic_spawn_pinned_invalid_core_panics_before_future() {
+        let executor = deterministic::Runner::default();
+        test_spawn_pinned_invalid_core_panics_before_future(executor);
+    }
+
     #[test]
     fn test_deterministic_spawn() {
         let runner = deterministic::Runner::default();
@@ -3701,6 +3734,13 @@ mod tests {
     fn test_tokio_spawn_pinned() {
         let executor = tokio::Runner::default();
         test_spawn_pinned(executor);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tokio_spawn_pinned_invalid_core_panics_before_future() {
+        let executor = tokio::Runner::default();
+        test_spawn_pinned_invalid_core_panics_before_future(executor);
     }
 
     #[test]

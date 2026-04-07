@@ -573,6 +573,16 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        #[cfg(target_os = "linux")]
+        if let Execution::Dedicated(Some(core)) = self.execution {
+            if let Some(num_cores) = utils::thread::available_cores() {
+                assert!(
+                    core < num_cores,
+                    "core {core} out of range ({num_cores} available)"
+                );
+            }
+        }
+
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
