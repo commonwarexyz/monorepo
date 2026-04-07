@@ -306,7 +306,7 @@ where
 
     /// Inserts a message into the cache.
     ///
-    /// Waiters are notified even when a sender is no longer eligible to keep a
+    /// Waiters are notified even when a sender is not eligible to keep a
     /// buffered cache entry resident.
     fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
         // Send the message to the waiters, if any
@@ -316,15 +316,12 @@ where
             }
         }
 
-        // Only peers listed in `latest.primary` may buffer. An empty set means no peer-set
-        // snapshot yet (or an explicit empty primary); nobody is a member, so inserts are
-        // ineligible until a non-empty primary arrives.
+        // Only peers listed in `latest.primary` may buffer
         if self.latest_primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
         }
 
-        // Get the relevant deque for the peer. Remote peers only reach this point if they are in
-        // the latest primary set, so allocating lazily here does not widen cache eligibility.
+        // Get the relevant deque for the peer
         let deque = self
             .deques
             .entry(peer)
