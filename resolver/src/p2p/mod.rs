@@ -37,18 +37,9 @@
 //!
 //! # Peer Selection
 //!
-//! Outbound fetches are reconciled against the latest primary peer set only. Retaining older peer
-//! sets in the provider's overlap window keeps those peers connected at the transport layer, but
-//! does not keep them eligible for new resolver traffic.
-//!
-//! Callers that still expect a key to be fetchable after a peer-set cutover must ensure the latest
-//! primary set can serve it. Overlap-only peers are treated as disposable continuity peers, not as
-//! authorities for new backfill or historical fetches after reconfiguration.
-//!
-//! This restriction applies when choosing peers for new outbound requests. If a request was
-//! already sent before a peer-set update removes that peer from `latest.primary`, its in-flight
-//! response is still accepted. Peer-set updates are therefore a routing cutover for future sends,
-//! not a retroactive invalidation of responses already on the wire.
+//! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
+//! requests are handled for all connected peers. Thus, callers that still expect a key to be fetchable after
+//! a peer set update must ensure the latest primary set can serve it.
 //!
 //! [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) can narrow the current primary set
 //! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
