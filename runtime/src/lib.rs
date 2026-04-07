@@ -191,8 +191,7 @@ stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// The spawned thread panics if `core` is greater than or equal to the number of available
-        /// CPUs.
+        /// Panics if `core` is greater than or equal to the number of available CPUs.
         fn pinned(self, core: usize) -> Self;
 
         /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
@@ -3773,14 +3772,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[should_panic(expected = "out of range")]
     fn test_tokio_spawn_pinned_invalid_core() {
-        // Pinning to a core beyond the available count panics on the dedicated
-        // thread.
+        // Pinning to a core beyond the available count panics eagerly.
         let num_cores = crate::available_cores().unwrap();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let result = context.pinned(num_cores).spawn(|_| async {}).await;
-            assert!(result.is_err());
+            context.pinned(num_cores).spawn(|_| async {});
         });
     }
 

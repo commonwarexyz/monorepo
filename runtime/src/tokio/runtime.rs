@@ -553,6 +553,12 @@ impl crate::Spawner for Context {
     }
 
     fn pinned(mut self, core: usize) -> Self {
+        if let Some(num_cores) = utils::thread::available_cores() {
+            assert!(
+                core < num_cores,
+                "core {core} out of range ({num_cores} available)"
+            );
+        }
         self.execution = Execution::Dedicated(Some(core));
         self
     }
