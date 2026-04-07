@@ -322,8 +322,8 @@ where
     /// Provider for peer set information.
     peer_provider: D,
 
-    /// Latest union of tracked peers from the peer set subscription.
-    tracked_peers: Set<P>,
+    /// Latest union of peer membership from the peer set subscription (`PeerSetUpdate::all`).
+    aggregate_peers: Set<P>,
 
     /// Latest primary peers allowed to retain pre-leader shard buffers.
     latest_primary_peers: Set<P>,
@@ -389,7 +389,7 @@ where
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
                 peer_provider: config.peer_provider,
-                tracked_peers: Set::default(),
+                aggregate_peers: Set::default(),
                 latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
@@ -463,7 +463,7 @@ where
             } => {
                 let all_peers = update.all.union();
                 self.update_latest_primary_peers(update.latest.primary);
-                self.tracked_peers = all_peers;
+                self.aggregate_peers = all_peers;
             },
             Some((peer, shard)) = receiver.recv() else {
                 debug!("receiver closed, stopping shard engine");
@@ -818,9 +818,9 @@ where
                 .await;
         }
 
-        // Send the leader's shard to tracked peers outside the participant set.
+        // Send the leader's shard to aggregate-membership peers outside the participant set.
         let non_participants: Vec<P> = self
-            .tracked_peers
+            .aggregate_peers
             .iter()
             .filter(|peer| participants.index(peer).is_none())
             .cloned()
@@ -1750,7 +1750,7 @@ mod tests {
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
 
                 let (network, oracle) =
-                    simulated::Network::<deterministic::Context, P>::new_with_tracked_peers(
+                    simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.with_label("network"),
                         simulated::Config {
                             max_size: MAX_SHARD_SIZE as u32,

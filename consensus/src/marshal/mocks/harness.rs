@@ -135,7 +135,7 @@ pub async fn setup_network_with_participants<I>(
 where
     I: IntoIterator<Item = K>,
 {
-    let (network, oracle) = Network::new_with_primary_peers(
+    let (network, oracle) = Network::new_with_peers(
         context.with_label("network"),
         simulated::Config {
             max_size: 1024 * 1024,

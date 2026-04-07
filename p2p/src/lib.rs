@@ -224,7 +224,7 @@ stability_scope!(BETA {
         pub index: u64,
         /// The primary and secondary peers in the new set.
         pub latest: TrackedPeers<P>,
-        /// Union of all currently tracked primary and secondary peers.
+        /// Union of primary and secondary peers across all retained peer sets.
         pub all: TrackedPeers<P>,
     }
 

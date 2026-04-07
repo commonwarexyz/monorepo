@@ -1013,14 +1013,14 @@ mod tests {
                 "new secondary set should be empty"
             );
 
-            // Self should NOT be in the tracked set (not registered)
+            // Self should NOT be in the peer set (not registered)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
-                "tracked peers should not include self"
+                "peer set should not include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
 
             // Now register a peer set that DOES include self
@@ -1053,14 +1053,14 @@ mod tests {
                 "new secondary set should be empty"
             );
 
-            // Both peers should be in the tracked set
+            // Both peers should be in the peer set
             assert!(
                 update.all.primary.position(&self_pk).is_some(),
-                "tracked peers should include self"
+                "peer set should include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
         });
     }

@@ -166,7 +166,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     "primary peer set too large: {plen} > {max}"
                 );
 
-                // Attempt to update tracked peers.
+                // Attempt to update peer set membership.
                 if !self.directory.track(index, primary, secondary) {
                     return;
                 }
@@ -1188,7 +1188,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Peer1 was only in set 0, which is now evicted.
-            // Construct for peer1 should now result in Kill because it's not in any active tracked set.
+            // Construct for peer1 should now result in Kill because it's not in any active peer set.
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             assert!(
                 matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),

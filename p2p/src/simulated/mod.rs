@@ -86,9 +86,9 @@
 //! // Start context
 //! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
-//!     // Initialize network with an initial tracked peer set.
+//!     // Initialize the network with an initial peer set (registered at id 0).
 //!     let (network, oracle) =
-//!         Network::new_with_primary_peers(context.with_label("network"), p2p_cfg, peers.clone())
+//!         Network::new_with_peers(context.with_label("network"), p2p_cfg, peers.clone())
 //!             .await;
 //!
 //!     // Start network
@@ -604,7 +604,7 @@ mod tests {
             let pk2 = PrivateKey::from_seed(1).public_key();
 
             // Create simulated network
-            let (network, oracle) = Network::new_with_primary_peers(
+            let (network, oracle) = Network::new_with_peers(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2728,14 +2728,14 @@ mod tests {
                 }
             }
 
-            // Send message from pk1 to pk2 (both in tracked set) - should succeed
+            // Send message from pk1 to pk2 (both in the peer set) - should succeed
             let sent = sender1
                 .send(Recipients::One(pk2.clone()), IoBuf::from(b"msg1"), false)
                 .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
-            // Try to send from pk1 to pk3 (pk3 not in any tracked set) - should fail
+            // Try to send from pk1 to pk3 (pk3 not in any peer set) - should fail
             let sent = sender1
                 .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg2"), false)
                 .await
@@ -2747,7 +2747,7 @@ mod tests {
                 .track(2, Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap())
                 .await;
 
-            // Now pk3 is in a tracked set, message should succeed
+            // Now pk3 is in a peer set, message should succeed
             let sent = sender1
                 .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg3"), false)
                 .await
@@ -2759,7 +2759,7 @@ mod tests {
                 .track(3, Set::try_from(vec![pk3.clone(), pk4.clone()]).unwrap())
                 .await;
 
-            // pk1 should now be removed from all tracked sets
+            // pk1 should now be removed from all peer sets
             // Try to send from pk2 to pk1 - should fail since pk1 is no longer tracked
             let sent = sender2
                 .send(Recipients::One(pk1.clone()), IoBuf::from(b"msg4"), false)
@@ -2895,7 +2895,7 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(10)) => {},
             }
 
-            // Add a peer back to the tracked set
+            // Add a peer back to a peer set
             manager
                 .track(
                     3,
@@ -3133,14 +3133,14 @@ mod tests {
                 "latest primary set should include other"
             );
 
-            // Self should NOT be in the tracked set (not registered)
+            // Self should NOT be in the peer set (not registered)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
-                "tracked peers should not include self"
+                "peer set should not include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
 
             // Now register a peer set that DOES include self
@@ -3168,14 +3168,14 @@ mod tests {
                 "latest primary set should include other"
             );
 
-            // Both peers should be in the tracked set
+            // Both peers should be in the peer set
             assert!(
                 update.all.primary.position(&self_pk).is_some(),
-                "tracked peers should include self"
+                "peer set should include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
         });
     }
@@ -3194,7 +3194,7 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) = Network::new_with_primary_peers(
+            let (network, oracle) = Network::new_with_peers(
                 network_context.clone(),
                 cfg,
                 [pk1.clone(), pk2.clone()],
@@ -3276,7 +3276,7 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) = Network::new_with_primary_peers(
+            let (network, oracle) = Network::new_with_peers(
                 network_context.clone(),
                 cfg,
                 [pk1.clone(), pk2.clone()],
@@ -3350,7 +3350,7 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             let (network, oracle) =
-                Network::new_with_primary_peers(network_context, cfg, [pk1.clone(), pk2.clone()])
+                Network::new_with_peers(network_context, cfg, [pk1.clone(), pk2.clone()])
                     .await;
             let handle = network.start();
 

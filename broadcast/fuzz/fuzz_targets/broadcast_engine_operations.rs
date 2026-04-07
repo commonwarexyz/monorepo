@@ -173,7 +173,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Generate peer identities before building the network so the initial
-        // tracked peer set can be seeded through the constructor.
+        // peer set can be seeded through the constructor.
         let peers = input
             .peer_seeds
             .iter()
@@ -182,7 +182,7 @@ fn fuzz(input: FuzzInput) {
 
         // Create network
         let (network, oracle) =
-            Network::<deterministic::Context, PublicKey>::new_with_primary_peers(
+            Network::<deterministic::Context, PublicKey>::new_with_peers(
                 context.with_label("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,

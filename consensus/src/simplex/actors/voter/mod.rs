@@ -97,7 +97,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    async fn start_test_network_with_primary_peers<I>(
+    async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
         peers: I,
         disconnect_on_block: bool,
@@ -105,7 +105,7 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
-        let (network, oracle) = Network::new_with_primary_peers(
+        let (network, oracle) = Network::new_with_peers(
             context.with_label("network"),
             NConfig {
                 max_size: 1024 * 1024,
@@ -331,8 +331,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -564,8 +563,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -837,8 +835,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -958,8 +955,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1094,8 +1090,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1219,8 +1214,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1393,8 +1387,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1605,8 +1598,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock
             let elector = L::default();
@@ -1829,7 +1821,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -2021,8 +2013,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2121,8 +2112,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2236,8 +2226,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2454,8 +2443,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2659,8 +2647,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2834,8 +2821,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -3043,8 +3029,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3191,8 +3176,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3481,8 +3465,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3751,8 +3734,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -3945,8 +3927,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4117,8 +4098,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4224,8 +4204,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4346,8 +4325,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4501,8 +4479,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4646,7 +4623,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -4785,7 +4762,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -5069,8 +5046,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -5271,7 +5247,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -5409,8 +5385,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -5536,7 +5511,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -5679,7 +5654,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -5810,7 +5785,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let oracle = start_test_network_with_primary_peers(
+            let oracle = start_test_network_with_peers(
                 context.clone(),
                 participants.clone(),
                 true,
@@ -5961,8 +5936,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));

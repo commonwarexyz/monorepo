@@ -124,7 +124,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, oracle) = simulated::Network::new_with_primary_peers(
+        let (network, oracle) = simulated::Network::new_with_peers(
             context.with_label("network"),
             p2p_cfg,
             peer_pks.iter().cloned(),

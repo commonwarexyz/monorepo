@@ -95,9 +95,10 @@ pub struct Config {
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
 
-    /// The maximum number of peer sets to track. When a new peer set is registered and this
-    /// limit is exceeded, the oldest peer set is removed. Peers that are no longer in any
-    /// tracked peer set will have their links removed and messages to them will be dropped.
+    /// The maximum number of peer sets to track (`tracked_peer_sets`). When a new peer set is
+    /// registered and this limit is exceeded, the oldest peer set is removed. Peers that are no
+    /// longer in any retained peer set will have their links removed and messages to them will be
+    /// dropped.
     pub tracked_peer_sets: NonZeroUsize,
 }
 
@@ -219,22 +220,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// This is a convenience for test setups that would otherwise call
     /// [`crate::Manager::track`] immediately after construction.
-    pub async fn new_with_primary_peers<I>(
-        context: E,
-        cfg: Config,
-        peers: I,
-    ) -> (Self, Oracle<P, E>)
+    pub async fn new_with_peers<I>(context: E, cfg: Config, peers: I) -> (Self, Oracle<P, E>)
     where
         I: IntoIterator<Item = P>,
     {
-        Self::new_with_tracked_peers(context, cfg, peers, std::iter::empty()).await
+        Self::new_with_split_peers(context, cfg, peers, std::iter::empty()).await
     }
 
-    /// Create a new simulated network with an initial tracked peer set.
+    /// Create a new simulated network with primary and secondary peers split into two sets.
     ///
-    /// The primary and secondary peers are registered at peer-set ID `0`,
-    /// matching the most common test setup.
-    pub async fn new_with_tracked_peers<I, J>(
+    /// Peers are registered at peer-set ID `0` as [`TrackedPeers`], matching the most common test
+    /// setup.
+    pub async fn new_with_split_peers<I, J>(
         context: E,
         cfg: Config,
         primary: I,
@@ -257,7 +254,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         (network, oracle)
     }
 
-    /// Register a tracked peer set directly in the network state.
+    /// Register a peer set directly in the network state.
     ///
     /// This mirrors the bookkeeping performed for [`ingress::Message::Track`]
     /// and is used by constructor helpers that seed the initial topology before
@@ -315,7 +312,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.primary_refs.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any tracked primary set"
+                        "removed peer no longer in any primary peer set"
                     );
                 }
             }
@@ -327,7 +324,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.secondary_refs.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any tracked secondary set"
+                        "removed peer no longer in any secondary peer set"
                     );
                 }
             }
@@ -583,8 +580,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         self.peer_subscribers = live_subscribers;
     }
 
-    /// Get all primary peers as an ordered set.
-    fn all_tracked_peers(&self) -> TrackedPeers<P> {
+    /// Primary and secondary peers aggregated across all retained peer sets (ref-count union).
+    fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
         let primary = self
             .primary_refs
             .keys()
@@ -600,7 +597,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         TrackedPeers::new(primary, secondary)
     }
 
-    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
     fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
         let (index, peers) = self.primary_sets.last_key_value()?;
         Some(PeerSetUpdate {
@@ -609,13 +606,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 peers.clone(),
                 self.secondary_sets.get(index).cloned().unwrap_or_default(),
             ),
-            all: self.all_tracked_peers(),
+            all: self.aggregate_peer_membership(),
         })
     }
 
     /// Get all peers that should be exposed to `Recipients::All`.
     ///
-    /// The simulated network treats all tracked peers as reachable. Primary
+    /// The simulated network treats all peers registered in peer sets as reachable. Primary
     /// peers remain the ones targeted for primary-only behavior such as
     /// dialing, but secondaries still receive broadcast traffic, matching the
     /// expectations of higher-level tests built on this abstraction.
@@ -1405,7 +1402,7 @@ mod tests {
             let peers = [pk1.clone(), pk2.clone()];
 
             let (network, oracle) =
-                Network::new_with_primary_peers(network_context.clone(), cfg, peers).await;
+                Network::new_with_peers(network_context.clone(), cfg, peers).await;
             network_context.spawn(|_| network.run());
 
             let control = oracle.control(pk1.clone());
@@ -1438,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_tracked_peers_seeds_initial_update() {
+    fn test_new_with_split_peers_seeds_initial_update() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1450,7 +1447,7 @@ mod tests {
             let primary = ed25519::PrivateKey::from_seed(11).public_key();
             let secondary = ed25519::PrivateKey::from_seed(12).public_key();
 
-            let (network, oracle) = Network::new_with_tracked_peers(
+            let (network, oracle) = Network::new_with_split_peers(
                 network_context.clone(),
                 cfg,
                 [primary.clone()],

@@ -186,7 +186,7 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Registrations<PublicKey>,
     ) {
-        let (network, mut oracle) = Network::new_with_primary_peers(
+        let (network, mut oracle) = Network::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -412,7 +412,7 @@ mod tests {
             let f = |mut context: deterministic::Context| async move {
                 let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-                let (network, mut oracle) = Network::new_with_primary_peers(
+                let (network, mut oracle) = Network::new_with_peers(
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
@@ -891,7 +891,7 @@ mod tests {
             participants.push(sequencer.public_key());
 
             // Create network
-            let (network, mut oracle) = Network::new_with_primary_peers(
+            let (network, mut oracle) = Network::new_with_peers(
                 context.with_label("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,

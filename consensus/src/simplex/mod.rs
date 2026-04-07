@@ -597,7 +597,7 @@ mod tests {
         registrations
     }
 
-    async fn start_test_network_with_primary_peers<I>(
+    async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
         peers: I,
         disconnect_on_block: bool,
@@ -605,7 +605,7 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
-        let (network, oracle) = Network::new_with_primary_peers(
+        let (network, oracle) = Network::new_with_peers(
             context.with_label("network"),
             Config {
                 max_size: 1024 * 1024,
@@ -619,7 +619,7 @@ mod tests {
         oracle
     }
 
-    async fn start_test_network_with_tracked_peers<I, J>(
+    async fn start_test_network_with_split_peers<I, J>(
         context: deterministic::Context,
         primary: I,
         secondary: J,
@@ -629,7 +629,7 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
-        let (network, oracle) = Network::new_with_tracked_peers(
+        let (network, oracle) = Network::new_with_split_peers(
             context.with_label("network"),
             Config {
                 max_size: 1024 * 1024,
@@ -734,8 +734,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -978,7 +977,7 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
-            let mut oracle = start_test_network_with_tracked_peers(
+            let mut oracle = start_test_network_with_split_peers(
                 context.clone(),
                 participants.clone(),
                 [public_key_observer.clone()],
@@ -1151,12 +1150,9 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle = start_test_network_with_primary_peers(
-                    context.clone(),
-                    participants.clone(),
-                    true,
-                )
-                .await;
+                let mut oracle =
+                    start_test_network_with_peers(context.clone(), participants.clone(), true)
+                        .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
 
                 // Link all validators
@@ -1325,8 +1321,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1581,8 +1576,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1813,8 +1807,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1991,8 +1984,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2193,8 +2185,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2385,8 +2376,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2630,8 +2620,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2822,8 +2811,7 @@ mod tests {
                 .collect();
 
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2979,8 +2967,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
@@ -3169,8 +3156,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3327,8 +3313,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3648,8 +3633,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3805,8 +3789,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3975,8 +3958,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4123,8 +4105,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4295,8 +4276,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4498,8 +4478,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4726,8 +4705,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
@@ -5061,8 +5039,7 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5208,8 +5185,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5714,7 +5690,7 @@ mod tests {
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
-                let mut oracle = start_test_network_with_primary_peers(
+                let mut oracle = start_test_network_with_peers(
                     context.clone(),
                     participants.iter().cloned(),
                     false,

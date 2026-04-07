@@ -287,12 +287,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.secondary_sets.get(index)
     }
 
-    /// Returns the latest tracked primary peer set index.
+    /// Returns the latest primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.primary_sets.keys().last().copied()
     }
 
-    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
     pub fn latest_update(&self) -> Option<PeerSetUpdate<C>> {
         let index = self.latest_set_index()?;
         Some(PeerSetUpdate {
@@ -364,7 +364,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers across all tracked primary and secondary peer sets.
+    /// Returns all peers across all retained primary and secondary peer sets.
     pub fn all(&self) -> TrackedPeers<C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();

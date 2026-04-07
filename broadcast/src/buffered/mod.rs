@@ -1273,11 +1273,11 @@ mod tests {
             assert_eq!(
                 mailbox_a.get(before.digest()).await,
                 Some(before.clone()),
-                "local broadcasts should remain retrievable before any peers are tracked"
+                "local broadcasts should remain retrievable before any peer set is registered"
             );
             assert!(
                 mailbox_b.get(before.digest()).await.is_none(),
-                "without a tracked peer set, broadcasts should not reach remote peers"
+                "without a registered peer set, broadcasts should not reach remote peers"
             );
 
             oracle
@@ -1354,7 +1354,7 @@ mod tests {
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             assert_eq!(mailbox_b.get(msg.digest()).await, Some(msg.clone()));
 
-            // Evict peer A only; C is still tracked.
+            // Evict peer A only; C is still in the latest primary set.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
             oracle.manager().track(1, remaining).await;
             context.sleep(A_JIFFY).await;
@@ -1363,7 +1363,7 @@ mod tests {
             assert_eq!(
                 mailbox_b.get(msg.digest()).await,
                 Some(msg.clone()),
-                "message should survive when another tracked peer still references it"
+                "message should survive when another peer in the primary set still references it"
             );
         });
     }

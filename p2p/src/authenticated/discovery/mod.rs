@@ -76,7 +76,7 @@
 //! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
 //! marked as '1'). It then waits for responses, learning about other peers through the
 //! `Payload::Peers` messages received. Bootstrapper information is persisted, and connections to
-//! them are maintained even if they aren't part of any currently tracked peer sets. Different
+//! them are maintained even if they aren't part of any retained peer sets. Different
 //! peers can have different bootstrapper lists.
 //!
 //! _Note: If a peer (listener) receives a connection request from another peer (dialer) that
@@ -1094,14 +1094,14 @@ mod tests {
                 "latest set should include other"
             );
 
-            // Self should NOT be in the tracked set (not registered)
+            // Self should NOT be in the peer set (not registered)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
-                "tracked peers should not include self"
+                "peer set should not include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
 
             // Now register a peer set that DOES include self
@@ -1126,14 +1126,14 @@ mod tests {
                 "latest set should include other"
             );
 
-            // Both peers should be in the tracked set
+            // Both peers should be in the peer set
             assert!(
                 update.all.primary.position(&self_pk).is_some(),
-                "tracked peers should include self"
+                "peer set should include self"
             );
             assert!(
                 update.all.primary.position(&other_pk).is_some(),
-                "tracked peers should include other"
+                "peer set should include other"
             );
         });
     }

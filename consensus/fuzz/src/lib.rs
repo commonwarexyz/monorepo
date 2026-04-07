@@ -219,7 +219,7 @@ async fn setup_network<P: simplex::Simplex>(
         verifier: _,
         ..
     } = P::fixture(context, NAMESPACE, input.configuration.n);
-    let (network, mut oracle) = Network::new_with_primary_peers(
+    let (network, mut oracle) = Network::new_with_peers(
         context.with_label("network"),
         NetworkConfig {
             max_size: 1024 * 1024,

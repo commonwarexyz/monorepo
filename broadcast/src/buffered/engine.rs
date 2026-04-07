@@ -152,8 +152,8 @@ where
             network.1,
         );
         // Subscribe immediately, but keep draining mailbox and network traffic even if no peer set
-        // has been tracked yet. Remote senders are gated by the latest primary set, so polling
-        // here avoids unnecessary backpressure without making traffic from untracked peers
+        // has been registered yet. Remote senders are gated by the latest primary set, so polling
+        // here avoids unnecessary backpressure without making traffic from peers outside that set
         // resident.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 

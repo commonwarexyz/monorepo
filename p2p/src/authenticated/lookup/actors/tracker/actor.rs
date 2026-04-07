@@ -142,7 +142,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     return;
                 };
 
-                // Kill connections for peers no longer in any tracked peer set
+                // Kill connections for peers no longer in any retained peer set
                 // or whose addresses changed.
                 for peer in reset_peers {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
