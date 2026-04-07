@@ -185,12 +185,13 @@ impl Record {
         self.secondary_sets
     }
 
-    /// Returns `true` if this peer may be used as an outbound dial target.
+    /// Whether this peer should be dialed outbound (primary or persistent peers).
     ///
     /// Secondary peers remain eligible for inbound connections, but we reserve
-    /// outbound dialing for primary peers.
+    /// outbound dialing for primary peers and for persistent records
+    /// that must stay dialable without a primary count.
     pub const fn is_outbound_target(&self) -> bool {
-        self.primary_sets > 0
+        self.primary_sets > 0 || self.persistent
     }
 
     /// Check whether this record is dialable at the given time.
