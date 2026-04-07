@@ -62,12 +62,12 @@ where
         self.status
     }
 
-    /// Returns whether the tracked proposal was built by the local participant.
+    /// Returns whether the tracked proposal belongs to a locally led view.
     pub const fn proposed_locally(&self) -> bool {
         self.proposed_locally
     }
 
-    /// Updates whether the tracked proposal belongs to the local participant.
+    /// Updates whether the tracked proposal belongs to a locally led view.
     pub const fn set_proposed_locally(&mut self, proposed_locally: bool) {
         self.proposed_locally = proposed_locally;
     }
@@ -85,10 +85,10 @@ where
         self.requested_build = true;
     }
 
-    /// Records the proposal in this slot and flips the build/verify flags.
+    /// Records a verified proposal in this slot and updates its locality marker.
     ///
     /// If the slot is already populated, we ignore the proposal.
-    pub fn built(&mut self, proposal: Proposal<D>) {
+    pub fn set_verified_proposal(&mut self, proposal: Proposal<D>, proposed_locally: bool) {
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
@@ -105,7 +105,7 @@ where
         self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
-        self.proposed_locally = true;
+        self.proposed_locally = proposed_locally;
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -183,7 +183,7 @@ mod tests {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(7), View::new(3));
         let proposal = Proposal::new(round, View::new(2), Sha256Digest::from([1u8; 32]));
-        slot.built(proposal);
+        slot.set_verified_proposal(proposal, true);
         assert!(!slot.should_build());
     }
 
@@ -194,7 +194,7 @@ mod tests {
 
         let round = Rnd::new(Epoch::new(9), View::new(1));
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([2u8; 32]));
-        slot.built(proposal.clone());
+        slot.set_verified_proposal(proposal.clone(), true);
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -212,7 +212,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(1), View::new(2));
         let proposal = Proposal::new(round, View::new(1), Sha256Digest::from([10u8; 32]));
 
-        slot.built(proposal.clone());
+        slot.set_verified_proposal(proposal.clone(), true);
 
         assert_eq!(slot.proposal(), Some(&proposal));
         assert_eq!(slot.status(), Status::Verified);
@@ -227,8 +227,8 @@ mod tests {
         let round = Rnd::new(Epoch::new(17), View::new(6));
         let proposal = Proposal::new(round, View::new(5), Sha256Digest::from([11u8; 32]));
 
-        slot.built(proposal.clone());
-        slot.built(proposal.clone());
+        slot.set_verified_proposal(proposal.clone(), true);
+        slot.set_verified_proposal(proposal.clone(), true);
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
@@ -292,7 +292,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.built(honest);
+        slot.set_verified_proposal(honest, true);
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
         assert!(!slot.proposed_locally());

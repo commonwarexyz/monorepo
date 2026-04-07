@@ -575,7 +575,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(false)
     }
 
-    /// Returns whether this view's proposal was built by the local participant.
+    /// Returns whether this view belongs to a round led by the local participant.
     pub fn proposed_locally(&self, view: View) -> bool {
         self.views
             .get(&view)
