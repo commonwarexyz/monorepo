@@ -804,10 +804,10 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            // No network links: forces repair to rely on local cache only.
             let mut oracle =
                 setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
                     .await;
-            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
 
@@ -858,8 +858,7 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            // Repair should find block_two in the local cache immediately.
-            // Walk through both blocks to confirm.
+            // Walk through both blocks to confirm repair recovered them.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
