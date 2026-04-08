@@ -274,20 +274,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         record.update(address)
     }
 
-    /// Gets a primary peer set by index.
-    pub fn get_primary_set(&self, index: &u64) -> Option<&Set<C>> {
-        self.peer_sets.get(index).map(|e| &e.primary)
-    }
-
     /// Gets the peer set (primary and secondary) at the given index.
     pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
+        let entry = self.peer_sets.get(index)?;
         Some(TrackedPeers::new(
-            self.get_primary_set(index)?.clone(),
-            self.get_secondary_set(index).cloned().unwrap_or_default(),
+            entry.primary.clone(),
+            entry.secondary.clone(),
         ))
     }
 
-    /// Returns the latest primary peer set index.
+    /// Returns the latest peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.peer_sets.keys().last().copied()
     }
@@ -297,17 +293,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let index = self.latest_set_index()?;
         Some(PeerSetUpdate {
             index,
-            latest: TrackedPeers::new(
-                self.get_primary_set(&index).cloned().unwrap(),
-                self.get_secondary_set(&index).cloned().unwrap_or_default(),
-            ),
+            latest: self.get_peer_set(&index).unwrap(),
             all: self.all(),
         })
-    }
-
-    /// Gets a secondary peer set by index.
-    pub fn get_secondary_set(&self, index: &u64) -> Option<&Set<C>> {
-        self.peer_sets.get(index).map(|e| &e.secondary)
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -839,8 +827,7 @@ mod tests {
         let secondary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
 
         runtime.start(|context| async move {
-            // Same pk in primary and secondary maps with different addresses; primary wins. all() and
-            // get_secondary_set reflect primary-only role for that pk.
+            // Same pk in primary and secondary maps with different addresses; primary wins.
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let reset_peers = directory
@@ -853,9 +840,15 @@ mod tests {
 
             assert!(reset_peers.is_empty());
             assert_eq!(directory.latest_set_index(), Some(0));
+            let peer_set = directory.get_peer_set(&0).unwrap();
             assert_eq!(
-                directory.get_primary_set(&0).unwrap(),
-                &[pk_1.clone()].try_into().unwrap()
+                peer_set.primary,
+                [pk_1.clone()].try_into().unwrap()
+            );
+            assert_eq!(
+                peer_set.secondary,
+                Set::default(),
+                "overlap peer must not appear in stored secondary set"
             );
             assert!(directory.eligible(&pk_1));
             assert_eq!(
@@ -874,12 +867,6 @@ mod tests {
             );
             assert!(directory.listenable().contains(&primary_addr.ip()));
             assert!(!directory.listenable().contains(&secondary_addr.ip()));
-
-            assert_eq!(
-                directory.get_secondary_set(&0).cloned().unwrap_or_default(),
-                Set::default(),
-                "overlap peer must not appear in stored secondary set"
-            );
             let rec = directory.peers.get(&pk_1).unwrap();
             assert_eq!(rec.primary_sets(), 1);
             assert_eq!(rec.secondary_sets(), 0);
@@ -928,8 +915,8 @@ mod tests {
             assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
             assert_eq!(directory.latest_set_index(), Some(1));
             assert_eq!(
-                directory.get_primary_set(&1).unwrap(),
-                &[pk_1.clone()].try_into().unwrap()
+                directory.get_peer_set(&1).unwrap().primary,
+                [pk_1.clone()].try_into().unwrap()
             );
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),

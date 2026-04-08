@@ -293,25 +293,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         true
     }
 
-    /// Gets a primary peer set by index.
-    pub fn get_primary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.peer_sets.get(index).map(|e| e.primary.deref())
-    }
-
     /// Gets the peer set (primary and secondary) at the given index.
     pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
+        let entry = self.peer_sets.get(index)?;
         Some(TrackedPeers::new(
-            self.get_primary_set(index)?.clone(),
-            self.get_secondary_set(index).cloned().unwrap_or_default(),
+            entry.primary.deref().clone(),
+            entry.secondary.clone(),
         ))
     }
 
-    /// Gets a secondary peer set by index.
-    pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.peer_sets.get(index).map(|e| &e.secondary)
-    }
-
-    /// Returns the latest primary peer set index.
+    /// Returns the latest peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.peer_sets.keys().last().copied()
     }
@@ -321,10 +312,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let index = self.latest_set_index()?;
         Some(PeerSetUpdate {
             index,
-            latest: TrackedPeers::new(
-                self.get_primary_set(&index).cloned().unwrap(),
-                self.get_secondary_set(&index).cloned().unwrap_or_default(),
-            ),
+            latest: self.get_peer_set(&index).unwrap(),
             all: self.all(),
         })
     }
@@ -736,10 +724,10 @@ mod tests {
                 [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
             ));
 
-            let secondary = directory.get_secondary_set(&0).unwrap();
-            assert_eq!(secondary.len(), 1);
-            assert!(secondary.position(&pk_c).is_some());
-            assert!(secondary.position(&pk_b).is_none());
+            let peer_set = directory.get_peer_set(&0).unwrap();
+            assert_eq!(peer_set.secondary.len(), 1);
+            assert!(peer_set.secondary.position(&pk_c).is_some());
+            assert!(peer_set.secondary.position(&pk_b).is_none());
 
             assert_eq!(directory.peers.get(&pk_b).unwrap().primary_sets(), 1);
             assert_eq!(directory.peers.get(&pk_b).unwrap().secondary_sets(), 0);
