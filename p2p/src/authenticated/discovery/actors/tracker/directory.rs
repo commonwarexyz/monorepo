@@ -8,6 +8,7 @@ use crate::{
             types::{self, Info},
         },
     },
+    utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
     Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
@@ -24,11 +25,8 @@ use std::{
 };
 use tracing::{debug, warn};
 
-/// Primary and secondary sets registered under a single peer-set index.
-struct PeerSetsAtIndex<C: PublicKey> {
-    primary: BitSet<C>,
-    secondary: OrderedSet<C>,
-}
+/// Primary [`BitSet`] and secondary ordered [`OrderedSet`] at one peer-set index.
+type PeerSetsAtIndex<C> = PeerSetsAtIndexBase<BitSet<C>, OrderedSet<C>>;
 
 /// Configuration for the [Directory].
 pub struct Config {

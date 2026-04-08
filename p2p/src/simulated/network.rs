@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     authenticated::UnboundedMailbox,
-    utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+    utils::{
+        limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+        PeerSetsAtIndex as PeerSetsAtIndexBase,
+    },
     Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
 };
 use commonware_codec::{DecodeExt, FixedSize};
@@ -37,6 +40,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
+
+type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
@@ -83,12 +88,6 @@ pub trait SplitRouter<P: PublicKey>:
 impl<P: PublicKey, F> SplitRouter<P> for F where
     F: Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
 {
-}
-
-/// Primary and secondary sets registered under a single peer-set index.
-struct PeerSetsAtIndex<P: PublicKey> {
-    primary: Set<P>,
-    secondary: Set<P>,
 }
 
 /// Reference counts for how many retained peer sets list a peer as primary vs secondary.

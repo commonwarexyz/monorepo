@@ -16,6 +16,15 @@ pub mod limited;
 pub mod mocks;
 pub mod mux;
 
+/// Primary and secondary peer memberships at one peer-set index.
+///
+/// Import as `PeerSetsAtIndexBase` (or similar) and define a local
+/// `type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<...>` with the primary/secondary types you use.
+pub(crate) struct PeerSetsAtIndex<Primary, Secondary> {
+    pub(crate) primary: Primary,
+    pub(crate) secondary: Secondary,
+}
+
 /// A [Provider] over a static set of peers.
 #[derive(Debug, Clone)]
 pub struct StaticProvider<P: PublicKey> {

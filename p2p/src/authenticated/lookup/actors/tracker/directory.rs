@@ -4,6 +4,7 @@ use crate::{
         dialing::{earliest, DialStatus, Dialable, ReserveResult},
         lookup::{actors::tracker::ingress::Releaser, metrics},
     },
+    utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
     types::Address,
     Ingress, PeerSetUpdate, TrackedPeers,
 };
@@ -24,11 +25,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-/// Primary and secondary sets registered under a single peer-set index.
-struct PeerSetsAtIndex<C: PublicKey> {
-    primary: Set<C>,
-    secondary: Set<C>,
-}
+type PeerSetsAtIndex<C> = PeerSetsAtIndexBase<Set<C>, Set<C>>;
 
 /// Configuration for the [Directory].
 pub struct Config {
