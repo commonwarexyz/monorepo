@@ -406,7 +406,7 @@ where
         self.cache.load_persisted_epochs().await;
 
         // If finalizations extend beyond our last stored finalized block,
-        // try to fill them from local data (e.g. notarized blocks in the
+        // try to fill them from local data (notarized blocks in the
         // buffer/cache) and fetch the rest by commitment.
         let mut wrote = self
             .repair_trailing_finalized(&mut buffer, &mut resolver, &mut application)
@@ -1501,7 +1501,7 @@ where
 
     /// Looks for a block anywhere in local storage using only the digest.
     ///
-    /// This is used when we only have a digest (e.g., during gap repair following
+    /// This is used when we only have a digest (during gap repair following
     /// parent links).
     async fn find_block_by_digest<Buf: Buffer<V>>(
         &self,
@@ -1516,7 +1516,7 @@ where
 
     /// Looks for a block anywhere in local storage using the full commitment.
     ///
-    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// This is used when we have a full commitment (from notarizations/finalizations).
     /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
@@ -1568,7 +1568,9 @@ where
                 )
                 .await;
         }
-        resolver.fetch(Request::<V::Commitment>::Block(commitment)).await;
+        resolver
+            .fetch(Request::<V::Commitment>::Block(commitment))
+            .await;
         false
     }
 
