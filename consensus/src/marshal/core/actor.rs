@@ -1530,24 +1530,12 @@ where
             .await
     }
 
-    /// Repair finalized heights beyond the last stored finalized block.
+    /// Ensure the latest finalized height has a corresponding block stored.
     ///
-    /// After restart, `finalizations_by_height` may contain entries for heights
-    /// that have no corresponding block in `finalized_blocks`. Rather than
-    /// walking forward over every such height (which may span a large range),
-    /// this method walks backwards from the tip over known finalization ranges
-    /// until it finds the first height where we have both a finalization
-    /// certificate and a block locally.
-    ///
-    /// That single block is stored as an anchor in `finalized_blocks`. This is
-    /// sufficient because:
-    /// - `try_repair_gaps` will walk backward from the anchor through parent
-    ///   links to fill the gap between the anchor and the contiguous range.
-    /// - Fetch requests are issued for all finalized heights above the anchor
-    ///   that are missing blocks, seeding the resolver for runtime backfill.
-    ///
-    /// Only trailing heights (beyond the last contiguous `finalized_blocks`
-    /// range) are considered. Internal gaps are handled by `try_repair_gaps`.
+    /// If the block is available locally (buffer or cache), it is stored
+    /// directly. Otherwise, a fetch request is issued to the resolver.
+    /// Once stored, `try_repair_gaps` fills backward from this anchor
+    /// through parent links.
     ///
     /// Returns `true` if a block was written locally and a sync is needed.
     async fn repair_trailing_finalized<Buf: Buffer<V>>(
@@ -1556,45 +1544,32 @@ where
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        let start = self.last_processed_height.next();
-        let (current_range_end, _) = self.finalized_blocks.next_gap(start);
-        let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
-        let ranges: Vec<_> = self
-            .finalizations_by_height
-            .ranges_from(trailing_start)
-            .collect();
-        let mut requests = Vec::new();
-        let mut wrote = false;
-        'outer: for (range_start, range_end) in ranges.into_iter().rev() {
-            let lo = range_start.max(trailing_start);
-            for h in (lo.get()..=range_end.get()).rev() {
-                let height = Height::new(h);
-                let finalization = self
-                    .get_finalization_by_height(height)
-                    .await
-                    .expect("finalization missing");
-                let commitment = finalization.proposal.payload;
-                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    let digest = block.digest();
-                    wrote = self
-                        .store_finalization(
-                            height,
-                            digest,
-                            block,
-                            Some(finalization),
-                            application,
-                            buffer,
-                        )
-                        .await;
-                    break 'outer;
-                }
-                requests.push(Request::<V::Commitment>::Block(commitment));
-            }
+        let Some(height) = self.finalizations_by_height.last_index() else {
+            return false;
+        };
+        if height <= self.last_processed_height {
+            return false;
         }
-        if !requests.is_empty() {
-            resolver.fetch_all(requests).await;
+        let finalization = self
+            .get_finalization_by_height(height)
+            .await
+            .expect("finalization missing");
+        let commitment = finalization.proposal.payload;
+        if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+            let digest = block.digest();
+            return self
+                .store_finalization(
+                    height,
+                    digest,
+                    block,
+                    Some(finalization),
+                    application,
+                    buffer,
+                )
+                .await;
         }
-        wrote
+        resolver.fetch(Request::<V::Commitment>::Block(commitment)).await;
+        false
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
