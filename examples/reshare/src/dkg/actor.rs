@@ -302,9 +302,10 @@ where
                 )
             };
 
-            // Primary peers are the dealers for the active epoch. Secondary peers are the
-            // active-epoch players and the next players we allow to connect early.
-            // Dealers may also appear among players; `track` keeps primary role only.
+            // Primary = dealers (drive the DKG round/running consensus)
+            // Secondary = current players + next-epoch players (give time to sync)
+            //
+            // Overlapping keys are deduplicated as primary (so we don't need to do any filtering here)
             self.manager
                 .track(
                     epoch.get(),
