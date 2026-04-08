@@ -1534,21 +1534,16 @@ where
     ///
     /// After restart, `finalizations_by_height` may contain entries for heights
     /// that have no corresponding block in `finalized_blocks`. This method
-    /// attempts to fill them from local data (buffer, cache) first, then issues
-    /// `Request::Block` fetches for any that remain missing.
+    /// walks backwards from the tip until it finds a height where we have both
+    /// a finalization certificate and a block locally. That block is stored as
+    /// an anchor, and fetch requests are issued for all heights above it where
+    /// we have a finalization but no block. Internal backfilling during runtime
+    /// will fill in the rest.
     ///
     /// Only trailing heights (beyond the last contiguous `finalized_blocks`
-    /// range) need this treatment. Internal gaps -- where a later finalized
-    /// block exists in the archive -- are handled by `try_repair_gaps`, which
-    /// walks backward through parent links from that anchor block.
+    /// range) are considered. Internal gaps are handled by `try_repair_gaps`.
     ///
-    /// Heights where a block exists in `finalized_blocks` but the finalization
-    /// is missing do not need repair: `store_finalization` accepts an optional
-    /// finalization, and `try_dispatch_blocks` delivers blocks to the
-    /// application based solely on contiguous `finalized_blocks` entries
-    /// without requiring a corresponding finalization row.
-    ///
-    /// Returns `true` if any blocks were written locally and a sync is needed.
+    /// Returns `true` if a block was written locally and a sync is needed.
     async fn repair_trailing_finalized<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
@@ -1561,9 +1556,8 @@ where
         let start = self.last_processed_height.next();
         let (current_range_end, _) = self.finalized_blocks.next_gap(start);
         let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
-        let mut wrote = false;
         let mut requests = Vec::new();
-        for h in trailing_start.get()..=tip.get() {
+        for h in (trailing_start.get()..=tip.get()).rev() {
             let height = Height::new(h);
             let Some(finalization) = self.get_finalization_by_height(height).await else {
                 continue;
@@ -1571,7 +1565,7 @@ where
             let commitment = finalization.proposal.payload;
             if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                 let digest = block.digest();
-                wrote |= self
+                let wrote = self
                     .store_finalization(
                         height,
                         digest,
@@ -1581,14 +1575,17 @@ where
                         buffer,
                     )
                     .await;
-            } else {
-                requests.push(Request::<V::Commitment>::Block(commitment));
+                if !requests.is_empty() {
+                    resolver.fetch_all(requests).await;
+                }
+                return wrote;
             }
+            requests.push(Request::<V::Commitment>::Block(commitment));
         }
         if !requests.is_empty() {
             resolver.fetch_all(requests).await;
         }
-        wrote
+        false
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
