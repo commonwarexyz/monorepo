@@ -3852,6 +3852,14 @@ mod tests {
         }
     }
 
+    /// After restart, a leader-owned proposal that was already voted on should
+    /// never trigger application verification. Tests four paths that can
+    /// re-introduce the proposal after restart:
+    ///
+    /// 1. ProposalReturns: proposal re-delivered via mailbox.
+    /// 2. DurableLocalNotarize: local notarize vote observed on the network.
+    /// 3. RecoveredNotarization: notarization certificate recovered.
+    /// 4. RecoveredFinalization: finalization certificate recovered.
     fn no_self_verify_after_restart<S, F>(mut fixture: F, case: RestartVerifyCase)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -3935,6 +3943,8 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
+
+            // Register an observer to intercept broadcasted votes (for DurableLocalNotarize case).
             let observer = participants[1].clone();
             let (_, mut observer_vote_receiver) = oracle
                 .control(observer.clone())
@@ -3961,6 +3971,7 @@ mod tests {
                 cert_sender,
             );
 
+            // Wait for startup and advance to view 2 where we are the leader.
             let (_, leader) = wait_for_startup_update(&mut batcher_receiver).await;
             assert_eq!(leader, Participant::new(4));
 
@@ -3974,7 +3985,9 @@ mod tests {
             )
             .await;
 
+            // Capture the proposal we produced as leader.
             let proposal = match case {
+                // Wait for the vote to be sent over the network.
                 RestartVerifyCase::DurableLocalNotarize => loop {
                     select! {
                         msg = batcher_receiver.recv() => match msg.unwrap() {
@@ -3995,6 +4008,7 @@ mod tests {
                         },
                     }
                 },
+                // Wait for the vote to be constructed locally.
                 RestartVerifyCase::ProposalReturns
                 | RestartVerifyCase::RecoveredCertificate(_) => loop {
                     select! {
@@ -4014,8 +4028,10 @@ mod tests {
                 },
             };
 
+            // Restart the voter (reuses the same journal partition).
             handle.abort();
 
+            // Create new application with a verify observer to detect spurious calls.
             let verify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
             let tracker = verify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -4075,6 +4091,7 @@ mod tests {
                 cert_sender,
             );
 
+            // Verify we restarted in the same leader-owned view.
             let (current, leader) = wait_for_startup_update(&mut batcher_receiver).await;
             assert_eq!(current, target_view, "restart should stay in the leader-owned view");
             assert_eq!(
@@ -4083,12 +4100,15 @@ mod tests {
                 "restart should remain in a leader-owned view"
             );
 
+            // Re-introduce the proposal via the path under test.
             match case {
                 RestartVerifyCase::ProposalReturns | RestartVerifyCase::DurableLocalNotarize => {
+                    // Re-deliver the proposal and allow time for any verify attempt.
                     mailbox.proposal(proposal).await;
                     context.sleep(Duration::from_millis(100)).await;
                 }
                 RestartVerifyCase::RecoveredCertificate(RecoveredCertificateKind::Notarization) => {
+                    // Send notarization and wait for the finalize vote.
                     let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
                     mailbox
                         .recovered(Certificate::Notarization(notarization))
@@ -4112,6 +4132,7 @@ mod tests {
                     }
                 }
                 RestartVerifyCase::RecoveredCertificate(RecoveredCertificateKind::Finalization) => {
+                    // Send finalization and wait for the view to advance.
                     let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                     mailbox
                         .recovered(Certificate::Finalization(finalization))
@@ -4141,6 +4162,7 @@ mod tests {
                 }
             }
 
+            // Verify that no application verify calls were made.
             assert!(
                 verify_calls.lock().is_empty(),
                 "application verify should not run for a leader-owned proposal after restart"

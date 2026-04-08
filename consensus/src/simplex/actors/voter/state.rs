@@ -1758,6 +1758,8 @@ mod tests {
         });
     }
 
+    /// Replaying a local notarize vote for a leader-owned proposal should
+    /// restore the proposal as verified and suppress duplicate vote construction.
     #[test]
     fn replayed_local_notarize_restores_verified_leader_proposal() {
         let runtime = deterministic::Runner::default();
@@ -1788,21 +1790,25 @@ mod tests {
             );
             state.set_genesis(test_genesis());
 
+            // Enter the view where we are the leader.
             assert!(state.enter_view(view));
             state.set_leader(view, None);
             assert_eq!(state.leader_index(view), Some(Participant::new(0)));
 
+            // Replay our own notarize vote.
             state.replay(&Artifact::Notarize(local_vote));
 
+            // Proposal should be restored in the round.
             let round = state.views.get(&view).expect("replayed round must exist");
             assert_eq!(round.proposal(), Some(&proposal));
+
+            // No duplicate notarize vote should be constructed.
             assert!(
                 state.construct_notarize(view).is_none(),
                 "replay should restore that we already emitted the local notarize vote"
             );
 
-            // Replay should restore the leader-owned proposal as already verified,
-            // so there is never a later verification opportunity.
+            // No verification request should be emitted (leader-owned).
             assert!(state.try_verify().is_none());
         });
     }
