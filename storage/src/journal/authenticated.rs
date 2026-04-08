@@ -435,19 +435,20 @@ where
             .into());
         };
 
-        // Apply ancestor items in root-to-tip order. Already-committed
+        // Apply ancestor item batches in root-to-tip order. Already-committed
         // batches are skipped by tracking cumulative leaf count.
         // Batches are collected into a single append_many call to acquire the
         // journal's write lock once instead of per-batch.
         let committed_leaves = self.journal.size().await;
-        let mut leaf_end = *Location::<F>::try_from(base_size)?;
+        let base_leaves = *Location::<F>::try_from(base_size)?;
+        let mut batch_leaf_end = base_leaves;
         let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
-        for ancestor_items in &batch.ancestor_items {
-            leaf_end += ancestor_items.len() as u64;
-            if skip_ancestors && leaf_end <= committed_leaves {
+        for ancestor in &batch.ancestor_items {
+            batch_leaf_end += ancestor.len() as u64;
+            if skip_ancestors && batch_leaf_end <= committed_leaves {
                 continue;
             }
-            batches.push(ancestor_items);
+            batches.push(ancestor);
         }
         if !batch.items.is_empty() {
             batches.push(&batch.items);
@@ -2475,7 +2476,7 @@ mod tests {
     }
 
     /// `apply_batch` works correctly across a 3-level chain.
-    async fn test_apply_batch_cross_segment_inner<F: Family + PartialEq>(context: Context) {
+    async fn test_apply_batch_cross_batch_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
@@ -2522,15 +2523,15 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_apply_batch_cross_segment_mmr() {
+    fn test_apply_batch_cross_batch_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_cross_segment_inner::<mmr::Family>);
+        executor.start(test_apply_batch_cross_batch_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_apply_batch_cross_segment_mmb() {
+    fn test_apply_batch_cross_batch_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_cross_segment_inner::<mmb::Family>);
+        executor.start(test_apply_batch_cross_batch_inner::<mmb::Family>);
     }
 
     /// merkleize_with produces the same root as add + merkleize.
@@ -2604,8 +2605,7 @@ mod tests {
         executor.start(test_merkleize_with_apply_inner::<mmb::Family>);
     }
 
-    /// merkleize_with shares the Arc: the caller's clone and the batch's
-    /// internal segment point to the same allocation.
+    /// merkleize_with stores the caller's Arc directly (no deep copy).
     async fn test_merkleize_with_shares_arc_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "mw-arc", 3).await;
 

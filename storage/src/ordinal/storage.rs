@@ -334,6 +334,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
     /// Retrieve the first index in the [Ordinal].
     pub fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()

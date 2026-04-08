@@ -401,8 +401,9 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
 
-        // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_blocks(&mut application).await;
+        // Load persisted cache epochs so find_block can discover blocks
+        // written before the last shutdown.
+        self.cache.load_persisted_epochs().await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         if self
@@ -411,6 +412,9 @@ where
         {
             self.sync_finalized().await;
         }
+
+        // Attempt to dispatch the next finalized block to the application, if it is ready.
+        self.try_dispatch_blocks(&mut application).await;
 
         select_loop! {
             self.context,
@@ -1488,7 +1492,7 @@ where
 
     /// Looks for a block anywhere in local storage using only the digest.
     ///
-    /// This is used when we only have a digest (e.g., during gap repair following
+    /// This is used when we only have a digest (during gap repair following
     /// parent links).
     async fn find_block_by_digest<Buf: Buffer<V>>(
         &self,
@@ -1503,7 +1507,7 @@ where
 
     /// Looks for a block anywhere in local storage using the full commitment.
     ///
-    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// This is used when we have a full commitment (from notarizations/finalizations).
     /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
@@ -1521,6 +1525,11 @@ where
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
     ///
+    /// This also handles the "trailing" case where finalizations exist beyond
+    /// the last stored block (the block data was lost before a crash). The
+    /// trailing block is anchored first so that backward gap repair can fill
+    /// inward from it.
+    ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     async fn try_repair_gaps<Buf: Buffer<V>>(
@@ -1531,6 +1540,44 @@ where
     ) -> bool {
         let mut wrote = false;
         let start = self.last_processed_height.next();
+
+        // If finalizations extend beyond the last stored block, anchor the
+        // trailing block so the gap repair loop below can walk backward from it.
+        if let Some(last_finalized) = self.finalizations_by_height.last_index() {
+            let have_block = self
+                .finalized_blocks
+                .last_index()
+                .is_some_and(|last| last >= last_finalized);
+            if last_finalized > self.last_processed_height && !have_block {
+                // Get the finalization for the last finalized block.
+                let finalization = self
+                    .get_finalization_by_height(last_finalized)
+                    .await
+                    .expect("finalization missing");
+                let commitment = finalization.proposal.payload;
+                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    // If found, persist the block.
+                    let digest = block.digest();
+                    wrote |= self
+                        .store_finalization(
+                            last_finalized,
+                            digest,
+                            block,
+                            Some(finalization),
+                            application,
+                            buffer,
+                        )
+                        .await;
+                } else {
+                    // Request the missing block.
+                    resolver
+                        .fetch(Request::<V::Commitment>::Block(commitment))
+                        .await;
+                }
+            }
+        }
+
+        // Fill internal gaps by walking backward from each gap's end block.
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
@@ -1591,10 +1638,10 @@ where
         let missing_items = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let requests = missing_items
+        let requests: Vec<_> = missing_items
             .into_iter()
             .map(|height| Request::<V::Commitment>::Finalized { height })
-            .collect::<Vec<_>>();
+            .collect();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
         }

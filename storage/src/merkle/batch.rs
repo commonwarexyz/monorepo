@@ -34,13 +34,13 @@
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
 //! plus `Arc` refs to each ancestor's data, collected during
-//! [`UnmerkleizedBatch::merkleize`]. These ancestor segments are used by
+//! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! segments. Committed-and-dropped ancestors truncate the `Weak` walk, but their
+//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, but their
 //! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
@@ -48,8 +48,8 @@
 //! ancestor data. After merkleize, the parent is downgraded to `Weak`.
 //!
 //! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
-//! holds at most one ancestor segment (its immediate parent's data, as an `Arc` ref).
-//! When that batch is applied and dropped, the ancestor segment is freed. Memory per
+//! holds at most one ancestor batch (its immediate parent's data, as an `Arc` ref).
+//! When that batch is applied and dropped, the ancestor data is freed. Memory per
 //! batch is O(batch size), never growing with chain depth.
 //!
 //! [`MerkleizedBatch::get_node`] resolves positions stored in the batch chain only.
@@ -318,8 +318,8 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        // Collect ancestor segments by walking the parent chain (strong Arc + Weak walk).
-        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_segments(&self.parent);
+        // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
+        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
@@ -419,11 +419,11 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     }
 }
 
-/// Collect ancestor segments by walking the parent + its Weak chain.
-/// Returns (appended, overwrites) in root-to-tip order. Skips empty segments
+/// Collect ancestor batch data by walking the parent + its Weak chain.
+/// Returns (appended, overwrites) in root-to-tip order. Skips empty batches
 /// (e.g. root batches from `from_mem`).
 #[allow(clippy::type_complexity)]
-fn collect_ancestor_segments<F: Family, D: Digest>(
+fn collect_ancestor_batches<F: Family, D: Digest>(
     parent: &Arc<MerkleizedBatch<F, D>>,
 ) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
     let mut appended = Vec::new();
