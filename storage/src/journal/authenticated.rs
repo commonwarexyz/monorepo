@@ -141,7 +141,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
     parent: Option<Weak<Self>>,
-    /// Ancestor item segments collected at merkleize time (root-to-tip order).
+    /// Ancestor item batches collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
 
@@ -435,26 +435,26 @@ where
             .into());
         };
 
-        // Apply ancestor item segments in root-to-tip order. Already-committed
-        // segments are skipped by tracking cumulative leaf count.
-        // Segments are collected into a single append_many call to acquire the
-        // journal's write lock once instead of per-segment.
+        // Apply ancestor items in root-to-tip order. Already-committed
+        // batches are skipped by tracking cumulative leaf count.
+        // Batches are collected into a single append_many call to acquire the
+        // journal's write lock once instead of per-batch.
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
-        let mut seg_leaf_end = base_leaves;
-        let mut segments: Vec<&[C::Item]> = Vec::new();
-        for seg in &batch.ancestor_items {
-            seg_leaf_end += seg.len() as u64;
-            if skip_ancestors && seg_leaf_end <= committed_leaves {
+        let mut leaf_end = base_leaves;
+        let mut batches: Vec<&[C::Item]> = Vec::new();
+        for ancestor_items in &batch.ancestor_items {
+            leaf_end += ancestor_items.len() as u64;
+            if skip_ancestors && leaf_end <= committed_leaves {
                 continue;
             }
-            segments.push(seg);
+            batches.push(ancestor_items);
         }
         if !batch.items.is_empty() {
-            segments.push(&batch.items);
+            batches.push(&batch.items);
         }
-        if !segments.is_empty() {
-            self.journal.append_many(Many::Nested(&segments)).await?;
+        if !batches.is_empty() {
+            self.journal.append_many(Many::Nested(&batches)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
