@@ -91,11 +91,6 @@ impl<const N: usize> ChunkOverlay<N> {
         chunk[rel / 8] &= !(1 << (rel % 8));
     }
 
-    /// Iterate dirty chunk indices (sorted, since backed by BTreeMap).
-    pub(crate) fn dirty_chunks(&self) -> impl Iterator<Item = &usize> {
-        self.chunks.keys()
-    }
-
     /// Get a dirty chunk's bytes, or `None` if unmodified.
     pub(crate) fn get(&self, idx: usize) -> Option<&[u8; N]> {
         self.chunks.get(&idx)
@@ -502,8 +497,6 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    let old_grafted_leaves = *grafted_parent.leaves() as usize;
-
     let batch_len = inner.journal_batch.items().len();
     let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
 
@@ -516,21 +509,14 @@ where
         &inner.ancestor_diffs,
     );
 
-    // Chunks needing grafted MMR recomputation:
-    // - New complete chunks beyond old_grafted_leaves.
-    // - Dirty existing chunks (from the overlay).
+    // Grafted MMR recomputation: iterate complete chunks in the overlay.
+    // This covers both new chunks and dirty existing chunks in a single pass.
     let new_grafted_leaves = overlay.complete_chunks();
-    let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-        .chain(
-            overlay
-                .dirty_chunks()
-                .filter(|&&idx| idx < old_grafted_leaves)
-                .copied(),
-        )
-        .map(|i| {
-            let chunk = *overlay.get(i).expect("chunk index must be in overlay");
-            (i, chunk)
-        });
+    let chunks_to_update = overlay
+        .chunks
+        .iter()
+        .filter(|(&idx, _)| idx < new_grafted_leaves)
+        .map(|(&idx, &chunk)| (idx, chunk));
     let ops_mmr_adapter =
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
     let hasher = StandardHasher::<H>::new();
