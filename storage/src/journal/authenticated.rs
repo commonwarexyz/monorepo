@@ -121,7 +121,10 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         );
 
         #[cfg(feature = "std")]
-        if let Some(pool) = self.inner.pool().filter(|_| items.len() >= batch::MIN_TO_PARALLELIZE)
+        if let Some(pool) = self
+            .inner
+            .pool()
+            .filter(|_| items.len() >= batch::MIN_TO_PARALLELIZE)
         {
             // Parallel path: encode items and compute leaf digests on the thread pool,
             // then feed the pre-computed digests sequentially into the MMR batch.

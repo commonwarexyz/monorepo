@@ -786,9 +786,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let mut batch = batch::MerkleizedBatch::from_mem(&inner.mem);
         #[cfg(feature = "std")]
         if let Some(pool) = &self.pool {
-            Arc::get_mut(&mut batch)
-                .expect("just created")
-                .pool = Some(pool.clone());
+            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
         }
         batch
     }
