@@ -217,11 +217,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Track new primary and secondary peer sets for the given index.
-    pub fn track(
-        &mut self,
-        index: u64,
-        peers: TrackedPeers<C>,
-    ) -> bool {
+    pub fn track(&mut self, index: u64, peers: TrackedPeers<C>) -> bool {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");

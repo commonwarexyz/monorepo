@@ -4,18 +4,15 @@ use crate::{
         dialing::{earliest, DialStatus, Dialable, ReserveResult},
         lookup::{actors::tracker::ingress::Releaser, metrics},
     },
-    utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
     types::Address,
+    utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
     AddressableTrackedPeers, Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{
-    ordered::Set,
-    IpAddrExt, PrioritySet, SystemTimeExt,
-};
+use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
@@ -153,11 +150,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// removed from all tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
-    pub fn track(
-        &mut self,
-        index: u64,
-        peers: AddressableTrackedPeers<C>,
-    ) -> Option<Set<C>> {
+    pub fn track(&mut self, index: u64, peers: AddressableTrackedPeers<C>) -> Option<Set<C>> {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -543,7 +536,9 @@ mod tests {
         Address::Symmetric(socket)
     }
 
-    fn primary(map: Map<ed25519::PublicKey, Address>) -> AddressableTrackedPeers<ed25519::PublicKey> {
+    fn primary(
+        map: Map<ed25519::PublicKey, Address>,
+    ) -> AddressableTrackedPeers<ed25519::PublicKey> {
         AddressableTrackedPeers::from(map)
     }
 
@@ -614,9 +609,7 @@ mod tests {
             let reset_peers = directory
                 .track(
                     2,
-                    primary(
-                        [(pk_3.clone(), addr(addr_3))].try_into().unwrap(),
-                    ),
+                    primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert_eq!(reset_peers.len(), 1, "One peer should be reset");
@@ -628,9 +621,7 @@ mod tests {
             let reset_peers = directory
                 .track(
                     3,
-                    primary(
-                        [(pk_3.clone(), addr(addr_3))].try_into().unwrap(),
-                    ),
+                    primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(reset_peers.is_empty(), "No peers should be reset");
@@ -696,9 +687,7 @@ mod tests {
             assert!(directory
                 .track(
                     2,
-                    primary(
-                        [(primary_2, addr(primary_2_addr))].try_into().unwrap(),
-                    ),
+                    primary([(primary_2, addr(primary_2_addr))].try_into().unwrap(),),
                 )
                 .is_some());
             assert!(!directory.peers.contains_key(&secondary_0));
@@ -754,9 +743,7 @@ mod tests {
 
             directory.track(
                 1,
-                primary(
-                    [(pk_1.clone(), addr(addr_4))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_4))].try_into().unwrap()),
             );
             assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
             assert_eq!(
@@ -771,9 +758,7 @@ mod tests {
 
             directory.track(
                 2,
-                primary(
-                    [(my_pk.clone(), addr(addr_3))].try_into().unwrap(),
-                ),
+                primary([(my_pk.clone(), addr(addr_3))].try_into().unwrap()),
             );
             assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
             assert_eq!(
@@ -789,9 +774,7 @@ mod tests {
             let reset_peers = directory
                 .track(
                     3,
-                    primary(
-                        [(my_pk.clone(), addr(my_addr))].try_into().unwrap(),
-                    ),
+                    primary([(my_pk.clone(), addr(my_addr))].try_into().unwrap()),
                 )
                 .unwrap();
             assert_eq!(reset_peers.len(), 1);
@@ -800,9 +783,7 @@ mod tests {
             let reset_peers = directory
                 .track(
                     4,
-                    primary(
-                        [(my_pk.clone(), addr(addr_3))].try_into().unwrap(),
-                    ),
+                    primary([(my_pk.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert_eq!(reset_peers.len(), 1);
@@ -991,9 +972,7 @@ mod tests {
             let initial_reset = directory
                 .track(
                     0,
-                    primary(
-                        [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
-                    ),
+                    primary([(pk_1.clone(), addr(old_addr))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(initial_reset.is_empty());
@@ -1123,9 +1102,7 @@ mod tests {
             directory
                 .track(
                     0,
-                    primary(
-                        [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                    ),
+                    primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
                 )
                 .unwrap();
 
@@ -1173,9 +1150,7 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
             assert!(
@@ -1193,9 +1168,7 @@ mod tests {
             // Update the address while blocked
             directory.track(
                 1,
-                primary(
-                    [(pk_1.clone(), addr(addr_2))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_2))].try_into().unwrap()),
             );
             assert!(
                 directory.blocked.contains(&pk_1),
@@ -1553,9 +1526,7 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Block the peer
@@ -1650,9 +1621,7 @@ mod tests {
             // Add pk_1 and block it
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
@@ -1669,9 +1638,7 @@ mod tests {
             // The blocked metric should remain since the block persists
             directory.track(
                 1,
-                primary(
-                    [(pk_2.clone(), addr(addr_2))].try_into().unwrap(),
-                ),
+                primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
             );
             assert!(
                 !directory.peers.contains_key(&pk_1),
@@ -1689,9 +1656,7 @@ mod tests {
             // Re-add pk_1 - should still be blocked because block persists
             directory.track(
                 2,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
             assert!(
                 directory.blocked.contains(&pk_1),
@@ -2082,9 +2047,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be dialable before blocking
@@ -2136,9 +2099,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // First reservation succeeds.
@@ -2190,9 +2151,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Reserve and release.
@@ -2258,9 +2217,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Block the only peer. No peers are immediately dialable, but
@@ -2298,9 +2255,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             directory.block(&pk_1);
@@ -2349,9 +2304,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             directory.block(&pk_1);
@@ -2397,9 +2350,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be acceptable before blocking
@@ -2453,9 +2404,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Peer's IP should be listenable before blocking
@@ -2509,9 +2458,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be eligible before blocking
@@ -2565,9 +2512,7 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             assert_eq!(
@@ -2636,15 +2581,11 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
             directory.track(
                 1,
-                primary(
-                    [(pk_2.clone(), addr(addr_2))].try_into().unwrap(),
-                ),
+                primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
             );
 
             let success = directory.overwrite(&pk_1, addr(addr_3));
@@ -2677,9 +2618,7 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
 
@@ -2749,9 +2688,7 @@ mod tests {
 
             directory.track(
                 0,
-                primary(
-                    [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
-                ),
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
             // First update with different address should succeed
