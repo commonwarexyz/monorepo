@@ -3402,12 +3402,14 @@ pub fn set_floor_without_pruning_preserves_archives<H: TestHarness>() {
         deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let oracle = setup_network(context.clone(), None);
         let Fixture {
             participants,
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                .await;
 
         let validator = participants[0].clone();
         let partition_prefix = format!("set-floor-no-prune-test-{}", validator.clone());

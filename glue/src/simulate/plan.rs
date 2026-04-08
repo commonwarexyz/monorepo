@@ -15,7 +15,7 @@ use commonware_p2p::{
     Manager as _,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Spawner};
-use commonware_utils::{channel::mpsc, TryCollect};
+use commonware_utils::{channel::mpsc, ordered::Set, NZUsize, TryCollect};
 use rand::seq::SliceRandom;
 use std::{
     collections::HashSet,
@@ -381,7 +381,7 @@ impl<D: EngineDefinition> Plan<D> {
             simulated::Config {
                 max_size: self.max_message_size,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: NZUsize!(3),
             },
         );
         network.start();
@@ -394,7 +394,7 @@ impl<D: EngineDefinition> Plan<D> {
                 self.participants
                     .iter()
                     .cloned()
-                    .try_collect()
+                    .try_collect::<Set<D::PublicKey>>()
                     .expect("participants must be unique"),
             )
             .await;

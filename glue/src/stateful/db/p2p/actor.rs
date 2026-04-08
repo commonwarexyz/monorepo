@@ -368,7 +368,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, sha256, Sha256};
-    use commonware_p2p::Provider;
+    use commonware_p2p::{Provider, TrackedPeers};
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -376,9 +376,7 @@ mod tests {
         qmdb::any::{unordered::fixed, FixedConfig},
         translator::TwoCap,
     };
-    use commonware_utils::{
-        channel::oneshot, ordered::Set, sync::AsyncRwLock, NZUsize, NZU16, NZU64,
-    };
+    use commonware_utils::{channel::oneshot, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
     use std::{num::NonZeroU64, sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]
@@ -387,7 +385,7 @@ mod tests {
     impl Provider for DummyProvider {
         type PublicKey = ed25519::PublicKey;
 
-        async fn peer_set(&mut self, _id: u64) -> Option<Set<Self::PublicKey>> {
+        async fn peer_set(&mut self, _id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
             None
         }
 
