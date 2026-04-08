@@ -68,18 +68,13 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner,
-    };
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
         metadata::{self, Metadata},
         translator::TwoCap,
     };
-    use commonware_utils::{
-        channel::oneshot,
-        NZUsize,
-    };
+    use commonware_utils::{channel::oneshot, NZUsize};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
         time::Duration,
@@ -370,12 +365,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -702,12 +694,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -722,7 +711,13 @@ mod tests {
             let block_five = make_raw_block(block_four.digest(), Height::new(5), 500);
 
             let mut finalizations = Vec::new();
-            let blocks = [&block_one, &block_two, &block_three, &block_four, &block_five];
+            let blocks = [
+                &block_one,
+                &block_two,
+                &block_three,
+                &block_four,
+                &block_five,
+            ];
             for (i, block) in blocks.iter().enumerate() {
                 let view = View::new(block.height().get());
                 let parent_view = if i == 0 {
@@ -731,11 +726,7 @@ mod tests {
                     View::new(blocks[i - 1].height().get())
                 };
                 finalizations.push(StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), view),
-                        parent_view,
-                        block.digest(),
-                    ),
+                    Proposal::new(Round::new(Epoch::zero(), view), parent_view, block.digest()),
                     &schemes,
                     3,
                 ));
@@ -757,11 +748,8 @@ mod tests {
                         (*block).clone(),
                     )
                     .await;
-                StandardHarness::report_finalization(
-                    &mut peer_mailbox,
-                    finalizations[i].clone(),
-                )
-                .await;
+                StandardHarness::report_finalization(&mut peer_mailbox, finalizations[i].clone())
+                    .await;
             }
             context.sleep(Duration::from_millis(200)).await;
 
@@ -793,9 +781,7 @@ mod tests {
 
             // Poll until all missing blocks are repaired (check the last one).
             loop {
-                if recovering_mailbox.get_block(Height::new(5)).await
-                    == Some(block_five.clone())
-                {
+                if recovering_mailbox.get_block(Height::new(5)).await == Some(block_five.clone()) {
                     return;
                 }
                 context.sleep(Duration::from_millis(200)).await;
@@ -815,12 +801,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -921,12 +904,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
