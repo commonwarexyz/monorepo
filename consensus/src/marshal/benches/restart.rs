@@ -586,10 +586,10 @@ fn bench_restart(c: &mut Criterion) {
                     let consensus = consensus.clone();
                     let partition_prefix = partition_prefix.clone();
                     b.to_async(&runner).iter_custom(move |iters| {
-                        let ctx = context::get::<RuntimeContext>();
                         let consensus = consensus.clone();
                         let partition_prefix = partition_prefix.clone();
                         async move {
+                            let ctx = context::get::<RuntimeContext>();
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
                                 total += match variant {
