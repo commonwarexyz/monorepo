@@ -1533,6 +1533,17 @@ where
     /// attempts to fill them from local data (buffer, cache) first, then issues
     /// `Request::Block` fetches for any that remain missing.
     ///
+    /// Only trailing heights (beyond the last contiguous `finalized_blocks`
+    /// range) need this treatment. Internal gaps -- where a later finalized
+    /// block exists in the archive -- are handled by `try_repair_gaps`, which
+    /// walks backward through parent links from that anchor block.
+    ///
+    /// Heights where a block exists in `finalized_blocks` but the finalization
+    /// is missing do not need repair: `store_finalization` accepts an optional
+    /// finalization, and `try_dispatch_blocks` delivers blocks to the
+    /// application based solely on contiguous `finalized_blocks` entries
+    /// without requiring a corresponding finalization row.
+    ///
     /// Returns `true` if any blocks were written locally and a sync is needed.
     async fn repair_trailing_finalized<Buf: Buffer<V>>(
         &mut self,
