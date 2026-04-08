@@ -616,15 +616,132 @@ mod tests {
         }
     }
 
+    /// Returns the mtime of `path`, or `None` if the file does not exist.
+    fn mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    }
+
+    /// Returns true if any source mtime is strictly newer than `target`'s
+    /// mtime, or if `target` does not exist.
+    fn any_newer(target: &std::path::Path, sources: &[PathBuf]) -> bool {
+        let Some(target_mtime) = mtime(target) else {
+            return true;
+        };
+        sources
+            .iter()
+            .any(|src| mtime(src).map(|t| t > target_mtime).unwrap_or(false))
+    }
+
+    /// Rebuilds `tla-build/main.tla` via `quint compile` if any of the
+    /// `.qnt` sources that feed into it are newer than the compiled file.
+    /// Avoids the recurring footgun of editing `replica_tla.qnt` and
+    /// forgetting to recompile before running the test.
+    fn ensure_tla_build_fresh() {
+        let main_tla = tla_build_dir().join("main.tla");
+        let sources: Vec<PathBuf> = [
+            "main_n4f1b0_tla.qnt",
+            "replica_tla.qnt",
+            "types.qnt",
+            "defs.qnt",
+            "option.qnt",
+        ]
+        .iter()
+        .map(|n| quint_dir().join(n))
+        .collect();
+        if !any_newer(&main_tla, &sources) {
+            return;
+        }
+        eprintln!("[tlc] rebuilding {} via quint compile", main_tla.display());
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(
+                "quint compile main_n4f1b0_tla.qnt --target=tlaplus 2>/dev/null \
+                 | awk '/^---- MODULE/{p=1} p'",
+            )
+            .current_dir(quint_dir())
+            .output()
+            .expect("failed to run quint compile");
+        assert!(
+            output.status.success() && !output.stdout.is_empty(),
+            "quint compile main_n4f1b0_tla.qnt failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        std::fs::write(&main_tla, &output.stdout).expect("write main.tla");
+    }
+
+    /// Rebuilds `tlc-controlled/dist/tla2tools_server.jar` via
+    /// `ant compile && ant dist` if any `.java` source under
+    /// `tlc-controlled/src/` is newer than the jar. `ant dist` alone does
+    /// NOT recompile sources, so we always run `compile` first.
+    fn ensure_jar_fresh() {
+        let jar = quint_dir().join("tlc-controlled/dist/tla2tools_server.jar");
+        let src_root = quint_dir().join("tlc-controlled/src");
+        let sources = collect_java_sources(&src_root);
+        if !any_newer(&jar, &sources) {
+            return;
+        }
+        eprintln!("[tlc] rebuilding {} via ant", jar.display());
+        for target in ["compile", "dist"] {
+            let status = Command::new("ant")
+                .args(["-f", "customBuild.xml", target])
+                .current_dir(quint_dir().join("tlc-controlled"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("failed to run ant");
+            assert!(status.success(), "ant {target} failed");
+        }
+    }
+
+    /// Recursively collects every `.java` file under `root`. Used by
+    /// [`ensure_jar_fresh`] so that edits to any TLC source (not just
+    /// `SimplexActionMapper.java`) trigger a rebuild.
+    fn collect_java_sources(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("java") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
     /// Spawns a tlc-controlled server against `tla-build/main.tla` (the
     /// hand-built artifact for the refactored `replica_tla.qnt` spec).
     /// Bypasses `scripts/tlc.sh run`, which targets `tlc-build/` and the
     /// legacy spec layout.
     fn start_server_for_tla_build(port: u16) -> TlcServerGuard {
+        ensure_tla_build_fresh();
+        ensure_jar_fresh();
         let jar = quint_dir().join("tlc-controlled/dist/tla2tools_server.jar");
         let build = tla_build_dir();
+        // Forward the JVM's stderr to the test harness so any Java
+        // exception thrown inside `/execute` is visible (the /execute
+        // handler writes stack traces to stderr). stdout is suppressed
+        // because TLC's parser, semantic processor, and TLCServer.main
+        // print noisy progress messages there that drown out the test
+        // output. Without forwarding *something*, an exception that
+        // aborts the HTTP response would surface in Rust as an opaque
+        // `IncompleteMessage` with no signal about the root cause.
         let child = Command::new("java")
             .args([
+                "-ea",
+                // Quint compiles variant matches and sequences of
+                // let-bindings into deeply nested TLA+ LET-INs, and TLC's
+                // evaluator recurses into them with one JVM frame per
+                // sub-expression. The default 512 KiB thread stack
+                // overflows part-way through the trace; 64 MiB is plenty.
+                "-Xss64m",
                 "-cp",
                 jar.to_str().expect("jar path utf-8"),
                 "tlc2.TLCServer",
@@ -636,7 +753,7 @@ mod tests {
             ])
             .current_dir(&build)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("failed to spawn TLC server JVM");
         let guard = TlcServerGuard { child };
@@ -804,17 +921,78 @@ mod tests {
                 "params": { "id": "n2", "payload": "val_b1", "parent": 1 },
             }),
 
+            // All other nodes inject nullify votes for view 2.
+            json!({
+                "name": "send_nullify_vote",
+                "params": { "view": 2, "sig": "n0" },
+            }),
+            json!({
+                "name": "send_nullify_vote",
+                "params": { "view": 2, "sig": "n1" },
+            }),
+            json!({
+                "name": "send_nullify_vote",
+                "params": { "view": 2, "sig": "n3" },
+            }),
+            json!({
+                "name": "on_nullify",
+                "params": { "id": "n1", "view": 2, "sig": "n0" },
+            }),
+            json!({
+                "name": "on_nullify",
+                "params": { "id": "n1", "view": 2, "sig": "n3" },
+            }),
+            json!({
+                "name": "on_nullify",
+                "params": { "id": "n0", "view": 2, "sig": "n1" },
+            }),
+            json!({
+                "name": "on_nullify",
+                "params": { "id": "n0", "view": 2, "sig": "n3" },
+            }),
+
+            json!({
+                "name": "send_certificate",
+                "params": {
+                    "type": "nullification",
+                    "view": 2,
+                    "signatures": ["n0", "n1", "n3"],
+                    "ghost_sender": "n1",
+                },
+            }),
+
+            json!({
+                "name": "on_certificate",
+                "params": {
+                    "id": "n2",
+                    "type": "nullification",
+                    "view": 2,
+                    "signatures": ["n0", "n1", "n3"],
+                    "ghost_sender": "n1",
+                },
+            }),
 
             json!({ "reset": true }),
         ];
 
         let response = client.execute_full(&trace).expect("execute");
         let verdict = verdict_for(&trace, &response);
+        // `response.keys` is the parallel fingerprint trace (one per
+        // visited state, including the init state at index 0). Count the
+        // distinct fingerprints: that is the number of distinct states
+        // the trace exercised, and `new_states` excludes the init state
+        // so it reflects how many states the trace *discovered* on top
+        // of the starting point.
+        let distinct_states: std::collections::HashSet<_> =
+            response.keys.iter().copied().collect();
+        let new_states = distinct_states.len().saturating_sub(1);
         println!(
-            "[finalize_path] sent={} accepted={} keys={} verdict={:?}",
+            "[finalize_path] sent={} accepted={} keys={} distinct={} new_states={} verdict={:?}",
             non_reset_action_count(&trace),
             accepted_action_count(&response),
             response.keys.len(),
+            distinct_states.len(),
+            new_states,
             verdict,
         );
         assert_eq!(

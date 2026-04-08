@@ -858,6 +858,59 @@ module replica {
             nondet cert_sender = oneOf(Replicas.map(r => sig_of(r)))
             on_nullification_cert(id, cert_view, cert_sender),
         },
+        // Inject a notarize vote into sent_notarize_votes without running
+        // the protocol. Models out-of-band delivery or a Byzantine sender.
+        // Enumerate components from CONSTANT sets so TLC can split this
+        // disjunct into named per-tuple actions at parse time.
+        all {
+            nondet vote_view = oneOf(VIEWS)
+            nondet vote_parent = oneOf(VIEWS.union(Set(GENESIS_VIEW)))
+            nondet vote_payload = oneOf(VALID_PAYLOADS)
+            nondet vote_sig = oneOf(Replicas.map(r => sig_of(r)))
+            send_notarize_vote({ proposal: { view: vote_view, parent: vote_parent, payload: vote_payload }, sig: vote_sig }),
+        },
+        // Inject a finalize vote. See send_notarize_vote disjunct for rationale.
+        all {
+            nondet vote_view = oneOf(VIEWS)
+            nondet vote_parent = oneOf(VIEWS.union(Set(GENESIS_VIEW)))
+            nondet vote_payload = oneOf(VALID_PAYLOADS)
+            nondet vote_sig = oneOf(Replicas.map(r => sig_of(r)))
+            send_finalize_vote({ proposal: { view: vote_view, parent: vote_parent, payload: vote_payload }, sig: vote_sig }),
+        },
+        // Inject a nullify vote. See send_notarize_vote disjunct for rationale.
+        all {
+            nondet vote_view = oneOf(VIEWS)
+            nondet vote_sig = oneOf(Replicas.map(r => sig_of(r)))
+            send_nullify_vote({ view: vote_view, sig: vote_sig }),
+        },
+        // Inject a notarization certificate. See send_notarize_vote
+        // disjunct for parse-time enumeration rationale.
+        all {
+            nondet cert_view = oneOf(VIEWS)
+            nondet cert_parent = oneOf(VIEWS.union(Set(GENESIS_VIEW)))
+            nondet cert_payload = oneOf(VALID_PAYLOADS)
+            nondet ghost_sender = oneOf(Replicas.map(r => sig_of(r)))
+            nondet signers = oneOf(CorrectSigs.powerset())
+            send_notarization_cert(cert_view, cert_parent, cert_payload, ghost_sender, signers),
+        },
+        // Inject a finalization certificate. See send_notarization_cert
+        // disjunct for rationale.
+        all {
+            nondet cert_view = oneOf(VIEWS)
+            nondet cert_parent = oneOf(VIEWS.union(Set(GENESIS_VIEW)))
+            nondet cert_payload = oneOf(VALID_PAYLOADS)
+            nondet ghost_sender = oneOf(Replicas.map(r => sig_of(r)))
+            nondet signers = oneOf(CorrectSigs.powerset())
+            send_finalization_cert(cert_view, cert_parent, cert_payload, ghost_sender, signers),
+        },
+        // Inject a nullification certificate. See send_notarization_cert
+        // disjunct for rationale.
+        all {
+            nondet cert_view = oneOf(VIEWS)
+            nondet ghost_sender = oneOf(Replicas.map(r => sig_of(r)))
+            nondet signers = oneOf(CorrectSigs.powerset())
+            send_nullification_cert(cert_view, ghost_sender, signers),
+        },
     }
 
     // This action models only the successful leader proposal path:
@@ -1590,6 +1643,162 @@ module replica {
             ghost_committed_blocks' = ghost_committed_blocks,
             certify_policy' = certify_policy,
             lastAction' = "timeout"
+        }
+    }
+
+    // Inject a notarize vote into sent_notarize_votes without running the
+    // protocol. Models out-of-band delivery or a Byzantine sender. Used by
+    // the model-based fuzzer to enable on_notarize from arbitrary states.
+    action send_notarize_vote(vote: NotarizeVote): bool = all {
+        sent_notarize_votes' = sent_notarize_votes.union(Set(vote)),
+        sent_nullify_votes'  = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates'   = sent_certificates,
+        store_notarize_votes'  = store_notarize_votes,
+        store_nullify_votes'   = store_nullify_votes,
+        store_finalize_votes'  = store_finalize_votes,
+        store_certificates'    = store_certificates,
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader'                = leader,
+        replica_state'         = replica_state,
+        certify_policy'        = certify_policy,
+        lastAction'            = "inject_vote",
+    }
+
+    // Inject a finalize vote. See send_notarize_vote.
+    action send_finalize_vote(vote: FinalizeVote): bool = all {
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes'  = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes.union(Set(vote)),
+        sent_certificates'   = sent_certificates,
+        store_notarize_votes'  = store_notarize_votes,
+        store_nullify_votes'   = store_nullify_votes,
+        store_finalize_votes'  = store_finalize_votes,
+        store_certificates'    = store_certificates,
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader'                = leader,
+        replica_state'         = replica_state,
+        certify_policy'        = certify_policy,
+        lastAction'            = "inject_vote",
+    }
+
+    // Inject a nullify vote. See send_notarize_vote.
+    action send_nullify_vote(vote: NullifyVote): bool = all {
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes'  = sent_nullify_votes.union(Set(vote)),
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates'   = sent_certificates,
+        store_notarize_votes'  = store_notarize_votes,
+        store_nullify_votes'   = store_nullify_votes,
+        store_finalize_votes'  = store_finalize_votes,
+        store_certificates'    = store_certificates,
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader'                = leader,
+        replica_state'         = replica_state,
+        certify_policy'        = certify_policy,
+        lastAction'            = "inject_vote",
+    }
+
+    // Inject a notarization certificate into sent_certificates. Each
+    // signer in `signers` must already have a matching notarize vote in
+    // sent_notarize_votes for this proposal. The (kind, proposal,
+    // ghost_sender) tuple must be unique in sent_certificates so that
+    // on_notarization_cert's runtime lookup remains deterministic.
+    action send_notarization_cert(
+        cert_view: ViewNumber,
+        cert_parent: ViewNumber,
+        cert_payload: Payload,
+        ghost_sender: Signature,
+        signers: Set[Signature]
+    ): bool = {
+        val proposal: Proposal = { view: cert_view, parent: cert_parent, payload: cert_payload }
+        val have_sigs = sent_notarize_votes.filter(v => v.proposal == proposal).map(v => v.sig)
+        val no_duplicate = sent_certificates.forall(c => match (c) {
+            | Notarization(n) => not(n.proposal == proposal and n.ghost_sender == ghost_sender)
+            | _ => true
+        })
+        all {
+            signers.size() >= Q,
+            signers.forall(s => have_sigs.contains(s)),
+            no_duplicate,
+            sent_certificates' = sent_certificates.union(Set(notarization(proposal, signers, ghost_sender))),
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes'  = sent_nullify_votes,
+            sent_finalize_votes' = sent_finalize_votes,
+            store_notarize_votes'  = store_notarize_votes,
+            store_nullify_votes'   = store_nullify_votes,
+            store_finalize_votes'  = store_finalize_votes,
+            store_certificates'    = store_certificates,
+            ghost_committed_blocks' = ghost_committed_blocks,
+            leader'                = leader,
+            replica_state'         = replica_state,
+            certify_policy'        = certify_policy,
+            lastAction'            = "inject_cert",
+        }
+    }
+
+    // Inject a finalization certificate. See send_notarization_cert.
+    action send_finalization_cert(
+        cert_view: ViewNumber,
+        cert_parent: ViewNumber,
+        cert_payload: Payload,
+        ghost_sender: Signature,
+        signers: Set[Signature]
+    ): bool = {
+        val proposal: Proposal = { view: cert_view, parent: cert_parent, payload: cert_payload }
+        val have_sigs = sent_finalize_votes.filter(v => v.proposal == proposal).map(v => v.sig)
+        val no_duplicate = sent_certificates.forall(c => match (c) {
+            | Finalization(f) => not(f.proposal == proposal and f.ghost_sender == ghost_sender)
+            | _ => true
+        })
+        all {
+            signers.size() >= Q,
+            signers.forall(s => have_sigs.contains(s)),
+            no_duplicate,
+            sent_certificates' = sent_certificates.union(Set(finalization(proposal, signers, ghost_sender))),
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes'  = sent_nullify_votes,
+            sent_finalize_votes' = sent_finalize_votes,
+            store_notarize_votes'  = store_notarize_votes,
+            store_nullify_votes'   = store_nullify_votes,
+            store_finalize_votes'  = store_finalize_votes,
+            store_certificates'    = store_certificates,
+            ghost_committed_blocks' = ghost_committed_blocks,
+            leader'                = leader,
+            replica_state'         = replica_state,
+            certify_policy'        = certify_policy,
+            lastAction'            = "inject_cert",
+        }
+    }
+
+    // Inject a nullification certificate. See send_notarization_cert.
+    action send_nullification_cert(
+        cert_view: ViewNumber,
+        ghost_sender: Signature,
+        signers: Set[Signature]
+    ): bool = {
+        val have_sigs = sent_nullify_votes.filter(v => v.view == cert_view).map(v => v.sig)
+        val no_duplicate = sent_certificates.forall(c => match (c) {
+            | Nullification(n) => not(n.view == cert_view and n.ghost_sender == ghost_sender)
+            | _ => true
+        })
+        all {
+            signers.size() >= Q,
+            signers.forall(s => have_sigs.contains(s)),
+            no_duplicate,
+            sent_certificates' = sent_certificates.union(Set(nullification(cert_view, signers, ghost_sender))),
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes'  = sent_nullify_votes,
+            sent_finalize_votes' = sent_finalize_votes,
+            store_notarize_votes'  = store_notarize_votes,
+            store_nullify_votes'   = store_nullify_votes,
+            store_finalize_votes'  = store_finalize_votes,
+            store_certificates'    = store_certificates,
+            ghost_committed_blocks' = ghost_committed_blocks,
+            leader'                = leader,
+            replica_state'         = replica_state,
+            certify_policy'        = certify_policy,
+            lastAction'            = "inject_cert",
         }
     }
 

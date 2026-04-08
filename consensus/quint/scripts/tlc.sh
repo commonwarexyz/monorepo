@@ -5,7 +5,7 @@ set -eu
 SCRIPT=$(cd "$(dirname "$0")" && pwd)
 QUINT_DIR=$(cd "$SCRIPT/.." && pwd)
 
-TLC_BUILD_DIR=${TLC_BUILD_DIR:-"$QUINT_DIR/tlc-build"}
+TLC_BUILD_DIR=${TLC_BUILD_DIR:-"$QUINT_DIR/tla-build"}
 TLC_TLA_LIB=${TLC_TLA_LIB:-"$QUINT_DIR/tla"}
 TLC_JAR=${TLC_JAR:-"$QUINT_DIR/tlc-controlled/dist/tla2tools_server.jar"}
 TLC_PORT=${TLC_PORT:-2023}
@@ -119,9 +119,15 @@ rewrite_spec_views() {
                 sub(/VALID_PAYLOADS[[:space:]]*=[[:space:]]*Set\([^)]*\),/,
                     "VALID_PAYLOADS = " payload_set(max_payloads) ",", line)
                 replaced_payloads = 1
-            } else if (line ~ /\)[[:space:]]*\.\*[[:space:]]*from[[:space:]]*"\.\/replica"/) {
-                sub(/\)[[:space:]]*\.\*[[:space:]]*from[[:space:]]*"\.\/replica"/,
-                    ") as replica from \"./replica\"", line)
+            } else if (match(line, /\)[[:space:]]*\.\*[[:space:]]*from[[:space:]]*"\.\/replica[A-Za-z0-9_]*"/)) {
+                # Capture the actual module path (e.g. "./replica" or
+                # "./replica_tla") so the alias rewrite preserves it.
+                matched = substr(line, RSTART, RLENGTH)
+                module_path = matched
+                sub(/^.*from[[:space:]]*"/, "", module_path)
+                sub(/"$/, "", module_path)
+                sub(/\)[[:space:]]*\.\*[[:space:]]*from[[:space:]]*"\.\/replica[A-Za-z0-9_]*"/,
+                    ") as replica from \"" module_path "\"", line)
                 replaced_import = 1
             } else if (line ~ /^[[:space:]]*}[[:space:]]*$/) {
                 if (n < 1) {
@@ -148,7 +154,12 @@ rewrite_spec_views() {
 
 # Compile a quint spec to TLA+. The compiled file is always named main.tla
 # because TLC requires the file name to match the top-level module name and
-# quint emits its top-level module as `main`.
+# quint emits its top-level module as `main`. `quint compile --target=tlaplus`
+# writes the TLA+ to stdout but prefixes it with several lines of progress
+# noise (`# Usage statistics`, `Output directory`, `# APALACHE version`,
+# `Starting checker server...`, `PASS #0: SanyParser`, ...). The TLA+
+# content begins with a `---...--- MODULE main ---...---` header line, so
+# we drop everything up to that line.
 compile() {
     if [ "$#" -lt 1 ]; then
         echo "Error: compile requires a quint spec path"
@@ -164,104 +175,25 @@ compile() {
 
     mkdir -p "$TLC_BUILD_DIR"
 
-    local spec_dir
-    spec_dir=$(cd "$(dirname "$spec")" && pwd)
-    local temp_base
-    temp_base=$(mktemp "$spec_dir/.tlc_spec.XXXXXX")
-    local temp_spec="${temp_base}.qnt"
-    mv "$temp_base" "$temp_spec"
-    trap 'rm -f "$temp_spec"' EXIT
-    rewrite_spec_views "$spec" "$temp_spec"
-
-    # quint compile --target=tlaplus prints noisy preamble before the actual
-    # MODULE; strip everything before the first ---- line.
-    quint compile "$temp_spec" --target=tlaplus 2>/dev/null \
-        | awk '/^---/{found=1} found' \
-        > "$TLC_BUILD_DIR/main.tla"
-
-    if [ ! -s "$TLC_BUILD_DIR/main.tla" ]; then
-        echo "Error: quint compile produced empty output for $spec"
-        rm -f "$TLC_BUILD_DIR/main.tla"
+    local raw rc
+    raw=$(quint compile "$spec" --target=tlaplus 2>&1) && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "Error: quint compile failed for $spec (exit $rc):"
+        echo "$raw"
         exit 1
     fi
 
-    local patched_tla
-    patched_tla=$(mktemp "$TLC_BUILD_DIR/.main.tla.XXXXXX")
-    if ! awk '
-        BEGIN { inserted = 0 }
-        /^=+$/ && !inserted {
-            print ""
-            print "TLC_ALL_PROPOSALS =="
-            print "  { [view |-> tlc_view, parent |-> tlc_parent, payload |-> tlc_payload] :"
-            print "      tlc_view \\in main_replica_VIEWS,"
-            print "      tlc_parent \\in main_replica_VIEWS \\union { (main_replica_GENESIS_VIEW) },"
-            print "      tlc_payload \\in main_replica_VALID_PAYLOADS }"
-            print ""
-            print "TLC_ALL_SIGNATURES =="
-            print "  { main_replica_REPLICA_KEYS[tlc_replica] :"
-            print "      tlc_replica \\in main_replica_CORRECT \\union main_replica_BYZANTINE }"
-            print ""
-            print "TLC_ALL_NOTARIZE_VOTES =="
-            print "  { [proposal |-> tlc_proposal, sig |-> tlc_sig] :"
-            print "      tlc_proposal \\in TLC_ALL_PROPOSALS,"
-            print "      tlc_sig \\in TLC_ALL_SIGNATURES }"
-            print ""
-            print "TLC_ALL_FINALIZE_VOTES =="
-            print "  { [proposal |-> tlc_proposal, sig |-> tlc_sig] :"
-            print "      tlc_proposal \\in TLC_ALL_PROPOSALS,"
-            print "      tlc_sig \\in TLC_ALL_SIGNATURES }"
-            print ""
-            print "TLC_ALL_NULLIFY_VOTES =="
-            print "  { [view |-> tlc_view, sig |-> tlc_sig] :"
-            print "      tlc_view \\in main_replica_VIEWS,"
-            print "      tlc_sig \\in TLC_ALL_SIGNATURES }"
-            print ""
-            print "q_step_tlc =="
-            print "  main_replica_correct_replica_step"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_expired \\in { (main_replica_LeaderTimeoutKind),"
-            print "          (main_replica_CertificationTimeoutKind) }:"
-            print "          main_replica_on_timeout(main_replica_id, main_replica_expired)))"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_vote \\in TLC_ALL_NOTARIZE_VOTES:"
-            print "          main_replica_on_notarize(main_replica_id, main_replica_vote)))"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_vote \\in TLC_ALL_FINALIZE_VOTES:"
-            print "          main_replica_on_finalize(main_replica_id, main_replica_vote)))"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_vote \\in TLC_ALL_NULLIFY_VOTES:"
-            print "          main_replica_on_nullify(main_replica_id, main_replica_vote)))"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_cert \\in main_replica_sent_certificates:"
-            print "          main_replica_on_certificate(main_replica_id, main_replica_cert)))"
-            print "    \\/ ((\\E main_replica_id \\in main_replica_CORRECT:"
-            print "        \\E main_replica_new_payload \\in main_replica_VALID_PAYLOADS:"
-            print "          \\E main_replica_parent_view \\in main_replica_VIEWS"
-            print "            \\union {(main_replica_GENESIS_VIEW)}:"
-            print "            main_replica_propose(main_replica_id, main_replica_new_payload, main_replica_parent_view)))"
-            print "    \\/ (main_replica_byzantine_replica_step"
-            print "      /\\ main_replica__unchanged_replica_state"
-            print "      /\\ main_replica_lastAction'\'' := \"byzantine_step\")"
-            print ""
-            inserted = 1
-        }
-        { print }
-        END {
-            if (!inserted) {
-                exit 42
-            }
-        }
-    ' "$TLC_BUILD_DIR/main.tla" > "$patched_tla"; then
-        echo "Error: failed to patch $TLC_BUILD_DIR/main.tla for tlc-controlled"
-        rm -f "$patched_tla" "$temp_spec"
+    local stripped
+    stripped=$(printf '%s\n' "$raw" | awk '/^-+ MODULE /{p=1} p')
+    if [ -z "$stripped" ]; then
+        echo "Error: quint compile output for $spec contained no MODULE header:"
+        echo "$raw"
         exit 1
     fi
-    mv "$patched_tla" "$TLC_BUILD_DIR/main.tla"
 
-    printf 'INIT q_init\nNEXT q_step_tlc\n' > "$TLC_BUILD_DIR/main.cfg"
-    rm -f "$temp_spec"
-    trap - EXIT
-    echo "Compiled $spec -> $TLC_BUILD_DIR/main.tla (TLA_EPOCH=$TLA_EPOCH, TLA_MAX_VIEW=$TLA_MAX_VIEW, TLA_MAX_PAYLOADS=$TLA_MAX_PAYLOADS)"
+    printf '%s\n' "$stripped" > "$TLC_BUILD_DIR/main.tla"
+    printf 'INIT q_init\nNEXT q_step\n' > "$TLC_BUILD_DIR/main.cfg"
+    echo "Compiled $spec -> $TLC_BUILD_DIR/main.tla"
 }
 
 # Start the controlled TLC HTTP server. The server reads main.tla from the
