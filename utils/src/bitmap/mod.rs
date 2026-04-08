@@ -202,6 +202,21 @@ impl<const N: usize> BitMap<N> {
 
     /* Setters */
 
+    /// Extend the bitmap to `new_len` bits, filling new positions with zero.
+    /// No-op if `new_len <= self.len`.
+    pub fn extend_to(&mut self, new_len: u64) {
+        if new_len <= self.len {
+            return;
+        }
+        // Allocate any needed new chunks (all zeroed).
+        let new_chunks_needed = new_len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        let current_chunks = self.chunks.len();
+        for _ in current_chunks..new_chunks_needed {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
+        }
+        self.len = new_len;
+    }
+
     /// Add a single bit to the bitmap.
     pub fn push(&mut self, bit: bool) {
         // Check if we need a new chunk
