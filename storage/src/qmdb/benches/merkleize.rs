@@ -29,6 +29,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+// -- Type aliases --
+
 type AnyUFix = commonware_storage::qmdb::any::unordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
     Context,
@@ -81,48 +83,98 @@ type CurUVar256 = commonware_storage::qmdb::current::unordered::variable::Db<
     LARGE_CHUNK_SIZE,
 >;
 
+// -- Config --
+
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
-
-/// Configure a large (512MB) page cache that can hold all active keys in RAM.
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn mmr_cfg(ctx: &(impl BufferPooler + ThreadPooler), page_cache: CacheRef) -> MmrConfig {
+fn mmr_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> MmrConfig {
     MmrConfig {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache,
+        page_cache: pc,
     }
 }
 
-fn fix_log_cfg(page_cache: CacheRef) -> FConfig {
+fn fix_log_cfg(pc: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
-        page_cache,
+        page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn var_log_cfg(page_cache: CacheRef) -> VConfig<((), ())> {
+fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
     VConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_section: ITEMS_PER_BLOB,
         compression: None,
         codec_config: ((), ()),
-        page_cache,
+        page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn large_page_cache(ctx: &impl BufferPooler) -> CacheRef {
+fn pc(ctx: &impl BufferPooler) -> CacheRef {
     CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
+
+// -- DB constructors (eliminates repeated config boilerplate in match arms) --
+
+fn any_fix_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
+    let pc = pc(ctx);
+    commonware_storage::qmdb::any::FixedConfig {
+        merkle_config: mmr_cfg(ctx, pc.clone()),
+        journal_config: fix_log_cfg(pc),
+        translator: EightCap,
+    }
+}
+
+fn any_var_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
+    let pc = pc(ctx);
+    commonware_storage::qmdb::any::VariableConfig {
+        merkle_config: mmr_cfg(ctx, pc.clone()),
+        journal_config: var_log_cfg(pc),
+        translator: EightCap,
+    }
+}
+
+fn cur_fix_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
+    let pc = pc(ctx);
+    commonware_storage::qmdb::current::FixedConfig {
+        mmr_config: mmr_cfg(ctx, pc.clone()),
+        journal_config: fix_log_cfg(pc),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION}"),
+        translator: EightCap,
+    }
+}
+
+fn cur_var_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
+    let pc = pc(ctx);
+    commonware_storage::qmdb::current::VariableConfig {
+        mmr_config: mmr_cfg(ctx, pc.clone()),
+        journal_config: var_log_cfg(pc),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION}"),
+        translator: EightCap,
+    }
+}
+
+// -- Benchmark helpers --
 
 /// Pre-populate the database with `num_keys` unique keys, commit, and sync.
 async fn seed_db<
@@ -143,33 +195,30 @@ async fn seed_db<
     db.sync().await.unwrap();
 }
 
-/// Create a speculative batch by applying random updates equal to 10% of the key count
-/// (sampled with replacement), then merkleize & retrieve its root.
-/// Returns elapsed time for the batch+merkleize+root cycle.
-async fn bench_speculative_merkleize<
-    C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
+/// Write `num_updates` random key updates into a batch.
+fn write_random_updates<
+    B: commonware_storage::qmdb::any::traits::UnmerkleizedBatch<
+        Db,
+        Family = commonware_storage::merkle::mmr::Family,
+        K = Digest,
+        V = Digest,
+    >,
+    Db: ?Sized,
 >(
-    db: &C,
+    mut batch: B,
+    num_updates: u64,
     num_keys: u64,
-) -> Duration {
-    let mut rng = StdRng::seed_from_u64(99);
-    let num_updates = num_keys / 10;
-
-    let start = Instant::now();
-
-    let mut batch = db.new_batch();
+    rng: &mut StdRng,
+) -> B {
     for _ in 0..num_updates {
         let idx = rng.next_u64() % num_keys;
         let k = Sha256::hash(&idx.to_be_bytes());
-        batch = batch.write(k, Some(make_fixed_value(&mut rng)));
+        batch = batch.write(k, Some(make_fixed_value(rng)));
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    black_box(merkleized.root());
-
-    start.elapsed()
+    batch
 }
 
-/// Run the benchmark for a concrete DB type.
+/// Single-batch benchmark: create batch, write updates, merkleize, read root.
 async fn run_bench<
     C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
 >(
@@ -178,13 +227,56 @@ async fn run_bench<
     iters: u64,
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
+    let num_updates = num_keys / 10;
+    let mut rng = StdRng::seed_from_u64(99);
     let mut total = Duration::ZERO;
     for _ in 0..iters {
-        total += bench_speculative_merkleize(&db, num_keys).await;
+        let start = Instant::now();
+        let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        black_box(merkleized.root());
+        total += start.elapsed();
     }
     db.destroy().await.unwrap();
     total
 }
+
+/// Chained benchmark: merkleize a parent (not timed), then create a child from
+/// the parent, write updates, merkleize the child, and read its root (timed).
+///
+/// `fork_child` bridges the gap between the generic trait and the concrete
+/// `MerkleizedBatch::new_batch` method.
+async fn run_chained_bench<
+    C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
+    F: Fn(&C::Merkleized) -> C::Batch,
+>(
+    mut db: C,
+    num_keys: u64,
+    iters: u64,
+    fork_child: F,
+) -> Duration {
+    seed_db(&mut db, num_keys).await;
+    let num_updates = num_keys / 10;
+    let mut rng = StdRng::seed_from_u64(99);
+    let mut total = Duration::ZERO;
+    for _ in 0..iters {
+        // Build and merkleize parent (not timed).
+        let parent_batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let parent = parent_batch.merkleize(&db, None).await.unwrap();
+
+        // Build and merkleize child (timed).
+        let start = Instant::now();
+        let child_batch =
+            write_random_updates(fork_child(&parent), num_updates, num_keys, &mut rng);
+        let child = child_batch.merkleize(&db, None).await.unwrap();
+        black_box(child.root());
+        total += start.elapsed();
+    }
+    db.destroy().await.unwrap();
+    total
+}
+
+// -- Variant dispatch --
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
@@ -231,73 +323,146 @@ fn bench_merkleize(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
-                        let pc = large_page_cache(&ctx);
                         match variant {
                             Variant::AnyFixed => {
-                                let cfg = commonware_storage::qmdb::any::FixedConfig {
-                                    merkle_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: fix_log_cfg(pc),
-                                    translator: EightCap,
-                                };
-                                let db = AnyUFix::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)).await.unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
                             }
                             Variant::AnyVariable => {
-                                let cfg = commonware_storage::qmdb::any::VariableConfig {
-                                    merkle_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: var_log_cfg(pc),
-                                    translator: EightCap,
-                                };
-                                let db = AnyUVar::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)).await.unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
                             }
                             Variant::CurrentFixed32 => {
-                                let cfg = commonware_storage::qmdb::current::FixedConfig {
-                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: fix_log_cfg(pc),
-                                    grafted_mmr_metadata_partition: format!(
-                                        "grafted-mmr-metadata-{PARTITION}"
-                                    ),
-                                    translator: EightCap,
-                                };
-                                let db = CurUFix32::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
                             }
                             Variant::CurrentVariable32 => {
-                                let cfg = commonware_storage::qmdb::current::VariableConfig {
-                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: var_log_cfg(pc),
-                                    grafted_mmr_metadata_partition: format!(
-                                        "grafted-mmr-metadata-{PARTITION}"
-                                    ),
-                                    translator: EightCap,
-                                };
-                                let db = CurUVar32::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
                             }
                             Variant::CurrentFixed256 => {
-                                let cfg = commonware_storage::qmdb::current::FixedConfig {
-                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: fix_log_cfg(pc),
-                                    grafted_mmr_metadata_partition: format!(
-                                        "grafted-mmr-metadata-{PARTITION}"
-                                    ),
-                                    translator: EightCap,
-                                };
-                                let db = CurUFix256::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
                             }
                             Variant::CurrentVariable256 => {
-                                let cfg = commonware_storage::qmdb::current::VariableConfig {
-                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
-                                    journal_config: var_log_cfg(pc),
-                                    grafted_mmr_metadata_partition: format!(
-                                        "grafted-mmr-metadata-{PARTITION}"
-                                    ),
-                                    translator: EightCap,
-                                };
-                                let db = CurUVar256::init(ctx, cfg).await.unwrap();
-                                run_bench(db, num_keys, iters).await
+                                run_bench(
+                                    CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                )
+                                .await
+                            }
+                        }
+                    });
+                },
+            );
+        }
+    }
+}
+
+fn bench_chained_merkleize(c: &mut Criterion) {
+    let runner = tokio::Runner::new(Config::default());
+    for num_keys in [10_000u64, 100_000, 1_000_000] {
+        for variant in VARIANTS {
+            c.bench_function(
+                &format!(
+                    "{}/chained variant={} num_keys={num_keys}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        match variant {
+                            Variant::AnyFixed => {
+                                run_chained_bench(
+                                    AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)).await.unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
+                            }
+                            Variant::AnyVariable => {
+                                run_chained_bench(
+                                    AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)).await.unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
+                            }
+                            Variant::CurrentFixed32 => {
+                                run_chained_bench(
+                                    CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
+                            }
+                            Variant::CurrentVariable32 => {
+                                run_chained_bench(
+                                    CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
+                            }
+                            Variant::CurrentFixed256 => {
+                                run_chained_bench(
+                                    CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
+                            }
+                            Variant::CurrentVariable256 => {
+                                run_chained_bench(
+                                    CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx))
+                                        .await
+                                        .unwrap(),
+                                    num_keys,
+                                    iters,
+                                    |p| p.new_batch(),
+                                )
+                                .await
                             }
                         }
                     });
@@ -310,5 +475,5 @@ fn bench_merkleize(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_merkleize
+    targets = bench_merkleize, bench_chained_merkleize
 }
