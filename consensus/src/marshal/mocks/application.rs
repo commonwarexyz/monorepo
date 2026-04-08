@@ -1,5 +1,4 @@
 use crate::{marshal::Update, types::Height, Block, Reporter};
-use commonware_runtime::reschedule;
 use commonware_utils::{acknowledgement::Exact, sync::Mutex, Acknowledgement};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -56,19 +55,10 @@ impl<B: Block> Application<B> {
     }
 
     /// Acknowledges the oldest pending block and returns its height.
-    ///
-    /// Always awaits [`reschedule`] once so other tasks (for example marshal) run after every
-    /// `.await`, including when the queue is empty (`None`).
-    pub async fn acknowledge_next(&self) -> Option<Height> {
-        let out = match self.pending_acks.lock().pop_front() {
-            Some((height, ack)) => {
-                ack.acknowledge();
-                Some(height)
-            }
-            None => None,
-        };
-        reschedule().await;
-        out
+    pub fn acknowledge_next(&self) -> Option<Height> {
+        let (height, ack) = self.pending_acks.lock().pop_front()?;
+        ack.acknowledge();
+        Some(height)
     }
 }
 

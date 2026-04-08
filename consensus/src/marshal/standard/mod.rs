@@ -582,7 +582,7 @@ mod tests {
             );
 
             assert_eq!(
-                recovering_application.acknowledge_next().await,
+                recovering_application.acknowledge_next(),
                 Some(Height::new(1)),
                 "expected the application to acknowledge height 1"
             );
@@ -593,7 +593,7 @@ mod tests {
                 "height 2 can be dispatched after height 1 even when no finalization exists at height 2"
             );
             assert_eq!(
-                recovering_application.acknowledge_next().await,
+                recovering_application.acknowledge_next(),
                 Some(Height::new(2)),
                 "expected the application to acknowledge height 2"
             );
