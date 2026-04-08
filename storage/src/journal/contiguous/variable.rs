@@ -531,9 +531,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let encode = |item: &V| variable::Journal::<E, V>::encode_item(self.compression, item);
         let encoded: Vec<_> = match &items {
             Many::Flat(s) => s.iter().map(encode).collect::<Result<Vec<_>, _>>()?,
-            Many::Nested(segs) => segs
+            Many::Nested(nested_items) => nested_items
                 .iter()
-                .flat_map(|s| s.iter())
+                .flat_map(|items| items.iter())
                 .map(encode)
                 .collect::<Result<Vec<_>, _>>()?,
         };
