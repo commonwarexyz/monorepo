@@ -412,6 +412,16 @@ where
             self.sync_finalized().await;
         }
 
+        // If finalizations extend beyond our last stored finalized block,
+        // try to fill them from local data (e.g. notarized blocks in the
+        // buffer/cache) and fetch the rest by commitment.
+        if self
+            .repair_trailing_finalized(&mut buffer, &mut resolver, &mut application)
+            .await
+        {
+            self.sync_finalized().await;
+        }
+
         select_loop! {
             self.context,
             on_start => {
@@ -1517,6 +1527,60 @@ where
             .await
     }
 
+    /// Repair finalized heights beyond the last stored finalized block.
+    ///
+    /// After restart, `finalizations_by_height` may contain entries for heights
+    /// that have no corresponding block in `finalized_blocks`. This method
+    /// attempts to fill them from local data (buffer, cache) first, then issues
+    /// `Request::Block` fetches for any that remain missing.
+    ///
+    /// Returns `true` if any blocks were written locally and a sync is needed.
+    async fn repair_trailing_finalized<Buf: Buffer<V>>(
+        &mut self,
+        buffer: &mut Buf,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) -> bool {
+        let Some(tip) = self.finalizations_by_height.last_index() else {
+            return false;
+        };
+        let start = self.last_processed_height.next();
+        let (current_range_end, _) = self.finalized_blocks.next_gap(start);
+        let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
+        let mut height = trailing_start;
+        let mut wrote = false;
+        let mut requests = Vec::new();
+        while height <= tip {
+            if let Some(finalization) = self.get_finalization_by_height(height).await {
+                let commitment = finalization.proposal.payload;
+                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    let digest = block.digest();
+                    wrote |= self
+                        .store_finalization(
+                            height,
+                            digest,
+                            block,
+                            Some(finalization),
+                            application,
+                            buffer,
+                        )
+                        .await;
+                } else {
+                    requests.push(Request::<V::Commitment>::Block(commitment));
+                }
+            }
+            // height.next() would panic at Height::MAX.
+            if height == tip {
+                break;
+            }
+            height = height.next();
+        }
+        if !requests.is_empty() {
+            resolver.fetch_all(requests).await;
+        }
+        wrote
+    }
+
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
@@ -1534,7 +1598,7 @@ where
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
-                break;
+                return wrote;
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
@@ -1591,33 +1655,10 @@ where
         let missing_items = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let mut requests: Vec<_> = missing_items
+        let requests: Vec<_> = missing_items
             .into_iter()
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
-
-        // If finalizations extend beyond our last stored finalized block,
-        // fetch the missing blocks by commitment. We already have the finalization
-        // so we only need the block itself.
-        if let Some(tip) = self.finalizations_by_height.last_index() {
-            let (current_range_end, _) = self.finalized_blocks.next_gap(start);
-            let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
-            let mut height = trailing_start;
-            let mut remaining = self.max_repair.get().saturating_sub(requests.len());
-            while height <= tip && remaining > 0 {
-                if let Some(finalization) = self.get_finalization_by_height(height).await {
-                    requests.push(Request::<V::Commitment>::Block(
-                        finalization.proposal.payload,
-                    ));
-                    remaining -= 1;
-                }
-                // height.next() would panic at Height::MAX.
-                if height == tip {
-                    break;
-                }
-                height = height.next();
-            }
-        }
 
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
