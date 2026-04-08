@@ -117,7 +117,7 @@ where
 /// Returns the number of available CPUs, or `None` if it cannot be determined.
 ///
 /// The result is cached after the first call.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub fn available_cores() -> Option<usize> {
     static CORES: OnceLock<Option<usize>> = OnceLock::new();
     *CORES.get_or_init(|| {
@@ -134,8 +134,8 @@ pub fn available_cores() -> Option<usize> {
 
 /// Returns the number of available CPUs, or `None` if it cannot be determined.
 ///
-/// Always returns `None` on non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
+/// Always returns `None` on non-Unix platforms.
+#[cfg(not(unix))]
 pub const fn available_cores() -> Option<usize> {
     None
 }
