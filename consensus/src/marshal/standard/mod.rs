@@ -615,6 +615,9 @@ mod tests {
         });
     }
 
+    /// Maps heights to their finalization and block pairs for mock resolver lookups.
+    type FinalizedMap = HashMap<Height, (Finalization<S, D>, B)>;
+
     /// [`Resolver`] that immediately schedules delivery of encoded blocks and finalized pairs.
     ///
     /// This avoids running the p2p resolver engine while still exercising marshal's fetch and
@@ -624,7 +627,7 @@ mod tests {
         sender: mpsc::Sender<handler::Message<D>>,
         context: deterministic::Context,
         by_commitment: Arc<HashMap<D, B>>,
-        finalized: Arc<HashMap<Height, (Finalization<S, D>, B)>>,
+        finalized: Arc<FinalizedMap>,
     }
 
     impl Resolver for ImmediateMockResolver {
@@ -675,14 +678,14 @@ mod tests {
                             .get(commitment)
                             .expect("mock resolver missing block for commitment")
                             .clone();
-                        Bytes::from(block.encode())
+                        block.encode()
                     }
                     handler::Request::Finalized { height } => {
                         let (fin, blk) = finalized
                             .get(height)
                             .expect("mock resolver missing finalized pair for height")
                             .clone();
-                        Bytes::from((fin, blk).encode())
+                        (fin, blk).encode()
                     }
                     handler::Request::Notarized { .. } => {
                         panic!("unexpected notarized resolver fetch in storage fault test");
@@ -700,6 +703,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn setup_standard_with_mock_resolver(
         context: deterministic::Context,
         oracle: &mut Oracle<K, deterministic::Context>,
@@ -708,7 +712,7 @@ mod tests {
         max_pending_acks: NonZeroUsize,
         application: crate::marshal::mocks::application::Application<B>,
         by_commitment: HashMap<D, B>,
-        finalized_pairs: HashMap<Height, (Finalization<S, D>, B)>,
+        finalized_pairs: FinalizedMap,
     ) -> Option<ValidatorSetup<StandardHarness>> {
         let config = Config {
             provider,
@@ -869,12 +873,13 @@ mod tests {
         let mut restarts: u64 = 0;
 
         loop {
-            let runner = if let Some(cp) = checkpoint.take() {
-                restarts += 1;
-                deterministic::Runner::from(cp)
-            } else {
-                deterministic::Runner::new(marshal_fault_test_config(seed))
-            };
+            let runner = checkpoint.take().map_or_else(
+                || deterministic::Runner::new(marshal_fault_test_config(seed)),
+                |cp| {
+                    restarts += 1;
+                    deterministic::Runner::from(cp)
+                },
+            );
 
             let (done, next_checkpoint) = runner.start_and_recover(|mut context| async move {
                 let Fixture {
