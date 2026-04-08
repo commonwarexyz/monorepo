@@ -31,7 +31,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 type Error = crate::qmdb::Error<mmr::Family>;
 
-/// Bitmap pushes and clears for a single ancestor batch. Speculative chunk-level bitmap overlay.
+/// Speculative chunk-level bitmap overlay.
 ///
 /// Instead of tracking individual pushed bits and cleared locations, maintains materialized chunk
 /// bytes for every chunk that differs from the parent bitmap. This directly produces the chunk data
@@ -80,8 +80,12 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 
     /// Clear a single bit (used for superseded locations).
+    /// Skips locations in pruned chunks — those bits are already inactive.
     fn clear_bit<B: BitmapReadable<N>>(&mut self, base: &B, loc: u64) {
         let idx = BitMap::<N>::to_chunk_index(loc);
+        if idx < base.pruned_chunks() {
+            return;
+        }
         let rel = (loc % Self::CHUNK_BITS) as usize;
         let chunk = self.chunk_mut(base, idx);
         chunk[rel / 8] &= !(1 << (rel % 8));
@@ -676,11 +680,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 impl<const N: usize> BitmapBatch<N> {
     /// Apply a chunk overlay to this bitmap. When `self` is `Base` with sole ownership, writes
     /// overlay chunks directly into the bitmap. Otherwise creates a new `Layer`.
-    pub(super) fn apply_overlay(&mut self, overlay: ChunkOverlay<N>) {
-        if overlay.chunks.is_empty() {
-            return;
-        }
-
+    pub(super) fn apply_overlay(&mut self, overlay: Arc<ChunkOverlay<N>>) {
         // Fast path: write overlay chunks directly into the Base bitmap.
         if let Self::Base(base) = self {
             if let Some(bitmap) = Arc::get_mut(base) {
@@ -689,7 +689,7 @@ impl<const N: usize> BitmapBatch<N> {
                 // Overwrite dirty chunks.
                 for (&idx, chunk_bytes) in &overlay.chunks {
                     if idx >= bitmap.pruned_chunks() {
-                        bitmap.set_chunk_by_index(idx, &chunk_bytes);
+                        bitmap.set_chunk_by_index(idx, chunk_bytes);
                     }
                 }
                 return;
@@ -698,10 +698,7 @@ impl<const N: usize> BitmapBatch<N> {
 
         // Slow path: create a new layer.
         let parent = self.clone();
-        *self = Self::Layer(Arc::new(BitmapBatchLayer {
-            parent,
-            overlay: Arc::new(overlay),
-        }));
+        *self = Self::Layer(Arc::new(BitmapBatchLayer { parent, overlay }));
     }
 
     /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
@@ -742,10 +739,8 @@ impl<const N: usize> BitmapBatch<N> {
             bitmap.extend_to(overlay.len);
             // Apply dirty chunks.
             for (&idx, chunk_bytes) in &overlay.chunks {
-                if BitMap::<N>::to_chunk_index(idx as u64 * ChunkOverlay::<N>::CHUNK_BITS)
-                    >= bitmap.pruned_chunks()
-                {
-                    bitmap.set_chunk_by_index(idx, &chunk_bytes);
+                if idx >= bitmap.pruned_chunks() {
+                    bitmap.set_chunk_by_index(idx, chunk_bytes);
                 }
             }
         }
@@ -1257,5 +1252,34 @@ mod tests {
         );
         // Empty bitmap, tip = 0: no candidates.
         assert_eq!(scan.next_candidate(Location::new(0), 0), None);
+    }
+
+    #[test]
+    fn test_apply_overlay() {
+        // Base: 8 bits all set, sole owner -> fast path.
+        let base = make_bitmap(&[true; 8]);
+        let mut batch = BitmapBatch::Base(Arc::new(base));
+
+        let mut overlay = ChunkOverlay::new(12);
+        let mut c0 = [0u8; N];
+        c0[0] = 0b1111_0111; // bits 0-7 set except bit 3
+        c0[1] = 0b0000_0100; // bit 10 set
+        overlay.chunks.insert(0, c0);
+        batch.apply_overlay(Arc::new(overlay));
+
+        // Fast path keeps Base, extends length, applies chunks.
+        assert!(matches!(batch, BitmapBatch::Base(_)));
+        assert_eq!(batch.len(), 12);
+        assert_eq!(batch.get_chunk(0)[0] & (1 << 3), 0);
+        assert_ne!(batch.get_chunk(0)[1] & (1 << 2), 0);
+
+        // Shared Arc -> slow path creates Layer.
+        let BitmapBatch::Base(ref base_arc) = batch else {
+            panic!("expected Base");
+        };
+        let _shared = Arc::clone(base_arc);
+        let overlay2 = ChunkOverlay::new(12);
+        batch.apply_overlay(Arc::new(overlay2));
+        assert!(matches!(batch, BitmapBatch::Layer(_)));
     }
 }

@@ -22,7 +22,7 @@ use crate::{
             operation::{update::Update, Operation},
         },
         current::{
-            batch::{BitmapBatch, ChunkOverlay},
+            batch::BitmapBatch,
             grafting,
             proof::{OperationProof, RangeProof},
         },
@@ -573,7 +573,7 @@ where
             }
             // Apply in chronological order (deepest ancestor first).
             for overlay in overlays.into_iter().rev() {
-                self.status.apply_overlay(ChunkOverlay::clone(&overlay));
+                self.status.apply_overlay(overlay);
             }
         }
 
