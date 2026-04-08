@@ -272,8 +272,9 @@ stability_scope!(BETA {
 
     /// Primary and secondary peers registered together for [`AddressableManager::track`].
     ///
-    /// If the same public key appears in both maps, the primary entry is authoritative
-    /// for address and role (the key is not registered as secondary).
+    /// If the same public key appears in both maps, the primary entry takes precedence:
+    /// [`AddressableManager::track`] will register it as primary and silently skip the
+    /// secondary entry.
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
