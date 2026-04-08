@@ -203,6 +203,10 @@ mod tests {
         harness::get_block_by_height_and_latest::<DeferredHarness>();
     }
 
+    // Directly writes blocks and finalizations into the storage archives
+    // used by the marshal, bypassing the normal finalization flow. This lets
+    // us manufacture inconsistent on-disk state (e.g. a finalization without
+    // its corresponding block) to simulate crash-recovery scenarios.
     async fn seed_inconsistent_restart_state(
         context: deterministic::Context,
         partition_prefix: &str,
@@ -301,6 +305,8 @@ mod tests {
             .expect("failed to sync seeded finalizations");
     }
 
+    // Writes a block directly into the cache's per-epoch notarized storage,
+    // simulating a block that was notarized but never finalized before a crash.
     async fn seed_cache_block(
         context: deterministic::Context,
         partition_prefix: &str,
@@ -352,6 +358,9 @@ mod tests {
             .expect("failed to seed notarized block");
     }
 
+    // Verifies that a validator whose finalized-blocks archive is missing
+    // the block at the tip (has finalization for height 2 but only block 1)
+    // fetches the missing block from a peer on restart.
     #[test_traced("WARN")]
     fn test_standard_restart_repairs_trailing_missing_finalized_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -372,6 +381,7 @@ mod tests {
             let recovering_validator = participants[0].clone();
             let peer_validator = participants[1].clone();
 
+            // Build chain: genesis -> block_one -> block_two
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
@@ -385,6 +395,7 @@ mod tests {
                 3,
             );
 
+            // Give the peer all blocks so it can serve them during repair.
             let mut peer_mailbox = StandardHarness::setup_validator(
                 context.with_label("peer_validator"),
                 &mut oracle,
@@ -402,6 +413,8 @@ mod tests {
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             context.sleep(Duration::from_millis(200)).await;
 
+            // Seed inconsistent state: has block_one but only a finalization
+            // (no block data) for height 2.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
                 context.clone(),
@@ -411,6 +424,7 @@ mod tests {
             )
             .await;
 
+            // Start the recovering validator and verify initial state.
             let recovering = StandardHarness::setup_validator_with(
                 context.with_label("recovering_validator"),
                 &mut oracle,
@@ -434,20 +448,20 @@ mod tests {
                 "seeded restart state should begin without the trailing finalized block"
             );
 
-            for _ in 0..20 {
+            // Poll until the trailing block is repaired from the peer.
+            loop {
                 if recovering_mailbox.get_block(Identifier::Latest).await == Some(block_two.clone())
                 {
                     return;
                 }
                 context.sleep(Duration::from_millis(200)).await;
             }
-
-            panic!(
-                "marshal should repair a trailing missing finalized block on restart when a peer can serve it"
-            );
         });
     }
 
+    // Verifies that a validator missing an internal block (has blocks 1 and 3
+    // but not 2, with finalizations for both 2 and 3) fetches the gap from a
+    // peer on restart.
     #[test_traced("WARN")]
     fn test_standard_restart_repairs_internal_missing_finalized_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -468,6 +482,7 @@ mod tests {
             let recovering_validator = participants[0].clone();
             let peer_validator = participants[1].clone();
 
+            // Build chain: genesis -> block_one -> block_two -> block_three
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
@@ -491,6 +506,7 @@ mod tests {
                 3,
             );
 
+            // Give the peer all blocks so it can serve them during repair.
             let mut peer_mailbox = StandardHarness::setup_validator(
                 context.with_label("peer_validator"),
                 &mut oracle,
@@ -513,6 +529,8 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(200)).await;
 
+            // Seed inconsistent state: has blocks 1 and 3 but is missing
+            // block 2 (an internal gap in the finalized chain).
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
                 context.clone(),
@@ -548,17 +566,20 @@ mod tests {
                 "seeded restart state should begin with the internal finalized gap still missing"
             );
 
-            for _ in 0..20 {
+            // Poll until the internal gap is repaired from the peer.
+            loop {
                 if recovering_mailbox.get_block(Height::new(2)).await == Some(block_two.clone()) {
                     return;
                 }
                 context.sleep(Duration::from_millis(200)).await;
             }
-
-            panic!("marshal should repair an internal missing finalized block on restart");
         });
     }
 
+    // Verifies that a block persisted at a height beyond the last finalization
+    // is still surfaced via get_block and dispatched to the application. This
+    // can happen if a crash occurs after persisting the block but before
+    // persisting its finalization.
     #[test_traced("WARN")]
     fn test_standard_restart_does_surface_block_without_finalization() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -578,6 +599,8 @@ mod tests {
 
             let recovering_validator = participants[0].clone();
 
+            // Build chain: genesis -> block_one -> block_two
+            // Only block_one gets a finalization; block_two is an orphan.
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
@@ -591,6 +614,9 @@ mod tests {
                 3,
             );
 
+            // Seed state: both blocks persisted, but only block_one has a
+            // finalization. block_two is a block without a corresponding
+            // finalization row.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
                 context.clone(),
@@ -612,6 +638,7 @@ mod tests {
             let recovering_application = recovering.application;
             let recovering_mailbox = recovering.mailbox;
 
+            // The tip tracks the highest finalization, not the highest block.
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(
                 recovering_mailbox.get_info(Identifier::Latest).await,
@@ -636,6 +663,9 @@ mod tests {
                 "height 1 should be pending before acknowledging the tip"
             );
 
+            // Walk the application through sequential acks. Even though
+            // block_two has no finalization, it is still dispatched because
+            // its block data exists in the archive.
             assert_eq!(
                 recovering_application.acknowledge_next(),
                 Some(Height::new(1)),
@@ -660,6 +690,9 @@ mod tests {
         });
     }
 
+    // Verifies repair when many trailing blocks are missing. Seed state has
+    // only block_one's data but finalizations for heights 1-5. The recovering
+    // validator must fetch blocks 2-5 from the peer.
     #[test_traced("WARN")]
     fn test_standard_restart_repairs_multiple_trailing_missing_finalized_blocks() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -680,6 +713,7 @@ mod tests {
             let recovering_validator = participants[0].clone();
             let peer_validator = participants[1].clone();
 
+            // Build a 5-block chain.
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
@@ -707,6 +741,7 @@ mod tests {
                 ));
             }
 
+            // Give the peer all blocks and finalizations.
             let mut peer_mailbox = StandardHarness::setup_validator(
                 context.with_label("peer_validator"),
                 &mut oracle,
@@ -730,6 +765,8 @@ mod tests {
             }
             context.sleep(Duration::from_millis(200)).await;
 
+            // Seed inconsistent state: only block_one persisted but all 5
+            // finalizations exist, leaving blocks 2-5 missing.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
                 context.clone(),
@@ -754,7 +791,8 @@ mod tests {
             .await;
             let recovering_mailbox = recovering.mailbox;
 
-            for _ in 0..40 {
+            // Poll until all missing blocks are repaired (check the last one).
+            loop {
                 if recovering_mailbox.get_block(Height::new(5)).await
                     == Some(block_five.clone())
                 {
@@ -762,13 +800,12 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(200)).await;
             }
-
-            panic!(
-                "marshal should repair multiple trailing missing finalized blocks on restart"
-            );
         });
     }
 
+    // Verifies that when all finalized blocks are already present on disk,
+    // restart completes normally with no repair needed. Acts as a baseline
+    // to confirm the repair logic is a no-op in the consistent case.
     #[test_traced("WARN")]
     fn test_standard_restart_no_trailing_finalizations_is_noop() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -810,6 +847,7 @@ mod tests {
                 3,
             );
 
+            // Seed fully consistent state: both blocks and both finalizations.
             let partition_prefix = format!("validator-{recovering_validator}");
             seed_inconsistent_restart_state(
                 context.clone(),
@@ -834,6 +872,7 @@ mod tests {
             let recovering_application = recovering.application;
             let recovering_mailbox = recovering.mailbox;
 
+            // Everything is present on disk -- no repair needed.
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(
                 recovering_mailbox.get_info(Identifier::Latest).await,
@@ -851,6 +890,7 @@ mod tests {
                 "only height 1 should be pending (height 2 awaits ack of height 1)"
             );
 
+            // Walk through sequential acks to confirm no repair was needed.
             assert_eq!(
                 recovering_application.acknowledge_next(),
                 Some(Height::new(1)),
@@ -868,6 +908,10 @@ mod tests {
         });
     }
 
+    // Verifies that trailing repair can source a missing block from the local
+    // cache (notarized storage) instead of fetching from a peer. This covers
+    // the case where a block was notarized and cached but the finalized-blocks
+    // archive was not updated before a crash.
     #[test_traced("WARN")]
     fn test_standard_restart_repairs_trailing_block_from_local_cache() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -914,6 +958,9 @@ mod tests {
             )
             .await;
 
+            // Seed inconsistent state: block_one in the finalized archive,
+            // finalization for height 2 but no block_two in the archive.
+            // block_two only exists in the cache's notarized storage.
             seed_inconsistent_restart_state(
                 context.clone(),
                 &partition_prefix,
@@ -934,6 +981,7 @@ mod tests {
             let recovering_application = recovering.application;
             let recovering_mailbox = recovering.mailbox;
 
+            // Repair should find block_two in the local cache immediately.
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(
                 recovering_mailbox.get_block(Identifier::Latest).await,
@@ -948,6 +996,9 @@ mod tests {
         });
     }
 
+    // Verifies that cache::Manager::load_persisted_epochs re-opens epoch
+    // archives from disk, making blocks written in a prior session findable
+    // via find_block after restart.
     #[test_traced("WARN")]
     fn test_cache_load_persisted_epochs_finds_blocks() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
