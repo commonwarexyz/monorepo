@@ -21,7 +21,7 @@
 //! On startup, the application supplies the initial set of peers. The [`Oracle`] implements
 //! [`AddressableManager`](crate::AddressableManager) which provides two ways to update peer addresses:
 //!
-//! - [`AddressableManager::track`](crate::AddressableManager::track): Register a new peer set at a
+//! - [`AddressableManager::track`](crate::AddressableManager::track): Track a new peer set at a
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
 //!   This accepts either a list of primary peers or an
 //!   [`AddressableTrackedPeers`](crate::AddressableTrackedPeers) value containing both primary and
@@ -1013,7 +1013,7 @@ mod tests {
                 "new secondary set should be empty"
             );
 
-            // Self should NOT be in the peer set (not registered)
+            // Self should NOT be in the peer set (not tracked)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
                 "peer set should not include self"

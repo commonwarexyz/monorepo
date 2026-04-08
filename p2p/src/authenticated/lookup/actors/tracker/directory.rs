@@ -75,7 +75,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
-    /// Primary and secondary peer sets indexed by peer-set ID.
+    /// Primary and secondary peer sets indexed by peer set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
@@ -150,7 +150,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Track new primary and secondary peer sets for the given index.
     ///
     /// Returns the peers whose connections should be reset because they were
-    /// removed from all retained peer sets or had their address changed.
+    /// removed from all tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
     ///
@@ -175,7 +175,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Create and store new primary peer set (all peers are registered regardless of address
+        // Create and store new primary peer set (all peers are tracked regardless of address
         // validity).
         let mut reset_peers = Vec::new();
         for (primary, addr) in &primaries {
@@ -259,7 +259,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(Set::from_iter_dedup(reset_peers))
     }
 
-    /// Update a registered peer's address.
+    /// Update a tracked peer's address.
     ///
     /// Returns `true` if the peer exists and the address actually changed.
     /// The caller should sever any existing connection to this peer since it
@@ -367,11 +367,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers across all retained peer sets.
+    /// Returns all peers across all tracked peer sets.
     ///
     /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
     /// [`PeerSetUpdate::all`]: a peer with any primary membership is listed only under `primary`,
-    /// even if they also appear as secondary in another retained set.
+    /// even if they also appear as secondary in another tracked set.
     pub fn all(&self) -> TrackedPeers<C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
@@ -1001,7 +1001,7 @@ mod tests {
             let agg = directory.all();
             assert!(
                 agg.primary.position(&pk_overlap).is_some(),
-                "any primary membership across retained sets -> aggregate primary only"
+                "any primary membership across tracked sets -> aggregate primary only"
             );
             assert!(
                 agg.secondary.position(&pk_overlap).is_none(),
@@ -1305,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_private_egress_ip_in_peer_set_but_not_dialable_or_registered() {
+    fn test_private_egress_ip_in_peer_set_but_not_dialable_or_tracked() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1894,7 +1894,7 @@ mod tests {
                 "Peer should not be blocked initially"
             );
 
-            // Block registered peer multiple times
+            // Block tracked peer multiple times
             directory.block(&registered_pk);
             assert!(
                 directory
@@ -1902,7 +1902,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Registered peer should be marked blocked"
+                "Tracked peer should be marked blocked"
             );
 
             directory.block(&registered_pk);
@@ -1912,7 +1912,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Blocking same registered peer twice should not change metric"
+                "Blocking same tracked peer twice should not change metric"
             );
 
             directory.block(&registered_pk);
@@ -1922,7 +1922,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Blocking same registered peer thrice should not change metric"
+                "Blocking same tracked peer thrice should not change metric"
             );
 
             // Block a nonexistent peer multiple times
@@ -2475,7 +2475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_unregistered_peer() {
+    fn test_overwrite_untracked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();

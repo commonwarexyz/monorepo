@@ -16,7 +16,7 @@ pub mod limited;
 pub mod mocks;
 pub mod mux;
 
-/// Primary and secondary peer memberships at one peer-set index.
+/// Primary and secondary peer memberships at one peer set index.
 ///
 /// Import as `PeerSetsAtIndexBase` (or similar) and define a local
 /// `type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<...>` with the primary/secondary types you use.

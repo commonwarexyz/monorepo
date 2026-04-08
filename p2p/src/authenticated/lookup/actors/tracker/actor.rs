@@ -142,7 +142,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     return;
                 };
 
-                // Kill connections for peers no longer in any retained peer set
+                // Kill connections for peers no longer in any tracked peer set
                 // or whose addresses changed.
                 for peer in reset_peers {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
@@ -516,7 +516,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            // With bypass_ip_check=true, registered peer with wrong IP is acceptable
+            // With bypass_ip_check=true, tracked peer with wrong IP is acceptable
             assert!(
                 mailbox.acceptable(peer_pk2.clone(), peer_addr.ip()).await,
                 "Registered peer with wrong IP should be acceptable with bypass_ip_check=true"
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_unregistered_peer_silently_ignored() {
+    fn test_overwrite_untracked_peer_silently_ignored() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -1180,7 +1180,7 @@ mod tests {
             let (unchanged_mailbox, mut unchanged_rx) = Mailbox::new(1);
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
-            // Call overwrite with mix of registered+changed, registered+unchanged, and unknown peers
+            // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers
             oracle
                 .overwrite(
                     [
@@ -1193,7 +1193,7 @@ mod tests {
                 )
                 .await;
 
-            // Only registered+changed peer (pk_tracked) gets killed
+            // Only tracked+changed peer (pk_tracked) gets killed
             assert!(matches!(tracked_rx.recv().await, Some(peer::Message::Kill)));
 
             // Unchanged peer should NOT receive kill - verify the receiver has no pending messages

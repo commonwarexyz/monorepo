@@ -25,7 +25,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-/// Primary [`BitSet`] and secondary ordered [`OrderedSet`] at one peer-set index.
+/// Primary [`BitSet`] and secondary ordered [`OrderedSet`] at one peer set index.
 type PeerSetsAtIndex<C> = PeerSetsAtIndexBase<BitSet<C>, OrderedSet<C>>;
 
 /// Configuration for the [Directory].
@@ -78,7 +78,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record<C>>,
 
-    /// Primary and secondary peer sets indexed by peer-set ID.
+    /// Primary and secondary peer sets indexed by peer set ID.
     ///
     /// Secondaries do not participate in BitVec knowledge gossip; they are stored as plain
     /// ordered sets (same type as [`TrackedPeers::secondary`]).
@@ -388,11 +388,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers across all retained peer sets.
+    /// Returns all peers across all tracked peer sets.
     ///
     /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
     /// [`PeerSetUpdate::all`]: a peer with any primary membership is listed only under `primary`,
-    /// even if they also appear as secondary in another retained set.
+    /// even if they also appear as secondary in another tracked set.
     pub fn all(&self) -> TrackedPeers<C> {
         let mut primary = Vec::new();
         let mut secondary = Vec::new();
@@ -492,7 +492,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
-    /// Unblock all peers whose block has expired and update primary peer-set knowledge bitmaps.
+    /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
     pub fn unblock_expired(&mut self) {
         let now = self.context.current();
         while let Some((_, &blocked_until)) = self.blocked.peek() {
@@ -793,7 +793,7 @@ mod tests {
             let agg = directory.all();
             assert!(
                 agg.primary.position(&pk_overlap).is_some(),
-                "any primary membership across retained sets -> aggregate primary only"
+                "any primary membership across tracked sets -> aggregate primary only"
             );
             assert!(
                 agg.secondary.position(&pk_overlap).is_none(),
@@ -970,7 +970,7 @@ mod tests {
                 "Peer should not be blocked initially"
             );
 
-            // Block registered peer multiple times
+            // Block tracked peer multiple times
             directory.block(&registered_pk);
             assert!(
                 directory
@@ -978,7 +978,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Registered peer should be marked blocked"
+                "Tracked peer should be marked blocked"
             );
 
             directory.block(&registered_pk);
@@ -988,7 +988,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Blocking same registered peer twice should not change metric"
+                "Blocking same tracked peer twice should not change metric"
             );
 
             directory.block(&registered_pk);
@@ -998,7 +998,7 @@ mod tests {
                     .blocked
                     .get(&metrics::Peer::new(&registered_pk))
                     .is_some(),
-                "Blocking same registered peer thrice should not change metric"
+                "Blocking same tracked peer thrice should not change metric"
             );
 
             // Block a nonexistent peer multiple times

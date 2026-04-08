@@ -76,11 +76,11 @@
 //! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
 //! marked as '1'). It then waits for responses, learning about other peers through the
 //! `Payload::Peers` messages received. Bootstrapper information is persisted, and connections to
-//! them are maintained even if they aren't part of any retained peer sets. Different
+//! them are maintained even if they aren't part of any tracked peer sets. Different
 //! peers can have different bootstrapper lists.
 //!
 //! _Note: If a peer (listener) receives a connection request from another peer (dialer) that
-//! belongs to a registered peer set, the listener will accept the connection, even if the
+//! belongs to a tracked peer set, the listener will accept the connection, even if the
 //! listener itself hasn't yet learned about that specific peer set (or has an older version). The
 //! core requirement is that the listener recognizes the *dialer's public key* as belonging to
 //! *some* authorized set it tracks (see `actors::tracker::Actor`). This mechanism allows peers
@@ -1094,7 +1094,7 @@ mod tests {
                 "latest set should include other"
             );
 
-            // Self should NOT be in the peer set (not registered)
+            // Self should NOT be in the peer set (not tracked)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
                 "peer set should not include self"

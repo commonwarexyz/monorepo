@@ -86,7 +86,7 @@
 //! // Start context
 //! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
-//!     // Initialize the network with an initial peer set (registered at id 0).
+//!     // Initialize the network with an initial peer set (tracked at id 0).
 //!     let (network, oracle) =
 //!         Network::new_with_peers(context.with_label("network"), p2p_cfg, peers.clone())
 //!             .await;
@@ -3229,7 +3229,7 @@ mod tests {
                 "latest primary set should include other"
             );
 
-            // Self should NOT be in the peer set (not registered)
+            // Self should NOT be in the peer set (not tracked)
             assert!(
                 update.all.primary.position(&self_pk).is_none(),
                 "peer set should not include self"

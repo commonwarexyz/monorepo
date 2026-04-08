@@ -90,7 +90,7 @@ impl<P: PublicKey, F> SplitRouter<P> for F where
 {
 }
 
-/// Reference counts for how many retained peer sets list a peer as primary vs secondary.
+/// Reference counts for how many tracked peer sets list a peer as primary vs secondary.
 #[derive(Clone, Copy, Default)]
 struct PeerRefCounts {
     primary: usize,
@@ -107,9 +107,9 @@ pub struct Config {
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
 
-    /// The maximum number of peer sets to retain (`tracked_peer_sets`). When a new peer set is
-    /// registered and this limit is exceeded, the oldest peer set is removed. Peers that are no
-    /// longer in any retained peer set will have their links removed and messages to them will be
+    /// The maximum number of peer sets to track (`tracked_peer_sets`). When a new peer set is
+    /// tracked and this limit is exceeded, the oldest peer set is removed. Peers that are no
+    /// longer in any tracked peer set will have their links removed and messages to them will be
     /// dropped.
     pub tracked_peer_sets: NonZeroUsize,
 }
@@ -148,13 +148,13 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // Primary and secondary peer sets indexed by peer-set ID.
+    // Primary and secondary peer sets indexed by peer set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
 
-    // Per-peer reference counts across retained peer sets (entry removed when both are zero).
+    // Per-peer reference counts across tracked peer sets (entry removed when both are zero).
     peer_ref_counts: BTreeMap<P, PeerRefCounts>,
 
-    // Maximum number of peer sets to retain.
+    // Maximum number of peer sets to track.
     tracked_peer_sets: NonZeroUsize,
 
     // A map of peers blocking each other
@@ -233,7 +233,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Create a new simulated network with primary and secondary peers split into two sets.
     ///
-    /// Peers are registered at peer-set ID `0` as [`TrackedPeers`], matching the most common test
+    /// Peers are tracked at peer set ID `0` as [`TrackedPeers`], matching the most common test
     /// setup.
     pub async fn new_with_split_peers<I, J>(
         context: E,
@@ -331,7 +331,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.peer_ref_counts.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any retained peer set"
+                        "removed peer no longer in any tracked peer set"
                     );
                 }
             }
@@ -349,7 +349,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.peer_ref_counts.remove(public_key);
                     debug!(
                         ?public_key,
-                        "removed peer no longer in any retained peer set"
+                        "removed peer no longer in any tracked peer set"
                     );
                 }
             }
@@ -598,10 +598,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         self.peer_subscribers = live_subscribers;
     }
 
-    /// Primary and secondary peers across all retained peer sets (reference-counted union).
+    /// Primary and secondary peers across all tracked peer sets (reference-counted union).
     ///
     /// Primary wins over secondary for the same public key: `secondary` includes only peers whose
-    /// only role across retained sets is secondary (same as [`crate::Provider::subscribe`] for [`PeerSetUpdate::all`]).
+    /// only role across tracked sets is secondary (same as [`crate::Provider::subscribe`] for [`PeerSetUpdate::all`]).
     fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
         let primary = self
             .peer_ref_counts
@@ -631,7 +631,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Peers used when expanding [`Recipients::All`].
     ///
-    /// Every peer registered in a retained peer set is treated as reachable for broadcast.
+    /// Every peer in a tracked peer set is treated as reachable for broadcast.
     /// Primary peers still drive primary-only behavior such as dialing; peers listed only as
     /// secondary still receive [`Recipients::All`] traffic, which matches how tests use this
     /// network.
@@ -1849,7 +1849,7 @@ mod tests {
         });
     }
 
-    /// [`PeerSetUpdate::all`] uses primary-wins across *retained* indices: a peer who is primary in one
+    /// [`PeerSetUpdate::all`] uses primary-wins across *tracked* indices: a peer who is primary in one
     /// peer set and secondary in another is listed only under `all.primary` (not in `all.secondary`).
     #[test]
     fn test_peer_set_update_all_cross_index_primary_wins() {
@@ -1905,7 +1905,7 @@ mod tests {
             assert!(update.latest.secondary.position(&pk_overlap).is_some());
             assert!(update.latest.secondary.position(&pk_sec).is_some());
 
-            // Across retained sets: pk_overlap is primary in set 10 -> aggregate lists them only under primary.
+            // Across tracked sets: pk_overlap is primary in set 10 -> aggregate lists them only under primary.
             assert!(update.all.primary.position(&pk_a).is_some());
             assert!(update.all.primary.position(&pk_b).is_some());
             assert!(update.all.primary.position(&pk_overlap).is_some());
@@ -2224,7 +2224,7 @@ mod tests {
     }
 
     /// After advancing tracked peer sets, secondaries from an older snapshot remain addressable until evicted from history:
-    /// a new primary can still reach them, while a newer-only primary does not receive messages intended for that retained secondary view.
+    /// a new primary can still reach them, while a newer-only primary does not receive messages intended for that tracked secondary view.
     #[test]
     fn test_secondary_sets_remain_until_eviction() {
         let executor = deterministic::Runner::default();

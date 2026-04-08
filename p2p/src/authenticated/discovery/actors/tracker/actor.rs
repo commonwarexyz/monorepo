@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_no_sets_registered() {
+    fn test_construct_no_sets_tracked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
