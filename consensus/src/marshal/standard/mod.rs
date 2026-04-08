@@ -361,7 +361,7 @@ mod tests {
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
-                NonZeroUsize::new(1).unwrap(),
+                NZUsize!(1),
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
@@ -475,7 +475,7 @@ mod tests {
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
-                NonZeroUsize::new(1).unwrap(),
+                NZUsize!(1),
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
@@ -550,7 +550,7 @@ mod tests {
                 &mut oracle,
                 recovering_validator,
                 ConstantProvider::new(schemes[0].clone()),
-                NonZeroUsize::new(1).unwrap(),
+                NZUsize!(1),
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;

@@ -1611,6 +1611,7 @@ where
                     ));
                     remaining -= 1;
                 }
+                // height.next() would panic at Height::MAX.
                 if height == tip {
                     break;
                 }
