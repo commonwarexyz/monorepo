@@ -46,9 +46,9 @@ mod tests {
             core::Mailbox,
             mocks::{
                 harness::{
-                    self, default_leader, make_raw_block, setup_network, Ctx, DeferredHarness,
-                    InlineHarness, StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK,
-                    NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
+                    self, default_leader, make_raw_block, setup_network_with_participants, Ctx,
+                    DeferredHarness, InlineHarness, StandardHarness, TestHarness, B,
+                    BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -64,7 +64,7 @@ mod tests {
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::channel::oneshot;
+    use commonware_utils::{channel::oneshot, NZUsize};
     use std::time::Duration;
 
     fn assert_finalize_deterministic<H: TestHarness>(
@@ -310,7 +310,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -320,6 +319,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -388,7 +393,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -398,6 +402,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -521,7 +531,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -531,6 +540,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -656,13 +671,18 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
                     ..
                 } =
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
