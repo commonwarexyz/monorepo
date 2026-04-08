@@ -134,11 +134,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                let primary = peers.primary;
-                let secondary = peers.secondary;
-
                 // Identify peers whose existing connection state should be reset.
-                let Some(reset_peers) = self.directory.track(index, primary, secondary) else {
+                let Some(reset_peers) = self.directory.track(index, peers) else {
                     return;
                 };
 

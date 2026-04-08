@@ -157,16 +157,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Secondary peers are not checked here because max_peer_set_size
                 // exists to cap the bitvec size, which only covers primary peers.
                 let max = self.max_peer_set_size;
-                let primary = peers.primary;
-                let secondary = peers.secondary;
                 assert!(
-                    primary.len() as u64 <= max,
+                    peers.primary.len() as u64 <= max,
                     "primary peer set too large: {} > {max}",
-                    primary.len()
+                    peers.primary.len()
                 );
 
                 // Attempt to update peer set membership.
-                if !self.directory.track(index, primary, secondary) {
+                if !self.directory.track(index, peers) {
                     return;
                 }
 
