@@ -68,10 +68,10 @@ impl<B: Block> Application<B> {
     /// Waits for the next block to be dispatched, acknowledges it, and returns its height.
     pub async fn acknowledged(&self) -> Height {
         loop {
-            self.ack_rx.lock().recv().await.expect("channel closed");
             if let Some(height) = self.acknowledge_next() {
                 return height;
             }
+            self.ack_rx.lock().recv().await.expect("channel closed");
         }
     }
 }
