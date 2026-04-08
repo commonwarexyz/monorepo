@@ -1,8 +1,10 @@
 //! Benchmarks for speculative batch merkleization.
 //!
-//! Measures the time to create a speculative batch with random updates of 10% of all keys,
-//! merkleize it to compute the root, and drop the result. The database is pre-populated with N
-//! unique keys (not timed).
+//! Measures the time required to create a speculative batch (applying random updates equal to 10%
+//! of the total key count, sampled with replacement), merkleize it, and compute its root. The
+//! database is initialized with N unique keys having random digests as values. Database
+//! initialization time is not included in the benchmark. The page cache is large enough to hold the
+//! entire active key set to eliminate disk access delays from affecting the results.
 
 use crate::common::{make_fixed_value, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::{Hasher, Sha256};
@@ -15,15 +17,15 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::mmr::journaled::Config as MmrConfig,
-    qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
+    qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     hint::black_box,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
 
@@ -64,8 +66,8 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 
 /// Configure a large (512MB) page cache that can hold all active keys in RAM.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(4096);
-const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32_768);
+const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
 fn mmr_cfg(ctx: &(impl BufferPooler + ThreadPooler), page_cache: CacheRef) -> MmrConfig {
@@ -122,7 +124,8 @@ async fn seed_db<
     db.sync().await.unwrap();
 }
 
-/// Create a speculative batch updating 10% of keys, then merkleize & retrieve its root.
+/// Create a speculative batch by applying random updates equal to 10% of the key count
+/// (sampled with replacement), then merkleize & retrieve its root.
 /// Returns elapsed time for the batch+merkleize+root cycle.
 async fn bench_speculative_merkleize<
     C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,

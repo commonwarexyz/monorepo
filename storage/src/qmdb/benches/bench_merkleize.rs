@@ -1,6 +1,7 @@
-//! Standalone benchmark entry point for QMDB merkleize benchmarks.
+//! Benchmark entry point for QMDB merkleize benchmarks.
 //!
-//! Run with: `cargo bench --bench qmdb-merkleize`
+//! This is a separate binary from the other QMDB benchmarks so they don't block waiting on the
+//! time-consuming setup of the QMDB init benchmarks.
 
 use criterion::criterion_main;
 
