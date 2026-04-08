@@ -186,3 +186,21 @@ pub(crate) fn pin_to_core(core: usize) {
 /// No-op on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub(crate) const fn pin_to_core(_core: usize) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_available_cores() {
+        let n = available_cores().expect("available_cores returned None on Unix");
+        assert!(n >= 1, "expected at least 1 core, got {n}");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn test_available_cores_non_unix() {
+        assert!(available_cores().is_none());
+    }
+}
