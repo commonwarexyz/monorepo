@@ -348,7 +348,7 @@ pub mod tests {
         qmdb::{
             any::{
                 test::colliding_digest,
-                traits::{DbAny, UnmerkleizedBatch as _},
+                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
         },
@@ -1781,36 +1781,54 @@ pub mod tests {
         });
     }
 
-    /// MerkleizedBatch::root() returns the canonical root that matches db.root() after apply.
-    /// ops_root() differs from root() because the canonical root includes the bitmap/grafted tree
-    /// layers.
-    #[test_traced("INFO")]
-    fn test_current_batch_speculative_root() {
+    /// Verify that the speculative canonical root from a merkleized batch matches the root
+    /// recomputed from committed state after sync + reopen.
+    ///
+    /// Uses enough operations to cross a chunk boundary (CHUNK_SIZE_BITS = N*8), which exercises
+    /// the grafted root computation for newly completed chunks.
+    pub fn test_speculative_root_matches_committed<M, C, F, Fut>(mut open_db: F)
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
+        C::Key: TestKey,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
         let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("sr", &ctx))
-                    .await
-                    .unwrap();
+            let partition = "speculative-root".to_string();
 
+            // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
+            // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
+            // next partial chunk. This ensures the grafted root computation must handle the
+            // newly completed chunk.
+            let mut db: C = open_db_clone(context.with_label("init"), partition.clone()).await;
             let mut batch = db.new_batch();
-            for i in 0..10 {
-                batch = batch.write(key(i), Some(val(i)));
+            for i in 0..260 {
+                batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            let speculative_root = merkleized.root();
-            let ops_root = merkleized.ops_root();
-
-            // Canonical root includes bitmap/grafted layers, so it differs from ops root.
-            assert_ne!(speculative_root, ops_root);
-
             db.apply_batch(merkleized).await.unwrap();
+            let speculative_root = db.root();
 
-            // Speculative canonical root matches the committed canonical root.
+            // Sync, close, and reopen to get the root recomputed from committed state.
+            db.sync().await.unwrap();
+            drop(db);
+
+            let db: C = open_db(context.with_label("reopen"), partition).await;
             assert_eq!(db.root(), speculative_root);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_all_variants_speculative_root_matches_committed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_speculative_root_matches_committed);
         });
     }
 

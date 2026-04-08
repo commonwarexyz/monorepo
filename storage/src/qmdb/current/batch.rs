@@ -552,6 +552,14 @@ where
         grafted_batch.merkleize(&current_db.grafted_tree, &gh)
     };
 
+    // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
+    // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
+    // that transitioned from partial to complete in this batch.
+    let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        parent: bitmap_parent.clone(),
+        overlay: Arc::new(overlay),
+    }));
+
     // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
     // so layer it over the committed grafted MMR.
     let ops_root = inner.root();
@@ -562,31 +570,23 @@ where
     let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter);
     // Compute partial chunk (last incomplete chunk, if any).
     let partial = {
-        let rem = overlay.len % ChunkOverlay::<N>::CHUNK_BITS;
+        let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
         if rem == 0 {
             None
         } else {
             let idx = new_grafted_leaves;
-            let chunk = overlay
-                .get(idx)
-                .copied()
-                .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
+            let chunk = bitmap_batch.get_chunk(idx);
             Some((chunk, rem))
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, _, N>(
         &hasher,
-        bitmap_parent,
+        &bitmap_batch,
         &grafted_storage,
         partial,
         &ops_root,
     )
     .await?;
-
-    let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
-        parent: bitmap_parent.clone(),
-        overlay: Arc::new(overlay),
-    }));
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
