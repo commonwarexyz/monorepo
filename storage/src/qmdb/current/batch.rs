@@ -6,8 +6,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        mmr::{self, Location, Position, Readable, StandardHasher},
-        storage::Storage as MerkleStorage,
+        self, hasher::Standard as StandardHasher, storage::Storage as MerkleStorage, Graftable,
+        Location, Position, Readable,
     },
     qmdb::{
         any::{
@@ -21,6 +21,7 @@ use crate::{
             grafting,
         },
         operation::Key,
+        Error,
     },
     Context,
 };
@@ -28,8 +29,6 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{collections::BTreeMap, sync::Arc};
-
-type Error = crate::qmdb::Error<mmr::Family>;
 
 /// Speculative chunk-level bitmap overlay.
 ///
@@ -114,8 +113,8 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
     }
 }
 
-impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_, B, N> {
-    fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location> {
+impl<F: Graftable, B: BitmapReadable<N>, const N: usize> FloorScan<F> for BitmapScan<'_, B, N> {
+    fn next_candidate(&mut self, floor: Location<F>, tip: u64) -> Option<Location<F>> {
         let loc = *floor;
         if loc >= tip {
             return None;
@@ -130,7 +129,7 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
             let bound = bitmap_len.min(tip);
             if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
                 if idx < bound {
-                    return Some(Location::new(idx));
+                    return Some(Location::<F>::new(idx));
                 }
             }
         }
@@ -139,7 +138,7 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
         if bitmap_len < tip {
             let candidate = loc.max(bitmap_len);
             if candidate < tip {
-                return Some(Location::new(candidate));
+                return Some(Location::<F>::new(candidate));
             }
         }
         None
@@ -153,21 +152,23 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
 /// [`MerkleStorage`].
 struct BatchStorageAdapter<
     'a,
+    F: Graftable,
     D: Digest,
-    R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-    S: MerkleStorage<mmr::Family, Digest = D>,
+    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    S: MerkleStorage<F, Digest = D>,
 > {
     batch: &'a R,
     base: &'a S,
-    _phantom: core::marker::PhantomData<D>,
+    _phantom: core::marker::PhantomData<(F, D)>,
 }
 
 impl<
         'a,
+        F: Graftable,
         D: Digest,
-        R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MerkleStorage<mmr::Family, Digest = D>,
-    > BatchStorageAdapter<'a, D, R, S>
+        R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+        S: MerkleStorage<F, Digest = D>,
+    > BatchStorageAdapter<'a, F, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
         Self {
@@ -179,17 +180,18 @@ impl<
 }
 
 impl<
+        F: Graftable,
         D: Digest,
-        R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MerkleStorage<mmr::Family, Digest = D>,
-    > MerkleStorage<mmr::Family> for BatchStorageAdapter<'_, D, R, S>
+        R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+        S: MerkleStorage<F, Digest = D>,
+    > MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
 {
     type Digest = D;
 
-    async fn size(&self) -> Position {
+    async fn size(&self) -> Position<F> {
         self.batch.size()
     }
-    async fn get_node(&self, pos: Position) -> Result<Option<D>, mmr::Error> {
+    async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
         if let Some(node) = self.batch.get_node(pos) {
             return Ok(Some(node));
         }
@@ -197,25 +199,25 @@ impl<
     }
 }
 
-/// Layers a [`mmr::batch::MerkleizedBatch`] over a [`mmr::mem::Mmr`] for node resolution.
+/// Layers a [`merkle::batch::MerkleizedBatch`] over a [`merkle::mem::Mem`] for node resolution.
 ///
-/// [`mmr::batch::MerkleizedBatch::get_node`] only covers the batch chain; committed positions
+/// [`merkle::batch::MerkleizedBatch::get_node`] only covers the batch chain; committed positions
 /// return `None`. This adapter falls through to the committed Mem for those positions.
-struct BatchOverMem<'a, D: Digest> {
-    batch: &'a mmr::batch::MerkleizedBatch<D>,
-    mem: &'a mmr::mem::Mmr<D>,
+struct BatchOverMem<'a, F: Graftable, D: Digest> {
+    batch: &'a merkle::batch::MerkleizedBatch<F, D>,
+    mem: &'a merkle::mem::Mem<F, D>,
 }
 
-impl<D: Digest> Readable for BatchOverMem<'_, D> {
-    type Family = mmr::Family;
+impl<F: Graftable, D: Digest> Readable for BatchOverMem<'_, F, D> {
+    type Family = F;
     type Digest = D;
-    type Error = mmr::Error;
+    type Error = merkle::Error<F>;
 
-    fn size(&self) -> Position {
+    fn size(&self) -> Position<F> {
         self.batch.size()
     }
 
-    fn get_node(&self, pos: Position) -> Option<D> {
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
         if let Some(d) = self.batch.get_node(pos) {
             return Some(d);
         }
@@ -226,23 +228,23 @@ impl<D: Digest> Readable for BatchOverMem<'_, D> {
         self.batch.root()
     }
 
-    fn pruning_boundary(&self) -> Location {
+    fn pruning_boundary(&self) -> Location<F> {
         self.batch.pruning_boundary()
     }
 
     fn proof(
         &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
-        _loc: Location,
-    ) -> Result<crate::merkle::Proof<mmr::Family, D>, mmr::Error> {
+        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
+        _loc: Location<F>,
+    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
         unreachable!("proof not used in compute_current_layer")
     }
 
     fn range_proof(
         &self,
-        _hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
-        _range: core::ops::Range<Location>,
-    ) -> Result<crate::merkle::Proof<mmr::Family, D>, mmr::Error> {
+        _hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
+        _range: core::ops::Range<Location<F>>,
+    ) -> Result<crate::merkle::Proof<F, D>, merkle::Error<F>> {
         unreachable!("range_proof not used in compute_current_layer")
     }
 }
@@ -252,17 +254,18 @@ impl<D: Digest> Readable for BatchOverMem<'_, D> {
 ///
 /// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
 /// needed to compute the current layer during [`merkleize`](Self::merkleize).
-pub struct UnmerkleizedBatch<H, U, const N: usize>
+pub struct UnmerkleizedBatch<F, H, U, const N: usize>
 where
+    F: Graftable,
     U: update::Update + Send + Sync,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
-    inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
+    inner: any::batch::UnmerkleizedBatch<F, H, U>,
 
     /// Parent's grafted MMR state.
-    grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
+    grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest>>,
 
     /// Parent's bitmap state (COW, Arc-based).
     bitmap_parent: BitmapBatch<N>,
@@ -273,16 +276,15 @@ where
 ///
 /// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed
 /// to compute the canonical root.
-#[derive(Clone)]
-pub struct MerkleizedBatch<D: Digest, U: update::Update + Send + Sync, const N: usize>
+pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize>
 where
-    Operation<mmr::Family, U>: Send + Sync,
+    Operation<F, U>: Send + Sync,
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
-    pub(crate) inner: Arc<any::batch::MerkleizedBatch<mmr::Family, D, U>>,
+    pub(crate) inner: Arc<any::batch::MerkleizedBatch<F, D, U>>,
 
     /// Grafted MMR state.
-    pub(crate) grafted: Arc<mmr::batch::MerkleizedBatch<D>>,
+    pub(crate) grafted: Arc<merkle::batch::MerkleizedBatch<F, D>>,
 
     /// COW bitmap state (for use as a parent in speculative batches).
     pub(crate) bitmap: BitmapBatch<N>,
@@ -291,15 +293,16 @@ where
     pub(crate) canonical_root: D,
 }
 
-impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>
+impl<F, H, U, const N: usize> UnmerkleizedBatch<F, H, U, N>
 where
+    F: Graftable,
     U: update::Update + Send + Sync,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
-        grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
+        inner: any::batch::UnmerkleizedBatch<F, H, U>,
+        grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest>>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
@@ -320,23 +323,24 @@ where
 }
 
 // Unordered get + merkleize.
-impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Unordered<K, V>, N>
+impl<F, K, V, H, const N: usize> UnmerkleizedBatch<F, H, update::Unordered<K, V>, N>
 where
+    F: Graftable,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<mmr::Family, update::Unordered<K, V>>: Codec,
+    Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Read through: mutations -> ancestor diffs -> committed DB.
     pub async fn get<E, C, I>(
         &self,
         key: &K,
-        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
-    ) -> Result<Option<V::Value>, Error>
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location> + 'static,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         self.inner.get(key, &db.any).await
     }
@@ -344,13 +348,13 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>>, Error>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location> + 'static,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         let Self {
             inner,
@@ -366,23 +370,24 @@ where
 }
 
 // Ordered get + merkleize.
-impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Ordered<K, V>, N>
+impl<F, K, V, H, const N: usize> UnmerkleizedBatch<F, H, update::Ordered<K, V>, N>
 where
+    F: Graftable,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<mmr::Family, update::Ordered<K, V>>: Codec,
+    Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Read through: mutations -> ancestor diffs -> committed DB.
     pub async fn get<E, C, I>(
         &self,
         key: &K,
-        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
-    ) -> Result<Option<V::Value>, Error>
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location> + 'static,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         self.inner.get(key, &db.any).await
     }
@@ -390,13 +395,13 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>>, Error>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location> + 'static,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         let Self {
             inner,
@@ -421,12 +426,12 @@ where
 /// search back through ancestors to find the most recent active location; if none exists, we clear
 /// the committed DB location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
-fn build_chunk_overlay<U, B: BitmapReadable<N>, const N: usize>(
+fn build_chunk_overlay<F: Graftable, U, B: BitmapReadable<N>, const N: usize>(
     base: &B,
     batch_len: usize,
     batch_base: u64,
-    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
-    ancestor_diffs: &[Arc<BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>>],
+    diff: &BTreeMap<U::Key, DiffEntry<F, U::Value>>,
+    ancestor_diffs: &[Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>],
 ) -> ChunkOverlay<N>
 where
     U: update::Update,
@@ -481,25 +486,26 @@ where
 ///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
-async fn compute_current_layer<E, U, C, I, H, const N: usize>(
-    inner: Arc<any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>>,
-    current_db: &super::db::Db<E, C, I, H, U, N>,
-    grafted_parent: &Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
+async fn compute_current_layer<F, E, U, C, I, H, const N: usize>(
+    inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U>>,
+    current_db: &super::db::Db<F, E, C, I, H, U, N>,
+    grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest>>,
     bitmap_parent: &BitmapBatch<N>,
-) -> Result<Arc<MerkleizedBatch<H::Digest, U, N>>, Error>
+) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N>>, Error<F>>
 where
+    F: Graftable,
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<mmr::Family, U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
     let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
-    let overlay = build_chunk_overlay::<U, _, N>(
+    let overlay = build_chunk_overlay::<F, U, _, N>(
         bitmap_parent,
         batch_len,
         batch_base,
@@ -515,12 +521,12 @@ where
         .iter()
         .filter(|(&idx, _)| idx < new_grafted_leaves)
         .map(|(&idx, &chunk)| (idx, chunk));
-    let ops_mmr_adapter =
+    let ops_tree_adapter =
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
     let hasher = StandardHasher::<H>::new();
-    let new_leaves = compute_grafted_leaves::<H, N>(
+    let new_leaves = compute_grafted_leaves::<F, H, N>(
         &hasher,
-        &ops_mmr_adapter,
+        &ops_tree_adapter,
         chunks_to_update,
         current_db.thread_pool.as_ref(),
     )
@@ -532,19 +538,18 @@ where
         let mut grafted_batch = grafted_parent
             .new_batch()
             .with_pool(current_db.thread_pool.clone());
-        for &(ops_pos, digest) in &new_leaves {
-            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
-            if grafted_pos < grafted_batch.size() {
-                let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
+        let old_grafted_leaves = *grafted_parent.leaves() as usize;
+        for &(chunk_idx, digest) in &new_leaves {
+            if chunk_idx < old_grafted_leaves {
                 grafted_batch = grafted_batch
-                    .update_leaf_digest(loc, digest)
+                    .update_leaf_digest(Location::<F>::new(chunk_idx as u64), digest)
                     .expect("update_leaf_digest failed");
             } else {
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_mmr, &gh)
+        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
     };
 
     // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
@@ -552,9 +557,9 @@ where
     let ops_root = inner.root();
     let layered = BatchOverMem {
         batch: &grafted_batch,
-        mem: &current_db.grafted_mmr,
+        mem: &current_db.grafted_tree,
     };
-    let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_mmr_adapter);
+    let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter);
     // Compute partial chunk (last incomplete chunk, if any).
     let partial = {
         let rem = overlay.len % ChunkOverlay::<N>::CHUNK_BITS;
@@ -569,8 +574,14 @@ where
             Some((chunk, rem))
         }
     };
-    let canonical_root =
-        compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
+    let canonical_root = compute_db_root::<F, H, _, _, _, N>(
+        &hasher,
+        bitmap_parent,
+        &grafted_storage,
+        partial,
+        &ops_root,
+    )
+    .await?;
 
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
@@ -587,7 +598,7 @@ where
 
 /// Immutable bitmap state at any point in a batch chain.
 ///
-/// Mirrors the [`crate::mmr::batch::MerkleizedBatch`] pattern.
+/// Mirrors the [`crate::merkle::batch::MerkleizedBatch`] pattern.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Committed bitmap (chain terminal).
@@ -728,9 +739,10 @@ impl<const N: usize> BitmapBatch<N> {
     }
 }
 
-impl<D: Digest, U: update::Update + Send + Sync, const N: usize> MerkleizedBatch<D, U, N>
+impl<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize>
+    MerkleizedBatch<F, D, U, N>
 where
-    Operation<mmr::Family, U>: Send + Sync,
+    Operation<F, U>: Send + Sync,
 {
     /// Return the canonical root.
     pub const fn root(&self) -> D {
@@ -743,16 +755,17 @@ where
     }
 }
 
-impl<D: Digest, U: update::Update + Send + Sync, const N: usize> MerkleizedBatch<D, U, N>
+impl<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize>
+    MerkleizedBatch<F, D, U, N>
 where
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
-    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<H, U, N>
+    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N>
     where
         H: Hasher<Digest = D>,
     {
@@ -767,29 +780,30 @@ where
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
-        db: &super::db::Db<E, C, I, H, U, N>,
-    ) -> Result<Option<U::Value>, Error>
+        db: &super::db::Db<F, E, C, I, H, U, N>,
+    ) -> Result<Option<U::Value>, Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<mmr::Family, U>>,
-        I: UnorderedIndex<Value = Location> + 'static,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
         self.inner.get(key, &db.any).await
     }
 }
 
-impl<E, C, I, H, U, const N: usize> super::db::Db<E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize> super::db::Db<F, E, C, I, H, U, N>
 where
+    F: Graftable,
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<mmr::Family, U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<H::Digest, U, N>> {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N>> {
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
@@ -813,26 +827,28 @@ mod trait_impls {
     };
     use std::future::Future;
 
-    type CurrentDb<E, C, I, H, U, const N: usize> = crate::qmdb::current::db::Db<E, C, I, H, U, N>;
+    type CurrentDb<F, E, C, I, H, U, const N: usize> =
+        crate::qmdb::current::db::Db<F, E, C, I, H, U, N>;
 
-    impl<K, V, H, E, C, I, const N: usize>
-        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Unordered<K, V>, N>>
-        for UnmerkleizedBatch<H, update::Unordered<K, V>, N>
+    impl<F, K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N>>
+        for UnmerkleizedBatch<F, H, update::Unordered<K, V>, N>
     where
+        F: Graftable,
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
-        I: UnorderedIndex<Value = Location> + 'static,
-        Operation<mmr::Family, update::Unordered<K, V>>: Codec,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        Operation<F, update::Unordered<K, V>>: Codec,
     {
-        type Family = mmr::Family;
+        type Family = F;
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
@@ -840,32 +856,32 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            db: &CurrentDb<E, C, I, H, update::Unordered<K, V>, N>,
+            db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<mmr::Family>>>
-        {
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
             self.merkleize(db, metadata)
         }
     }
 
-    impl<K, V, H, E, C, I, const N: usize>
-        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Ordered<K, V>, N>>
-        for UnmerkleizedBatch<H, update::Ordered<K, V>, N>
+    impl<F, K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N>>
+        for UnmerkleizedBatch<F, H, update::Ordered<K, V>, N>
     where
+        F: Graftable,
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
-        I: crate::index::Ordered<Value = Location> + 'static,
-        Operation<mmr::Family, update::Ordered<K, V>>: Codec,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+        Operation<F, update::Ordered<K, V>>: Codec,
     {
-        type Family = mmr::Family;
+        type Family = F;
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
@@ -873,18 +889,17 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            db: &CurrentDb<E, C, I, H, update::Ordered<K, V>, N>,
+            db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N>,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<mmr::Family>>>
-        {
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
             self.merkleize(db, metadata)
         }
     }
 
-    impl<D: Digest, U: update::Update + Send + Sync + 'static, const N: usize> MerkleizedBatchTrait
-        for Arc<MerkleizedBatch<D, U, N>>
+    impl<F: Graftable, D: Digest, U: update::Update + Send + Sync + 'static, const N: usize>
+        MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N>>
     where
-        Operation<mmr::Family, U>: Codec,
+        Operation<F, U>: Codec,
     {
         type Digest = D;
 
@@ -893,23 +908,24 @@ mod trait_impls {
         }
     }
 
-    impl<E, K, V, C, I, H, const N: usize> BatchableDb
-        for CurrentDb<E, C, I, H, update::Unordered<K, V>, N>
+    impl<F, E, K, V, C, I, H, const N: usize> BatchableDb
+        for CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N>
     where
+        F: Graftable,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
-        I: UnorderedIndex<Value = Location> + 'static,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
-        Operation<mmr::Family, update::Unordered<K, V>>: Codec,
+        Operation<F, update::Unordered<K, V>>: Codec,
     {
-        type Family = mmr::Family;
+        type Family = F;
         type K = K;
         type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>>;
-        type Batch = UnmerkleizedBatch<H, update::Unordered<K, V>, N>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N>>;
+        type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, N>;
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()
@@ -918,30 +934,30 @@ mod trait_impls {
         fn apply_batch(
             &mut self,
             batch: Self::Merkleized,
-        ) -> impl Future<
-            Output = Result<core::ops::Range<Location>, crate::qmdb::Error<crate::mmr::Family>>,
-        > {
+        ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
+        {
             self.apply_batch(batch)
         }
     }
 
-    impl<E, K, V, C, I, H, const N: usize> BatchableDb
-        for CurrentDb<E, C, I, H, update::Ordered<K, V>, N>
+    impl<F, E, K, V, C, I, H, const N: usize> BatchableDb
+        for CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N>
     where
+        F: Graftable,
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
-        I: crate::index::Ordered<Value = Location> + 'static,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
         H: Hasher,
-        Operation<mmr::Family, update::Ordered<K, V>>: Codec,
+        Operation<F, update::Ordered<K, V>>: Codec,
     {
-        type Family = mmr::Family;
+        type Family = F;
         type K = K;
         type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>>;
-        type Batch = UnmerkleizedBatch<H, update::Ordered<K, V>, N>;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N>>;
+        type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, N>;
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()
@@ -950,9 +966,8 @@ mod trait_impls {
         fn apply_batch(
             &mut self,
             batch: Self::Merkleized,
-        ) -> impl Future<
-            Output = Result<core::ops::Range<Location>, crate::qmdb::Error<crate::mmr::Family>>,
-        > {
+        ) -> impl Future<Output = Result<core::ops::Range<Location<F>>, crate::qmdb::Error<F>>>
+        {
             self.apply_batch(batch)
         }
     }
@@ -961,11 +976,13 @@ mod trait_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmr;
     use commonware_utils::bitmap::Prunable as BitMap;
 
     // N=4 -> CHUNK_SIZE_BITS = 32
     const N: usize = 4;
     type Bm = BitMap<N>;
+    type Location = mmr::Location;
 
     fn make_bitmap(bits: &[bool]) -> Bm {
         let mut bm = Bm::new();
@@ -1012,7 +1029,7 @@ mod tests {
             },
         );
 
-        let overlay = build_chunk_overlay::<U, _, N>(&base, 4, 4, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
         // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
         // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
@@ -1070,7 +1087,7 @@ mod tests {
         );
 
         // Segment of 8 ops starting at 64; previous commit at loc 63.
-        let overlay = build_chunk_overlay::<U, _, N>(&base, 8, 64, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 8, 64, &diff, &[]);
 
         // Verify bits 5 and 10 are cleared in chunk 0.
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
@@ -1111,7 +1128,7 @@ mod tests {
             },
         );
 
-        let overlay = build_chunk_overlay::<U, _, N>(&base, 20, 20, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 20, 20, &diff, &[]);
 
         // Chunk 0 should be materialized and preserve the parent's first 20 bits.
         let c0 = overlay.get(0).expect("chunk 0 should be in overlay");

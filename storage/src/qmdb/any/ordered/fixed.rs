@@ -1619,17 +1619,13 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_stacked_delete_recreate_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_stacked_delete_recreate_inner::<crate::merkle::mmb::Family>(context)
-        });
+        executor.start(batch_stacked_delete_recreate_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_apply_returns_range_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_apply_returns_range_inner::<crate::merkle::mmb::Family>(context)
-        });
+        executor.start(batch_apply_returns_range_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("INFO")]

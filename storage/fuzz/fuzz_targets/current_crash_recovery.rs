@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig, Location},
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
@@ -34,7 +34,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Db = Current<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db = Current<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -98,7 +98,7 @@ fn make_config(
 ) -> VariableConfig<TwoCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),
             metadata_partition: format!("crash-mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(mmr_items_per_blob),
@@ -114,7 +114,7 @@ fn make_config(
             codec_config: ((), ()),
             page_cache,
         },
-        grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
+        grafted_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
         translator: TwoCap,
     }
 }

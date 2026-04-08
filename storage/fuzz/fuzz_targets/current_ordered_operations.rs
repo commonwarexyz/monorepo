@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig, Location},
     qmdb::current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -20,7 +20,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
-type Db = CurrentDb<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db = CurrentDb<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -115,7 +115,7 @@ fn fuzz(data: FuzzInput) {
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = Config {
-            mmr_config: MmrConfig {
+            merkle_config: MmrConfig {
                 journal_partition: "fuzz-current-mmr-journal".into(),
                 metadata_partition: "fuzz-current-mmr-metadata".into(),
                 items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
@@ -129,7 +129,7 @@ fn fuzz(data: FuzzInput) {
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 page_cache,
             },
-            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
+            grafted_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
         };
 
