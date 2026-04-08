@@ -115,7 +115,7 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    batch: MerkleizedBatch<mmr::Family, H::Digest, K, V>,
+    inner: Arc<MerkleizedBatch<mmr::Family, H::Digest, K, V>>,
     db: ImmutableDbHandle<E, K, V, C, H, T>,
 }
 
@@ -132,7 +132,7 @@ where
     type Target = MerkleizedBatch<mmr::Family, H::Digest, K, V>;
 
     fn deref(&self) -> &Self::Target {
-        &self.batch
+        &self.inner
     }
 }
 
@@ -149,7 +149,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
-        self.batch.get(key, &*db).await
+        self.inner.get(key, &*db).await
     }
 }
 
@@ -167,9 +167,11 @@ where
     type Error = Error<mmr::Family>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        let merkleized = self.batch.merkleize(&*db, self.metadata);
         Ok(ImmutableMerkleized {
-            batch: self.batch.merkleize(self.metadata),
-            db: self.db,
+            inner: merkleized,
+            db: self.db.clone(),
         })
     }
 }
@@ -188,12 +190,12 @@ where
     type Unmerkleized = ImmutableUnmerkleized<E, K, V, C, H, T>;
 
     fn root(&self) -> H::Digest {
-        self.batch.root()
+        self.inner.root()
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: self.batch.new_batch::<H>(),
+            batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
             metadata: None,
         }
@@ -236,9 +238,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
-        let current_size = *self.bounds().await.end;
-        let changeset = batch.batch.finalize_from(current_size);
-        self.apply_batch(changeset).await?;
+        self.apply_batch(batch.inner).await?;
         self.sync().await?;
         Ok(())
     }
@@ -310,9 +310,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
-        let current_size = *self.bounds().await.end;
-        let changeset = batch.batch.finalize_from(current_size);
-        self.apply_batch(changeset).await?;
+        self.apply_batch(batch.inner).await?;
         self.sync().await?;
         Ok(())
     }
