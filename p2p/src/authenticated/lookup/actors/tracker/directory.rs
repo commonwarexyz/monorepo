@@ -22,6 +22,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Primary and secondary [`Set`] at one peer set index.
 type PeerSetsAtIndex<C> = PeerSetsAtIndexBase<Set<C>, Set<C>>;
 
 /// Configuration for the [Directory].

@@ -41,6 +41,7 @@ use std::{
 };
 use tracing::{debug, error, trace, warn};
 
+/// Primary and secondary [`Set`] at one peer set index.
 type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.

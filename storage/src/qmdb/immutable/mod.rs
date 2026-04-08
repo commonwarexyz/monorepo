@@ -77,6 +77,7 @@ pub mod batch;
 mod operation;
 pub use operation::Operation;
 
+/// Authenticated variable-length journal over [`Operation`] entries.
 type Journal<E, K, V, H> = authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H>;
 
 pub mod sync;
