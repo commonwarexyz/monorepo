@@ -420,8 +420,6 @@ where
 /// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
 /// search back through ancestors to find the most recent active location; if none exists, we clear
 /// the committed DB location (`base_old_loc`).
-/// Build a [`ChunkOverlay`] for this batch by setting active bits and clearing
-/// superseded locations directly in materialized chunk bytes.
 #[allow(clippy::type_complexity)]
 fn build_chunk_overlay<U, B: BitmapReadable<N>, const N: usize>(
     base: &B,
