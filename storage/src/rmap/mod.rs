@@ -286,8 +286,11 @@ impl RMap {
             .next_back()
             .filter(|(_, &end)| end >= from);
         // All ranges starting after `from` are guaranteed to follow.
-        let tail = self.ranges.range(from.saturating_add(1)..);
-        candidate.into_iter().chain(tail)
+        let tail = match from {
+            u64::MAX => None,
+            _ => Some(self.ranges.range(from + 1..)),
+        };
+        candidate.into_iter().chain(tail.into_iter().flatten())
     }
 
     /// Retrieve the first index in the [RMap].
