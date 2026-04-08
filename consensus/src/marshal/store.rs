@@ -85,6 +85,9 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
+
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
@@ -219,6 +222,11 @@ where
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
     }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
@@ -301,6 +309,11 @@ where
 
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
+    }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
     }
 }
 

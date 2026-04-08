@@ -1550,36 +1550,40 @@ where
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        let Some(tip) = self.finalizations_by_height.last_index() else {
-            return false;
-        };
         let start = self.last_processed_height.next();
         let (current_range_end, _) = self.finalized_blocks.next_gap(start);
         let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
+        let ranges: Vec<_> = self
+            .finalizations_by_height
+            .ranges_from(trailing_start)
+            .collect();
         let mut requests = Vec::new();
         let mut wrote = false;
-        for h in (trailing_start.get()..=tip.get()).rev() {
-            let height = Height::new(h);
-            let finalization = self
-                .get_finalization_by_height(height)
-                .await
-                .expect("finalization missing");
-            let commitment = finalization.proposal.payload;
-            if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                let digest = block.digest();
-                wrote = self
-                    .store_finalization(
-                        height,
-                        digest,
-                        block,
-                        Some(finalization),
-                        application,
-                        buffer,
-                    )
-                    .await;
-                break;
+        'outer: for (range_start, range_end) in ranges.into_iter().rev() {
+            let lo = range_start.max(trailing_start);
+            for h in (lo.get()..=range_end.get()).rev() {
+                let height = Height::new(h);
+                let finalization = self
+                    .get_finalization_by_height(height)
+                    .await
+                    .expect("finalization missing");
+                let commitment = finalization.proposal.payload;
+                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    let digest = block.digest();
+                    wrote = self
+                        .store_finalization(
+                            height,
+                            digest,
+                            block,
+                            Some(finalization),
+                            application,
+                            buffer,
+                        )
+                        .await;
+                    break 'outer;
+                }
+                requests.push(Request::<V::Commitment>::Block(commitment));
             }
-            requests.push(Request::<V::Commitment>::Block(commitment));
         }
         if !requests.is_empty() {
             resolver.fetch_all(requests).await;
