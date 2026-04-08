@@ -770,8 +770,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// chain was created, or if only ancestors of this batch have been applied.
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns [`Error::StaleBatch`].
-    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
-        self.inner.get_mut().mem.apply_batch(batch)?;
+    pub fn apply_batch(&self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+        self.inner.write().mem.apply_batch(batch)?;
         Ok(())
     }
 
@@ -1117,7 +1117,7 @@ mod tests {
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("second"),
             &hasher,
             test_config(&context),
@@ -1273,7 +1273,7 @@ mod tests {
     async fn journaled_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
         // Build a test structure with 255 leaves
@@ -1343,7 +1343,7 @@ mod tests {
         use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
 
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("first"),
             &hasher,
             test_config(&context),
@@ -1448,7 +1448,7 @@ mod tests {
             thread_pool: None,
             page_cache: cfg_pruned.page_cache.clone(),
         };
-        let mut mmr =
+        let mmr =
             Journaled::<F, _, Digest>::init(context.with_label("unpruned"), &hasher, cfg_unpruned)
                 .await
                 .unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         const LEAF_COUNT: usize = 2000;
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -1677,7 +1677,7 @@ mod tests {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
         let mut elements = Vec::new();
@@ -1781,7 +1781,7 @@ mod tests {
         mmr.prune(prune_loc).await.unwrap();
 
         // Create reference structure for verification to get correct size
-        let mut ref_mmr = Journaled::<F, _, Digest>::init(
+        let ref_mmr = Journaled::<F, _, Digest>::init(
             context.with_label("ref"),
             &hasher,
             Config {
@@ -1844,7 +1844,7 @@ mod tests {
     async fn journaled_historical_proof_large_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
 
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("server"),
             &hasher,
             Config {
@@ -1873,7 +1873,7 @@ mod tests {
         let range = Location::<F>::new(30)..Location::<F>::new(61);
 
         // Only apply elements up to end_loc to the reference structure.
-        let mut ref_mmr = Journaled::<F, _, Digest>::init(
+        let ref_mmr = Journaled::<F, _, Digest>::init(
             context.with_label("client"),
             &hasher,
             Config {
@@ -1932,7 +1932,7 @@ mod tests {
     ) {
         let hasher = Standard::<Sha256>::new();
         let cfg = test_config(&context);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
 
@@ -1985,7 +1985,7 @@ mod tests {
             pinned_nodes: None,
         };
 
-        let mut sync_mmr = Journaled::<F, _, Digest>::init_sync(context.clone(), sync_cfg, &hasher)
+        let sync_mmr = Journaled::<F, _, Digest>::init_sync(context.clone(), sync_cfg, &hasher)
             .await
             .unwrap();
 
@@ -2026,7 +2026,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Create initial structure with elements.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2371,10 +2371,9 @@ mod tests {
         };
 
         // Create structure with enough elements to span multiple sections.
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("init"), &hasher, cfg.clone())
-                .await
-                .unwrap();
+        let mmr = Journaled::<F, _, Digest>::init(context.with_label("init"), &hasher, cfg.clone())
+            .await
+            .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..100 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2495,7 +2494,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2551,7 +2550,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -2748,7 +2747,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("oob"),
             &hasher,
             test_config(&context),
@@ -2791,7 +2790,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("range_validation"),
             &hasher,
             test_config(&context),
@@ -2947,7 +2946,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Build a structure with 3 leaves, sync, and drop.
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
             test_config(&context),
@@ -3017,7 +3016,7 @@ mod tests {
 
     async fn journaled_stale_batch_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Journaled::<F, _, Digest>::init(
+        let mmr = Journaled::<F, _, Digest>::init(
             context.clone(),
             &Standard::<Sha256>::new(),
             test_config(&context),
@@ -3090,10 +3089,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
-                .await
-                .unwrap();
+        let mmr = Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
+            .await
+            .unwrap();
 
         // Add 50 elements and sync (flushes all nodes to journal, prunes mem).
         let mut batch = mmr.new_batch();

@@ -65,7 +65,7 @@ mod tests {
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let mut journaled_mmr = Mmr::init(
+            let journaled_mmr = Mmr::init(
                 context.clone(),
                 &Standard::<Sha256>::new(),
                 test_config(&context),
@@ -223,7 +223,7 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
 
             // Build base journaled MMR with 10 elements.
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.clone(),
                 &Standard::<Sha256>::new(),
                 test_config(&context),
@@ -281,7 +281,7 @@ mod tests {
             let hasher = Standard::<Sha256>::new();
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mut mmr =
+            let mmr =
                 Mmr::<_, Digest>::init(context.with_label("init"), &hasher, test_config(&context))
                     .await
                     .unwrap();
@@ -304,7 +304,7 @@ mod tests {
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)
+            let ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)
                 .await
                 .unwrap();
             let mut batch = ref_mmr.new_batch();
@@ -328,7 +328,7 @@ mod tests {
                 range: Location::new(100)..Location::new(200),
                 pinned_nodes: Some(pinned),
             };
-            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 

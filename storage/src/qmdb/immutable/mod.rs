@@ -145,7 +145,7 @@ where
     /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
     /// and returns the initialized database.
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H>,
+        journal: authenticated::Journal<F, E, C, H>,
         context: E,
         translator: T,
     ) -> Result<Self, Error<F>> {

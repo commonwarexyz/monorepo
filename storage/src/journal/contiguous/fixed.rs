@@ -877,11 +877,11 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
-    async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
+    async fn append(&self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
 
-    async fn append_many<'a>(&'a mut self, items: Many<'a, Self::Item>) -> Result<u64, Error> {
+    async fn append_many<'a>(&'a self, items: Many<'a, Self::Item>) -> Result<u64, Error> {
         Self::append_many(self, items).await
     }
 

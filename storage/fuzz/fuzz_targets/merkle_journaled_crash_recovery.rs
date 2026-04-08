@@ -269,7 +269,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
-        let mut merkle = Journaled::<F>::init(
+        let merkle = Journaled::<F>::init(
             ctx.with_label("recovered"),
             &hasher,
             merkle_config(

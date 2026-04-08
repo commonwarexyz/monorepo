@@ -129,7 +129,7 @@ where
     Operation<F, U>: Committable + CodecShared,
     Cb: FnMut(bool, Option<Location<F>>),
 {
-    let mut log = J::init::<F, H>(
+    let log = J::init::<F, H>(
         context.with_label("log"),
         cfg.merkle_config,
         cfg.journal_config,

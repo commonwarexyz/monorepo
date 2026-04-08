@@ -22,6 +22,7 @@ use alloc::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_utils::sync::AsyncMutex;
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -237,6 +238,10 @@ where
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
+
+    /// Serializes mutating operations (`append`, `apply_batch`) to maintain the invariant
+    /// that leaf i corresponds to item i. Readers are not blocked by this mutex.
+    write_mutex: AsyncMutex<()>,
 }
 
 impl<F, E, C, H> Journal<F, E, C, H>
@@ -328,6 +333,7 @@ where
             merkle,
             journal,
             hasher,
+            write_mutex: AsyncMutex::new(()),
         })
     }
 
@@ -389,8 +395,9 @@ where
     }
 
     /// Append an item to the journal and update the Merkle structure.
-    pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
+    pub async fn append(&self, item: &C::Item) -> Result<Location<F>, Error<F>> {
         let encoded_item = item.encode();
+        let _guard = self.write_mutex.lock().await;
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
@@ -410,9 +417,10 @@ where
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns an error.
     pub async fn apply_batch(
-        &mut self,
+        &self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item>,
     ) -> Result<(), Error<F>> {
+        let _guard = self.write_mutex.lock().await;
         let merkle_size = self.merkle.size();
         let base_size = batch.inner.base_size();
 
@@ -589,7 +597,13 @@ where
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
+    ///
+    /// Acquires the write mutex to ensure no concurrent append/apply_batch is in flight,
+    /// guaranteeing that the merkle sync snapshot includes all prior writes. The mutex is
+    /// held for the duration, but readers are not blocked (the underlying structures use
+    /// read locks for fsync).
     pub async fn sync(&self) -> Result<(), Error<F>> {
+        let _guard = self.write_mutex.lock().await;
         try_join!(
             self.journal.sync().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
@@ -639,6 +653,7 @@ macro_rules! impl_journal_new {
                     merkle,
                     journal,
                     hasher,
+                    write_mutex: AsyncMutex::new(()),
                 })
             }
         }
@@ -673,7 +688,7 @@ where
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
-    async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
+    async fn append(&self, item: &Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
@@ -863,7 +878,7 @@ mod tests {
         suffix: &str,
         count: usize,
     ) -> TestJournal<F> {
-        let mut journal = create_empty_journal::<F>(context, suffix).await;
+        let journal = create_empty_journal::<F>(context, suffix).await;
 
         for i in 0..count {
             let op = create_operation::<F>(i as u8);
@@ -1052,8 +1067,7 @@ mod tests {
     async fn test_align_with_mismatched_committed_ops_inner<F: Family + PartialEq>(
         context: Context,
     ) {
-        let mut journal =
-            create_empty_journal::<F>(context.with_label("first"), "mismatched").await;
+        let journal = create_empty_journal::<F>(context.with_label("first"), "mismatched").await;
 
         // Add 20 uncommitted operations
         for i in 0..20 {
@@ -1351,7 +1365,7 @@ mod tests {
     /// Verify that append() increments the operation count, returns correct locations, and
     /// operations can be read back correctly.
     async fn test_apply_op_and_read_operations_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_empty_journal::<F>(context, "apply_op").await;
+        let journal = create_empty_journal::<F>(context, "apply_op").await;
 
         assert_eq!(journal.size().await, 0);
 
@@ -1520,8 +1534,7 @@ mod tests {
 
     /// Verify that sync() persists operations.
     async fn test_sync_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal =
-            create_empty_journal::<F>(context.with_label("first"), "close_pending").await;
+        let journal = create_empty_journal::<F>(context.with_label("first"), "close_pending").await;
 
         // Add 20 operations
         let expected_ops: Vec<_> = (0..20).map(|i| create_operation::<F>(i as u8)).collect();
@@ -1995,7 +2008,7 @@ mod tests {
     /// Verify historical_proof() for a truly historical state (before more operations added).
     async fn test_historical_proof_truly_historical_inner<F: Family + PartialEq>(context: Context) {
         // Create journal with initial operations
-        let mut journal = create_journal_with_ops::<F>(context, "proof_historical", 50).await;
+        let journal = create_journal_with_ops::<F>(context, "proof_historical", 50).await;
 
         // Capture root at historical state
         let hasher = StandardHasher::new();
@@ -2155,7 +2168,7 @@ mod tests {
 
     /// Verify the speculative batch API: fork two batches, verify independent roots, apply one.
     async fn test_speculative_batch_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "speculative_batch", 10).await;
+        let journal = create_journal_with_ops::<F>(context, "speculative_batch", 10).await;
         let original_root = journal.root();
 
         // Fork two independent speculative batches.
@@ -2202,7 +2215,7 @@ mod tests {
     /// Verify stacking: create batch A, merkleize, create batch B from merkleized A,
     /// merkleize, and apply. Verify root and items.
     async fn test_speculative_batch_stacking_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "batch_stacking", 10).await;
+        let journal = create_journal_with_ops::<F>(context, "batch_stacking", 10).await;
 
         let op_a = create_operation::<F>(100);
         let op_b = create_operation::<F>(200);
@@ -2243,7 +2256,7 @@ mod tests {
     /// Verify sequential batch application: apply batch A, then build and apply batch B
     /// from the committed state. Verify root and items.
     async fn test_speculative_batch_sequential_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "batch_sequential", 10).await;
+        let journal = create_journal_with_ops::<F>(context, "batch_sequential", 10).await;
 
         let op_a = create_operation::<F>(100);
         let op_b = create_operation::<F>(200);
@@ -2283,7 +2296,7 @@ mod tests {
     }
 
     async fn test_stale_batch_sibling_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_empty_journal::<F>(context, "stale-sibling").await;
+        let journal = create_empty_journal::<F>(context, "stale-sibling").await;
         let op_a = create_operation::<F>(1);
         let op_b = create_operation::<F>(2);
 
@@ -2331,7 +2344,7 @@ mod tests {
     }
 
     async fn test_stale_batch_chained_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "stale-chained", 5).await;
+        let journal = create_journal_with_ops::<F>(context, "stale-chained", 5).await;
 
         // Parent batch, then fork two children.
         let parent_batch = journal.new_batch().add(create_operation::<F>(10));
@@ -2367,7 +2380,7 @@ mod tests {
     }
 
     async fn test_stale_batch_parent_before_child_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_empty_journal::<F>(context, "stale-parent-first").await;
+        let journal = create_empty_journal::<F>(context, "stale-parent-first").await;
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
@@ -2398,7 +2411,7 @@ mod tests {
     }
 
     async fn test_stale_batch_child_before_parent_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_empty_journal::<F>(context, "stale-child-first").await;
+        let journal = create_empty_journal::<F>(context, "stale-child-first").await;
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
@@ -2432,7 +2445,7 @@ mod tests {
 
     /// Apply parent then child: child skips already-committed ancestor items.
     async fn test_apply_batch_skip_ancestor_items_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "rp-skip", 3).await;
+        let journal = create_journal_with_ops::<F>(context, "rp-skip", 3).await;
 
         // Parent: 2 items.
         let parent_batch = journal
@@ -2477,7 +2490,7 @@ mod tests {
 
     /// `apply_batch` works correctly across a 3-level chain.
     async fn test_apply_batch_cross_batch_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
+        let journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
         let grandparent_batch = journal
@@ -2574,7 +2587,7 @@ mod tests {
 
     /// merkleize_with items are readable after apply.
     async fn test_merkleize_with_apply_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "mw-apply", 5).await;
+        let journal = create_journal_with_ops::<F>(context, "mw-apply", 5).await;
 
         let ops = vec![create_operation::<F>(10), create_operation::<F>(11)];
         let batch = journal.new_batch();
@@ -2637,7 +2650,7 @@ mod tests {
     async fn test_apply_batch_skips_only_committed_ancestor_items_inner<F: Family + PartialEq>(
         context: Context,
     ) {
-        let mut journal = create_empty_journal::<F>(context.clone(), "skip-partial").await;
+        let journal = create_empty_journal::<F>(context.clone(), "skip-partial").await;
 
         // Build chain: A -> B -> C
         let a_batch = journal.new_batch().add(create_operation::<F>(1));
@@ -2655,7 +2668,7 @@ mod tests {
         assert_eq!(*journal.size().await, 3);
 
         // Build a reference that applies all three sequentially.
-        let mut reference =
+        let reference =
             create_empty_journal::<F>(context.with_label("ref"), "skip-partial-ref").await;
         for i in 1..=3u8 {
             reference.append(&create_operation::<F>(i)).await.unwrap();

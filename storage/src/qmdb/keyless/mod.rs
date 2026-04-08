@@ -99,7 +99,7 @@ where
     Operation<V>: EncodeShared,
 {
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H>,
+        journal: authenticated::Journal<F, E, C, H>,
     ) -> Result<Self, Error<F>> {
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
