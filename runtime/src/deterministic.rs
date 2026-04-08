@@ -480,12 +480,6 @@ impl Checkpoint {
     pub fn auditor(&self) -> Arc<Auditor> {
         self.auditor.clone()
     }
-
-    /// Override the storage fault configuration that will be used after recovery.
-    pub fn with_storage_fault_config(self, faults: FaultConfig) -> Self {
-        *self.storage.inner().inner().config().write() = faults;
-        self
-    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -2236,23 +2230,25 @@ mod tests {
         // Verify sync failed
         assert!(result.is_err());
 
-        // Phase 2: Recover with faults disabled explicitly.
-        deterministic::Runner::from(checkpoint.with_storage_fault_config(FaultConfig::default()))
-            .start(|ctx| async move {
-                // Data was not synced, so blob should be empty (unsynced writes are lost)
-                let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
-                assert_eq!(len, 0, "unsynced data should be lost after recovery");
+        // Phase 2: Recover and disable faults explicitly
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            // Explicitly disable faults for recovery verification
+            *ctx.storage_fault_config().write() = FaultConfig::default();
 
-                // Now we can write and sync successfully
-                blob.write_at(0, b"recovered".to_vec()).await.unwrap();
-                blob.sync()
-                    .await
-                    .expect("sync should succeed with faults disabled");
+            // Data was not synced, so blob should be empty (unsynced writes are lost)
+            let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
+            assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
-                // Verify data persisted
-                let read_buf = blob.read_at(0, 9).await.unwrap();
-                assert_eq!(read_buf.coalesce(), b"recovered");
-            });
+            // Now we can write and sync successfully
+            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+
+            // Verify data persisted
+            let read_buf = blob.read_at(0, 9).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"recovered");
+        });
     }
 
     #[test]
