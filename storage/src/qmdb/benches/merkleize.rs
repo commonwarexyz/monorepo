@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::mmr::journaled::Config as MmrConfig,
+    merkle::{self, journaled},
     qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
@@ -47,7 +47,24 @@ type AnyUVar = commonware_storage::qmdb::any::unordered::variable::Db<
     Sha256,
     EightCap,
 >;
+type AnyUFixMmb = commonware_storage::qmdb::any::unordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
+type AnyUVarMmb = commonware_storage::qmdb::any::unordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
 type CurUFix32 = commonware_storage::qmdb::current::unordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
     Context,
     Digest,
     Digest,
@@ -56,6 +73,25 @@ type CurUFix32 = commonware_storage::qmdb::current::unordered::fixed::Db<
     CHUNK_SIZE,
 >;
 type CurUVar32 = commonware_storage::qmdb::current::unordered::variable::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurUFix32Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurUVar32Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
     Context,
     Digest,
     Digest,
@@ -67,6 +103,7 @@ type CurUVar32 = commonware_storage::qmdb::current::unordered::variable::Db<
 const LARGE_CHUNK_SIZE: usize = 256;
 
 type CurUFix256 = commonware_storage::qmdb::current::unordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
     Context,
     Digest,
     Digest,
@@ -75,6 +112,25 @@ type CurUFix256 = commonware_storage::qmdb::current::unordered::fixed::Db<
     LARGE_CHUNK_SIZE,
 >;
 type CurUVar256 = commonware_storage::qmdb::current::unordered::variable::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurUFix256Mmb = commonware_storage::qmdb::current::unordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurUVar256Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
     Context,
     Digest,
     Digest,
@@ -91,8 +147,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn mmr_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> MmrConfig {
-    MmrConfig {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
+    journaled::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
@@ -133,7 +189,7 @@ fn any_fix_cfg(
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
     let pc = pc(ctx);
     commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: mmr_cfg(ctx, pc.clone()),
+        merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
     }
@@ -144,7 +200,7 @@ fn any_var_cfg(
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
     let pc = pc(ctx);
     commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: mmr_cfg(ctx, pc.clone()),
+        merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         translator: EightCap,
     }
@@ -155,9 +211,9 @@ fn cur_fix_cfg(
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
-        mmr_config: mmr_cfg(ctx, pc.clone()),
+        merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
 }
@@ -167,9 +223,9 @@ fn cur_var_cfg(
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::VariableConfig {
-        mmr_config: mmr_cfg(ctx, pc.clone()),
+        merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
 }
@@ -177,9 +233,7 @@ fn cur_var_cfg(
 // -- Benchmark helpers --
 
 /// Pre-populate the database with `num_keys` unique keys, commit, and sync.
-async fn seed_db<
-    C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
->(
+async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     db: &mut C,
     num_keys: u64,
 ) {
@@ -197,12 +251,7 @@ async fn seed_db<
 
 /// Write `num_updates` random key updates into a batch.
 fn write_random_updates<
-    B: commonware_storage::qmdb::any::traits::UnmerkleizedBatch<
-        Db,
-        Family = commonware_storage::merkle::mmr::Family,
-        K = Digest,
-        V = Digest,
-    >,
+    B: commonware_storage::qmdb::any::traits::UnmerkleizedBatch<Db, K = Digest, V = Digest>,
     Db: ?Sized,
 >(
     mut batch: B,
@@ -219,9 +268,7 @@ fn write_random_updates<
 }
 
 /// Single-batch benchmark: create batch, write updates, merkleize, read root.
-async fn run_bench<
-    C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
->(
+async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
     iters: u64,
@@ -247,13 +294,14 @@ async fn run_bench<
 /// `fork_child` bridges the gap between the generic trait and the concrete
 /// `MerkleizedBatch::new_batch` method.
 async fn run_chained_bench<
-    C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest, Value = Digest>,
-    F: Fn(&C::Merkleized) -> C::Batch,
+    F: merkle::Family,
+    C: DbAny<F, Key = Digest, Value = Digest>,
+    Fn: std::ops::Fn(&C::Merkleized) -> C::Batch,
 >(
     mut db: C,
     num_keys: u64,
     iters: u64,
-    fork_child: F,
+    fork_child: Fn,
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
     let num_updates = num_keys / 10;
@@ -282,33 +330,131 @@ async fn run_chained_bench<
 enum Variant {
     AnyFixed,
     AnyVariable,
+    AnyFixedMmb,
+    AnyVariableMmb,
     CurrentFixed32,
     CurrentVariable32,
+    CurrentFixed32Mmb,
+    CurrentVariable32Mmb,
     CurrentFixed256,
     CurrentVariable256,
+    CurrentFixed256Mmb,
+    CurrentVariable256Mmb,
 }
 
 impl Variant {
     const fn name(self) -> &'static str {
         match self {
-            Self::AnyFixed => "any::unordered::fixed",
-            Self::AnyVariable => "any::unordered::variable",
-            Self::CurrentFixed32 => "current::unordered::fixed::chunk=32",
-            Self::CurrentVariable32 => "current::unordered::variable::chunk=32",
-            Self::CurrentFixed256 => "current::unordered::fixed::chunk=256",
-            Self::CurrentVariable256 => "current::unordered::variable::chunk=256",
+            Self::AnyFixed => "any::unordered::fixed::mmr",
+            Self::AnyVariable => "any::unordered::variable::mmr",
+            Self::AnyFixedMmb => "any::unordered::fixed::mmb",
+            Self::AnyVariableMmb => "any::unordered::variable::mmb",
+            Self::CurrentFixed32 => "current::unordered::fixed::mmr chunk=32",
+            Self::CurrentVariable32 => "current::unordered::variable::mmr chunk=32",
+            Self::CurrentFixed32Mmb => "current::unordered::fixed::mmb chunk=32",
+            Self::CurrentVariable32Mmb => "current::unordered::variable::mmb chunk=32",
+            Self::CurrentFixed256 => "current::unordered::fixed::mmr chunk=256",
+            Self::CurrentVariable256 => "current::unordered::variable::mmr chunk=256",
+            Self::CurrentFixed256Mmb => "current::unordered::fixed::mmb chunk=256",
+            Self::CurrentVariable256Mmb => "current::unordered::variable::mmb chunk=256",
         }
     }
 }
 
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 12] = [
     Variant::AnyFixed,
     Variant::AnyVariable,
+    Variant::AnyFixedMmb,
+    Variant::AnyVariableMmb,
     Variant::CurrentFixed32,
     Variant::CurrentVariable32,
+    Variant::CurrentFixed32Mmb,
+    Variant::CurrentVariable32Mmb,
     Variant::CurrentFixed256,
     Variant::CurrentVariable256,
+    Variant::CurrentFixed256Mmb,
+    Variant::CurrentVariable256Mmb,
 ];
+
+/// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db` bound.
+macro_rules! dispatch_variant {
+    ($ctx:expr, $variant:expr, |$db:ident| $body:expr) => {
+        match $variant {
+            Variant::AnyFixed => {
+                let $db = AnyUFix::init($ctx.clone(), any_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyVariable => {
+                let $db = AnyUVar::init($ctx.clone(), any_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyFixedMmb => {
+                let $db = AnyUFixMmb::init($ctx.clone(), any_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyVariableMmb => {
+                let $db = AnyUVarMmb::init($ctx.clone(), any_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentFixed32 => {
+                let $db = CurUFix32::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentVariable32 => {
+                let $db = CurUVar32::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentFixed32Mmb => {
+                let $db = CurUFix32Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentVariable32Mmb => {
+                let $db = CurUVar32Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentFixed256 => {
+                let $db = CurUFix256::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentVariable256 => {
+                let $db = CurUVar256::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentFixed256Mmb => {
+                let $db = CurUFix256Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentVariable256Mmb => {
+                let $db = CurUVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+        }
+    };
+}
 
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
@@ -323,64 +469,9 @@ fn bench_merkleize(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
-                        match variant {
-                            Variant::AnyFixed => {
-                                run_bench(
-                                    AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)).await.unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                            Variant::AnyVariable => {
-                                run_bench(
-                                    AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)).await.unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                            Variant::CurrentFixed32 => {
-                                run_bench(
-                                    CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                            Variant::CurrentVariable32 => {
-                                run_bench(
-                                    CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                            Variant::CurrentFixed256 => {
-                                run_bench(
-                                    CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                            Variant::CurrentVariable256 => {
-                                run_bench(
-                                    CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                )
-                                .await
-                            }
-                        }
+                        dispatch_variant!(ctx, variant, |db| {
+                            run_bench(db, num_keys, iters).await
+                        })
                     });
                 },
             );
@@ -401,70 +492,9 @@ fn bench_chained_merkleize(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
-                        match variant {
-                            Variant::AnyFixed => {
-                                run_chained_bench(
-                                    AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)).await.unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                            Variant::AnyVariable => {
-                                run_chained_bench(
-                                    AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)).await.unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                            Variant::CurrentFixed32 => {
-                                run_chained_bench(
-                                    CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                            Variant::CurrentVariable32 => {
-                                run_chained_bench(
-                                    CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                            Variant::CurrentFixed256 => {
-                                run_chained_bench(
-                                    CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                            Variant::CurrentVariable256 => {
-                                run_chained_bench(
-                                    CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx))
-                                        .await
-                                        .unwrap(),
-                                    num_keys,
-                                    iters,
-                                    |p| p.new_batch(),
-                                )
-                                .await
-                            }
-                        }
+                        dispatch_variant!(ctx, variant, |db| {
+                            run_chained_bench(db, num_keys, iters, |p| p.new_batch()).await
+                        })
                     });
                 },
             );
