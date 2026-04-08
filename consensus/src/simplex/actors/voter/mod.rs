@@ -3780,21 +3780,18 @@ mod tests {
         let partition = "no_self_verify_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
