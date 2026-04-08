@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -437,18 +437,24 @@ where
 
         // Apply ancestor item segments in root-to-tip order. Already-committed
         // segments are skipped by tracking cumulative leaf count.
+        // Segments are collected into a single append_many call to acquire the
+        // journal's write lock once instead of per-segment.
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
         let mut seg_leaf_end = base_leaves;
+        let mut segments: Vec<&[C::Item]> = Vec::new();
         for seg in &batch.ancestor_items {
             seg_leaf_end += seg.len() as u64;
             if skip_ancestors && seg_leaf_end <= committed_leaves {
                 continue;
             }
-            self.journal.append_many(seg).await?;
+            segments.push(seg);
         }
         if !batch.items.is_empty() {
-            self.journal.append_many(&batch.items).await?;
+            segments.push(&batch.items);
+        }
+        if !segments.is_empty() {
+            self.journal.append_many(Many::Nested(&segments)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
