@@ -1569,10 +1569,6 @@ where
                     requests.push(Request::<V::Commitment>::Block(commitment));
                 }
             }
-            // height.next() would panic at Height::MAX.
-            if height == tip {
-                break;
-            }
             height = height.next();
         }
         if !requests.is_empty() {
@@ -1659,7 +1655,6 @@ where
             .into_iter()
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
-
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
         }
