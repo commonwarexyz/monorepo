@@ -185,6 +185,15 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push(bit);
     }
 
+    /// Extend the bitmap to `new_len` total bits (including pruned bits), filling new positions
+    /// with zero. No-op if `new_len <= self.len()`.
+    pub fn extend_to(&mut self, new_len: u64) {
+        let current = self.len();
+        if new_len > current {
+            self.bitmap.extend_to(new_len - self.pruned_bits());
+        }
+    }
+
     /// Remove and return the last bit from the bitmap.
     ///
     /// # Warning
@@ -309,7 +318,7 @@ impl<const N: usize> Prunable<N> {
     /// # Panics
     ///
     /// Panics if the chunk is pruned or out of bounds.
-    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
+    pub fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
             chunk_index >= self.pruned_chunks,
             "cannot set pruned chunk {chunk_index} (pruned_chunks: {})",
@@ -1365,6 +1374,37 @@ mod tests {
         let ones: Vec<u64> = Readable::ones_iter_from(&p, 0).collect();
         let expected: Vec<u64> = (32..64).collect();
         assert_eq!(ones, expected);
+    }
+
+    #[test]
+    fn test_extend_to() {
+        let mut p = Prunable::<4>::new();
+        for i in 0..30u64 {
+            p.push(i % 2 == 0);
+        }
+
+        // No-op when target is smaller.
+        p.extend_to(5);
+        assert_eq!(p.len(), 30);
+
+        // Extends across a chunk boundary, new bits are zero.
+        p.extend_to(65);
+        assert_eq!(p.len(), 65);
+        for i in 0..30 {
+            assert_eq!(p.get_bit(i), i % 2 == 0, "original bit {i}");
+        }
+        for i in 30..65 {
+            assert!(!p.get_bit(i), "extended bit {i} should be false");
+        }
+
+        // Works correctly with a pruned prefix.
+        p.prune_to_bit(32);
+        p.extend_to(100);
+        assert_eq!(p.len(), 100);
+        assert_eq!(p.pruned_bits(), 32);
+        for i in 65..100 {
+            assert!(!p.get_bit(i), "extended bit {i} should be false");
+        }
     }
 
     #[cfg(feature = "arbitrary")]

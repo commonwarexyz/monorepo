@@ -186,7 +186,6 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            None, // No parent -- created from DB.
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -559,28 +558,23 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. Both ancestor_bitmap_{pushes,clears} and ancestor_diff_ends
-        //    are in parent-first order. Iterate in reverse (root-to-tip) so that
-        //    pushes are concatenated in chronological order.
+        // 2. Apply bitmap overlay. The batch's bitmap is a Layer whose overlay
+        //    contains all dirty chunks. Walk the layer chain to collect and apply
+        //    all uncommitted ancestor overlays + this batch's overlay.
         {
-            let mut pushes = Vec::new();
-            let mut clears = super::batch::ClearSet::with_capacity(0);
-            let n_ancestors = batch.ancestor_bitmap_pushes.len();
-            for i in (0..n_ancestors).rev() {
-                if batch
-                    .inner
-                    .ancestor_diff_ends
-                    .get(i)
-                    .is_some_and(|&batch_end| batch_end <= db_size)
-                {
-                    continue;
+            let mut overlays = Vec::new();
+            let mut current = &batch.bitmap;
+            while let super::batch::BitmapBatch::Layer(layer) = current {
+                if layer.overlay.len <= db_size {
+                    break;
                 }
-                pushes.extend_from_slice(&batch.ancestor_bitmap_pushes[i]);
-                clears.merge(&batch.ancestor_bitmap_clears[i]);
+                overlays.push(Arc::clone(&layer.overlay));
+                current = &layer.parent;
             }
-            pushes.extend_from_slice(&batch.bitmap_pushes);
-            clears.merge(&batch.bitmap_clears);
-            self.status.push_batch(pushes, clears);
+            // Apply in chronological order (deepest ancestor first).
+            for overlay in overlays.into_iter().rev() {
+                self.status.apply_overlay(overlay);
+            }
         }
 
         // 3. Apply grafted MMR (merkle layer handles partial ancestor skipping).
