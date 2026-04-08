@@ -405,9 +405,6 @@ where
         // written before the last shutdown.
         self.cache.load_persisted_epochs().await;
 
-        // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_blocks(&mut application).await;
-
         // If finalizations extend beyond our last stored finalized block,
         // try to fill them from local data (e.g. notarized blocks in the
         // buffer/cache) and fetch the rest by commitment.
@@ -424,6 +421,9 @@ where
         if wrote {
             self.sync_finalized().await;
         }
+
+        // Attempt to dispatch the next finalized block to the application, if it is ready.
+        self.try_dispatch_blocks(&mut application).await;
 
         select_loop! {
             self.context,
@@ -1565,23 +1565,24 @@ where
         let mut requests = Vec::new();
         for h in trailing_start.get()..=tip.get() {
             let height = Height::new(h);
-            if let Some(finalization) = self.get_finalization_by_height(height).await {
-                let commitment = finalization.proposal.payload;
-                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    let digest = block.digest();
-                    wrote |= self
-                        .store_finalization(
-                            height,
-                            digest,
-                            block,
-                            Some(finalization),
-                            application,
-                            buffer,
-                        )
-                        .await;
-                } else {
-                    requests.push(Request::<V::Commitment>::Block(commitment));
-                }
+            let Some(finalization) = self.get_finalization_by_height(height).await else {
+                continue;
+            };
+            let commitment = finalization.proposal.payload;
+            if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                let digest = block.digest();
+                wrote |= self
+                    .store_finalization(
+                        height,
+                        digest,
+                        block,
+                        Some(finalization),
+                        application,
+                        buffer,
+                    )
+                    .await;
+            } else {
+                requests.push(Request::<V::Commitment>::Block(commitment));
             }
         }
         if !requests.is_empty() {
