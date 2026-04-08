@@ -319,6 +319,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.ordinal.ranges()
     }
 
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.ordinal.ranges_from(from)
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.ordinal.first_index()
     }
