@@ -563,114 +563,112 @@ impl Runner {
 
         // Process tasks until root task completes or progress stalls.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            loop {
-                // Ensure we have not exceeded our deadline
-                {
-                    let current = executor.time.lock();
-                    if let Some(deadline) = executor.deadline {
-                        if *current >= deadline {
-                            drop(current);
-                            panic!("runtime timeout");
-                        }
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
+            // Ensure we have not exceeded our deadline
+            {
+                let current = executor.time.lock();
+                if let Some(deadline) = executor.deadline {
+                    if *current >= deadline {
+                        drop(current);
+                        panic!("runtime timeout");
                     }
                 }
-
-                // Drain all ready tasks
-                let mut queue = executor.tasks.drain();
-
-                // Shuffle tasks (if more than one)
-                if queue.len() > 1 {
-                    let mut rng = executor.rng.lock();
-                    queue.shuffle(&mut *rng);
-                }
-
-                // Run all snapshotted tasks
-                //
-                // This approach is more efficient than randomly selecting a task one-at-a-time
-                // because it ensures we don't pull the same pending task multiple times in a row (without
-                // processing a different task required for other tasks to make progress).
-                trace!(
-                    iter = executor.metrics.iterations.get(),
-                    tasks = queue.len(),
-                    "starting loop"
-                );
-                let mut output = None;
-                for id in queue {
-                    // Lookup the task (it may have completed already)
-                    let Some(task) = executor.tasks.get(id) else {
-                        trace!(id, "skipping missing task");
-                        continue;
-                    };
-
-                    // Record task for auditing
-                    executor.auditor.event(b"process_task", |hasher| {
-                        hasher.update(task.id.to_be_bytes());
-                        hasher.update(task.label.name().as_bytes());
-                    });
-                    executor.metrics.task_polls.get_or_create(&task.label).inc();
-                    trace!(id, "processing task");
-
-                    // Prepare task for polling
-                    let waker = waker(Arc::new(TaskWaker {
-                        id,
-                        tasks: Arc::downgrade(&executor.tasks),
-                    }));
-                    let mut cx = task::Context::from_waker(&waker);
-
-                    // Poll the task
-                    match &task.mode {
-                        Mode::Root => {
-                            // Poll the root task
-                            if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                                trace!(id, "root task is complete");
-                                output = Some(result);
-                                break;
-                            }
-                        }
-                        Mode::Work(future) => {
-                            // Get the future (if it still exists)
-                            let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                trace!(id, "skipping already complete task");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                continue;
-                            };
-
-                            // Poll the task
-                            if fut.as_mut().poll(&mut cx).is_ready() {
-                                trace!(id, "task is complete");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                *fut_opt = None;
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Try again later if task is still pending
-                    trace!(id, "task is still pending");
-                }
-
-                // If the root task has completed, exit as soon as possible
-                if let Some(output) = output {
-                    break output;
-                }
-
-                // Advance time (skipping ahead if no tasks are ready yet)
-                let mut current = executor.advance_time();
-                current = executor.skip_idle_time(current);
-
-                // Wake sleepers and ensure we continue to make progress
-                executor.wake_ready_sleepers(current);
-                executor.assert_liveness();
-
-                // Record that we completed another iteration of the event loop.
-                executor.metrics.iterations.inc();
             }
+
+            // Drain all ready tasks
+            let mut queue = executor.tasks.drain();
+
+            // Shuffle tasks (if more than one)
+            if queue.len() > 1 {
+                let mut rng = executor.rng.lock();
+                queue.shuffle(&mut *rng);
+            }
+
+            // Run all snapshotted tasks
+            //
+            // This approach is more efficient than randomly selecting a task one-at-a-time
+            // because it ensures we don't pull the same pending task multiple times in a row (without
+            // processing a different task required for other tasks to make progress).
+            trace!(
+                iter = executor.metrics.iterations.get(),
+                tasks = queue.len(),
+                "starting loop"
+            );
+            let mut output = None;
+            for id in queue {
+                // Lookup the task (it may have completed already)
+                let Some(task) = executor.tasks.get(id) else {
+                    trace!(id, "skipping missing task");
+                    continue;
+                };
+
+                // Record task for auditing
+                executor.auditor.event(b"process_task", |hasher| {
+                    hasher.update(task.id.to_be_bytes());
+                    hasher.update(task.label.name().as_bytes());
+                });
+                executor.metrics.task_polls.get_or_create(&task.label).inc();
+                trace!(id, "processing task");
+
+                // Prepare task for polling
+                let waker = waker(Arc::new(TaskWaker {
+                    id,
+                    tasks: Arc::downgrade(&executor.tasks),
+                }));
+                let mut cx = task::Context::from_waker(&waker);
+
+                // Poll the task
+                match &task.mode {
+                    Mode::Root => {
+                        // Poll the root task
+                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                            trace!(id, "root task is complete");
+                            output = Some(result);
+                            break;
+                        }
+                    }
+                    Mode::Work(future) => {
+                        // Get the future (if it still exists)
+                        let mut fut_opt = future.lock();
+                        let Some(fut) = fut_opt.as_mut() else {
+                            trace!(id, "skipping already complete task");
+
+                            // Remove the future
+                            executor.tasks.remove(id);
+                            continue;
+                        };
+
+                        // Poll the task
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            trace!(id, "task is complete");
+
+                            // Remove the future
+                            executor.tasks.remove(id);
+                            *fut_opt = None;
+                            continue;
+                        }
+                    }
+                }
+
+                // Try again later if task is still pending
+                trace!(id, "task is still pending");
+            }
+
+            // If the root task has completed, exit as soon as possible
+            if let Some(output) = output {
+                break output;
+            }
+
+            // Advance time (skipping ahead if no tasks are ready yet)
+            let mut current = executor.advance_time();
+            current = executor.skip_idle_time(current);
+
+            // Wake sleepers and ensure we continue to make progress
+            executor.wake_ready_sleepers(current);
+            executor.assert_liveness();
+
+            // Record that we completed another iteration of the event loop.
+            executor.metrics.iterations.inc();
         }));
 
         // Clear remaining tasks from the executor.

@@ -1578,9 +1578,13 @@ where
             .await
     }
 
-    /// Attempt to repair any identified gaps in the finalized blocks archive. The total
-    /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
-    /// though multiple gaps may be spanned.
+    /// Attempt to repair any identified gaps in the finalized blocks archive.
+    ///
+    /// Internal gaps (anchored by a later stored block) are repaired via backwards
+    /// parent-chain walking and bounded by `self.max_repair` fetch requests. Trailing
+    /// gaps (beyond the last stored block) are repaired from `finalizations_by_height`
+    /// with a separate `self.max_repair`-bounded fetch budget. Local writes are
+    /// unbounded in both phases since they are cheap.
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
@@ -1675,15 +1679,18 @@ where
             return wrote;
         };
         let mut height = trailing_start;
-        let mut remaining = self.max_repair.get();
-        while height <= tip && remaining > 0 {
+        let mut fetch_remaining = self.max_repair.get();
+        while height <= tip && fetch_remaining > 0 {
             if let Some(repaired) = self
                 .repair_trailing_finalized_height(height, buffer, resolver, application)
                 .await
             {
                 wrote |= repaired;
-                remaining -= 1;
+                if !repaired {
+                    fetch_remaining -= 1;
+                }
             }
+            // Overflow guard: height.next() would panic at Height::MAX.
             if height == tip {
                 break;
             }
