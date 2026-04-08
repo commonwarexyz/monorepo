@@ -243,11 +243,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the archive
+            let first_context = context.with_label("first");
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    &context.with_label("first"),
+                    &first_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -259,7 +260,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
+            let mut archive = Archive::init(first_context, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -278,11 +279,12 @@ mod tests {
 
             // Initialize the archive again without compression.
             // Index journal replay succeeds (no compression), but value reads will fail.
+            let second_context = context.with_label("second");
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    &context.with_label("second"),
+                    &second_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -295,7 +297,7 @@ mod tests {
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.with_label("second"),
+                second_context,
                 cfg.clone(),
             )
             .await
@@ -532,11 +534,12 @@ mod tests {
         executor.start(|mut context| async move {
             // Initialize the archive
             let items_per_section = 256u64;
+            let init1_context = context.with_label("init1");
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    &context.with_label("init1"),
+                    &init1_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -548,7 +551,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
+            let mut archive = Archive::init(init1_context, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -597,11 +600,12 @@ mod tests {
             drop(archive);
 
             // Reinitialize the archive
+            let init2_context = context.with_label("init2");
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    &context.with_label("init2"),
+                    &init2_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -614,7 +618,7 @@ mod tests {
                 items_per_section: NZU64!(items_per_section),
             };
             let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
-                context.with_label("init2"),
+                init2_context,
                 cfg.clone(),
             )
             .await

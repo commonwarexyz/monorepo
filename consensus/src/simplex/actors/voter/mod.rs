@@ -1632,6 +1632,7 @@ mod tests {
             actor.start();
 
             // Initialize voter actor
+            let voter_context = context.with_label("voter");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1649,12 +1650,12 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter"),
+                    &voter_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -3533,6 +3534,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
             actor.start();
 
+            let voter_context = context.with_label("voter");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3550,12 +3552,12 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter"),
+                    &voter_context,
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);

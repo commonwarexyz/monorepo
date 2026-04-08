@@ -876,13 +876,17 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let prefix = "test-cache";
-            let make_cfg = || cache::Config {
+            let make_cfg = |label: &str| cache::Config {
                 partition_prefix: prefix.to_string(),
                 prunable_items_per_section: NZU64!(10),
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    &context.with_label(label),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
 
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
@@ -893,7 +897,7 @@ mod tests {
             {
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
                     context.with_label("write"),
-                    make_cfg(),
+                    make_cfg("cfg1"),
                     (),
                 )
                 .await;
@@ -904,7 +908,7 @@ mod tests {
             // before loading persisted epochs.
             let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
                 context.with_label("read"),
-                make_cfg(),
+                make_cfg("cfg2"),
                 (),
             )
             .await;
