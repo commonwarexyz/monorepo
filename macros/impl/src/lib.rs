@@ -741,3 +741,39 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
     }
     .into()
 }
+
+/// Make a test function callable from fuzz harnesses.
+///
+/// Converts test attributes (`#[test]`, `#[test_traced]`, `#[test_async]`,
+/// `#[tokio::test]`) to `#[cfg_attr(test, ...)]` and makes the function `pub`.
+/// This allows fuzz harnesses to call the function directly while it continues
+/// to behave as a normal test function in `cargo test`.
+#[proc_macro_attribute]
+pub fn fuzzable_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    let sig = &input.sig;
+    let block = &input.block;
+    let converted_attrs: Vec<_> = input
+        .attrs
+        .iter()
+        .map(|attr| {
+            let is_test_attr = attr.path().is_ident("test")
+                || attr.path().is_ident("test_traced")
+                || attr.path().is_ident("test_async");
+            let is_tokio_test = attr.path().segments.len() == 2
+                && attr.path().segments.first().map(|s| s.ident == "tokio").unwrap_or(false)
+                && attr.path().segments.last().map(|s| s.ident == "test").unwrap_or(false);
+            if is_test_attr || is_tokio_test {
+                let meta = &attr.meta;
+                quote! { #[cfg_attr(test, #meta)] }
+            } else {
+                quote! { #attr }
+            }
+        })
+        .collect();
+    let output = quote! {
+        #(#converted_attrs)*
+        pub #sig #block
+    };
+    output.into()
+}
