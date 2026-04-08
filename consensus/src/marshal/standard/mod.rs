@@ -43,7 +43,7 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            core::Mailbox,
+            core::{cache, Mailbox},
             mocks::{
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
@@ -71,7 +71,11 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner,
     };
-    use commonware_storage::archive::{immutable, Archive as _};
+    use commonware_storage::{
+        archive::{immutable, prunable, Archive as _},
+        metadata::{self, Metadata},
+        translator::TwoCap,
+    };
     use commonware_utils::{
         channel::oneshot,
         NZUsize,
@@ -295,6 +299,57 @@ mod tests {
             .sync()
             .await
             .expect("failed to sync seeded finalizations");
+    }
+
+    async fn seed_cache_block(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        epoch: Epoch,
+        view: View,
+        block: &B,
+    ) {
+        let cache_prefix = format!("{partition_prefix}-cache");
+        let replay_buffer = NonZeroUsize::new(1024).unwrap();
+        let write_buffer = NonZeroUsize::new(1024).unwrap();
+
+        let mut metadata: Metadata<deterministic::Context, u8, (Epoch, Epoch)> = Metadata::init(
+            context.with_label("seed_cache_metadata"),
+            metadata::Config {
+                partition: format!("{cache_prefix}-metadata"),
+                codec_config: ((), ()),
+            },
+        )
+        .await
+        .expect("failed to initialize cache metadata");
+        metadata.put(0, (epoch, epoch));
+        metadata
+            .sync()
+            .await
+            .expect("failed to sync cache metadata");
+
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
+            prunable::Archive::init(
+                context.with_label("seed_notarized"),
+                prunable::Config {
+                    translator: TwoCap,
+                    key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
+                    key_page_cache: page_cache,
+                    value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
+                    items_per_section: NonZeroU64::new(10).unwrap(),
+                    compression: None,
+                    codec_config: (),
+                    replay_buffer,
+                    key_write_buffer: write_buffer,
+                    value_write_buffer: write_buffer,
+                },
+            )
+            .await
+            .expect("failed to initialize notarized blocks archive");
+        notarized
+            .put_sync(view.get(), block.digest(), block.clone())
+            .await
+            .expect("failed to seed notarized block");
     }
 
     #[test_traced("WARN")]
@@ -601,6 +656,346 @@ mod tests {
             assert!(
                 recovering_application.pending_ack_heights().is_empty(),
                 "pending acks should be empty after acknowledging through height 2"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_restart_repairs_multiple_trailing_missing_finalized_blocks() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let recovering_validator = participants[0].clone();
+            let peer_validator = participants[1].clone();
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
+            let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
+            let block_four = make_raw_block(block_three.digest(), Height::new(4), 400);
+            let block_five = make_raw_block(block_four.digest(), Height::new(5), 500);
+
+            let mut finalizations = Vec::new();
+            let blocks = [&block_one, &block_two, &block_three, &block_four, &block_five];
+            for (i, block) in blocks.iter().enumerate() {
+                let view = View::new(block.height().get());
+                let parent_view = if i == 0 {
+                    View::zero()
+                } else {
+                    View::new(blocks[i - 1].height().get())
+                };
+                finalizations.push(StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), view),
+                        parent_view,
+                        block.digest(),
+                    ),
+                    &schemes,
+                    3,
+                ));
+            }
+
+            let mut peer_mailbox = StandardHarness::setup_validator(
+                context.with_label("peer_validator"),
+                &mut oracle,
+                peer_validator.clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await
+            .mailbox;
+            for (i, block) in blocks.iter().enumerate() {
+                peer_mailbox
+                    .proposed(
+                        Round::new(Epoch::zero(), View::new(block.height().get())),
+                        (*block).clone(),
+                    )
+                    .await;
+                StandardHarness::report_finalization(
+                    &mut peer_mailbox,
+                    finalizations[i].clone(),
+                )
+                .await;
+            }
+            context.sleep(Duration::from_millis(200)).await;
+
+            let partition_prefix = format!("validator-{recovering_validator}");
+            seed_inconsistent_restart_state(
+                context.clone(),
+                &partition_prefix,
+                &[block_one],
+                &finalizations
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (Height::new(i as u64 + 1), f.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .await;
+
+            let recovering = StandardHarness::setup_validator_with(
+                context.with_label("recovering_validator"),
+                &mut oracle,
+                recovering_validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::manual_ack(),
+            )
+            .await;
+            let recovering_mailbox = recovering.mailbox;
+
+            for _ in 0..40 {
+                if recovering_mailbox.get_block(Height::new(5)).await
+                    == Some(block_five.clone())
+                {
+                    return;
+                }
+                context.sleep(Duration::from_millis(200)).await;
+            }
+
+            panic!(
+                "marshal should repair multiple trailing missing finalized blocks on restart"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_restart_no_trailing_finalizations_is_noop() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let recovering_validator = participants[0].clone();
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
+            let finalization_one = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block_one.digest(),
+                ),
+                &schemes,
+                3,
+            );
+            let finalization_two = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_two.digest(),
+                ),
+                &schemes,
+                3,
+            );
+
+            let partition_prefix = format!("validator-{recovering_validator}");
+            seed_inconsistent_restart_state(
+                context.clone(),
+                &partition_prefix,
+                &[block_one.clone(), block_two.clone()],
+                &[
+                    (Height::new(1), finalization_one),
+                    (Height::new(2), finalization_two),
+                ],
+            )
+            .await;
+
+            let recovering = StandardHarness::setup_validator_with(
+                context.with_label("recovering_validator"),
+                &mut oracle,
+                recovering_validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::manual_ack(),
+            )
+            .await;
+            let recovering_application = recovering.application;
+            let recovering_mailbox = recovering.mailbox;
+
+            context.sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                recovering_mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(2), block_two.digest())),
+                "latest tip should be the highest finalized block"
+            );
+            assert_eq!(
+                recovering_mailbox.get_block(Identifier::Latest).await,
+                Some(block_two.clone()),
+                "latest block should be available"
+            );
+            assert_eq!(
+                recovering_application.pending_ack_heights(),
+                vec![Height::new(1)],
+                "only height 1 should be pending (height 2 awaits ack of height 1)"
+            );
+
+            assert_eq!(
+                recovering_application.acknowledge_next(),
+                Some(Height::new(1)),
+            );
+            context.sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                recovering_application.acknowledge_next(),
+                Some(Height::new(2)),
+            );
+            context.sleep(Duration::from_millis(200)).await;
+            assert!(
+                recovering_application.pending_ack_heights().is_empty(),
+                "all blocks should be dispatched without any trailing repair"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_restart_repairs_trailing_block_from_local_cache() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let recovering_validator = participants[0].clone();
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
+            let finalization_two = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_two.digest(),
+                ),
+                &schemes,
+                3,
+            );
+
+            let partition_prefix = format!("validator-{recovering_validator}");
+
+            // Seed block_two into the cache's notarized storage so the
+            // recovering validator can find it locally during trailing repair,
+            // without needing a peer to serve it.
+            seed_cache_block(
+                context.clone(),
+                &partition_prefix,
+                Epoch::zero(),
+                View::new(2),
+                &block_two,
+            )
+            .await;
+
+            seed_inconsistent_restart_state(
+                context.clone(),
+                &partition_prefix,
+                &[block_one],
+                &[(Height::new(2), finalization_two)],
+            )
+            .await;
+
+            let recovering = StandardHarness::setup_validator_with(
+                context.with_label("recovering_validator"),
+                &mut oracle,
+                recovering_validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::manual_ack(),
+            )
+            .await;
+            let recovering_application = recovering.application;
+            let recovering_mailbox = recovering.mailbox;
+
+            context.sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                recovering_mailbox.get_block(Identifier::Latest).await,
+                Some(block_two.clone()),
+                "trailing block should be repaired from local cache without peer fetch"
+            );
+            assert_eq!(
+                recovering_application.pending_ack_heights(),
+                vec![Height::new(1)],
+                "height 1 should be pending"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_cache_load_persisted_epochs_finds_blocks() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let prefix = "test-cache";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NonZeroU64::new(10).unwrap().into(),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            // Write a block into the cache.
+            {
+                let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.with_label("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                mgr.put_block(round, digest, block.clone().into()).await;
+            }
+
+            // Re-init the cache (simulating restart). find_block should fail
+            // before loading persisted epochs.
+            let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                context.with_label("read"),
+                make_cfg(),
+                (),
+            )
+            .await;
+            assert_eq!(
+                mgr.find_block(digest).await,
+                None,
+                "cache should not find block before loading persisted epochs"
+            );
+
+            mgr.load_persisted_epochs().await;
+            assert_eq!(
+                mgr.find_block(digest).await.map(Into::into),
+                Some(block),
+                "cache should find block after loading persisted epochs"
             );
         });
     }

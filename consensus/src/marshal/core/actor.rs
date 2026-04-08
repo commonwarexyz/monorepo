@@ -401,6 +401,10 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
 
+        // Load persisted cache epochs so find_block can discover blocks
+        // written before the last shutdown.
+        self.cache.load_persisted_epochs().await;
+
         // Attempt to dispatch the next finalized block to the application, if it is ready.
         self.try_dispatch_blocks(&mut application).await;
 
