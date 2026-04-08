@@ -136,6 +136,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Append pre-encoded bytes to the given section.
     ///
+    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
+    ///
     /// # Panics
     ///
     /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
