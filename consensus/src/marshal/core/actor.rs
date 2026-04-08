@@ -1549,14 +1549,14 @@ where
                 .last_index()
                 .is_some_and(|last| last >= last_finalized);
             if last_finalized > self.last_processed_height && !have_block {
+                // Get the finalization for the last finalized block.
                 let finalization = self
                     .get_finalization_by_height(last_finalized)
                     .await
                     .expect("finalization missing");
                 let commitment = finalization.proposal.payload;
-                if let Some(block) =
-                    self.find_block_by_commitment(buffer, commitment).await
-                {
+                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    // If found, persist the block.
                     let digest = block.digest();
                     wrote |= self
                         .store_finalization(
@@ -1569,6 +1569,7 @@ where
                         )
                         .await;
                 } else {
+                    // Request the missing block.
                     resolver
                         .fetch(Request::<V::Commitment>::Block(commitment))
                         .await;
