@@ -660,24 +660,35 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(self.inner.read().await.size);
         }
 
-        // Encode before grabbing write guard.
-        let encoded: Vec<_> = items.iter().map(|item| item.encode()).collect();
+        // Encode all items into a single contiguous buffer before taking the write guard.
+        // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
+        let mut items_buf = Vec::with_capacity(items.len() * A::SIZE);
+        for item in items {
+            item.write(&mut items_buf);
+        }
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        let mut last_position = 0;
-        for buf in &encoded {
-            // Append the pre-encoded item to the journal.
-            let (section, _) = self.position_to_section(inner.size);
-            inner.journal.append_raw(section, buf).await?;
-            last_position = inner.size;
-            inner.size += 1;
+        let mut written = 0;
+        while written < items.len() {
+            let (section, pos_in_section) = self.position_to_section(inner.size);
+            let remaining_space = (self.items_per_blob - pos_in_section) as usize;
+            let batch_count = remaining_space.min(items.len() - written);
+            let start = written * A::SIZE;
+            let end = start + batch_count * A::SIZE;
 
-            // The section was filled and must be synced. Downgrade so readers can continue
-            // during the sync, but keep mutators blocked. After sync, upgrade again to create
-            // the next tail section before any append can proceed.
+            inner
+                .journal
+                .append_raw(section, &items_buf[start..end])
+                .await?;
+            inner.size += batch_count as u64;
+            written += batch_count;
+
             if inner.size.is_multiple_of(self.items_per_blob) {
+                // The section was filled and must be synced. Downgrade so readers can continue
+                // during the sync, but keep mutators blocked. After sync, upgrade again to
+                // create the next tail section before any append can proceed.
                 let inner_ref = inner.downgrade_to_upgradable();
                 inner_ref.journal.sync(section).await?;
                 inner = inner_ref.upgrade().await;
@@ -685,7 +696,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             }
         }
 
-        Ok(last_position)
+        Ok(inner.size - 1)
     }
 
     /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
