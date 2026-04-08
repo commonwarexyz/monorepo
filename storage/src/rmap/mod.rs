@@ -285,6 +285,7 @@ impl RMap {
             .range(..=from)
             .next_back()
             .filter(|(_, &end)| end >= from);
+
         // All ranges starting after `from` are guaranteed to follow.
         let tail = match from {
             u64::MAX => None,
