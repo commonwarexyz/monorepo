@@ -10,7 +10,7 @@ use crate::{
     journal::{
         contiguous::{
             fixed::{Config as JConfig, Journal},
-            Reader,
+            Many, Reader,
         },
         Error as JError,
     },
@@ -639,7 +639,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        self.journal.append_many(&missing_nodes).await?;
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
 
         // Sync the journal while still holding the sync_lock to ensure durability before returning.
         self.journal.sync().await?;

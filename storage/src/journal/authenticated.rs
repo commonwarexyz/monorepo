@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -437,18 +437,24 @@ where
 
         // Apply ancestor item batches in root-to-tip order. Already-committed
         // batches are skipped by tracking cumulative leaf count.
+        // Batches are collected into a single append_many call to acquire the
+        // journal's write lock once instead of per-batch.
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
         let mut batch_leaf_end = base_leaves;
+        let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
         for ancestor in &batch.ancestor_items {
             batch_leaf_end += ancestor.len() as u64;
             if skip_ancestors && batch_leaf_end <= committed_leaves {
                 continue;
             }
-            self.journal.append_many(ancestor).await?;
+            batches.push(ancestor);
         }
         if !batch.items.is_empty() {
-            self.journal.append_many(&batch.items).await?;
+            batches.push(&batch.items);
+        }
+        if !batches.is_empty() {
+            self.journal.append_many(Many::Nested(&batches)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
