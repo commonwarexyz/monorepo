@@ -1546,10 +1546,10 @@ where
         let start = self.last_processed_height.next();
         let (current_range_end, _) = self.finalized_blocks.next_gap(start);
         let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
-        let mut height = trailing_start;
         let mut wrote = false;
         let mut requests = Vec::new();
-        while height <= tip {
+        for h in trailing_start.get()..=tip.get() {
+            let height = Height::new(h);
             if let Some(finalization) = self.get_finalization_by_height(height).await {
                 let commitment = finalization.proposal.payload;
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
@@ -1568,7 +1568,6 @@ where
                     requests.push(Request::<V::Commitment>::Block(commitment));
                 }
             }
-            height = height.next();
         }
         if !requests.is_empty() {
             resolver.fetch_all(requests).await;
