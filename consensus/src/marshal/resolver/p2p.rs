@@ -20,6 +20,8 @@ where
     pub public_key: P,
 
     /// The provider of peers that can be consulted for fetching data.
+    ///
+    /// We only fetch data from peers in `latest.primary` (see [commonware_p2p::Provider]).
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.

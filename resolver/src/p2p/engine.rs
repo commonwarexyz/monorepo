@@ -195,15 +195,13 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, all)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
-                // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
-                // reconcile with all tracked peers).
-                if self.last_peer_set_id < Some(id) {
-                    self.last_peer_set_id = Some(id);
-                    self.fetcher.reconcile(all.as_ref());
+                if self.last_peer_set_id < Some(update.index) {
+                    self.last_peer_set_id = Some(update.index);
+                    self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },
             // Handle active deadline

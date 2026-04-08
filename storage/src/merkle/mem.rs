@@ -494,6 +494,7 @@ mod tests {
     use crate::merkle::{hasher::Standard, Error, Location, Position};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
+    use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -743,9 +744,7 @@ mod tests {
         executor.start(|ctx| async move {
             let hasher: H = Standard::new();
             let mem = build::<F>(&hasher, 200);
-            let pool = ctx
-                .create_thread_pool(commonware_utils::NZUsize!(4))
-                .unwrap();
+            let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
             do_batch_update(&hasher, mem, Some(pool));
         });
     }
