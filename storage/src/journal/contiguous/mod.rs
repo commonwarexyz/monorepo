@@ -93,7 +93,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
     /// may override this to acquire the write lock once for all items.
     ///
-    /// No-ops if items is empty, returning the current size (next append position).
+    /// Returns [Error::EmptyAppend] if items is empty.
     fn append_many(
         &mut self,
         items: &[Self::Item],
@@ -102,6 +102,9 @@ pub trait Mutable: Contiguous + Send + Sync {
         Self::Item: Sync,
     {
         async move {
+            if items.is_empty() {
+                return Err(Error::EmptyAppend);
+            }
             let mut last_pos = self.size().await;
             for item in items {
                 last_pos = self.append(item).await?;

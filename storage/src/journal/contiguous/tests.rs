@@ -1110,7 +1110,7 @@ where
     }
 }
 
-/// Test append_many with empty slice is a no-op.
+/// Test append_many with empty slice returns an error.
 async fn test_append_many_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1122,9 +1122,11 @@ where
     journal.append(&10).await.unwrap();
     journal.append(&20).await.unwrap();
 
-    // append_many with empty slice should no-op and return current size.
-    let pos = journal.append_many(&[]).await.unwrap();
-    assert_eq!(pos, 2);
+    // append_many with empty slice should return an error.
+    assert!(matches!(
+        journal.append_many(&[]).await,
+        Err(Error::EmptyAppend)
+    ));
     assert_eq!(get_bounds(&journal).await.end, 2);
 
     journal.destroy().await.unwrap();
