@@ -16,7 +16,7 @@ pub enum Address {
     /// Peer is the local node.
     Myself,
 
-    /// Address is provided when peer is registered.
+    /// Address is provided when peer is tracked.
     Known(types::Address),
 }
 
@@ -45,8 +45,11 @@ pub struct Record {
     /// Connection status of the peer.
     status: Status,
 
-    /// Number of peer sets this peer is part of.
-    sets: usize,
+    /// Number of primary peer sets this peer is part of.
+    primary_sets: usize,
+
+    /// Number of secondary peer sets this peer is part of.
+    secondary_sets: usize,
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
@@ -66,7 +69,8 @@ impl Record {
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
-            sets: 0,
+            primary_sets: 0,
+            secondary_sets: 0,
             persistent: false,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -78,7 +82,8 @@ impl Record {
         Self {
             address: Address::Myself,
             status: Status::Inert,
-            sets: 0,
+            primary_sets: 0,
+            secondary_sets: 0,
             persistent: true,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -103,18 +108,24 @@ impl Record {
         }
     }
 
-    /// Increase the count of peer sets this peer is part of.
-    pub const fn increment(&mut self) {
-        self.sets = self.sets.checked_add(1).unwrap();
+    /// Increase the count of primary peer sets this peer is part of.
+    pub const fn increment_primary(&mut self) {
+        self.primary_sets = self.primary_sets.checked_add(1).unwrap();
     }
 
-    /// Decrease the count of peer sets this peer is part of.
-    ///
-    /// Returns `true` if the record can be deleted. That is:
-    /// - The count reaches zero
-    /// - The peer is not the local node
-    pub const fn decrement(&mut self) {
-        self.sets = self.sets.checked_sub(1).unwrap();
+    /// Decrease the count of primary peer sets this peer is part of.
+    pub const fn decrement_primary(&mut self) {
+        self.primary_sets = self.primary_sets.checked_sub(1).unwrap();
+    }
+
+    /// Increase the count of secondary peer sets this peer is part of.
+    pub const fn increment_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_add(1).unwrap();
+    }
+
+    /// Decrease the count of secondary peer sets this peer is part of.
+    pub const fn decrement_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
     }
 
     /// Attempt to reserve the peer for connection.
@@ -164,9 +175,23 @@ impl Record {
         !matches!(self.address, Address::Myself)
     }
 
-    /// Returns the number of peer sets this peer is part of.
-    pub const fn sets(&self) -> usize {
-        self.sets
+    /// Returns the number of primary peer sets this peer is part of.
+    pub const fn primary_sets(&self) -> usize {
+        self.primary_sets
+    }
+
+    /// Returns the number of secondary peer sets this peer is part of.
+    pub const fn secondary_sets(&self) -> usize {
+        self.secondary_sets
+    }
+
+    /// Whether this peer should be dialed outbound (primary or persistent peers).
+    ///
+    /// Secondary peers remain eligible for inbound connections, but we reserve
+    /// outbound dialing for primary peers and for persistent records
+    /// that must stay dialable without a primary count.
+    pub const fn is_outbound_target(&self) -> bool {
+        self.primary_sets > 0 || self.persistent
     }
 
     /// Check whether this record is dialable at the given time.
@@ -180,7 +205,7 @@ impl Record {
         allow_private_ips: bool,
         allow_dns: bool,
     ) -> DialStatus {
-        if self.status != Status::Inert {
+        if self.status != Status::Inert || !self.is_outbound_target() {
             return DialStatus::Unavailable;
         }
         let ingress = match &self.address {
@@ -234,18 +259,24 @@ impl Record {
 
     /// Returns `true` if the record can safely be deleted.
     pub const fn deletable(&self) -> bool {
-        self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
+        self.primary_sets == 0
+            && self.secondary_sets == 0
+            && !self.persistent
+            && matches!(self.status, Status::Inert)
     }
 
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
     /// - It is not ourselves
-    /// - It is part of at least one peer set (or is persistent)
+    /// - It is part of at least one primary peer set, at least one secondary peer set, or
+    ///   persistent
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
-            Address::Known(_) => self.sets > 0 || self.persistent,
+            Address::Known(_) => {
+                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
+            }
         }
     }
 }
@@ -268,7 +299,7 @@ mod tests {
         let record = Record::myself();
         assert!(matches!(record.address, Address::Myself));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
+        assert_eq!(record.primary_sets, 0);
         assert!(record.persistent);
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
@@ -282,7 +313,7 @@ mod tests {
         let record = Record::known(test_address());
         assert!(matches!(record.address, Address::Known(_)));
         assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
+        assert_eq!(record.primary_sets, 0);
         assert!(!record.persistent);
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
@@ -305,16 +336,16 @@ mod tests {
     fn test_increment_decrement_and_deletable() {
         let mut record_known = Record::known(test_address());
         assert!(record_known.deletable());
-        record_known.increment();
+        record_known.increment_primary();
         assert!(!record_known.deletable());
-        record_known.decrement();
+        record_known.decrement_primary();
         assert!(record_known.deletable());
 
         let mut record_myself = Record::myself();
         assert!(!record_myself.deletable());
-        record_myself.increment();
+        record_myself.increment_primary();
         assert!(!record_myself.deletable());
-        record_myself.decrement();
+        record_myself.decrement_primary();
         assert!(!record_myself.deletable());
     }
 
@@ -322,8 +353,8 @@ mod tests {
     #[should_panic]
     fn test_decrement_panics_at_zero() {
         let mut record = Record::known(test_address());
-        assert_eq!(record.sets, 0);
-        record.decrement();
+        assert_eq!(record.primary_sets, 0);
+        record.decrement_primary();
     }
 
     #[test]
@@ -402,11 +433,11 @@ mod tests {
             assert!(!Record::myself().deletable());
 
             let mut record = Record::known(test_address());
-            assert_eq!(record.sets, 0);
+            assert_eq!(record.primary_sets, 0);
             assert_eq!(record.status, Status::Inert);
             assert!(record.deletable());
 
-            record.increment();
+            record.increment_primary();
             assert!(!record.deletable());
 
             assert_eq!(
@@ -421,7 +452,7 @@ mod tests {
             record.release();
             assert!(!record.deletable());
 
-            record.decrement();
+            record.decrement_primary();
             assert!(record.deletable());
         });
     }
@@ -434,9 +465,9 @@ mod tests {
         // Known records are only eligible when in a peer set
         let mut record_known = Record::known(test_address());
         assert!(!record_known.eligible(), "Not eligible when sets=0");
-        record_known.increment();
+        record_known.increment_primary();
         assert!(record_known.eligible(), "Eligible when sets>0");
-        record_known.decrement();
+        record_known.decrement_primary();
         assert!(!record_known.eligible(), "Not eligible when sets=0 again");
     }
 
@@ -450,7 +481,7 @@ mod tests {
             let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
             let mut record = Record::known(types::Address::Symmetric(public_socket));
-            record.increment();
+            record.increment_primary();
             assert!(record.acceptable(egress_ip, false));
             assert!(!record.acceptable(wrong_ip, false));
 
@@ -458,12 +489,12 @@ mod tests {
             assert!(!record_not_eligible.acceptable(egress_ip, false));
 
             let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-            record_reserved.increment();
+            record_reserved.increment_primary();
             record_reserved.reserve(&mut context, Duration::ZERO);
             assert!(!record_reserved.acceptable(egress_ip, false));
 
             let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-            record_connected.increment();
+            record_connected.increment_primary();
             record_connected.reserve(&mut context, Duration::ZERO);
             record_connected.connect();
             assert!(!record_connected.acceptable(egress_ip, false));
@@ -480,19 +511,19 @@ mod tests {
             let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
             let mut record = Record::known(types::Address::Symmetric(public_socket));
-            record.increment();
+            record.increment_primary();
             assert!(record.acceptable(wrong_ip, true));
 
             let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
             assert!(!record_not_eligible.acceptable(egress_ip, true));
 
             let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-            record_reserved.increment();
+            record_reserved.increment_primary();
             record_reserved.reserve(&mut context, Duration::ZERO);
             assert!(!record_reserved.acceptable(egress_ip, true));
 
             let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-            record_connected.increment();
+            record_connected.increment_primary();
             record_connected.reserve(&mut context, Duration::ZERO);
             record_connected.connect();
             assert!(!record_connected.acceptable(egress_ip, true));
@@ -505,6 +536,7 @@ mod tests {
     fn test_reserve_sets_next_dial() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
+            record.increment_primary();
             let now = context.current();
             assert_eq!(record.dialable(now, true, true), DialStatus::Now);
 
@@ -563,7 +595,8 @@ mod tests {
 
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-        let record_public = Record::known(types::Address::Symmetric(public_socket));
+        let mut record_public = Record::known(types::Address::Symmetric(public_socket));
+        record_public.increment_primary();
         assert_eq!(record_public.dialable(now, false, true), DialStatus::Now);
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
@@ -574,7 +607,8 @@ mod tests {
             ingress: Ingress::Socket(private_ingress),
             egress: public_egress,
         };
-        let record_private_ingress = Record::known(asymmetric_private_ingress);
+        let mut record_private_ingress = Record::known(asymmetric_private_ingress);
+        record_private_ingress.increment_primary();
         assert_eq!(
             record_private_ingress.dialable(now, false, true),
             DialStatus::Unavailable
@@ -592,7 +626,8 @@ mod tests {
             ingress: Ingress::Socket(public_ingress),
             egress: private_egress,
         };
-        let record_private_egress = Record::known(asymmetric_private_egress);
+        let mut record_private_egress = Record::known(asymmetric_private_egress);
+        record_private_egress.increment_primary();
         assert_eq!(
             record_private_egress.dialable(now, false, true),
             DialStatus::Now
@@ -606,7 +641,8 @@ mod tests {
             },
             egress: public_egress,
         };
-        let record_dns = Record::known(dns_ingress);
+        let mut record_dns = Record::known(dns_ingress);
+        record_dns.increment_primary();
         assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
         assert_eq!(
             record_dns.dialable(now, false, false),
