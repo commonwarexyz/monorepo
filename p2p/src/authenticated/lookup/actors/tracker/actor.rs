@@ -709,8 +709,7 @@ mod tests {
     fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Duplicate key across primary/secondary maps; primary wins. Expect empty latest.secondary,
-            // dialable as primary, and acceptable for ingress.
+            // Duplicate key across primary/secondary maps; deduplicated as primary only.
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
@@ -738,7 +737,7 @@ mod tests {
             assert!(update.latest.primary.position(&pk).is_some());
             assert!(
                 update.latest.secondary.is_empty(),
-                "overlap peer is stored as primary only"
+                "overlap peer is deduplicated as primary only"
             );
             assert_eq!(update.all.primary, update.latest.primary);
             assert!(

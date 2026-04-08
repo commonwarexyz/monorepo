@@ -234,7 +234,7 @@ stability_scope!(BETA {
     /// Primary and secondary peers provided together to [`Manager::track`].
     ///
     /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
-    /// treats the peer as primary only (it is omitted from the stored secondary set).
+    /// deduplicates overlapping keys, storing them as primary only.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct TrackedPeers<P: PublicKey> {
         /// Peers eligible for primary-only policies.
@@ -272,9 +272,8 @@ stability_scope!(BETA {
 
     /// Primary and secondary peers provided together to [`AddressableManager::track`].
     ///
-    /// If the same public key appears in both maps, the primary entry takes precedence:
-    /// [`AddressableManager::track`] will track it as primary and silently skip the
-    /// secondary entry.
+    /// The same public key may appear in both maps. [`AddressableManager::track`]
+    /// deduplicates overlapping keys, storing them as primary only.
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
@@ -333,8 +332,7 @@ stability_scope!(BETA {
         ///
         /// Callers may pass either a list of primary peers or a [`TrackedPeers`] value containing both primary and secondary peers.
         ///
-        /// Overlapping keys in [`TrackedPeers`] are allowed; primary takes precedence for role
-        /// and for the stored secondary list (see [`TrackedPeers`]).
+        /// Overlapping keys in [`TrackedPeers`] are allowed; they are deduplicated as primary only.
         ///
         /// ## Primary vs Secondary Peers
         ///

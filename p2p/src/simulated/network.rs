@@ -2223,6 +2223,77 @@ mod tests {
         });
     }
 
+    /// A peer can be demoted from primary to secondary across tracked peer set indices.
+    /// After the old primary-containing set is evicted, the peer is purely secondary.
+    #[test]
+    fn test_demotion_from_primary_to_secondary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(2),
+            };
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            network.start();
+
+            let pk_x = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk_y = ed25519::PrivateKey::from_seed(2).public_key();
+
+            let mut manager = oracle.manager();
+            let mut sub = manager.subscribe().await;
+
+            // Index 0: X is primary, Y is secondary.
+            manager
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([pk_x.clone()]).unwrap(),
+                        Set::try_from([pk_y.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = sub.recv().await.unwrap();
+            assert!(update.all.primary.position(&pk_x).is_some());
+            assert!(update.all.secondary.position(&pk_y).is_some());
+
+            // Index 1: X is demoted to secondary, Y is promoted to primary.
+            manager
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::try_from([pk_y.clone()]).unwrap(),
+                        Set::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = sub.recv().await.unwrap();
+            // Both indices retained: both peers are primary somewhere -> aggregate primary.
+            assert!(update.all.primary.position(&pk_x).is_some());
+            assert!(update.all.primary.position(&pk_y).is_some());
+            assert!(update.all.secondary.is_empty());
+
+            // Index 2: same as index 1. Evicts index 0.
+            manager
+                .track(
+                    2,
+                    TrackedPeers::new(
+                        Set::try_from([pk_y.clone()]).unwrap(),
+                        Set::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .await;
+
+            let update = sub.recv().await.unwrap();
+            // Index 0 evicted. X is now purely secondary.
+            assert!(update.all.primary.position(&pk_y).is_some());
+            assert!(update.all.secondary.position(&pk_x).is_some());
+            assert!(update.all.primary.position(&pk_x).is_none());
+        });
+    }
+
     /// After advancing tracked peer sets, secondaries from an older snapshot remain addressable until evicted from history:
     /// a new primary can still reach them, while a newer-only primary does not receive messages intended for that tracked secondary view.
     #[test]

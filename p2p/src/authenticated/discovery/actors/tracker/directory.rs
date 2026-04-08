@@ -236,8 +236,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Peers listed in both roles keep only primary; secondaries must not duplicate primaries.
-        let secondary_ordered: OrderedSet<C> = OrderedSet::from_iter_dedup(
+        // Peers in both primary and secondary are stored as primary only.
+        let secondary_deduped: OrderedSet<C> = OrderedSet::from_iter_dedup(
             peers
                 .secondary
                 .iter()
@@ -261,7 +261,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new secondary peer set.
-        for secondary in secondary_ordered.iter() {
+        for secondary in secondary_deduped.iter() {
             let record = self.peers.entry(secondary.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
@@ -272,7 +272,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             index,
             PeerSetsAtIndex {
                 primary: primary_set,
-                secondary: secondary_ordered,
+                secondary: secondary_deduped,
             },
         );
 
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn test_track_primary_secondary_overlap_excludes_from_secondary_storage() {
+    fn test_track_primary_secondary_overlap_deduplicates() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
@@ -721,8 +721,7 @@ mod tests {
         let pk_c = PrivateKey::from_seed(3).public_key();
 
         runtime.start(|context| async move {
-            // pk_b in both roles; pk_c secondary-only. Stored secondary, record counts, latest, and
-            // all() list pk_b as primary only.
+            // pk_b in both roles; pk_c secondary-only. pk_b is deduplicated as primary only.
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             assert!(directory.track(
@@ -749,6 +748,85 @@ mod tests {
             let agg = directory.all();
             assert!(agg.primary.position(&pk_b).is_some());
             assert!(agg.secondary.position(&pk_b).is_none());
+        });
+    }
+
+    #[test]
+    fn test_demotion_from_primary_to_secondary() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: NZUsize!(2),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+        let pk_x = PrivateKey::from_seed(1).public_key();
+        let pk_y = PrivateKey::from_seed(2).public_key();
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, vec![], my_info, config, releaser);
+
+            // Index 0: X is primary, Y is secondary.
+            assert!(directory.track(
+                0,
+                TrackedPeers::new(
+                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                ),
+            ));
+            assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
+            assert_eq!(directory.peers.get(&pk_x).unwrap().secondary_sets(), 0);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().primary_sets(), 0);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().secondary_sets(), 1);
+
+            // Index 1: X is demoted to secondary, Y is promoted to primary.
+            assert!(directory.track(
+                1,
+                TrackedPeers::new(
+                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                ),
+            ));
+
+            // Both indices retained (max_sets=2).
+            assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
+            assert_eq!(directory.peers.get(&pk_x).unwrap().secondary_sets(), 1);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().primary_sets(), 1);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().secondary_sets(), 1);
+
+            // Aggregate: both are primary (primary-wins across sets).
+            let agg = directory.all();
+            assert!(agg.primary.position(&pk_x).is_some());
+            assert!(agg.primary.position(&pk_y).is_some());
+            assert!(agg.secondary.is_empty());
+
+            // Index 2: only Y is primary, X is secondary. This evicts index 0.
+            assert!(directory.track(
+                2,
+                TrackedPeers::new(
+                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                ),
+            ));
+
+            // Index 0 evicted. X lost its primary from index 0.
+            assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 0);
+            assert_eq!(directory.peers.get(&pk_x).unwrap().secondary_sets(), 2);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().primary_sets(), 2);
+            assert_eq!(directory.peers.get(&pk_y).unwrap().secondary_sets(), 0);
+
+            // Aggregate: X is now purely secondary, Y is purely primary.
+            let agg = directory.all();
+            assert!(agg.primary.position(&pk_y).is_some());
+            assert!(agg.secondary.position(&pk_x).is_some());
+            assert!(agg.primary.position(&pk_x).is_none());
+            assert!(agg.secondary.position(&pk_y).is_none());
         });
     }
 
