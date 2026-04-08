@@ -541,7 +541,7 @@ mod tests {
     // can happen if a crash occurs after persisting the block but before
     // persisting its finalization.
     #[test_traced("WARN")]
-    fn test_standard_restart_does_surface_block_without_finalization() {
+    fn test_standard_restart_surfaces_block_without_finalization() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
