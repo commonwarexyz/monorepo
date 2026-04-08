@@ -130,9 +130,9 @@ pub trait Mutable: Contiguous + Send + Sync {
                         last_pos = self.append(item).await?;
                     }
                 }
-                Many::Nested(segments) => {
-                    for seg in segments {
-                        for item in *seg {
+                Many::Nested(nested_items) => {
+                    for items in nested_items {
+                        for item in *items {
                             last_pos = self.append(item).await?;
                         }
                     }
