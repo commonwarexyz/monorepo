@@ -86,8 +86,8 @@ impl<T> Many<'_, T> {
     /// Returns `true` if there are no items across all segments.
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Flat(s) => s.is_empty(),
-            Self::Nested(segs) => segs.iter().all(|s| s.is_empty()),
+            Self::Flat(items) => items.is_empty(),
+            Self::Nested(nested_items) => nested_items.iter().all(|items| items.is_empty()),
         }
     }
 }
