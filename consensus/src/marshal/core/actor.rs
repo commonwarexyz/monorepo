@@ -1557,15 +1557,17 @@ where
         let (current_range_end, _) = self.finalized_blocks.next_gap(start);
         let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
         let mut requests = Vec::new();
+        let mut wrote = false;
         for h in (trailing_start.get()..=tip.get()).rev() {
             let height = Height::new(h);
-            let Some(finalization) = self.get_finalization_by_height(height).await else {
-                continue;
-            };
+            let finalization = self
+                .get_finalization_by_height(height)
+                .await
+                .expect("finalization missing");
             let commitment = finalization.proposal.payload;
             if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                 let digest = block.digest();
-                let wrote = self
+                wrote = self
                     .store_finalization(
                         height,
                         digest,
@@ -1575,17 +1577,14 @@ where
                         buffer,
                     )
                     .await;
-                if !requests.is_empty() {
-                    resolver.fetch_all(requests).await;
-                }
-                return wrote;
+                break;
             }
             requests.push(Request::<V::Commitment>::Block(commitment));
         }
         if !requests.is_empty() {
             resolver.fetch_all(requests).await;
         }
-        false
+        wrote
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
