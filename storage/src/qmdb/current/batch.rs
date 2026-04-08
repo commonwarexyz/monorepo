@@ -425,12 +425,12 @@ where
 
     /// Arc refs to each ancestor's bitmap pushes, collected during
     /// `compute_current_layer()` while the parent is alive. Parent-first order
-    /// (matching `ancestor_seg_ends`).
+    /// (matching `ancestor_diff_ends`).
     pub(crate) ancestor_bitmap_pushes: Vec<Arc<Vec<bool>>>,
 
     /// Arc refs to each ancestor's bitmap clears, collected during
     /// `compute_current_layer()` while the parent is alive. Parent-first order
-    /// (matching `ancestor_seg_ends`).
+    /// (matching `ancestor_diff_ends`).
     pub(crate) ancestor_bitmap_clears: Vec<Arc<ClearSet<N>>>,
 }
 
@@ -558,20 +558,20 @@ where
     }
 }
 
-/// Push one bitmap bit per operation in `segment`. An Update is active only if
+/// Push one bitmap bit per operation in `batch_ops`. An Update is active only if
 /// the merged diff shows it as the final location for its key.
 fn push_operation_bits<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    segment: &[Operation<mmr::Family, U>],
-    segment_base: u64,
+    batch_ops: &[Operation<mmr::Family, U>],
+    batch_base: u64,
     diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
 ) where
     U: update::Update,
     B: BitmapReadable<N>,
     Operation<mmr::Family, U>: Codec,
 {
-    for (i, op) in segment.iter().enumerate() {
-        let op_loc = Location::new(segment_base + i as u64);
+    for (i, op) in batch_ops.iter().enumerate() {
+        let op_loc = Location::new(batch_base + i as u64);
         match op {
             Operation::Update(update) => {
                 let is_active = diff
@@ -605,7 +605,7 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
     }
 }
 
-/// Clear bits for ancestor-segment operations superseded by a later segment.
+/// Clear bits for ancestor-batch operations superseded by a later batch.
 /// Only relevant for chained batches (chain length > 1).
 #[allow(clippy::type_complexity)]
 fn clear_ancestor_superseded<U, B, const N: usize>(
@@ -618,11 +618,11 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     B: BitmapReadable<N>,
     Operation<mmr::Family, U>: Codec,
 {
-    let mut seg_base = db_base;
-    for ancestor_seg in &chain[..chain.len() - 1] {
-        for (j, op) in ancestor_seg.iter().enumerate() {
+    let mut batch_base = db_base;
+    for ancestor_batch in &chain[..chain.len() - 1] {
+        for (j, op) in ancestor_batch.iter().enumerate() {
             if let Some(key) = op.key() {
-                let ancestor_loc = Location::new(seg_base + j as u64);
+                let ancestor_loc = Location::new(batch_base + j as u64);
                 if let Some(entry) = diff.get(key) {
                     if entry.loc() != Some(ancestor_loc) {
                         bitmap.clear_bit(ancestor_loc);
@@ -630,7 +630,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
                 }
             }
         }
-        seg_base += ancestor_seg.len() as u64;
+        batch_base += ancestor_batch.len() as u64;
     }
 }
 
@@ -659,41 +659,41 @@ where
     let old_grafted_leaves = *grafted_parent.leaves() as usize;
     let mut bitmap = BitmapDiff::new(bitmap_parent, old_grafted_leaves);
 
-    let this_segment = inner.journal_batch.items();
-    let segment_base = *inner.new_last_commit_loc + 1 - this_segment.len() as u64;
+    let batch_ops = inner.journal_batch.items();
+    let batch_base = *inner.new_last_commit_loc + 1 - batch_ops.len() as u64;
 
     // 1. Inactivate previous commit.
-    let prev_commit_loc = Location::new(segment_base - 1);
+    let prev_commit_loc = Location::new(batch_base - 1);
     bitmap.clear_bit(prev_commit_loc);
 
-    // 2. Push bitmap bits for this segment's operations.
-    push_operation_bits(&mut bitmap, this_segment, segment_base, &inner.diff);
+    // 2. Push bitmap bits for this batch's operations.
+    push_operation_bits(&mut bitmap, batch_ops, batch_base, &inner.diff);
 
     // 3. Clear superseded base-DB operations.
     clear_base_old_locs(&mut bitmap, &inner.diff);
 
-    // 4. Clear ancestor-segment superseded operations (chaining only).
-    // Collect ancestor segments from the parent chain to clear superseded ops.
+    // 4. Clear ancestor-batch superseded operations (chaining only).
+    // Collect ancestor batches from the parent chain to clear superseded ops.
     let db_base_leaves = *current_db.any.last_commit_loc + 1;
     let has_ancestors = inner
         .ancestors()
         .next()
         .is_some_and(|p| p.journal_batch.size() > db_base_leaves);
     if has_ancestors {
-        // Build the chain of segments (ancestor-first order) for clear_ancestor_superseded.
-        let mut ancestor_segments: Vec<Arc<Vec<Operation<mmr::Family, U>>>> = Vec::new();
+        // Build the chain of batches (ancestor-first order) for clear_ancestor_superseded.
+        let mut ancestor_batches: Vec<Arc<Vec<Operation<mmr::Family, U>>>> = Vec::new();
         for batch in inner.ancestors() {
             let items = batch.journal_batch.items();
             if !items.is_empty() && batch.journal_batch.size() > db_base_leaves {
-                ancestor_segments.push(items.clone());
+                ancestor_batches.push(items.clone());
             }
         }
-        ancestor_segments.reverse();
-        // Append this segment to form the full chain (ancestors + this).
-        ancestor_segments.push(inner.journal_batch.items().clone());
+        ancestor_batches.reverse();
+        // Append this batch to form the full chain (ancestors + this).
+        ancestor_batches.push(inner.journal_batch.items().clone());
         clear_ancestor_superseded(
             &mut bitmap,
-            &ancestor_segments,
+            &ancestor_batches,
             &inner.diff,
             *current_db.any.last_commit_loc + 1,
         );
@@ -765,7 +765,7 @@ where
 
     // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
     // truncate the walk (committed-and-dropped ancestors are skipped). The walk
-    // yields parent-first order, matching ancestor_seg_ends.
+    // yields parent-first order, matching ancestor_diff_ends.
     let mut ancestor_bitmap_pushes = Vec::new();
     let mut ancestor_bitmap_clears = Vec::new();
     let mut current = parent.as_ref().and_then(Weak::upgrade);
@@ -1340,8 +1340,8 @@ mod tests {
         let key2 = FixedBytes::from([2, 0, 0, 0]);
         let key3 = FixedBytes::from([3, 0, 0, 0]);
 
-        // Segment: Update(key1), Update(key2), Delete(key3), CommitFloor
-        let segment: Vec<Op> = vec![
+        // Batch: Update(key1), Update(key2), Delete(key3), CommitFloor
+        let batch_ops: Vec<Op> = vec![
             Op::Update(update::Unordered(key1.clone(), 100u64)),
             Op::Update(update::Unordered(key2.clone(), 200u64)),
             Op::Delete(key3),
@@ -1369,7 +1369,7 @@ mod tests {
 
         let base = Bm::new();
         let mut bitmap = BitmapDiff::<Bm, N>::new(&base, 0);
-        push_operation_bits::<U, Bm, N>(&mut bitmap, &segment, 0, &diff);
+        push_operation_bits::<U, Bm, N>(&mut bitmap, &batch_ops, 0, &diff);
 
         // Expected: [true(key1 active), false(key2 superseded), false(delete), true(commit)]
         assert_eq!(bitmap.pushed_bits, [true, false, false, true]);

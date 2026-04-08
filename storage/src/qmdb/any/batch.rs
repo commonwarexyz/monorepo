@@ -240,13 +240,13 @@ where
 
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
+    /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
     ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
-    pub(crate) ancestor_seg_ends: Vec<u64>,
+    /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
+    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
+    pub(crate) ancestor_diff_ends: Vec<u64>,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -593,7 +593,7 @@ where
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestor_seg_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
+        let ancestor_diff_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
@@ -607,7 +607,7 @@ where
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
             ancestor_diffs,
-            ancestor_seg_ends,
+            ancestor_diff_ends,
         }))
     }
 }
@@ -1244,10 +1244,10 @@ where
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor_seg_ends[i] (partial commit).
+        // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
-            || batch.ancestor_seg_ends.contains(&db_size);
+            || batch.ancestor_diff_ends.contains(&db_size);
         if !valid {
             return Err(crate::qmdb::Error::StaleBatch {
                 db_size,
@@ -1260,12 +1260,12 @@ where
         // 1. Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // 2. Build committed_locs: for each key in a committed ancestor segment,
+        // 2. Build committed_locs: for each key in a committed ancestor batch,
         //    record the nearest (to child) committed ancestor's final state.
         //    Some(loc) = Active at loc, None = Deleted.
         let mut committed_locs: BTreeMap<&U::Key, Option<Location<F>>> = BTreeMap::new();
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_seg_ends[i] <= db_size {
+            if batch.ancestor_diff_ends[i] <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
                     // parent-first order: .or_insert keeps the nearest committed.
                     committed_locs.entry(key).or_insert(entry.loc());
@@ -1284,9 +1284,9 @@ where
             apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
         }
 
-        // 4. Apply uncommitted ancestor diffs (skip committed segments, skip seen keys).
+        // 4. Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_seg_ends[i] <= db_size {
+            if batch.ancestor_diff_ends[i] <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
@@ -1338,7 +1338,7 @@ where
             total_active_keys: self.active_keys,
             db_size: journal_size,
             ancestor_diffs: Vec::new(),
-            ancestor_seg_ends: Vec::new(),
+            ancestor_diff_ends: Vec::new(),
         })
     }
 }
@@ -1975,7 +1975,7 @@ mod tests {
     #[test]
     fn sequential_commit_three_deep() {
         // Build DB -> grandparent -> parent -> child, commit each
-        // sequentially. Tests applying across segment boundaries.
+        // sequentially. Tests applying across batch boundaries.
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<

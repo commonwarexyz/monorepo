@@ -438,7 +438,7 @@ where
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
-            || batch.ancestor_seg_ends.contains(&db_size);
+            || batch.ancestor_diff_ends.contains(&db_size);
         if !valid {
             return Err(Error::StaleBatch {
                 db_size,
@@ -452,7 +452,7 @@ where
         self.journal.apply_batch(&batch.journal_batch).await?;
 
         // Apply snapshot inserts. Child first (child wins via `seen`), then
-        // uncommitted ancestor segments.
+        // uncommitted ancestor batches.
         let bounds = self.journal.reader().await.bounds();
         let mut seen = BTreeSet::new();
         for (key, entry) in batch.diff.iter() {
@@ -461,7 +461,7 @@ where
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_seg_ends[i] <= db_size {
+            if batch.ancestor_diff_ends[i] <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {

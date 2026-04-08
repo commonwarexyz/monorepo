@@ -559,7 +559,7 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. Both ancestor_bitmap_{pushes,clears} and ancestor_seg_ends
+        // 2. Apply bitmap. Both ancestor_bitmap_{pushes,clears} and ancestor_diff_ends
         //    are in parent-first order. Iterate in reverse (root-to-tip) so that
         //    pushes are concatenated in chronological order.
         {
@@ -569,9 +569,9 @@ where
             for i in (0..n_ancestors).rev() {
                 if batch
                     .inner
-                    .ancestor_seg_ends
+                    .ancestor_diff_ends
                     .get(i)
-                    .is_some_and(|&seg_end| seg_end <= db_size)
+                    .is_some_and(|&batch_end| batch_end <= db_size)
                 {
                     continue;
                 }

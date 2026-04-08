@@ -64,7 +64,7 @@ where
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// Used by `apply_batch` to validate partial ancestor commits.
-    pub(super) ancestor_seg_ends: Vec<u64>,
+    pub(super) ancestor_batch_ends: Vec<u64>,
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
@@ -211,11 +211,11 @@ where
         }
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let mut ancestor_seg_ends = Vec::new();
+        let mut ancestor_batch_ends = Vec::new();
         if let Some(parent) = &self.parent {
-            ancestor_seg_ends.push(parent.total_size);
+            ancestor_batch_ends.push(parent.total_size);
             for batch in parent.ancestors() {
-                ancestor_seg_ends.push(batch.total_size);
+                ancestor_batch_ends.push(batch.total_size);
             }
         }
 
@@ -225,7 +225,7 @@ where
             base_size: self.base_size,
             total_size,
             db_size: self.db_size,
-            ancestor_seg_ends,
+            ancestor_batch_ends,
         })
     }
 }
