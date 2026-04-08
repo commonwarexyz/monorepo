@@ -419,8 +419,8 @@ where
 /// Derive all bitmap mutations (pushes + clears) for this batch in a single pass over the diff and
 /// ancestor diffs. Avoids iterating raw operations.
 ///
-/// Pushes: one bit per operation in the segment. All false except active diff entries (whose `loc`
-/// falls in the segment) and the CommitFloor (last op).
+/// Pushes: one bit per operation in the batch. All false except active diff entries (whose `loc`
+/// falls in the batch) and the CommitFloor (last op).
 ///
 /// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
 /// search back through ancestors to find the most recent active location; if none exists, we clear
@@ -430,29 +430,29 @@ where
 #[allow(clippy::type_complexity)]
 fn build_chunk_overlay<U, B: BitmapReadable<N>, const N: usize>(
     base: &B,
-    segment_len: usize,
-    segment_base: u64,
+    batch_len: usize,
+    batch_base: u64,
     diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
     ancestor_diffs: &[Arc<BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>>],
 ) -> ChunkOverlay<N>
 where
     U: update::Update,
 {
-    let total_bits = base.len() + segment_len as u64;
+    let total_bits = base.len() + batch_len as u64;
     let mut overlay = ChunkOverlay::new(total_bits);
 
-    // 1. CommitFloor (last op in segment) is always active.
-    let commit_loc = segment_base + segment_len as u64 - 1;
+    // 1. CommitFloor (last op) is always active.
+    let commit_loc = batch_base + batch_len as u64 - 1;
     overlay.set_bit(base, commit_loc);
 
     // 2. Inactivate previous CommitFloor.
-    overlay.clear_bit(base, segment_base - 1);
+    overlay.clear_bit(base, batch_base - 1);
 
     // 3. Set active bits + clear superseded locations from the diff.
     for (key, entry) in diff {
         // Set the active bit for this key's final location.
         if let Some(loc) = entry.loc() {
-            if *loc >= segment_base && *loc < segment_base + segment_len as u64 {
+            if *loc >= batch_base && *loc < batch_base + batch_len as u64 {
                 overlay.set_bit(base, *loc);
             }
         }
@@ -504,14 +504,14 @@ where
 {
     let old_grafted_leaves = *grafted_parent.leaves() as usize;
 
-    let segment_len = inner.journal_batch.items().len();
-    let segment_base = *inner.new_last_commit_loc + 1 - segment_len as u64;
+    let batch_len = inner.journal_batch.items().len();
+    let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<U, _, N>(
         bitmap_parent,
-        segment_len,
-        segment_base,
+        batch_len,
+        batch_base,
         &inner.diff,
         &inner.ancestor_diffs,
     );
@@ -528,11 +528,7 @@ where
                 .copied(),
         )
         .map(|i| {
-            // Use overlay if dirty, otherwise read from parent.
-            let chunk = overlay
-                .get(i)
-                .copied()
-                .unwrap_or_else(|| bitmap_parent.get_chunk(i));
+            let chunk = *overlay.get(i).expect("chunk index must be in overlay");
             (i, chunk)
         });
     let ops_mmr_adapter =
