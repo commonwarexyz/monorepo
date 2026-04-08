@@ -1436,8 +1436,8 @@ mod tests {
             };
             mmr.apply(changeset).unwrap();
             let leaves_before = mmr.leaves();
-            assert!(matches!(mmr.rewind(9, &hasher).await, Err(Error::Empty)));
             // Rewind returns error without partial modification.
+            assert!(matches!(mmr.rewind(9, &hasher).await, Err(Error::Empty)));
             assert_eq!(mmr.leaves(), leaves_before);
             mmr.destroy().await.unwrap();
         });
@@ -1449,8 +1449,8 @@ mod tests {
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
             // Build a test MMR with 255 leaves
+            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
             const LEAF_COUNT: usize = 255;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             for i in 0..LEAF_COUNT {
@@ -1570,8 +1570,8 @@ mod tests {
     fn test_journaled_mmr_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new();
             // make sure pruning doesn't break root computation, adding of new nodes, etc.
+            let hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
             let cfg_pruned = test_config(&context);
             let mut pruned_mmr =
@@ -2690,8 +2690,8 @@ mod tests {
                 .historical_range_proof(&hasher, end, keep_loc..end)
                 .await;
             assert!(ok_result.is_ok());
-            let pruned_end = keep_loc - 1;
             // make sure this is in a pruned range, considering blob boundaries.
+            let pruned_end = keep_loc - 1;
             let start_loc = Location::new(1);
             let pruned_result = mmr
                 .historical_range_proof(&hasher, end, start_loc..pruned_end + 1)

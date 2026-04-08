@@ -2269,8 +2269,8 @@ mod tests {
                 )
                 .await;
 
-            let update = sub.recv().await.unwrap();
             // Both indices retained: both peers are primary somewhere -> aggregate primary.
+            let update = sub.recv().await.unwrap();
             assert!(update.all.primary.position(&pk_x).is_some());
             assert!(update.all.primary.position(&pk_y).is_some());
             assert!(update.all.secondary.is_empty());
@@ -2286,8 +2286,8 @@ mod tests {
                 )
                 .await;
 
-            let update = sub.recv().await.unwrap();
             // Index 0 evicted. X is now purely secondary.
+            let update = sub.recv().await.unwrap();
             assert!(update.all.primary.position(&pk_y).is_some());
             assert!(update.all.secondary.position(&pk_x).is_some());
             assert!(update.all.primary.position(&pk_x).is_none());
