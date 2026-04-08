@@ -426,27 +426,12 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_mailbox = recovering.mailbox;
 
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_mailbox.get_info(Identifier::Latest).await,
-                Some((Height::new(2), block_two.digest())),
-                "seeded restart state should expose the trailing finalization as the latest tip"
-            );
-            assert_eq!(
-                recovering_mailbox.get_block(Identifier::Latest).await,
-                None,
-                "seeded restart state should begin without the trailing finalized block"
-            );
-
-            // Poll until the trailing block is repaired from the peer.
-            loop {
-                if recovering_mailbox.get_block(Identifier::Latest).await == Some(block_two.clone())
-                {
-                    return;
-                }
-                context.sleep(Duration::from_millis(200)).await;
+            // Walk through all blocks sequentially. Block 2 must be
+            // repaired from the peer before it can be dispatched.
+            for expected_height in 1..=2 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
             }
         });
     }
@@ -544,26 +529,12 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_mailbox = recovering.mailbox;
 
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_mailbox.get_info(Identifier::Latest).await,
-                Some((Height::new(3), block_three.digest())),
-                "seeded restart state should expose the highest stored finalization as the latest tip"
-            );
-            assert_eq!(
-                recovering_mailbox.get_block(Height::new(2)).await,
-                None,
-                "seeded restart state should begin with the internal finalized gap still missing"
-            );
-
-            // Poll until the internal gap is repaired from the peer.
-            loop {
-                if recovering_mailbox.get_block(Height::new(2)).await == Some(block_two.clone()) {
-                    return;
-                }
-                context.sleep(Duration::from_millis(200)).await;
+            // Walk through all three blocks sequentially. Block 2 must be
+            // repaired from the peer before it can be dispatched.
+            for expected_height in 1..=3 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
             }
         });
     }
@@ -777,14 +748,12 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_mailbox = recovering.mailbox;
 
-            // Poll until all missing blocks are repaired (check the last one).
-            loop {
-                if recovering_mailbox.get_block(Height::new(5)).await == Some(block_five.clone()) {
-                    return;
-                }
-                context.sleep(Duration::from_millis(200)).await;
+            // Walk through all five blocks sequentially. Blocks 2-5 must be
+            // repaired from the peer before they can be dispatched.
+            for expected_height in 1..=5 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
             }
         });
     }

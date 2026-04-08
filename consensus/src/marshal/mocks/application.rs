@@ -1,5 +1,10 @@
 use crate::{marshal::Update, types::Height, Block, Reporter};
-use commonware_utils::{acknowledgement::Exact, sync::Mutex, Acknowledgement};
+use commonware_utils::{
+    acknowledgement::Exact,
+    channel::mpsc,
+    sync::Mutex,
+    Acknowledgement,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -12,15 +17,18 @@ pub struct Application<B: Block> {
     #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
+    ack_signal: (mpsc::UnboundedSender<()>, Arc<Mutex<mpsc::UnboundedReceiver<()>>>),
     auto_ack: bool,
 }
 
 impl<B: Block> Default for Application<B> {
     fn default() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         Self {
             blocks: Default::default(),
             tip: Default::default(),
             pending_acks: Default::default(),
+            ack_signal: (tx, Arc::new(Mutex::new(rx))),
             auto_ack: true,
         }
     }
@@ -60,6 +68,16 @@ impl<B: Block> Application<B> {
         ack.acknowledge();
         Some(height)
     }
+
+    /// Waits for the next block to be dispatched, acknowledges it, and returns its height.
+    pub async fn acknowledged(&self) -> Height {
+        loop {
+            self.ack_signal.1.lock().recv().await.expect("channel closed");
+            if let Some(height) = self.acknowledge_next() {
+                return height;
+            }
+        }
+    }
 }
 
 impl<B: Block> Reporter for Application<B> {
@@ -74,6 +92,7 @@ impl<B: Block> Reporter for Application<B> {
                     ack_tx.acknowledge();
                 } else {
                     self.pending_acks.lock().push_back((height, ack_tx));
+                    let _ = self.ack_signal.0.send(());
                 }
             }
             Update::Tip(_, height, digest) => {
