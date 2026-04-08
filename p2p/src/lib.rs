@@ -334,6 +334,12 @@ stability_scope!(BETA {
         ///
         /// Overlapping keys in [`TrackedPeers`] are allowed; they are deduplicated as primary only.
         ///
+        /// ## Active Peers
+        ///
+        /// The most recently registered peer set (highest ID) is considered the
+        /// active set. Implementations use the active set to decide which peers to
+        /// maintain connections with and which to disconnect from.
+        ///
         /// ## Primary vs Secondary Peers
         ///
         /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
@@ -363,6 +369,12 @@ stability_scope!(BETA {
         /// both primary and secondary peers.
         ///
         /// The same key may appear in both maps; see [`AddressableTrackedPeers`].
+        ///
+        /// ## Active Peers
+        ///
+        /// The most recently registered peer set (highest ID) is considered the
+        /// active set. Implementations use the active set to decide which peers to
+        /// maintain connections with and which to disconnect from.
         ///
         /// ## Primary vs Secondary Peers
         ///
