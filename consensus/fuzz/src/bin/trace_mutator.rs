@@ -43,6 +43,7 @@ use commonware_consensus_fuzz::{
         sniffer::{TraceEntry, TracedCert, TracedVote},
     },
 };
+use commonware_cryptography::Sha256;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -52,7 +53,6 @@ use std::{
     path::{Path, PathBuf},
     process,
 };
-use commonware_cryptography::Sha256;
 
 const DEFAULT_ITERATIONS: usize = 1000;
 const DEFAULT_SEED: u64 = 0;

@@ -833,5 +833,4 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_honest_tracing(input, corpus_bytes);
 }
 
-// TODO: re-enable when tlc::run_quint_tlc_honest_model is restored.
-// pub use tlc::run_quint_tlc_honest_model;
+pub use tlc::run_quint_tlc_honest_model;

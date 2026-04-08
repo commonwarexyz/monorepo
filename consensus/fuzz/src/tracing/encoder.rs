@@ -1,18 +1,16 @@
-//! Encodes a simplex consensus trace into either a quint test module or a
-//! JSON action sequence for the controlled TLC server.
+//! Encodes a simplex consensus trace into a quint test module.
 //!
-//! Takes structured [`TraceEntry`] items from the sniffer and produces
-//! either a complete `.qnt` test module that can be verified with the quint
-//! model checker against `replica.qnt`, or a JSON action sequence consumed
-//! by the Java `SimplexActionMapper`. Both back-ends are driven by the same
-//! semantic action walk in [`build_action_items`], so they always agree on
-//! which events are emitted, in what order, and with what dedup decisions.
+//! Takes structured [`TraceEntry`] items from the sniffer and produces a
+//! complete `.qnt` test module that can be verified with the quint model
+//! checker against `replica.qnt`. The semantic walk in
+//! [`build_action_items`] is shared with the TLA/TLC back-end (see
+//! `super::tlc_encoder`), so the two encoders always agree on which events
+//! are emitted, in what order, and with what dedup decisions.
 
 use super::{
     data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{TraceEntry, TracedCert, TracedVote},
 };
-use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write,
@@ -70,6 +68,7 @@ pub enum ActionItem {
     /// network without delivering it to a particular receiver).
     SendNotarizeVote {
         view: u64,
+        parent_view: u64,
         payload: String,
         sig: String,
     },
@@ -78,6 +77,7 @@ pub enum ActionItem {
     /// `send_finalize_vote(...)` barrier.
     SendFinalizeVote {
         view: u64,
+        parent_view: u64,
         payload: String,
         sig: String,
     },
@@ -106,10 +106,7 @@ pub enum ActionItem {
         sig: String,
     },
     /// `on_certificate(receiver, cert)` delivery.
-    OnCertificate {
-        receiver: String,
-        cert: CertItem,
-    },
+    OnCertificate { receiver: String, cert: CertItem },
 }
 
 /// Semantic certificate value carried by [`ActionItem::SendCertificate`] and
@@ -142,8 +139,9 @@ pub enum CertItem {
 }
 
 impl CertItem {
-    /// Stable dedup key, matching the `cert_send_key` previously computed
-    /// in `build_actions`.
+    /// Stable dedup key for delivery dedup. Ignores `ghost_sender` so that
+    /// multiple deliveries of the "same" logical cert (kind/view/payload/
+    /// signers) collapse to one `on_certificate` call per receiver.
     fn dedup_key(&self) -> String {
         match self {
             CertItem::Notarization {
@@ -171,6 +169,15 @@ impl CertItem {
                 sorted.sort();
                 format!("F:{}:{}:{}", view, payload, sorted.join(","))
             }
+        }
+    }
+
+    /// Returns the cert's `ghost_sender`.
+    fn ghost_sender(&self) -> &str {
+        match self {
+            CertItem::Notarization { ghost_sender, .. }
+            | CertItem::Nullification { ghost_sender, .. }
+            | CertItem::Finalization { ghost_sender, .. } => ghost_sender,
         }
     }
 }
@@ -606,10 +613,8 @@ fn build_actions_internal(
                         let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                         let bn = map_block(block, block_map);
                         let proposal = proposal_key(*view, &bn);
-                        let parent_view = proposals
-                            .get(&proposal)
-                            .map(|p| p.view_parent)
-                            .unwrap_or(0);
+                        let parent_view =
+                            proposals.get(&proposal).map(|p| p.view_parent).unwrap_or(0);
                         let leader_id = leader_for_view(cfg, *view);
                         let leader_is_byzantine = is_byzantine_node(&leader_id, cfg.faults);
                         let sender_is_correct = !is_byzantine_node(sender, cfg.faults);
@@ -626,6 +631,7 @@ fn build_actions_internal(
                                     )) {
                                         actions.push(ActionItem::SendNotarizeVote {
                                             view: *view,
+                                            parent_view,
                                             payload: bn.clone(),
                                             sig: leader_id.clone(),
                                         });
@@ -661,6 +667,7 @@ fn build_actions_internal(
                         {
                             actions.push(ActionItem::SendNotarizeVote {
                                 view: *view,
+                                parent_view,
                                 payload: bn.clone(),
                                 sig: sig.clone(),
                             });
@@ -712,6 +719,7 @@ fn build_actions_internal(
                         )) {
                             actions.push(ActionItem::SendFinalizeVote {
                                 view: *view,
+                                parent_view,
                                 payload: bn.clone(),
                                 sig: sig.clone(),
                             });
@@ -785,10 +793,13 @@ fn build_actions_internal(
                 let cert_item = cert_to_item(cert, block_map, proposals);
                 let cert_key = cert_item.dedup_key();
 
-                // Emit send_certificate once per unique cert (regardless of
-                // receiver) so sent_certificates is populated before any
-                // on_certificate delivery.
-                if cert_sent.insert(cert_key.clone()) {
+                // Emit `send_certificate` once per distinct cert, including
+                // `ghost_sender` in the dedup key. The model treats certs
+                // with different `ghost_sender` as distinct values in
+                // `sent_certificates`, so each variant must be sent before
+                // it can be delivered via `on_certificate`.
+                let cert_send_key = format!("{}:{}", cert_item.ghost_sender(), &cert_key);
+                if cert_sent.insert(cert_send_key) {
                     actions.push(ActionItem::SendCertificate {
                         cert: cert_item.clone(),
                     });
@@ -842,7 +853,9 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
                     leader, pref, pref
                 ));
             }
-            ActionItem::SendNotarizeVote { view, payload, sig } => {
+            ActionItem::SendNotarizeVote {
+                view, payload, sig, ..
+            } => {
                 result.push(format!(
                     "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
                     proposal_ref(*view, payload),
@@ -855,7 +868,9 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
                     view, sig
                 ));
             }
-            ActionItem::SendFinalizeVote { view, payload, sig } => {
+            ActionItem::SendFinalizeVote {
+                view, payload, sig, ..
+            } => {
                 result.push(format!(
                     "send_finalize_vote({{ proposal: {}, sig: \"{}\" }})",
                     proposal_ref(*view, payload),
@@ -916,171 +931,6 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
     }
 
     result
-}
-
-/// Renders semantic action items as JSON action objects accepted by the
-/// Java `SimplexActionMapper`.
-///
-/// The TLA+ surface (`main_n4f1b0.qnt` compiled to `main.tla`) exposes the
-/// following fine-grained top-level actions (disjuncts of `step`):
-///   * `propose(id, new_payload, parent_view)`
-///   * `on_timeout(id, expired)` — not emitted from traces (no timeout entries)
-///   * `on_notarize(id, vote)` where `vote: NotarizeVote`
-///   * `on_finalize(id, vote)` where `vote: FinalizeVote`
-///   * `on_nullify(id, vote)` where `vote: NullifyVote`
-///   * `on_certificate(id, cert)` where `cert: Certificate` is variant-encoded
-///   * `byzantine_step` (only when `BYZANTINE != Set()`)
-///
-/// `Send*` barriers have no top-level TLA+ counterpart (state mutation happens
-/// inside the corresponding `on_*` action) and are dropped.
-pub fn render_tla_actions(items: &[ActionItem]) -> Vec<Value> {
-    let mut result = Vec::new();
-    for item in items {
-        match item {
-            ActionItem::Propose {
-                leader,
-                payload,
-                parent_view,
-                ..
-            } => {
-                result.push(json!({
-                    "name": "propose",
-                    "params": {
-                        "id": leader,
-                        "payload": payload,
-                        "parent_view": parent_view,
-                    },
-                }));
-            }
-            ActionItem::SendNotarizeVote { .. }
-            | ActionItem::SendNullifyVote { .. }
-            | ActionItem::SendFinalizeVote { .. }
-            | ActionItem::SendCertificate { .. } => {
-                // No top-level TLA+ counterpart; the matching `on_*` action
-                // updates `sent_*` state inline.
-            }
-            ActionItem::OnNotarize {
-                receiver,
-                view,
-                parent_view,
-                payload,
-                sig,
-            } => {
-                result.push(json!({
-                    "name": "on_notarize",
-                    "params": {
-                        "id": receiver,
-                        "vote": {
-                            "proposal": proposal_to_tla_value(*view, *parent_view, payload),
-                            "sig": sig,
-                        },
-                    },
-                }));
-            }
-            ActionItem::OnNullify {
-                receiver,
-                view,
-                sig,
-            } => {
-                result.push(json!({
-                    "name": "on_nullify",
-                    "params": {
-                        "id": receiver,
-                        "vote": {
-                            "view": view,
-                            "sig": sig,
-                        },
-                    },
-                }));
-            }
-            ActionItem::OnFinalize {
-                receiver,
-                view,
-                parent_view,
-                payload,
-                sig,
-            } => {
-                result.push(json!({
-                    "name": "on_finalize",
-                    "params": {
-                        "id": receiver,
-                        "vote": {
-                            "proposal": proposal_to_tla_value(*view, *parent_view, payload),
-                            "sig": sig,
-                        },
-                    },
-                }));
-            }
-            ActionItem::OnCertificate { receiver, cert } => {
-                result.push(json!({
-                    "name": "on_certificate",
-                    "params": {
-                        "id": receiver,
-                        "cert": cert_to_tla_value(cert),
-                    },
-                }));
-            }
-        }
-    }
-    result
-}
-
-/// Builds the JSON representation of a Quint `Proposal` record:
-/// `{ payload, view, parent }`.
-fn proposal_to_tla_value(view: u64, parent_view: u64, payload: &str) -> Value {
-    json!({
-        "payload": payload,
-        "view": view,
-        "parent": parent_view,
-    })
-}
-
-/// Builds the JSON representation of a Quint `Certificate` variant.
-///
-/// Quint variants compile to TLA+ via `Variant("Tag", payload) ==
-/// [t \in {"Tag"} |-> payload]`, i.e. a function with a singleton string
-/// domain. The Java `SimplexActionMapper` coerces such `FcnRcdValue`s into
-/// `RecordValue`s, so a single-key JSON object `{"Tag": payload}` matches.
-fn cert_to_tla_value(cert: &CertItem) -> Value {
-    match cert {
-        CertItem::Notarization {
-            view,
-            parent_view,
-            payload,
-            signers,
-            ghost_sender,
-        } => json!({
-            "Notarization": {
-                "proposal": proposal_to_tla_value(*view, *parent_view, payload),
-                "signatures": signers,
-                "ghost_sender": ghost_sender,
-            },
-        }),
-        CertItem::Nullification {
-            view,
-            signers,
-            ghost_sender,
-        } => json!({
-            "Nullification": {
-                "view": view,
-                "signatures": signers,
-                "ghost_sender": ghost_sender,
-            },
-        }),
-        CertItem::Finalization {
-            view,
-            parent_view,
-            payload,
-            signers,
-            ghost_sender,
-        } => json!({
-            "Finalization": {
-                "proposal": proposal_to_tla_value(*view, *parent_view, payload),
-                "signatures": signers,
-                "ghost_sender": ghost_sender,
-            },
-        }),
-    }
 }
 
 fn cert_to_quint(cert: &CertItem) -> String {

@@ -17,21 +17,16 @@
 //!     proposes `payload` (must be in `VALID_PAYLOADS`)
 //!   * `byzantine_step` — only enabled when `BYZANTINE` is non-empty
 //!
-//! [`TlcMapper::map_trace`] delegates to [`encoder::build_action_items`] +
-//! [`encoder::render_tla_actions`] so the action sequence sent to TLC is
-//! exactly the one driven by the same walk that the quint encoder uses
-//! (same dedup, same causal repair, same self-deliveries, ...). The TLA+
-//! renderer collapses every `on_*` delivery to `correct_replica_step(id)`
-//! because that is the only top-level action exposed by the compiled spec.
+//! [`TlcMapper::map_trace`] delegates to [`tlc_encoder::encode`], which
+//! reuses the same semantic walk as the quint encoder so the action
+//! sequence sent to TLC is exactly the one quint sees (same dedup, same
+//! causal repair, same self-deliveries, ...).
 
-use crate::tracing::{
-    data::TraceData,
-    encoder::{self, EncoderConfig},
+use crate::{
+    tracing::{data::TraceData, encoder::EncoderConfig, runtime::run_honest_pipeline, tlc_encoder},
+    FuzzInput,
 };
-// TODO: re-enable when run_quint_tlc_honest_model below is restored.
-// use crate::FuzzInput;
-// use crate::tracing::runtime::run_honest_pipeline;
-// use libfuzzer_sys::Corpus;
+use libfuzzer_sys::Corpus;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -46,10 +41,10 @@ pub const DEFAULT_TLC_URL: &str = "http://localhost:2023/execute";
 ///
 /// All event-level decisions (which entries become which actions, dedup of
 /// `send_*_vote` barriers, leader-vote causal repair, self-deliveries, ...)
-/// live in [`encoder::build_action_items`] so the quint encoder and the TLA+
-/// driver always agree on the action sequence. This mapper only renders the
-/// resulting [`encoder::ActionItem`] list as JSON via
-/// [`encoder::render_tla_actions`].
+/// live in [`super::tracing::encoder::build_action_items`] so the quint
+/// encoder and the TLC driver always agree on the action sequence. This
+/// mapper just calls [`tlc_encoder::encode`] and appends the reset
+/// terminator.
 pub struct TlcMapper;
 
 impl TlcMapper {
@@ -63,8 +58,7 @@ impl TlcMapper {
             max_view: trace.max_view,
             required_containers: trace.required_containers,
         };
-        let items = encoder::build_action_items(trace, &cfg);
-        let mut actions = encoder::render_tla_actions(&items);
+        let mut actions = tlc_encoder::encode(trace, &cfg);
 
         // The TLC server's `simulate(..., is_reset=true)` loop only terminates
         // on a reset/quit/unknown action. Without this terminator it would
@@ -146,9 +140,7 @@ pub fn non_reset_action_count(actions: &[Value]) -> usize {
             // The terminator we append in TlcMapper is `{"reset": true}`.
             // Anything else (proposes, correct_replica_step, ...) is a real
             // action.
-            !a.get("reset")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+            !a.get("reset").and_then(|v| v.as_bool()).unwrap_or(false)
         })
         .count()
 }
@@ -269,33 +261,33 @@ pub fn submit_trace(client: &TlcClient, trace: &TraceData) -> Result<CoverageOut
 // ///
 // /// The TLC server URL is read from the `TLC_URL` environment variable,
 // /// defaulting to [`DEFAULT_TLC_URL`].
-// pub fn run_quint_tlc_honest_model(input: FuzzInput, _corpus_bytes: &[u8]) -> Corpus {
-//     let Some(trace) = run_honest_pipeline(input) else {
-//         return Corpus::Keep;
-//     };
-//
-//     let url = std::env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
-//     let client = tlc_client(&url);
-//
-//     match submit_trace(client, &trace) {
-//         Ok(outcome) if outcome.is_interesting() => Corpus::Keep,
-//         // The only path that drops an input from the corpus: TLC ran the
-//         // trace and reported no new fingerprints.
-//         Ok(_) => Corpus::Reject,
-//         Err(err) => {
-//             eprintln!("[tlc] {err}");
-//             Corpus::Keep
-//         }
-//     }
-// }
-//
-// /// Returns a process-wide [`TlcClient`] keyed on the URL it was first
-// /// constructed for. Reusing the client lets `reqwest` reuse the underlying
-// /// HTTP connection across fuzz iterations.
-// fn tlc_client(url: &str) -> &'static TlcClient {
-//     static CLIENT: OnceLock<TlcClient> = OnceLock::new();
-//     CLIENT.get_or_init(|| TlcClient::new(url))
-// }
+pub fn run_quint_tlc_honest_model(input: FuzzInput, _corpus_bytes: &[u8]) -> Corpus {
+    let Some(trace) = run_honest_pipeline(input) else {
+        return Corpus::Keep;
+    };
+
+    let url = std::env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
+    let client = tlc_client(&url);
+
+    match submit_trace(client, &trace) {
+        Ok(outcome) if outcome.is_interesting() => Corpus::Keep,
+        // The only path that drops an input from the corpus: TLC ran the
+        // trace and reported no new fingerprints.
+        Ok(_) => Corpus::Reject,
+        Err(err) => {
+            eprintln!("[tlc] {err}");
+            Corpus::Keep
+        }
+    }
+}
+
+/// Returns a process-wide [`TlcClient`] keyed on the URL it was first
+/// constructed for. Reusing the client lets `reqwest` reuse the underlying
+/// HTTP connection across fuzz iterations.
+fn tlc_client(url: &str) -> &'static TlcClient {
+    static CLIENT: OnceLock<TlcClient> = OnceLock::new();
+    CLIENT.get_or_init(|| TlcClient::new(url))
+}
 
 #[cfg(test)]
 mod tests {
@@ -425,7 +417,11 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
             .collect();
         fixtures.sort_by_key(|e| e.file_name());
-        assert!(!fixtures.is_empty(), "no honest fixtures in {}", dir.display());
+        assert!(
+            !fixtures.is_empty(),
+            "no honest fixtures in {}",
+            dir.display()
+        );
 
         let mut failures: Vec<String> = Vec::new();
         let mut replayed = 0usize;
@@ -539,7 +535,10 @@ mod tests {
         let v = check("unknown", unknown);
         assert_eq!(
             v,
-            TlcVerdict::Rejected { sent: 1, accepted: 0 },
+            TlcVerdict::Rejected {
+                sent: 1,
+                accepted: 0
+            },
             "unknown action must be flagged as rejected",
         );
 
@@ -558,7 +557,10 @@ mod tests {
         let v = check("wrong_leader", wrong_leader);
         assert_eq!(
             v,
-            TlcVerdict::Rejected { sent: 2, accepted: 1 },
+            TlcVerdict::Rejected {
+                sent: 2,
+                accepted: 1
+            },
             "wrong-leader propose must be flagged as rejected",
         );
 
@@ -575,7 +577,10 @@ mod tests {
         let v = check("bad_parent", bad_parent);
         assert_eq!(
             v,
-            TlcVerdict::Rejected { sent: 2, accepted: 1 },
+            TlcVerdict::Rejected {
+                sent: 2,
+                accepted: 1
+            },
             "bogus parent_view must be flagged as rejected",
         );
     }
@@ -886,7 +891,6 @@ mod tests {
                     "ghost_sender": "n1",
                 },
             }),
-
             json!({
                 "name": "on_finalize",
                 "params": { "id": "n2", "view": 1, "parent": 0, "payload": "val_b0", "sig": "n0" },
@@ -903,7 +907,6 @@ mod tests {
                 "name": "on_finalize",
                 "params": { "id": "n0", "view": 1, "parent": 0, "payload": "val_b0", "sig": "n1" },
             }),
-
             json!({
                 "name": "on_certificate",
                 "params": {
@@ -914,13 +917,11 @@ mod tests {
                     "ghost_sender": "n2",
                 },
             }),
-
             // 2. Leader of view 2 (n2) proposes.
             json!({
                 "name": "propose",
                 "params": { "id": "n2", "payload": "val_b1", "parent": 1 },
             }),
-
             // All other nodes inject nullify votes for view 2.
             json!({
                 "name": "send_nullify_vote",
@@ -950,7 +951,6 @@ mod tests {
                 "name": "on_nullify",
                 "params": { "id": "n0", "view": 2, "sig": "n3" },
             }),
-
             json!({
                 "name": "send_certificate",
                 "params": {
@@ -960,7 +960,6 @@ mod tests {
                     "ghost_sender": "n1",
                 },
             }),
-
             json!({
                 "name": "on_certificate",
                 "params": {
@@ -971,7 +970,6 @@ mod tests {
                     "ghost_sender": "n1",
                 },
             }),
-
             json!({ "reset": true }),
         ];
 
@@ -983,8 +981,7 @@ mod tests {
         // the trace exercised, and `new_states` excludes the init state
         // so it reflects how many states the trace *discovered* on top
         // of the starting point.
-        let distinct_states: std::collections::HashSet<_> =
-            response.keys.iter().copied().collect();
+        let distinct_states: std::collections::HashSet<_> = response.keys.iter().copied().collect();
         let new_states = distinct_states.len().saturating_sub(1);
         println!(
             "[finalize_path] sent={} accepted={} keys={} distinct={} new_states={} verdict={:?}",

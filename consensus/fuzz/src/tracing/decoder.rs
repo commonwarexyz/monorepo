@@ -584,7 +584,13 @@ pub fn extract_expected_state(
                                 let block_name = entry.as_str()?;
                                 data.finalizations
                                     .iter()
-                                    .find(|(_, proposal)| proposal.payload == block_map.get(block_name).cloned().unwrap_or_default())
+                                    .find(|(_, proposal)| {
+                                        proposal.payload
+                                            == block_map
+                                                .get(block_name)
+                                                .cloned()
+                                                .unwrap_or_default()
+                                    })
                                     .map(|(&v, _)| v)
                             }
                         })
@@ -945,13 +951,19 @@ mod tests {
             .reporter_states
             .get("n1")
             .expect("n1 reporter state must exist");
-        assert_eq!(reporter_state.certified, [1, 2, 3, 4, 5, 6].into_iter().collect());
+        assert_eq!(
+            reporter_state.certified,
+            [1, 2, 3, 4, 5, 6].into_iter().collect()
+        );
         assert_eq!(
             reporter_state.successful_certifications,
             [2, 3, 4, 6].into_iter().collect()
         );
 
-        let expected_node = expected.nodes.get("n1").expect("n1 expected state must exist");
+        let expected_node = expected
+            .nodes
+            .get("n1")
+            .expect("n1 expected state must exist");
         assert_eq!(
             expected_node.certified,
             [1, 2, 3, 4, 5, 6].into_iter().collect()

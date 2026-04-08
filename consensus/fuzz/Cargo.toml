@@ -196,3 +196,10 @@ path = "src/bin/itf_to_trace.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_tlc_honest"
+path = "fuzz_targets/simplex_ed25519_quint_tlc_honest.rs"
+test = false
+doc = false
+bench = false

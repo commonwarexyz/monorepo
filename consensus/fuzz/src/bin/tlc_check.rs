@@ -121,7 +121,10 @@ fn main() {
             println!("ACCEPTED: every action fired");
         }
         TlcVerdict::Rejected { sent, accepted } => {
-            println!("REJECTED: sent={sent} accepted={accepted} skipped={}", sent - accepted);
+            println!(
+                "REJECTED: sent={sent} accepted={accepted} skipped={}",
+                sent - accepted
+            );
             process::exit(3);
         }
     }

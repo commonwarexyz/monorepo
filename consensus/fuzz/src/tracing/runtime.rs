@@ -1,4 +1,5 @@
-    use super::{
+
+use super::{
     data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
 };
@@ -1455,6 +1456,174 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             matches!(actor, ByzantineActor::Disrupter),
         );
     });
+}
+
+/// Runs the deterministic 4-node honest consensus pipeline and returns the
+/// resulting quint [`TraceData`].
+///
+/// Shared between [`run_quint_honest_tracing`] (which then persists the
+/// trace as a fuzzing artifact) and the TLC-driven fuzz target (which then
+/// feeds the trace into the controlled TLC server for coverage feedback).
+pub(crate) fn run_honest_pipeline(input: FuzzInput) -> Option<TraceData> {
+    let captured: Arc<StdMutex<Option<TraceData>>> = Arc::new(StdMutex::new(None));
+    let captured_clone = captured.clone();
+
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(|context| async move {
+        let trace_data = build_honest_trace_data(context, input).await;
+        *captured_clone.lock().unwrap() = Some(trace_data);
+    });
+
+    let result = captured.lock().unwrap().take();
+    result
+}
+
+/// Body of the honest tracing pipeline. Sets up the deterministic 4-node
+/// network, runs consensus until every reporter has reached the required
+/// container count, drains the pipeline, and returns the encoded
+/// [`TraceData`].
+async fn build_honest_trace_data(
+    mut context: deterministic::Context,
+    input: FuzzInput,
+) -> TraceData {
+    let tracing_input = FuzzInput {
+        raw_bytes: input.raw_bytes.clone(),
+        required_containers: input.required_containers,
+        degraded_network: false,
+        configuration: N4F0C4,
+        partition: Partition::Connected,
+        strategy: input.strategy,
+        byzantine_actor: input.byzantine_actor,
+    };
+
+    let (oracle, participants, schemes, mut registrations) =
+        crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+
+    let trace = Arc::new(Mutex::new(TraceLog::default()));
+    let relay = Arc::new(relay::Relay::new());
+    let elector = RoundRobin::<Sha256Hasher>::default();
+    let mut reporters = Vec::new();
+    let config = tracing_input.configuration;
+
+    for i in 0..(config.n as usize) {
+        let validator = participants[i].clone();
+        let (vote_network, cert_network, resolver_network) =
+            registrations.remove(&validator).unwrap();
+        let ctx = context.with_label(&format!("validator_{validator}"));
+        let node_id = format!("n{}", i);
+
+        let (vote_sender, vote_receiver) = vote_network;
+        let (cert_sender, cert_receiver) = cert_network;
+        let (resolver_sender, resolver_receiver) = resolver_network;
+
+        let sniffing_vote = SniffingReceiver::new(
+            vote_receiver,
+            ChannelKind::Vote,
+            node_id.clone(),
+            participants.clone(),
+            trace.clone(),
+        );
+        let sniffing_cert = SniffingReceiver::new(
+            cert_receiver,
+            ChannelKind::Certificate,
+            node_id,
+            participants.clone(),
+            trace.clone(),
+        );
+
+        let reporter_cfg = reporter::Config {
+            participants: participants
+                .as_slice()
+                .try_into()
+                .expect("public keys are unique"),
+            scheme: schemes[i].clone(),
+            elector: elector.clone(),
+        };
+        let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
+        reporters.push(reporter.clone());
+
+        let app_cfg = application::Config {
+            hasher: Sha256Hasher::default(),
+            relay: relay.clone(),
+            me: validator.clone(),
+            propose_latency: (10.0, 5.0),
+            verify_latency: (10.0, 5.0),
+            certify_latency: (10.0, 5.0),
+            should_certify: application::Certifier::Sometimes,
+        };
+        let (actor, application) =
+            application::Application::new(ctx.with_label("application"), app_cfg);
+        actor.start();
+
+        let blocker = oracle.control(validator.clone());
+        let engine_cfg = config::Config {
+            blocker,
+            scheme: schemes[i].clone(),
+            elector: elector.clone(),
+            automaton: application.clone(),
+            relay: application.clone(),
+            reporter: reporter.clone(),
+            partition: validator.to_string(),
+            mailbox_size: 1024,
+            epoch: Epoch::new(EPOCH),
+            leader_timeout: Duration::from_secs(1),
+            certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
+            fetch_timeout: Duration::from_secs(1),
+            activity_timeout: Delta::new(10),
+            skip_timeout: Delta::new(5),
+            fetch_concurrent: 1,
+            replay_buffer: NZUsize!(1024 * 1024),
+            write_buffer: NZUsize!(1024 * 1024),
+            page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
+            forwarding: ForwardingPolicy::Disabled,
+        };
+        let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
+        engine.start(
+            (vote_sender, sniffing_vote),
+            (cert_sender, sniffing_cert),
+            (resolver_sender, resolver_receiver),
+        );
+    }
+
+    let mut finalizers = Vec::new();
+    for reporter in reporters.iter_mut() {
+        let required_containers = tracing_input.required_containers;
+        let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+        finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+            while latest.get() < required_containers {
+                latest = monitor.recv().await.expect("event missing");
+            }
+        }));
+    }
+    join_all(finalizers).await;
+    drain_pipeline(&context).await;
+
+    let reporter_states = encode_reporter_states(
+        invariants::extract_replayed(&reporters, config.n as usize),
+        config.faults as usize,
+    );
+
+    let states = invariants::extract(&reporters, config.n as usize);
+    invariants::check::<SimplexEd25519>(config.n, &states);
+
+    let trace = trace.lock();
+    let filtered = filter_unprocessed(&trace.structured, &reporter_states);
+    let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
+
+    TraceData {
+        n: config.n as usize,
+        faults: config.faults as usize,
+        epoch: EPOCH,
+        max_view,
+        entries: filtered,
+        required_containers: tracing_input.required_containers,
+        reporter_states,
+    }
 }
 
 /// Run consensus with all honest nodes and quint tracing.
