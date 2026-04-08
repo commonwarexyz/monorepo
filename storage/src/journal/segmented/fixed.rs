@@ -144,7 +144,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
         let blob = self.manager.get_or_create(section).await?;
         blob.append(buf).await?;
-        trace!(section, count = buf.len() / Self::CHUNK_SIZE, "appended items");
+        trace!(
+            section,
+            count = buf.len() / Self::CHUNK_SIZE,
+            "appended items"
+        );
         Ok(())
     }
 
