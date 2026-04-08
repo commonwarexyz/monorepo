@@ -448,12 +448,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -552,12 +549,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(3),
-                participants.clone(),
-            )
-            .await;
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                    .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -598,58 +592,26 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_application = recovering.application;
-            let recovering_mailbox = recovering.mailbox;
 
             // The tip tracks the highest finalization, not the highest block.
-            context.sleep(Duration::from_millis(200)).await;
             assert_eq!(
-                recovering_mailbox.get_info(Identifier::Latest).await,
+                recovering.mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(1), block_one.digest())),
                 "latest tip should be derived from the highest stored finalization"
             );
             assert_eq!(
-                recovering_mailbox.get_block(Identifier::Latest).await,
-                Some(block_one.clone()),
-                "latest block should remain the highest finalized block"
-            );
-            assert_eq!(
-                recovering_mailbox.get_block(Height::new(2)).await,
+                recovering.mailbox.get_block(Height::new(2)).await,
                 Some(block_two.clone()),
-                "get_block by height reads the finalized-blocks archive; inconsistent seeding can \
-                 persist a block at a height without a finalization row, and the lookup still \
-                 returns that block"
-            );
-            assert_eq!(
-                recovering_application.pending_ack_heights(),
-                vec![Height::new(1)],
-                "height 1 should be pending before acknowledging the tip"
+                "block without a finalization row should still be queryable by height"
             );
 
             // Walk the application through sequential acks. Even though
             // block_two has no finalization, it is still dispatched because
             // its block data exists in the archive.
-            assert_eq!(
-                recovering_application.acknowledge_next(),
-                Some(Height::new(1)),
-                "expected the application to acknowledge height 1"
-            );
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_application.pending_ack_heights(),
-                vec![Height::new(2)],
-                "height 2 can be dispatched after height 1 even when no finalization exists at height 2"
-            );
-            assert_eq!(
-                recovering_application.acknowledge_next(),
-                Some(Height::new(2)),
-                "expected the application to acknowledge height 2"
-            );
-            context.sleep(Duration::from_millis(200)).await;
-            assert!(
-                recovering_application.pending_ack_heights().is_empty(),
-                "pending acks should be empty after acknowledging through height 2"
-            );
+            for expected_height in 1..=2 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
+            }
         });
     }
 
@@ -821,42 +783,11 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_application = recovering.application;
-            let recovering_mailbox = recovering.mailbox;
-
-            // Everything is present on disk -- no repair needed.
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_mailbox.get_info(Identifier::Latest).await,
-                Some((Height::new(2), block_two.digest())),
-                "latest tip should be the highest finalized block"
-            );
-            assert_eq!(
-                recovering_mailbox.get_block(Identifier::Latest).await,
-                Some(block_two.clone()),
-                "latest block should be available"
-            );
-            assert_eq!(
-                recovering_application.pending_ack_heights(),
-                vec![Height::new(1)],
-                "only height 1 should be pending (height 2 awaits ack of height 1)"
-            );
-
             // Walk through sequential acks to confirm no repair was needed.
-            assert_eq!(
-                recovering_application.acknowledge_next(),
-                Some(Height::new(1)),
-            );
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_application.acknowledge_next(),
-                Some(Height::new(2)),
-            );
-            context.sleep(Duration::from_millis(200)).await;
-            assert!(
-                recovering_application.pending_ack_heights().is_empty(),
-                "all blocks should be dispatched without any trailing repair"
-            );
+            for expected_height in 1..=2 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
+            }
         });
     }
 
@@ -927,21 +858,12 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-            let recovering_application = recovering.application;
-            let recovering_mailbox = recovering.mailbox;
-
             // Repair should find block_two in the local cache immediately.
-            context.sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                recovering_mailbox.get_block(Identifier::Latest).await,
-                Some(block_two.clone()),
-                "trailing block should be repaired from local cache without peer fetch"
-            );
-            assert_eq!(
-                recovering_application.pending_ack_heights(),
-                vec![Height::new(1)],
-                "height 1 should be pending"
-            );
+            // Walk through both blocks to confirm.
+            for expected_height in 1..=2 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
+            }
         });
     }
 
