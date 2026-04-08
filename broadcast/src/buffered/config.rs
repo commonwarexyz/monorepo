@@ -18,7 +18,6 @@ pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     /// The configuration for the codec item.
     pub codec_config: MCfg,
 
-    /// Provider for peer set changes. Per-peer caches are freed when a
-    /// peer leaves all tracked peer sets.
+    /// Provider for peer set changes (eviction follows latest primary; see [`buffered`](super)).
     pub peer_provider: D,
 }

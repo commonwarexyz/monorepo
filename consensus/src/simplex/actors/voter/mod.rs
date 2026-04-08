@@ -79,7 +79,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::simulated::{Config as NConfig, Link, Network};
+    use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
@@ -96,6 +96,28 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn start_test_network_with_peers<I>(
+        context: deterministic::Context,
+        peers: I,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_peers(
+            context.with_label("network"),
+            NConfig {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            peers,
+        )
+        .await;
+        network.start();
+        oracle
+    }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
@@ -301,23 +323,16 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -541,23 +556,16 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -821,23 +829,16 @@ mod tests {
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -949,23 +950,16 @@ mod tests {
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1093,21 +1087,15 @@ mod tests {
         let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1224,21 +1212,15 @@ mod tests {
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1402,17 +1384,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -1420,6 +1391,10 @@ mod tests {
                 verifier: _,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1622,23 +1597,16 @@ mod tests {
         let namespace = b"populate_resolver_on_restart_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock
             let elector = L::default();
@@ -1855,21 +1823,19 @@ mod tests {
         let namespace = b"startup_update_timeout_hint_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
             let me = participants[0].clone();
 
             let elector = RoundRobin::<Sha256>::default();
@@ -2048,23 +2014,16 @@ mod tests {
         let namespace = b"finalization_from_resolver".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2155,23 +2114,16 @@ mod tests {
         let namespace = b"no_resolver_boomerang".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2277,23 +2229,16 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2503,21 +2448,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2714,21 +2653,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2895,21 +2828,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -3110,21 +3037,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3264,21 +3185,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3560,21 +3475,15 @@ mod tests {
         let namespace = b"no_recertification_after_replay".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3836,21 +3745,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4036,21 +3939,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4213,22 +4110,16 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network.
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Build participants and voter.
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4326,23 +4217,16 @@ mod tests {
         let namespace = b"certification_after_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4455,23 +4339,16 @@ mod tests {
         let namespace = b"certification_after_notarize_timeout_as_follower".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4617,23 +4494,16 @@ mod tests {
         let namespace = b"certification_after_notarize_timeout_as_leader".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4770,23 +4640,20 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -4914,21 +4781,19 @@ mod tests {
         let namespace = b"cancelled_cert_restart_recertify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -5199,23 +5064,16 @@ mod tests {
         let namespace = b"future_notarization_no_rescue".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -5409,23 +5267,20 @@ mod tests {
         let namespace = b"cert_fail_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -5550,23 +5405,16 @@ mod tests {
         let namespace = b"pending_cert_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -5686,21 +5534,19 @@ mod tests {
         let namespace = b"proposal_clears_leader_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
@@ -5832,21 +5678,19 @@ mod tests {
         let namespace = b"recovered_proposal_clears_leader_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
@@ -5966,21 +5810,19 @@ mod tests {
         let namespace = b"next_view_gets_fresh_timeout_after_prior_view_nullifies".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -6119,21 +5961,15 @@ mod tests {
         let namespace = b"first_view_progress_without_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));

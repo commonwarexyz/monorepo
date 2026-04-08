@@ -176,14 +176,16 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Registrations<PublicKey>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, mut oracle) = Network::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
-        );
+            fixture.participants.clone(),
+        )
+        .await;
         network.start();
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;

@@ -47,10 +47,11 @@ mod tests {
             core::{Actor, Mailbox},
             mocks::{
                 harness::{
-                    self, default_leader, make_raw_block, setup_network, setup_network_links, Ctx,
-                    DeferredHarness, InlineHarness, StandardHarness, TestHarness, ValidatorSetup,
-                    B, BLOCKS_PER_EPOCH, D, K, LINK, NAMESPACE, NUM_VALIDATORS, P, PAGE_CACHE_SIZE,
-                    PAGE_SIZE, S, TEST_QUOTA, UNRELIABLE_LINK, V,
+                    self, default_leader, make_raw_block, setup_network_links,
+                    setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
+                    StandardHarness, TestHarness, ValidatorSetup, B, BLOCKS_PER_EPOCH, D, K, LINK,
+                    NAMESPACE, NUM_VALIDATORS, P, PAGE_CACHE_SIZE, PAGE_SIZE, S, TEST_QUOTA,
+                    UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -73,7 +74,7 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_p2p::{simulated::Oracle, Manager};
+    use commonware_p2p::simulated::Oracle;
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
@@ -314,16 +315,17 @@ mod tests {
     fn test_standard_restart_repairs_trailing_missing_finalized_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(3));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut manager = oracle.manager();
-            manager
-                .track(0, participants.clone().try_into().unwrap())
-                .await;
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -409,16 +411,17 @@ mod tests {
     fn test_standard_restart_repairs_internal_missing_finalized_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(3));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut manager = oracle.manager();
-            manager
-                .track(0, participants.clone().try_into().unwrap())
-                .await;
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -519,16 +522,17 @@ mod tests {
     fn test_standard_restart_does_surface_block_without_finalization() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(3));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut manager = oracle.manager();
-            manager
-                .track(0, participants.clone().try_into().unwrap())
-                .await;
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -892,7 +896,12 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let validator = participants[0].clone();
-                let mut oracle = setup_network(context.clone(), None);
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
 
                 let tip_height = Height::new(25);
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
@@ -1128,7 +1137,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -1138,6 +1146,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -1206,7 +1220,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -1216,6 +1229,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -1339,7 +1358,6 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
@@ -1349,6 +1367,12 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(
@@ -1474,13 +1498,18 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
                 let Fixture {
                     participants,
                     schemes,
                     ..
                 } =
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
                 let me = participants[0].clone();
 
                 let setup = StandardHarness::setup_validator(

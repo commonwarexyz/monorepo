@@ -14,7 +14,9 @@ pub struct Config<
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
-    /// Manages the current set of peers
+    /// Manages the current set of peers.
+    ///
+    /// Peer selection for outbound fetches is documented in the [`p2p`](crate::p2p) module.
     pub peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses

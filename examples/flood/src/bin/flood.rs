@@ -6,7 +6,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
+use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::histogram::HistogramExt, tokio, Buf, Metrics, Quota, Runner, Spawner,
 };
