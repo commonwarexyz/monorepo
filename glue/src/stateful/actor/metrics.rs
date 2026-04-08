@@ -1,11 +1,15 @@
 //! Metrics for the [`Processor`](super::processor::Processor).
 
-use commonware_runtime::{
-    telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics as MetricsTrait,
-};
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics as MetricsTrait};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
+
+/// Buckets for histograms.
+///
+/// These buckets are much less coarse than [`Buckets::LOCAL`].
+///
+/// [`Buckets::LOCAL`]: commonware_runtime::telemetry::metrics::histogram::Buckets::LOCAL
+const BUCKETS: [f64; 10] = [0.001, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0];
 
 /// Metrics for the stateful processor.
 ///
@@ -55,28 +59,28 @@ impl<E: MetricsTrait + Clock> Metrics<E> {
             pruned_forks.clone(),
         );
 
-        let propose_hist = Histogram::new(Buckets::LOCAL);
+        let propose_hist = Histogram::new(BUCKETS);
         context.register(
             "propose_duration",
             "Wall-clock duration of a full propose cycle",
             propose_hist.clone(),
         );
 
-        let verify_hist = Histogram::new(Buckets::LOCAL);
+        let verify_hist = Histogram::new(BUCKETS);
         context.register(
             "verify_duration",
             "Wall-clock duration of a full verify cycle",
             verify_hist.clone(),
         );
 
-        let finalize_hist = Histogram::new(Buckets::LOCAL);
+        let finalize_hist = Histogram::new(BUCKETS);
         context.register(
             "finalize_duration",
             "Wall-clock duration of a finalization",
             finalize_hist.clone(),
         );
 
-        let rebuild_hist = Histogram::new(Buckets::LOCAL);
+        let rebuild_hist = Histogram::new(BUCKETS);
         context.register(
             "rebuild_pending_duration",
             "Wall-clock duration of lazy-recovery replays",
