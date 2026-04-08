@@ -445,7 +445,10 @@ impl std::fmt::Display for Mismatch {
                 expected,
                 actual,
             } => {
-                write!(f, "{node}: certified views mismatch: spec={expected:?}, impl={actual:?}")
+                write!(
+                    f,
+                    "{node}: certified views mismatch: spec={expected:?}, impl={actual:?}"
+                )
             }
             Mismatch::VoteSignerMismatch {
                 node,
@@ -521,30 +524,20 @@ mod tests {
 
         let mismatches = compare(&expected, &actual, 1);
 
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| matches!(m, Mismatch::NotarizationPayloadMismatch { .. }))
-        );
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| matches!(m, Mismatch::NotarizationSignatureCountMismatch { .. }))
-        );
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| matches!(m, Mismatch::FinalizationPayloadMismatch { .. }))
-        );
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| matches!(m, Mismatch::FinalizationSignatureCountMismatch { .. }))
-        );
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| matches!(m, Mismatch::CertifiedViewsMismatch { .. }))
-        );
+        assert!(mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::NotarizationPayloadMismatch { .. })));
+        assert!(mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::NotarizationSignatureCountMismatch { .. })));
+        assert!(mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::FinalizationPayloadMismatch { .. })));
+        assert!(mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::FinalizationSignatureCountMismatch { .. })));
+        assert!(mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::CertifiedViewsMismatch { .. })));
     }
 }

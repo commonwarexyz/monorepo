@@ -4,10 +4,7 @@ pub mod messages;
 
 use crate::{
     invariants,
-    tracing::{
-        data::TraceData,
-        sniffer::TraceEntry,
-    },
+    tracing::{data::TraceData, sniffer::TraceEntry},
     types::ReplayedReplicaState,
 };
 use commonware_consensus::{

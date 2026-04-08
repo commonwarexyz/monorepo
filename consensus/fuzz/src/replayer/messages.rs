@@ -87,8 +87,8 @@ impl ParentTracker {
     pub fn observe_entry(&mut self, entry: &TraceEntry) {
         match entry {
             TraceEntry::Vote {
-                vote: TracedVote::Notarize { view, block, .. }
-                    | TracedVote::Finalize { view, block, .. },
+                vote:
+                    TracedVote::Notarize { view, block, .. } | TracedVote::Finalize { view, block, .. },
                 ..
             }
             | TraceEntry::Certificate {

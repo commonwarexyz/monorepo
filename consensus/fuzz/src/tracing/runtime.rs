@@ -1,4 +1,4 @@
-use super::{
+    use super::{
     data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
 };

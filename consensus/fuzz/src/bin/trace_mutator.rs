@@ -1,6 +1,8 @@
-//! Trace fuzzer driven by the Quint model checker.
+//! Trace fuzzer driven by the controlled TLC server.
 //!
-//! High-level loop (mirrors `modelfuzz.Fuzzer.Run`):
+//! Faithful Rust port of the Go `modelfuzz` PoC under
+//! `consensus/quint/modelfuzz/`. The high-level design mirrors
+//! `modelfuzz.Fuzzer.Run` + `TLCStateGuider.Check`:
 //!
 //!   1. Load every JSON trace under
 //!      `consensus/fuzz/src/tracing/tests/fixtures/` as the initial
@@ -8,20 +10,19 @@
 //!   2. Maintain a `mutated_traces_queue: VecDeque<TraceData>` seeded
 //!      from the initial population.
 //!   3. Per iteration: pop a trace from the queue (or fall back to a
-//!      random initial seed when the queue is empty), encode it into a
-//!      `.qnt` test module via [`encoder::encode`] (the same path used
-//!      by `trace_to_quint` and the encoder roundtrip tests) and run
-//!      `quint test ... --match=traceTest` against it. If quint exits
-//!      non-zero, the mutation is rejected.
-//!   4. If quint accepted the trace and we have not seen it before,
-//!      persist it under `consensus/fuzz/artifacts/mutated_traces/` and
-//!      push `mut_per_trace` mutated descendants back onto the queue.
+//!      random initial seed when the queue is empty), submit it to the
+//!      controlled TLC server via [`TlcMapper`] / [`TlcClient`], and
+//!      count fingerprints (`response.keys`) that are not in the
+//!      cumulative `states_map`.
+//!   4. If the trace produced new fingerprints, persist it under
+//!      `consensus/fuzz/artifacts/mutated_traces/` and push
+//!      `mut_per_trace * new_states` mutated descendants back onto the
+//!      queue.
 //!   5. Every `reseed_frequency` iterations, reset the queue and re-add
 //!      the initial seed population (mirrors `Fuzzer.seed`).
 //!
-//! Coverage signal: trace novelty (sha256 over the serialized
-//! `TraceData`). There is no TLC fingerprint anymore - quint pass/fail
-//! is the only validity gate.
+//! There is *no* validity gating: every fingerprint returned by TLC
+//! contributes to coverage, exactly like `TLCStateGuider.Check`.
 //!
 //! Usage:
 //!
@@ -29,74 +30,45 @@
 //!
 //! Environment variables:
 //!
-//!   * `MUTATOR_ITERATIONS`     - number of iterations, default `1000`
-//!   * `MUTATOR_SEED`           - PRNG seed, default `0`
-//!   * `MUTATOR_MUT_PER_TRACE`  - max mutations applied per child (1..=N
-//!                                drawn uniformly), default `2`
-//!   * `MUTATOR_RESEED_FREQ`    - iterations between queue reseeds, default `100`
-//!   * `MUTATOR_DEBUG`          - print per-iteration log lines (set to `1`)
-//!   * `MUTATED_TRACES_SEED_DIR` - seed-trace input directory, default
-//!                                `<crate>/src/tracing/tests/fixtures`
-//!   * `QUINT_BIN`              - quint executable, default `quint`
+//!   * `TLC_URL`               - oracle endpoint, default `http://localhost:2023/execute`
+//!   * `MUTATOR_ITERATIONS`    - number of iterations, default `1000`
+//!   * `MUTATOR_SEED`          - PRNG seed, default `0`
+//!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default `3`
+//!   * `MUTATOR_RESEED_FREQ`   - iterations between queue reseeds, default `100`
 
-use commonware_consensus_fuzz::tracing::{
-    data::TraceData,
-    encoder::{self, EncoderConfig},
-    sniffer::{TraceEntry, TracedCert, TracedVote},
+use commonware_consensus_fuzz::{
+    tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
+    tracing::{
+        data::TraceData,
+        sniffer::{TraceEntry, TracedCert, TracedVote},
+    },
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::{
     collections::{HashSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
-    process::{self, Command},
+    process,
 };
+use commonware_cryptography::Sha256;
 
 const DEFAULT_ITERATIONS: usize = 1000;
 const DEFAULT_SEED: u64 = 0;
-/// Default max number of mutations applied per child (used when
-/// `MUTATOR_MUT_PER_TRACE` is unset). The actual count per child is drawn
-/// uniformly from `1..=max`.
-const DEFAULT_MUT_PER_TRACE: usize = 2;
+const DEFAULT_MUT_PER_TRACE: usize = 3;
 const DEFAULT_RESEED_FREQ: usize = 100;
-/// Number of mutated descendants pushed onto the queue per accepted
-/// parent. Mirrors the amplification factor in `Fuzzer.Run`.
-const CHILDREN_PER_PARENT: usize = 3;
-/// Default seed-trace input directory, relative to the crate manifest.
-/// Overridable via `MUTATED_TRACES_SEED_DIR`.
-const DEFAULT_MUTATED_TRACES_SEED_DIR: &str = "src/tracing/tests/fixtures";
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Directory containing the JSON seed traces. Overridable via the
-/// `MUTATED_TRACES_SEED_DIR` env var; falls back to
-/// `DEFAULT_MUTATED_TRACES_SEED_DIR` resolved against the crate manifest.
 fn seeds_dir() -> PathBuf {
-    if let Ok(p) = env::var("MUTATED_TRACES_SEED_DIR") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-    manifest_dir().join(DEFAULT_MUTATED_TRACES_SEED_DIR)
+    manifest_dir().join("src/tracing/tests/fixtures")
 }
 
 fn output_dir() -> PathBuf {
     manifest_dir().join("artifacts/mutated_traces")
-}
-
-/// Directory where transient `.qnt` test files are written for `quint test`.
-/// Mirrors `tests/mod.rs::quint_traces_dir`.
-fn quint_traces_dir() -> PathBuf {
-    let dir = manifest_dir().parent().unwrap().join("quint/traces");
-    fs::create_dir_all(&dir).ok();
-    dir
-}
-
-fn quint_bin() -> String {
-    env::var("QUINT_BIN").unwrap_or_else(|_| "quint".to_string())
 }
 
 /// Recursively walks `dir` and returns every `*.json` path under it.
@@ -159,18 +131,6 @@ enum Mutation {
     BumpView,
 }
 
-impl Mutation {
-    fn name(self) -> &'static str {
-        match self {
-            Mutation::Swap => "Swap",
-            Mutation::Duplicate => "Duplicate",
-            Mutation::Delete => "Delete",
-            Mutation::ReverseRange => "ReverseRange",
-            Mutation::BumpView => "BumpView",
-        }
-    }
-}
-
 const ALL_MUTATIONS: &[Mutation] = &[
     Mutation::Swap,
     Mutation::Duplicate,
@@ -179,37 +139,19 @@ const ALL_MUTATIONS: &[Mutation] = &[
     Mutation::BumpView,
 ];
 
-/// A trace plus the lineage of mutation kinds applied to derive it from
-/// its seed. Lives only in the mutator queue; never serialised into a
-/// trace JSON file.
-#[derive(Clone)]
-struct Candidate {
-    trace: TraceData,
-    mutations: Vec<&'static str>,
-}
-
-impl Candidate {
-    fn from_seed(trace: TraceData) -> Self {
-        Self {
-            trace,
-            mutations: Vec::new(),
-        }
-    }
-}
-
-/// Applies a single mutation to `trace.entries`. Returns `Some(kind)` if
-/// the mutation actually changed the trace; `None` if the trace was too
-/// small for the chosen mutation (e.g. swap on a 1-element list).
-fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> Option<Mutation> {
+/// Applies a single mutation to `trace.entries`. Returns `true` if the
+/// mutation actually changed the trace; `false` if the trace was too small
+/// for the chosen mutation (e.g. swap on a 1-element list).
+fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> bool {
     let len = trace.entries.len();
     if len == 0 {
-        return None;
+        return false;
     }
     let mutation = ALL_MUTATIONS[rng.gen_range(0..ALL_MUTATIONS.len())];
-    let applied = match mutation {
+    match mutation {
         Mutation::Swap => {
             if len < 2 {
-                return None;
+                return false;
             }
             let i = rng.gen_range(0..len);
             let mut j = rng.gen_range(0..len);
@@ -233,7 +175,7 @@ fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> Option<Mutation> {
         }
         Mutation::ReverseRange => {
             if len < 2 {
-                return None;
+                return false;
             }
             let a = rng.gen_range(0..len);
             let b = rng.gen_range(0..len);
@@ -251,11 +193,6 @@ fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> Option<Mutation> {
             }
             mutate_view(&mut trace.entries[idx], delta)
         }
-    };
-    if applied {
-        Some(mutation)
-    } else {
-        None
     }
 }
 
@@ -286,26 +223,15 @@ fn mutate_view(entry: &mut TraceEntry, delta: i64) -> bool {
     }
 }
 
-/// Returns a fresh candidate produced by applying `1..=max_mutations`
-/// mutations to a copy of `parent`. The exact count is drawn uniformly
-/// from that range. Each successfully applied mutation kind is appended
-/// to the child's lineage. Returns `None` if no mutation could be applied
-/// (mirrors `Mutator.Mutate -> (trace, ok)`).
-fn mutate_once(parent: &Candidate, rng: &mut StdRng, max_mutations: usize) -> Option<Candidate> {
-    let cap = max_mutations.max(1);
-    let mut child = parent.clone();
-    let count = rng.gen_range(1..=cap);
-    let mut applied = 0usize;
-    for _ in 0..count {
-        if let Some(kind) = apply_mutation(&mut child.trace, rng) {
-            child.mutations.push(kind.name());
-            applied += 1;
-        }
-    }
-    if applied == 0 {
-        None
+/// Returns a fresh trace produced by applying a single mutation to a copy
+/// of `trace`. Returns `None` if the trace was too degenerate for any
+/// mutation (mirrors `Mutator.Mutate -> (trace, ok)`).
+fn mutate_once(trace: &TraceData, rng: &mut StdRng) -> Option<TraceData> {
+    let mut copy = trace.clone();
+    if apply_mutation(&mut copy, rng) {
+        Some(copy)
     } else {
-        Some(child)
+        None
     }
 }
 
@@ -337,18 +263,24 @@ fn reseed_freq_from_env() -> usize {
         .unwrap_or(DEFAULT_RESEED_FREQ)
 }
 
-/// Returns true when `MUTATOR_DEBUG` is set to a truthy value. Controls
-/// whether per-iteration log lines are emitted.
-fn debug_from_env() -> bool {
-    matches!(
-        env::var("MUTATOR_DEBUG").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
+/// Hex sha1 of the canonical-ish JSON encoding of a trace, used as the
+/// on-disk file name. Two traces that serialize to the same bytes
+/// collapse to the same file (idempotent).
+fn trace_filename(json: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(json.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("{hex}.json")
 }
 
-/// Hex sha1 of arbitrary bytes.
-fn sha1_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha1::new();
+/// Hex sha256 of arbitrary bytes. Mirrors the `crypto/sha256` digests used
+/// by `TLCStateGuider.Check` for trace and state-trace dedup.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
@@ -359,95 +291,20 @@ fn sha1_hex(bytes: &[u8]) -> String {
 }
 
 /// Pushes the initial seed population onto `queue`, mirroring
-/// `Fuzzer.seed()`. Each seed enters the queue with an empty mutation
-/// lineage.
-fn seed_queue(queue: &mut VecDeque<Candidate>, seeds: &[TraceData]) {
+/// `Fuzzer.seed()`.
+fn seed_queue(queue: &mut VecDeque<TraceData>, seeds: &[TraceData]) {
     queue.clear();
     for trace in seeds {
-        queue.push_back(Candidate::from_seed(trace.clone()));
+        queue.push_back(trace.clone());
     }
-}
-
-fn encoder_config_for(trace: &TraceData) -> EncoderConfig {
-    EncoderConfig {
-        n: trace.n,
-        faults: trace.faults,
-        epoch: trace.epoch,
-        max_view: trace.max_view,
-        required_containers: trace.required_containers,
-    }
-}
-
-/// Result of running quint against an encoded trace.
-struct QuintResult {
-    accepted: bool,
-    /// Combined stdout/stderr, only populated on rejection (for logging).
-    detail: String,
-}
-
-/// Runs `quint test --match=traceTest` against `qnt_path` and returns
-/// whether quint accepted the encoded trace.
-fn run_quint(qnt_path: &Path) -> QuintResult {
-    let output = Command::new(quint_bin())
-        .args([
-            "test",
-            "--main=tests",
-            "--backend=rust",
-            "--max-samples=10",
-            "--match=traceTest",
-        ])
-        .arg(qnt_path)
-        .env("NODE_OPTIONS", "--max-old-space-size=8192")
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => QuintResult {
-            accepted: true,
-            detail: String::new(),
-        },
-        Ok(out) => {
-            let mut detail = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !stderr.is_empty() {
-                if !detail.is_empty() {
-                    detail.push('\n');
-                }
-                detail.push_str(&stderr);
-            }
-            QuintResult {
-                accepted: false,
-                detail,
-            }
-        }
-        Err(e) => QuintResult {
-            accepted: false,
-            detail: format!("failed to spawn quint: {e}"),
-        },
-    }
-}
-
-/// Encodes `trace` to a temporary `.qnt` file and runs quint against it.
-/// The file is removed before returning. Returns `None` if writing the
-/// file failed.
-fn validate_with_quint(trace: &TraceData, tag: &str) -> Option<QuintResult> {
-    let cfg = encoder_config_for(trace);
-    let qnt = encoder::encode(trace, &cfg);
-    let qnt_path = quint_traces_dir().join(format!("trace_{tag}_mutator.qnt"));
-    if let Err(e) = fs::write(&qnt_path, &qnt) {
-        eprintln!("warning: failed to write {}: {e}", qnt_path.display());
-        return None;
-    }
-    let result = run_quint(&qnt_path);
-    let _ = fs::remove_file(&qnt_path);
-    Some(result)
 }
 
 fn main() {
+    let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
     let iterations = iterations_from_env();
     let seed = seed_from_env();
     let mut_per_trace = mut_per_trace_from_env();
     let reseed_freq = reseed_freq_from_env().max(1);
-    let debug = debug_from_env();
 
     let seeds = load_seeds(&seeds_dir());
     if seeds.is_empty() {
@@ -462,34 +319,36 @@ fn main() {
     }
 
     println!(
-        "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} children_per_parent={} reseed_freq={} debug={} seed_dir={} quint={}",
+        "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} url={}",
         seeds.len(),
         iterations,
         seed,
         mut_per_trace,
-        CHILDREN_PER_PARENT,
         reseed_freq,
-        debug,
-        seeds_dir().display(),
-        quint_bin(),
+        url,
     );
 
+    let client = TlcClient::new(&url);
     let mut rng = StdRng::seed_from_u64(seed);
 
-    // Trace dedup cache (sha1 of serialized TraceData), mirrors
-    // `TLCStateGuider.tracesMap`. Doubles as the novelty signal that
-    // gates "interesting" traces.
+    // Coverage signal: cumulative set of state fingerprints observed
+    // across all `/execute` calls so far. Mirrors `TLCStateGuider.statesMap`.
+    let mut states_map: HashSet<i64> = HashSet::new();
+    // Trace dedup cache (sha256 of serialized TraceData), mirrors
+    // `TLCStateGuider.tracesMap`.
     let mut traces_map: HashSet<String> = HashSet::new();
-    // BFS queue of mutated trace candidates to evaluate next, mirrors
-    // `Fuzzer.mutatedTracesQueue`. Each entry carries the lineage of
-    // mutation kinds applied to derive it from its seed.
-    let mut queue: VecDeque<Candidate> = VecDeque::new();
+    // State-trace dedup cache (sha256 of serialized response.keys),
+    // mirrors `TLCStateGuider.stateTracesMap`.
+    let mut state_traces_map: HashSet<String> = HashSet::new();
+    // BFS queue of mutated traces to evaluate next, mirrors
+    // `Fuzzer.mutatedTracesQueue`.
+    let mut queue: VecDeque<TraceData> = VecDeque::new();
     seed_queue(&mut queue, &seeds);
 
     let mut kept = 0usize;
-    let mut rejected = 0usize;
-    let mut duplicates = 0usize;
-    let mut empty_traces = 0usize;
+    let mut empty_actions = 0usize;
+    let mut errors = 0usize;
+    let mut uninteresting = 0usize;
     let mut mutated_executions = 0usize;
     let mut random_executions = 0usize;
 
@@ -500,139 +359,137 @@ fn main() {
             seed_queue(&mut queue, &seeds);
         }
 
-        // Pop the next mutated candidate; fall back to a random initial
-        // seed if the queue ran dry between reseed cycles.
-        let candidate = match queue.pop_front() {
-            Some(c) => {
+        // Pop the next mutated trace; fall back to a random initial seed
+        // if the queue ran dry between reseed cycles.
+        let trace = match queue.pop_front() {
+            Some(t) => {
                 mutated_executions += 1;
-                c
+                t
             }
             None => {
                 random_executions += 1;
-                Candidate::from_seed(seeds[rng.gen_range(0..seeds.len())].clone())
+                seeds[rng.gen_range(0..seeds.len())].clone()
             }
         };
 
-        if candidate.trace.entries.is_empty() {
-            empty_traces += 1;
+        // Track unique traces (cosmetic, like `tracesMap`).
+        if let Ok(bytes) = serde_json::to_vec(&trace) {
+            traces_map.insert(sha256_hex(&bytes));
+        }
+
+        let actions = TlcMapper::map_trace(&trace);
+        if actions.is_empty() {
+            empty_actions += 1;
+            println!(
+                "[iter {iter}] tlc=skip-empty (q={}, traces={}, states={})",
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
             continue;
         }
 
-        // Trace dedup: skip traces we have already evaluated.
-        let trace_bytes = match serde_json::to_vec(&candidate.trace) {
-            Ok(b) => b,
+        let response = match client.execute_full(&actions) {
+            Ok(r) => r,
             Err(e) => {
-                eprintln!("[iter {iter}] serialize error: {e}");
+                errors += 1;
+                println!(
+                    "[iter {iter}] tlc=error (q={}, traces={}, states={}): {e}",
+                    queue.len(),
+                    traces_map.len(),
+                    states_map.len(),
+                );
                 continue;
             }
         };
-        let trace_hash = sha1_hex(&trace_bytes);
-        if !traces_map.insert(trace_hash.clone()) {
-            duplicates += 1;
-            if debug {
-                println!(
-                    "[iter {iter}] quint=skip-duplicate (q={}, traces={})",
-                    queue.len(),
-                    traces_map.len(),
-                );
+
+        // Mirror `TLCStateGuider.Check`: count every fingerprint that is
+        // not yet in the cumulative `states_map` as a "new state". We
+        // intentionally do NOT skip `keys[0]` — modelfuzz adds all keys.
+        let mut num_new_states = 0usize;
+        for key in &response.keys {
+            if states_map.insert(*key) {
+                num_new_states += 1;
             }
-            continue;
         }
 
-        // Raw seeds (no mutations applied yet) are trusted inputs: skip
-        // quint validation and persistence, but still expand them by
-        // pushing mutated descendants onto the queue so the rest of the
-        // run has real candidates to evaluate. We never write a seed to
-        // the output artifact directory because it is an input, not a
-        // mutation.
-        if candidate.mutations.is_empty() {
-            let mut pushed = 0usize;
-            for _ in 0..CHILDREN_PER_PARENT {
-                if let Some(child) = mutate_once(&candidate, &mut rng, mut_per_trace) {
-                    queue.push_back(child);
-                    pushed += 1;
-                }
-            }
-            if debug {
-                println!(
-                    "[iter {iter}] seed-expanded pushed={pushed} q={} traces={}",
-                    queue.len(),
-                    traces_map.len(),
-                );
-            }
-            continue;
+        // Track unique state-traces (cosmetic). Mirrors modelfuzz which
+        // hashes the full `[]State{Repr, Key}` list, not just the keys
+        // — two traces with identical key vectors but different state
+        // reprs must hash differently.
+        let pairs: Vec<(&String, i64)> = response
+            .states
+            .iter()
+            .zip(response.keys.iter().copied())
+            .collect();
+        if let Ok(bytes) = serde_json::to_vec(&pairs) {
+            state_traces_map.insert(sha256_hex(&bytes));
         }
 
-        let result = match validate_with_quint(&candidate.trace, &trace_hash[..12]) {
-            Some(r) => r,
-            None => continue,
-        };
-
-        if !result.accepted {
-            rejected += 1;
-            if debug {
-                // Trim quint output so the per-iter line stays readable.
-                let snippet: String = result
-                    .detail
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                println!(
-                    "[iter {iter}] quint=reject mutations=[{}] (q={}, traces={}): {snippet}",
-                    candidate.mutations.join(","),
-                    queue.len(),
-                    traces_map.len(),
-                );
-            }
+        if num_new_states == 0 {
+            uninteresting += 1;
+            println!(
+                "[iter {iter}] tlc=ok-uninteresting (keys={}, q={}, traces={}, states={})",
+                response.keys.len(),
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
             continue;
         }
 
         // Persist the keeper as pretty JSON named by sha1 of its bytes.
         // (Mirrors `TLCStateGuider.recordTrace`.)
-        let json = match serde_json::to_string_pretty(&candidate.trace) {
+        let json = match serde_json::to_string_pretty(&trace) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[iter {iter}] serialize error: {e}");
+                errors += 1;
+                println!("[iter {iter}] tlc=ok-serialize-error: {e}");
                 continue;
             }
         };
-        let path = out_dir.join(format!("{trace_hash}.json"));
+        let path = out_dir.join(trace_filename(&json));
         if let Err(e) = fs::write(&path, &json) {
-            eprintln!("[iter {iter}] write error ({}): {e}", path.display());
+            errors += 1;
+            println!(
+                "[iter {iter}] tlc=ok-write-error (path={}): {e}",
+                path.display()
+            );
             continue;
         }
 
-        // Amplify successful traces by pushing several mutated descendants
-        // back onto the queue (mirrors the `numMutations := numNewStates *
-        // MutPerTrace` loop in `Fuzzer.Run`, with `numNewStates` collapsed
-        // to 1 since quint only gives us pass/fail).
+        // Mirror the `numMutations := numNewStates * MutPerTrace` loop in
+        // `Fuzzer.Run`: amplify successful traces by pushing several
+        // mutated descendants back onto the queue.
+        let num_mutations = num_new_states * mut_per_trace;
         let mut pushed = 0usize;
-        for _ in 0..CHILDREN_PER_PARENT {
-            if let Some(child) = mutate_once(&candidate, &mut rng, mut_per_trace) {
+        for _ in 0..num_mutations {
+            if let Some(child) = mutate_once(&trace, &mut rng) {
                 queue.push_back(child);
                 pushed += 1;
             }
         }
 
         kept += 1;
-        if debug {
-            println!(
-                "[iter {iter}] quint=ok-kept {} mutations=[{}] (pushed={}, q={}, traces={})",
-                path.file_name().unwrap().to_string_lossy(),
-                candidate.mutations.join(","),
-                pushed,
-                queue.len(),
-                traces_map.len(),
-            );
-        }
+        println!(
+            "[iter {iter}] tlc=ok-kept {} (keys={}, new={}, pushed={}, q={}, traces={}, states={})",
+            path.file_name().unwrap().to_string_lossy(),
+            response.keys.len(),
+            num_new_states,
+            pushed,
+            queue.len(),
+            traces_map.len(),
+            states_map.len(),
+        );
     }
 
     println!(
-        "trace_mutator done: kept={kept} rejected={rejected} duplicates={duplicates} \
-         empty_traces={empty_traces} mutated_executions={mutated_executions} \
-         random_executions={random_executions} traces={}",
+        "trace_mutator done: kept={kept} uninteresting={uninteresting} \
+         empty_actions={empty_actions} errors={errors} \
+         mutated_executions={mutated_executions} random_executions={random_executions} \
+         traces={} state_traces={} states={}",
         traces_map.len(),
+        state_traces_map.len(),
+        states_map.len(),
     );
 }

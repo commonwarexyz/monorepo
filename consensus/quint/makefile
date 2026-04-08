@@ -80,6 +80,15 @@ clean_fuzz_traces:
 clean_traces:
 	rm -rf $(TRACES_DIR)
 
+clean:
+	./scripts/verify.sh clean
+	./scripts/invariant.sh clean
+
+check:
+	./scripts/verify.sh check || true
+	@echo
+	./scripts/invariant.sh check
+
 tv: clean_fuzz_traces clean_traces get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces
 
 tv_live: clean_fuzz_traces clean_traces
@@ -270,11 +279,29 @@ ist:
 	cargo run -p commonware-consensus-fuzz --bin ist -- \
 		--spec itf_n4f1b1.qnt --steps $(IST_STEPS) --url $(IST_URL)
 
-clean:
-	./scripts/verify.sh clean
-	./scripts/invariant.sh clean
+# tlc-controlled targets
+#
+# All targets delegate to scripts/tlc.sh; see that script for env var overrides
+# (TLC_PORT, TLC_BUILD_DIR, TLC_JAR, ...).
+#
+#   make tlc_compile TLA_QUINT_SPEC=main_n4f1b0.qnt
+#   make tlc_run                  # uses tlc-build/main.tla
+#   make tlc_run TLC_PORT=2024    # custom port
+#   make tlc_status               # check if the server is alive
+#   make tlc_kill                 # stop the server
+TLA_QUINT_SPEC ?= main_n4f1b0_tla.qnt
 
-check:
-	./scripts/verify.sh check || true
-	@echo
-	./scripts/invariant.sh check
+tlc_compile:
+	./scripts/tlc.sh compile $(TLA_QUINT_SPEC)
+
+tlc_run:
+	./scripts/tlc.sh run
+
+tlc_status:
+	./scripts/tlc.sh status
+
+tlc_kill:
+	./scripts/tlc.sh kill
+
+tlc_clean:
+	./scripts/tlc.sh clean
