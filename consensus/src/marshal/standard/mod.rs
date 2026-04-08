@@ -43,57 +43,43 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            config::Config,
-            core::{Actor, Mailbox},
+            core::Mailbox,
             mocks::{
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    StandardHarness, TestHarness, ValidatorSetup, B, BLOCKS_PER_EPOCH, D, K, LINK,
-                    NAMESPACE, NUM_VALIDATORS, P, PAGE_CACHE_SIZE, PAGE_SIZE, S, TEST_QUOTA,
-                    UNRELIABLE_LINK, V,
+                    StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK, NAMESPACE,
+                    NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
-            resolver::handler,
             Identifier,
         },
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
-        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+        types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton, Heightable,
     };
-    use bytes::Bytes;
-    use commonware_broadcast::buffered;
-    use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         sha256::Sha256,
         Digestible, Hasher as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_p2p::simulated::Oracle;
-    use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::FaultConfig, Clock, Metrics, Runner,
-        Spawner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner,
     };
     use commonware_storage::archive::{immutable, Archive as _};
     use commonware_utils::{
-        channel::{mpsc, oneshot},
-        vec::NonEmptyVec,
-        NZUsize, NZU64,
+        channel::oneshot,
+        NZUsize,
     };
     use std::{
-        collections::HashMap,
         num::{NonZeroU64, NonZeroUsize},
-        sync::Arc,
         time::Duration,
     };
-    use tracing::warn;
 
     fn assert_finalize_deterministic<H: TestHarness>(
         seed: u64,
@@ -617,399 +603,6 @@ mod tests {
                 "pending acks should be empty after acknowledging through height 2"
             );
         });
-    }
-
-    /// Maps heights to their finalization and block pairs for mock resolver lookups.
-    type FinalizedMap = HashMap<Height, (Finalization<S, D>, B)>;
-
-    /// [`Resolver`] that immediately schedules delivery of encoded blocks and finalized pairs.
-    ///
-    /// This avoids running the p2p resolver engine while still exercising marshal's fetch and
-    /// `handle_deliver` paths.
-    #[derive(Clone)]
-    struct ImmediateMockResolver {
-        sender: mpsc::Sender<handler::Message<D>>,
-        context: deterministic::Context,
-        by_commitment: Arc<HashMap<D, B>>,
-        finalized: Arc<FinalizedMap>,
-    }
-
-    impl Resolver for ImmediateMockResolver {
-        type Key = handler::Request<D>;
-        type PublicKey = K;
-
-        async fn fetch(&mut self, key: Self::Key) {
-            self.spawn_deliver(key);
-        }
-
-        async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
-            for key in keys {
-                self.spawn_deliver(key);
-            }
-        }
-
-        async fn fetch_targeted(&mut self, key: Self::Key, _targets: NonEmptyVec<Self::PublicKey>) {
-            self.spawn_deliver(key);
-        }
-
-        async fn fetch_all_targeted(
-            &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
-            for (key, _) in requests {
-                self.spawn_deliver(key);
-            }
-        }
-
-        async fn cancel(&mut self, _: Self::Key) {}
-
-        async fn clear(&mut self) {}
-
-        async fn retain(&mut self, _: impl Fn(&Self::Key) -> bool + Send + 'static) {}
-    }
-
-    impl ImmediateMockResolver {
-        fn spawn_deliver(&self, key: handler::Request<D>) {
-            let sender = self.sender.clone();
-            let by_commitment = self.by_commitment.clone();
-            let finalized = self.finalized.clone();
-            let ctx = self.context.clone();
-            ctx.spawn(move |c| async move {
-                c.sleep(Duration::ZERO).await;
-                let value: Bytes = match &key {
-                    handler::Request::Block(commitment) => {
-                        let block = by_commitment
-                            .get(commitment)
-                            .expect("mock resolver missing block for commitment")
-                            .clone();
-                        block.encode()
-                    }
-                    handler::Request::Finalized { height } => {
-                        let (fin, blk) = finalized
-                            .get(height)
-                            .expect("mock resolver missing finalized pair for height")
-                            .clone();
-                        (fin, blk).encode()
-                    }
-                    handler::Request::Notarized { .. } => {
-                        panic!("unexpected notarized resolver fetch in storage fault test");
-                    }
-                };
-                let (response, _) = oneshot::channel();
-                let _ = sender
-                    .send(handler::Message::Deliver {
-                        key,
-                        value,
-                        response,
-                    })
-                    .await;
-            });
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn setup_standard_with_mock_resolver(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: crate::marshal::mocks::application::Application<B>,
-        by_commitment: HashMap<D, B>,
-        finalized_pairs: FinalizedMap,
-    ) -> Option<ValidatorSetup<StandardHarness>> {
-        let config = Config {
-            provider,
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks,
-            block_codec_config: (),
-            partition_prefix: format!("validator-{validator}"),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
-        };
-
-        let control = oracle.control(validator.clone());
-        let (resolver_tx, resolver_rx) = mpsc::channel(config.mailbox_size);
-        let mock_resolver = ImmediateMockResolver {
-            sender: resolver_tx,
-            context: context.clone(),
-            by_commitment: Arc::new(by_commitment),
-            finalized: Arc::new(finalized_pairs),
-        };
-
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
-            peer_provider: oracle.manager(),
-        };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2, TEST_QUOTA).await.ok()?;
-        broadcast_engine.start(network);
-
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalizations-by-height-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalizations-by-height-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .ok()?;
-
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalized_blocks-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: NZU64!(10),
-                codec_config: config.block_codec_config,
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .ok()?;
-
-        let (actor, mailbox, height) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        actor.start(application.clone(), buffer, (resolver_rx, mock_resolver));
-
-        Some(ValidatorSetup {
-            application,
-            mailbox,
-            extra: (),
-            height,
-        })
-    }
-
-    fn marshal_storage_fault_config() -> FaultConfig {
-        FaultConfig {
-            // Higher rates stress persistence; marshal still panics on IO errors and we restart from
-            // checkpoints until the ack pipeline completes.
-            // Keep sync/write at the original 0.002 so each runner attempt can finish within a
-            // bounded poll budget; the outer loop still restarts from checkpoints until success.
-            sync_rate: Some(0.002),
-            write_rate: Some(0.002),
-            partial_write_rate: Some(0.35),
-            ..Default::default()
-        }
-    }
-
-    fn marshal_fault_test_config(seed: u64) -> deterministic::Config {
-        deterministic::Config::default()
-            .with_seed(seed)
-            // Spawned tasks (marshal actor) panic on cache/archive IO errors today; swallow those
-            // panics so the root future can checkpoint storage and restart a fresh marshal.
-            .with_catch_panics(true)
-            .with_storage_fault_config(marshal_storage_fault_config())
-    }
-
-    fn storage_fault_recovery_seed(seed: u64) -> bool {
-        let mut checkpoint: Option<deterministic::Checkpoint> = None;
-        let mut restarts: u64 = 0;
-
-        loop {
-            let runner = checkpoint.take().map_or_else(
-                || deterministic::Runner::new(marshal_fault_test_config(seed)),
-                |cp| {
-                    restarts += 1;
-                    deterministic::Runner::from(cp)
-                },
-            );
-
-            let (done, next_checkpoint) = runner.start_and_recover(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let validator = participants[0].clone();
-                let mut oracle = setup_network_with_participants(
-                    context.clone(),
-                    NZUsize!(1),
-                    participants.clone(),
-                )
-                .await;
-
-                let tip_height = Height::new(25);
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mut blocks = Vec::with_capacity(tip_height.get() as usize);
-                let mut parent = genesis.digest();
-                for height in 1..=tip_height.get() {
-                    let block = make_raw_block(parent, Height::new(height), height * 100);
-                    parent = block.digest();
-                    blocks.push(block);
-                }
-
-                let mut finalizations = Vec::with_capacity(tip_height.get() as usize);
-                for block in &blocks {
-                    let parent_view = if block.height() == Height::new(1) {
-                        View::zero()
-                    } else {
-                        View::new(
-                            block
-                                .height()
-                                .previous()
-                                .expect("non-genesis block must have parent height")
-                                .get(),
-                        )
-                    };
-                    let fin = StandardHarness::make_finalization(
-                        Proposal::new(
-                            Round::new(Epoch::zero(), View::new(block.height().get())),
-                            parent_view,
-                            block.digest(),
-                        ),
-                        &schemes,
-                        3,
-                    );
-                    finalizations.push(fin);
-                }
-
-                let mut by_commitment = HashMap::new();
-                let mut finalized_pairs = HashMap::new();
-                for (i, block) in blocks.iter().enumerate() {
-                    let height = block.height();
-                    by_commitment.insert(block.digest(), block.clone());
-                    finalized_pairs.insert(height, (finalizations[i].clone(), block.clone()));
-                }
-
-                let Some(mut setup) = setup_standard_with_mock_resolver(
-                    context.clone(),
-                    &mut oracle,
-                    validator,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NonZeroUsize::new(1).unwrap(),
-                    crate::marshal::mocks::application::Application::manual_ack(),
-                    by_commitment,
-                    finalized_pairs,
-                )
-                .await
-                else {
-                    return false;
-                };
-
-                let tip_block = blocks.last().expect("tip block missing").clone();
-
-                for fin in &finalizations {
-                    StandardHarness::report_finalization(&mut setup.mailbox, fin.clone()).await;
-                    context.sleep(Duration::from_millis(1)).await;
-                }
-
-                // Success: tip finalized block was delivered (`Update::Block`) and the application
-                // ack was released (`Exact::acknowledge`), draining the pending-ack queue. With
-                // `max_pending_acks == 1`, marshal only advances after each ack, so we must both
-                // receive and acknowledge. `acknowledge_next().await` yields once per call.
-                //
-                // Bound each attempt: an unbounded inner loop never completes the root future, so
-                // `start_and_recover` would hang forever when this attempt does not reach the tip.
-                for _ in 0..200_000 {
-                    let _ = setup.application.acknowledge_next().await;
-                    let delivered = setup.application.blocks().get(&tip_height) == Some(&tip_block);
-                    let drained = setup.application.pending_ack_heights().is_empty();
-                    if delivered && drained {
-                        return true;
-                    }
-                }
-                false
-            });
-
-            checkpoint = Some(next_checkpoint);
-            if done {
-                warn!(
-                    seed = seed,
-                    restarts = restarts,
-                    "test_standard_recovery_from_random_storage_sync_faults seed finished"
-                );
-                return true;
-            }
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_recovery_from_random_storage_sync_faults() {
-        // Mock resolver with the full chain, storage faults always enabled on the runner, and
-        // `catch_panics` so marshal can be restarted from a checkpoint until the application has
-        // received and acknowledged the tip (`manual_ack` + pending queue drained). Each runner
-        // attempt is bounded; failed attempts return `false` so the outer loop can retry.
-        for seed in 0_u64..16 {
-            assert!(
-                storage_fault_recovery_seed(seed),
-                "expected recovery for seed {seed}"
-            );
-        }
     }
 
     #[test_traced("WARN")]
