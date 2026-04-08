@@ -213,6 +213,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         "Whether state sync has completed",
         state_sync_done.clone(),
     );
+    state_sync_done.set(0);
 
     let mut metadata = Metadata::<E, U64, bool>::init(
         context.with_label("state_sync_metadata"),
