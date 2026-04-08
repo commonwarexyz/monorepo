@@ -939,7 +939,7 @@ where
                 // Persist the block, also storing the finalization if we have it.
                 let height = block.height();
                 let digest = block.digest();
-                let finalization = self.get_known_finalization(height, digest).await;
+                let finalization = self.cache.get_finalization_for(digest).await;
                 let wrote = self
                     .store_finalization(height, digest, block, finalization, application, buffer)
                     .await;
@@ -1373,66 +1373,6 @@ where
         }
     }
 
-    /// Find a known finalization for the given block from either the cache or the
-    /// height-indexed archive.
-    ///
-    /// This is important during restart recovery: the block may arrive later via a
-    /// commitment-based fetch, while the corresponding finalization only exists in
-    /// `finalizations_by_height` rather than the in-memory cache.
-    async fn get_known_finalization(
-        &self,
-        height: Height,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
-        if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-            return Some(finalization);
-        }
-        let finalization = self.get_finalization_by_height(height).await?;
-        (V::commitment_to_inner(finalization.proposal.payload) == digest).then_some(finalization)
-    }
-
-    /// Repair or request a trailing finalized block for a single height.
-    ///
-    /// In this state we already know the finalized height and commitment from
-    /// `finalizations_by_height`, but we may not yet have the block in
-    /// `finalized_blocks` at its eventual height. The block might still be available
-    /// elsewhere by commitment (buffer, cache, or peer fetch).
-    ///
-    /// The caller only uses this helper for heights that are known to be in the
-    /// trailing missing suffix after the last contiguous `finalized_blocks` range,
-    /// so we do not need to probe `finalized_blocks` again here.
-    ///
-    /// Returns `Some(wrote)` if this height corresponds to a known finalization.
-    /// Returns `None` if there is nothing to do at this height.
-    async fn repair_trailing_finalized_height<Buf: Buffer<V>>(
-        &mut self,
-        height: Height,
-        buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> Option<bool> {
-        let finalization = self.get_finalization_by_height(height).await?;
-        let commitment = finalization.proposal.payload;
-        let digest = V::commitment_to_inner(commitment);
-        if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            let wrote = self
-                .store_finalization(
-                    height,
-                    digest,
-                    block,
-                    Some(finalization),
-                    application,
-                    buffer,
-                )
-                .await;
-            return Some(wrote);
-        }
-        resolver
-            .fetch(Request::<V::Commitment>::Block(commitment))
-            .await;
-        Some(false)
-    }
-
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
     /// After persisting the block, attempt to dispatch the next contiguous block to the application.
@@ -1564,8 +1504,7 @@ where
     /// Looks for a block anywhere in local storage using the full commitment.
     ///
     /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
-    /// Having the full commitment may enable additional retrieval mechanisms, even if the
-    /// block is not yet present in `finalized_blocks` at its eventual height.
+    /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
         buffer: &Buf,
@@ -1578,13 +1517,9 @@ where
             .await
     }
 
-    /// Attempt to repair any identified gaps in the finalized blocks archive.
-    ///
-    /// Internal gaps (anchored by a later stored block) are repaired via backwards
-    /// parent-chain walking and bounded by `self.max_repair` fetch requests. Trailing
-    /// gaps (beyond the last stored block) are repaired from `finalizations_by_height`
-    /// with a separate `self.max_repair`-bounded fetch budget. Local writes are
-    /// unbounded in both phases since they are cheap.
+    /// Attempt to repair any identified gaps in the finalized blocks archive. The total
+    /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
+    /// though multiple gaps may be spanned.
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
@@ -1596,14 +1531,9 @@ where
     ) -> bool {
         let mut wrote = false;
         let start = self.last_processed_height.next();
-        let mut trailing_start = start;
         'cache_repair: loop {
-            let (current_range_end, next_range_start) = self.finalized_blocks.next_gap(start);
-            let Some(gap_end) = next_range_start else {
-                // There is no later finalized block range to anchor a backwards walk.
-                // Any remaining missing heights are therefore a trailing finalized suffix
-                // and must be repaired from `finalizations_by_height` by commitment.
-                trailing_start = current_range_end.map(Height::next).unwrap_or(start);
+            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
+                // No gaps detected
                 break;
             };
 
@@ -1613,10 +1543,10 @@ where
                 panic!("gapped block missing that should exist: {gap_end}");
             };
 
-            // Compute the lower bound of the recursive repair. `current_range_end` is `Some`
+            // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
             // re-persist it to the database in the repair loop below.
-            let gap_start = current_range_end.map(Height::next).unwrap_or(start);
+            let gap_start = gap_start.map(Height::next).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
@@ -1626,9 +1556,7 @@ where
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
-                    let finalization = self
-                        .get_known_finalization(block.height(), parent_digest)
-                        .await;
+                    let finalization = self.cache.get_finalization_for(parent_digest).await;
                     wrote |= self
                         .store_finalization(
                             block.height(),
@@ -1663,38 +1591,35 @@ where
         let missing_items = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let requests = missing_items
+        let mut requests: Vec<_> = missing_items
             .into_iter()
             .map(|height| Request::<V::Commitment>::Finalized { height })
-            .collect::<Vec<_>>();
-        if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            .collect();
+
+        // If finalizations extend beyond our last stored finalized block,
+        // fetch the missing blocks by commitment. We already have the finalization
+        // so we only need the block itself.
+        if let Some(tip) = self.finalizations_by_height.last_index() {
+            let (current_range_end, _) = self.finalized_blocks.next_gap(start);
+            let trailing_start = current_range_end.map(Height::next).unwrap_or(start);
+            let mut height = trailing_start;
+            let mut remaining = self.max_repair.get().saturating_sub(requests.len());
+            while height <= tip && remaining > 0 {
+                if let Some(finalization) = self.get_finalization_by_height(height).await {
+                    requests.push(Request::<V::Commitment>::Block(
+                        finalization.proposal.payload,
+                    ));
+                    remaining -= 1;
+                }
+                if height == tip {
+                    break;
+                }
+                height = height.next();
+            }
         }
 
-        // If finalizations extend beyond our highest contiguous finalized block range,
-        // request the trailing missing blocks directly by commitment. We cannot use the
-        // backwards-walk logic above because there is no later stored finalized block to
-        // anchor from; all we have is the finalized height -> commitment mapping.
-        let Some(tip) = self.finalizations_by_height.last_index() else {
-            return wrote;
-        };
-        let mut height = trailing_start;
-        let mut fetch_remaining = self.max_repair.get();
-        while height <= tip && fetch_remaining > 0 {
-            if let Some(repaired) = self
-                .repair_trailing_finalized_height(height, buffer, resolver, application)
-                .await
-            {
-                wrote |= repaired;
-                if !repaired {
-                    fetch_remaining -= 1;
-                }
-            }
-            // Overflow guard: height.next() would panic at Height::MAX.
-            if height == tip {
-                break;
-            }
-            height = height.next();
+        if !requests.is_empty() {
+            resolver.fetch_all(requests).await
         }
         wrote
     }
