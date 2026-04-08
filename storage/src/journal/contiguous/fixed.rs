@@ -663,19 +663,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Encode all items into a single contiguous buffer before taking the write guard.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let mut items_buf = Vec::new();
+        let items_count = match &items {
+            Many::Flat(items) => items.len(),
+            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
+        };
+        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
         match &items {
-            Many::Flat(s) => {
-                items_buf.reserve(s.len() * A::SIZE);
-                for item in *s {
+            Many::Flat(items) => {
+                for item in *items {
                     item.write(&mut items_buf);
                 }
             }
-            Many::Nested(segs) => {
-                let total: usize = segs.iter().map(|s| s.len()).sum();
-                items_buf.reserve(total * A::SIZE);
-                for seg in *segs {
-                    for item in *seg {
+            Many::Nested(nested_items) => {
+                for items in *nested_items {
+                    for item in *items {
                         item.write(&mut items_buf);
                     }
                 }
@@ -684,13 +685,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
-
         let mut written = 0;
-        let total_items = items_buf.len() / A::SIZE;
-        while written < total_items {
+        while written < items_count {
             let (section, pos_in_section) = self.position_to_section(inner.size);
-            let space = (self.items_per_blob - pos_in_section) as usize;
-            let batch_count = space.min(total_items - written);
+            let remaining_space = (self.items_per_blob - pos_in_section) as usize;
+            let batch_count = remaining_space.min(items_count - written);
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
 

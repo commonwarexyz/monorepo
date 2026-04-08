@@ -442,7 +442,7 @@ where
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
         let mut leaf_end = base_leaves;
-        let mut batches: Vec<&[C::Item]> = Vec::new();
+        let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
         for ancestor_items in &batch.ancestor_items {
             leaf_end += ancestor_items.len() as u64;
             if skip_ancestors && leaf_end <= committed_leaves {
