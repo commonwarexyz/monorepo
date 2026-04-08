@@ -74,7 +74,7 @@ mod tests {
         metadata::{self, Metadata},
         translator::TwoCap,
     };
-    use commonware_utils::{channel::oneshot, NZUsize};
+    use commonware_utils::{channel::oneshot, NZUsize, NZU64};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
         time::Duration,
@@ -876,7 +876,7 @@ mod tests {
             let prefix = "test-cache";
             let make_cfg = || cache::Config {
                 partition_prefix: prefix.to_string(),
-                prunable_items_per_section: NonZeroU64::new(10).unwrap().into(),
+                prunable_items_per_section: NZU64!(10),
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
@@ -895,7 +895,7 @@ mod tests {
                     (),
                 )
                 .await;
-                mgr.put_block(round, digest, block.clone().into()).await;
+                mgr.put_block(round, digest, block.clone()).await;
             }
 
             // Re-init the cache (simulating restart). find_block should fail
@@ -914,7 +914,7 @@ mod tests {
 
             mgr.load_persisted_epochs().await;
             assert_eq!(
-                mgr.find_block(digest).await.map(Into::into),
+                mgr.find_block(digest).await,
                 Some(block),
                 "cache should find block after loading persisted epochs"
             );

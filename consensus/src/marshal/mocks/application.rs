@@ -1,5 +1,9 @@
 use crate::{marshal::Update, types::Height, Block, Reporter};
-use commonware_utils::{acknowledgement::Exact, channel::mpsc, sync::Mutex, Acknowledgement};
+use commonware_utils::{
+    acknowledgement::Exact,
+    sync::{Mutex, Notify},
+    Acknowledgement,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -9,22 +13,20 @@ use std::{
 #[derive(Clone)]
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<Height, B>>>,
+    #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
-    ack_tx: mpsc::UnboundedSender<()>,
-    ack_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+    notify: Arc<Notify>,
     auto_ack: bool,
 }
 
 impl<B: Block> Default for Application<B> {
     fn default() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
         Self {
             blocks: Default::default(),
             tip: Default::default(),
             pending_acks: Default::default(),
-            ack_tx: tx,
-            ack_rx: Arc::new(Mutex::new(rx)),
+            notify: Arc::new(Notify::new()),
             auto_ack: true,
         }
     }
@@ -71,7 +73,7 @@ impl<B: Block> Application<B> {
             if let Some(height) = self.acknowledge_next() {
                 return height;
             }
-            self.ack_rx.lock().recv().await.expect("channel closed");
+            self.notify.notified().await;
         }
     }
 }
@@ -88,7 +90,7 @@ impl<B: Block> Reporter for Application<B> {
                     ack_tx.acknowledge();
                 } else {
                     self.pending_acks.lock().push_back((height, ack_tx));
-                    let _ = self.ack_tx.send(());
+                    self.notify.notify_one();
                 }
             }
             Update::Tip(_, height, digest) => {
