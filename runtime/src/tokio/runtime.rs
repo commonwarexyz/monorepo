@@ -551,7 +551,18 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+        self.execution = Execution::Dedicated(None);
+        self
+    }
+
+    fn pinned(mut self, core: usize) -> Self {
+        if let Some(num_cores) = utils::thread::available_cores() {
+            assert!(
+                core < num_cores,
+                "core {core} out of range ({num_cores} available)"
+            );
+        }
+        self.execution = Execution::Dedicated(Some(core));
         self
     }
 
@@ -590,7 +601,7 @@ impl crate::Spawner for Context {
         // (new thread) or colocated onto an existing dedicated thread.
         let parent_on_dedicated = self.on_dedicated_thread;
         self.on_dedicated_thread = match past {
-            Execution::Dedicated => true,
+            Execution::Dedicated(_) => true,
             Execution::Colocated if parent_on_dedicated => true,
             _ => false,
         };
@@ -619,11 +630,16 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        if matches!(past, Execution::Dedicated) {
+        if let Execution::Dedicated(core) = past {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
+                    // Pin before running any work on this thread
+                    if let Some(core) = core {
+                        utils::thread::pin_to_core(core);
+                    }
+
                     let local = tokio::task::LocalSet::new();
                     handle.block_on(local.run_until(f));
                 }

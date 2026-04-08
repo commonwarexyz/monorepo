@@ -1134,7 +1134,12 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+        self.execution = Execution::Dedicated(None);
+        self
+    }
+
+    fn pinned(mut self, core: usize) -> Self {
+        self.execution = Execution::Dedicated(Some(core));
         self
     }
 

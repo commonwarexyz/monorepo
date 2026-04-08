@@ -110,6 +110,10 @@ where
         Self::Present(self.into_present().dedicated())
     }
 
+    fn pinned(self, core: usize) -> Self {
+        Self::Present(self.into_present().pinned(core))
+    }
+
     fn colocated(self) -> Self {
         Self::Present(self.into_present().colocated())
     }

@@ -1,9 +1,8 @@
 //! Helpers for resolving the configured thread stack size.
 
+#[cfg(target_os = "linux")]
+use commonware_utils::sync::Once;
 use std::{env, sync::OnceLock, thread};
-
-/// Cached configured thread stack size.
-static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
 /// Rust's default thread stack size.
 ///
@@ -32,7 +31,10 @@ fn rust_min_stack() -> Option<usize> {
 ///
 /// On other platforms, or if the platform-specific query fails, this falls back
 /// to [RUST_DEFAULT_THREAD_STACK_SIZE].
+///
+/// The result is cached after the first call.
 pub(crate) fn system_thread_stack_size() -> usize {
+    static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
     *SYSTEM_THREAD_STACK_SIZE.get_or_init(|| {
         rust_min_stack()
             .or(system_thread_stack_size_impl())
@@ -111,3 +113,76 @@ where
         .spawn(f)
         .expect("failed to spawn thread")
 }
+
+/// Returns the number of available CPUs, or `None` if it cannot be determined.
+///
+/// The result is cached after the first call.
+#[cfg(target_os = "linux")]
+pub fn available_cores() -> Option<usize> {
+    static CORES: OnceLock<Option<usize>> = OnceLock::new();
+    *CORES.get_or_init(|| {
+        // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
+        // preconditions.
+        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if n <= 0 {
+            None
+        } else {
+            Some(n as usize)
+        }
+    })
+}
+
+/// Returns the number of available CPUs, or `None` if it cannot be determined.
+///
+/// Always returns `None` on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub const fn available_cores() -> Option<usize> {
+    None
+}
+
+/// Pins the current thread to the given core.
+///
+/// If the CPU count cannot be queried or `sched_setaffinity` fails, a warning
+/// is logged once and the thread continues unpinned.
+///
+/// # Panics
+///
+/// Panics if `core` is greater than or equal to the number of available CPUs.
+#[cfg(target_os = "linux")]
+pub(crate) fn pin_to_core(core: usize) {
+    static WARN_CPUS: Once = Once::new();
+    static WARN_AFFINITY: Once = Once::new();
+
+    let Some(num_cores) = available_cores() else {
+        WARN_CPUS.call_once(|| {
+            tracing::warn!("failed to query CPU count, skipping core pinning");
+        });
+        return;
+    };
+    assert!(
+        core < num_cores,
+        "core {core} out of range ({num_cores} available)"
+    );
+
+    // SAFETY: `cpu_set` is zeroed and then a single valid CPU index is set.
+    unsafe {
+        let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(core, &mut cpu_set);
+        let result = libc::sched_setaffinity(
+            0, // current thread
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &cpu_set,
+        );
+        if result != 0 {
+            WARN_AFFINITY.call_once(|| {
+                tracing::warn!(core, "sched_setaffinity failed, skipping core pinning");
+            });
+        }
+    }
+}
+
+/// Pins the current thread to the given core.
+///
+/// No-op on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub(crate) const fn pin_to_core(_core: usize) {}

@@ -16,6 +16,8 @@ commonware_macros::stability_mod!(BETA, pub mod buffer);
 pub mod signal;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod thread;
+#[cfg(not(target_arch = "wasm32"))]
+pub use thread::available_cores;
 
 mod handle;
 pub use handle::Handle;
@@ -31,8 +33,9 @@ pub(crate) mod supervision;
 /// The execution mode of a task.
 #[derive(Copy, Clone, Debug)]
 pub enum Execution {
-    /// Task runs on a dedicated thread.
-    Dedicated,
+    /// Task runs on a dedicated thread, optionally pinned to a core. Core pinning is
+    /// currently Linux only and a no-op on other platforms.
+    Dedicated(Option<usize>),
     /// Task runs on the same thread as its dedicated ancestor. Falls back to
     /// the shared executor if the ancestor is not dedicated.
     Colocated,
