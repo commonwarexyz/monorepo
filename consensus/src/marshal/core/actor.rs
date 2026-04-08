@@ -1533,12 +1533,18 @@ where
     /// Repair finalized heights beyond the last stored finalized block.
     ///
     /// After restart, `finalizations_by_height` may contain entries for heights
-    /// that have no corresponding block in `finalized_blocks`. This method
-    /// walks backwards from the tip until it finds a height where we have both
-    /// a finalization certificate and a block locally. That block is stored as
-    /// an anchor, and fetch requests are issued for all heights above it where
-    /// we have a finalization but no block. Internal backfilling during runtime
-    /// will fill in the rest.
+    /// that have no corresponding block in `finalized_blocks`. Rather than
+    /// walking forward over every such height (which may span a large range),
+    /// this method walks backwards from the tip over known finalization ranges
+    /// until it finds the first height where we have both a finalization
+    /// certificate and a block locally.
+    ///
+    /// That single block is stored as an anchor in `finalized_blocks`. This is
+    /// sufficient because:
+    /// - `try_repair_gaps` will walk backward from the anchor through parent
+    ///   links to fill the gap between the anchor and the contiguous range.
+    /// - Fetch requests are issued for all finalized heights above the anchor
+    ///   that are missing blocks, seeding the resolver for runtime backfill.
     ///
     /// Only trailing heights (beyond the last contiguous `finalized_blocks`
     /// range) are considered. Internal gaps are handled by `try_repair_gaps`.
