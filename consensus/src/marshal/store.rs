@@ -180,6 +180,12 @@ pub trait Blocks: Send + Sync + 'static {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+
+    /// Retrieve the last (highest) index in the store.
+    ///
+    /// # Returns
+    /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.
+    fn last_index(&self) -> Option<Height>;
 }
 
 impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
@@ -268,6 +274,10 @@ where
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
     }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
+    }
 }
 
 impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
@@ -355,5 +365,9 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }

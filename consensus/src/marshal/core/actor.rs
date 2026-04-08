@@ -405,20 +405,11 @@ where
         // written before the last shutdown.
         self.cache.load_persisted_epochs().await;
 
-        // If finalizations extend beyond our last stored finalized block,
-        // try to fill them from local data (notarized blocks in the
-        // buffer/cache) and fetch the rest by commitment.
-        let mut wrote = self
-            .repair_trailing_finalized(&mut buffer, &mut resolver, &mut application)
-            .await;
-
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        wrote |= self
+        if self
             .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await;
-
-        // Flush any blocks written by trailing or gap repair in a single sync.
-        if wrote {
+            .await
+        {
             self.sync_finalized().await;
         }
 
@@ -1530,53 +1521,14 @@ where
             .await
     }
 
-    /// Ensure the latest finalized height has a corresponding block stored.
-    ///
-    /// If the block is available locally (buffer or cache), it is stored
-    /// directly. Otherwise, a fetch request is issued to the resolver.
-    /// Once stored, `try_repair_gaps` fills backward from this anchor
-    /// through parent links.
-    ///
-    /// Returns `true` if a block was written locally and a sync is needed.
-    async fn repair_trailing_finalized<Buf: Buffer<V>>(
-        &mut self,
-        buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> bool {
-        let Some(height) = self.finalizations_by_height.last_index() else {
-            return false;
-        };
-        if height <= self.last_processed_height {
-            return false;
-        }
-        let finalization = self
-            .get_finalization_by_height(height)
-            .await
-            .expect("finalization missing");
-        let commitment = finalization.proposal.payload;
-        if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            let digest = block.digest();
-            return self
-                .store_finalization(
-                    height,
-                    digest,
-                    block,
-                    Some(finalization),
-                    application,
-                    buffer,
-                )
-                .await;
-        }
-        resolver
-            .fetch(Request::<V::Commitment>::Block(commitment))
-            .await;
-        false
-    }
-
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
+    ///
+    /// This also handles the "trailing" case where finalizations exist beyond
+    /// the last stored block (the block data was lost before a crash). The
+    /// trailing block is anchored first so that backward gap repair can fill
+    /// inward from it.
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
@@ -1588,6 +1540,43 @@ where
     ) -> bool {
         let mut wrote = false;
         let start = self.last_processed_height.next();
+
+        // If finalizations extend beyond the last stored block, anchor the
+        // trailing block so the gap repair loop below can walk backward from it.
+        if let Some(last_finalized) = self.finalizations_by_height.last_index() {
+            let have_block = self
+                .finalized_blocks
+                .last_index()
+                .is_some_and(|last| last >= last_finalized);
+            if last_finalized > self.last_processed_height && !have_block {
+                let finalization = self
+                    .get_finalization_by_height(last_finalized)
+                    .await
+                    .expect("finalization missing");
+                let commitment = finalization.proposal.payload;
+                if let Some(block) =
+                    self.find_block_by_commitment(buffer, commitment).await
+                {
+                    let digest = block.digest();
+                    wrote |= self
+                        .store_finalization(
+                            last_finalized,
+                            digest,
+                            block,
+                            Some(finalization),
+                            application,
+                            buffer,
+                        )
+                        .await;
+                } else {
+                    resolver
+                        .fetch(Request::<V::Commitment>::Block(commitment))
+                        .await;
+                }
+            }
+        }
+
+        // Fill internal gaps by walking backward from each gap's end block.
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
