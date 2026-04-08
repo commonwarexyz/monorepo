@@ -434,6 +434,91 @@ impl<B: Blob> Append<B> {
         Ok((bufs, available))
     }
 
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    ///
+    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
+    /// non-overlapping, and within bounds. This amortizes lock acquisition and avoids
+    /// per-item buffer allocation compared to calling [`read_at`](Self::read_at) in a loop.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: usize,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(buf.len(), offsets.len() * item_size);
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        let last_end = offsets[offsets.len() - 1]
+            .checked_add(item_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Acquire the buffer lock once for all items.
+        let buffer = self.buffer.read().await;
+        if last_end > buffer.size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Resolve tip-buffer overlap for all items, tracking which indices need cache reads.
+        // cache_indices stores (item_index, byte_len, offset) for items needing cache reads.
+        let mut cache_indices: Vec<(usize, usize, u64)> = Vec::new();
+        for (i, &offset) in offsets.iter().enumerate() {
+            let item_buf = &mut buf[i * item_size..(i + 1) * item_size];
+            let end = offset + item_size as u64;
+
+            if end <= buffer.offset {
+                // Entirely below tip -- needs cache read.
+                cache_indices.push((i, item_size, offset));
+            } else if offset >= buffer.offset {
+                // Entirely in tip buffer.
+                let src = (offset - buffer.offset) as usize;
+                item_buf.copy_from_slice(&buffer.as_ref()[src..src + item_size]);
+            } else {
+                // Straddles tip boundary.
+                let prefix_len = (buffer.offset - offset) as usize;
+                item_buf[prefix_len..].copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
+                cache_indices.push((i, prefix_len, offset));
+            }
+        }
+
+        drop(buffer);
+
+        if cache_indices.is_empty() {
+            return Ok(());
+        }
+
+        // Build mutable slices for the cache read. We split buf into non-overlapping
+        // sub-slices using raw pointer arithmetic (items are at fixed strides).
+        // SAFETY: Each (index, len) pair refers to a disjoint region of buf since
+        // indices are unique and item_size-aligned.
+        let mut cache_ranges: Vec<(&mut [u8], u64)> = cache_indices
+            .iter()
+            .map(|&(idx, len, offset)| {
+                let start = idx * item_size;
+                let ptr = unsafe { buf.as_mut_ptr().add(start) };
+                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+                (slice, offset)
+            })
+            .collect();
+
+        // Fast path: try page cache for all ranges in a single lock acquisition.
+        let fully_cached = self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        if fully_cached == cache_ranges.len() {
+            return Ok(());
+        }
+
+        // Slow path: cache miss on some ranges. Fall back to per-range reads.
+        let blob_guard = self.blob_state.read().await;
+        for (item_buf, offset) in &mut cache_ranges[fully_cached..] {
+            self.cache_ref
+                .read(&blob_guard.blob, self.id, item_buf, *offset)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Reads bytes starting at `logical_offset` into `buf`.
     ///
     /// This method allows reading directly into a mutable slice without taking ownership of the

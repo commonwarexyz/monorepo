@@ -181,6 +181,42 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
+    /// Read multiple items from the same section at sorted positions into a caller buffer.
+    ///
+    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
+    /// within the section's bounds.
+    pub async fn get_many(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let offsets: Vec<u64> = positions
+            .iter()
+            .map(|&p| {
+                p.checked_mul(Self::CHUNK_SIZE_U64)
+                    .ok_or(Error::ItemOutOfRange(p))
+            })
+            .collect::<Result<_, _>>()?;
+
+        blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
+
+        let mut items = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
+            items.push(A::decode(bytes::Bytes::copy_from_slice(slice)).map_err(Error::Codec)?);
+        }
+        Ok(items)
+    }
+
     /// Read the last item in a section, if any.
     ///
     /// Returns `Ok(None)` if the section is empty.

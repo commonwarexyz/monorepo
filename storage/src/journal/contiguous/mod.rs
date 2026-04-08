@@ -35,6 +35,27 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
+    /// Read multiple items at sorted positions.
+    ///
+    /// The default implementation calls [`read`](Self::read) in a loop.
+    /// Fixed-size journal implementations override this to amortize lock
+    /// acquisition and avoid per-item buffer allocation.
+    fn read_many(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
+    where
+        Self::Item: Send,
+    {
+        async move {
+            let mut items = Vec::with_capacity(positions.len());
+            for &pos in positions {
+                items.push(self.read(pos).await?);
+            }
+            Ok(items)
+        }
+    }
+
     /// Return a stream of all items starting from `start_pos`.
     ///
     /// Because the reader holds the lock, validation and stream setup happen

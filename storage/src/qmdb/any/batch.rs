@@ -393,15 +393,29 @@ where
             return Ok(Vec::new());
         }
 
-        let mut ops = Vec::with_capacity(locations.len());
-        for &loc in locations {
+        // Separate in-memory ops from committed-journal positions for batch reading.
+        let mut ops: Vec<Option<Operation<F, U>>> = Vec::with_capacity(locations.len());
+        let mut committed: Vec<(usize, u64)> = Vec::new();
+        for (i, &loc) in locations.iter().enumerate() {
             if let Some(op) = self.read_cached_op(loc, current_ops) {
-                ops.push(op);
-                continue;
+                ops.push(Some(op));
+            } else {
+                ops.push(None);
+                committed.push((i, *loc));
             }
-            ops.push(reader.read(*loc).await?);
         }
-        Ok(ops)
+
+        if committed.is_empty() {
+            return Ok(ops.into_iter().map(|o| o.unwrap()).collect());
+        }
+
+        // Batch read all committed positions in a single call.
+        let positions: Vec<u64> = committed.iter().map(|&(_, pos)| pos).collect();
+        let read_ops = reader.read_many(&positions).await?;
+        for ((idx, _), op) in committed.into_iter().zip(read_ops) {
+            ops[idx] = Some(op);
+        }
+        Ok(ops.into_iter().map(|o| o.unwrap()).collect())
     }
 
     /// Gather existing-key locations for all keys in `mutations`.

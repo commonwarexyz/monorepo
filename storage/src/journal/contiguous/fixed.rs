@@ -199,6 +199,68 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         self.guard.read(pos, self.items_per_blob).await
     }
 
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Validate all positions.
+        for &pos in positions {
+            if pos >= self.guard.size {
+                return Err(Error::ItemOutOfRange(pos));
+            }
+            if pos < self.guard.pruning_boundary {
+                return Err(Error::ItemPruned(pos));
+            }
+        }
+
+        let items_per_blob = self.items_per_blob;
+        let pruning_boundary = self.guard.pruning_boundary;
+        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
+
+        // Group positions by section and translate to section-local positions.
+        let mut result = Vec::with_capacity(positions.len());
+        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+
+        let mut group_start = 0;
+        while group_start < positions.len() {
+            let section = positions[group_start] / items_per_blob;
+            let section_start = section * items_per_blob;
+            let first_in_section = pruning_boundary.max(section_start);
+
+            // Find the end of this section group (positions are sorted).
+            let mut group_end = group_start + 1;
+            while group_end < positions.len() && positions[group_end] / items_per_blob == section {
+                group_end += 1;
+            }
+
+            let group_len = group_end - group_start;
+            let section_positions: Vec<u64> = positions[group_start..group_end]
+                .iter()
+                .map(|&pos| pos - first_in_section)
+                .collect();
+
+            let buf = &mut reusable_buf[..group_len * chunk_size];
+            let items = self
+                .guard
+                .journal
+                .get_many(section, &section_positions, buf)
+                .await
+                .map_err(|e| match e {
+                    Error::SectionOutOfRange(e)
+                    | Error::AlreadyPrunedToSection(e)
+                    | Error::ItemOutOfRange(e) => {
+                        Error::Corruption(format!("section/item should be found, but got: {e}"))
+                    }
+                    other => other,
+                })?;
+
+            result.extend(items);
+            group_start = group_end;
+        }
+
+        Ok(result)
+    }
+
     async fn replay(
         &self,
         buffer: NonZeroUsize,
