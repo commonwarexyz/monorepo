@@ -11,8 +11,10 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch, hasher::Standard as StandardHasher, journaled::Journaled, Family, Location,
-        Position, Proof, Readable,
+        self, batch,
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+        journaled::Journaled,
+        Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -117,10 +119,44 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             self.items.is_empty(),
             "merkleize_with expects no items added via add"
         );
+
+        #[cfg(feature = "std")]
+        if let Some(pool) = self.inner.pool().filter(|_| items.len() >= batch::MIN_TO_PARALLELIZE)
+        {
+            // Parallel path: encode items and compute leaf digests on the thread pool,
+            // then feed the pre-computed digests sequentially into the MMR batch.
+            use rayon::prelude::*;
+            let starting_leaves = self.inner.leaves();
+            let digests: Vec<H::Digest> = pool.install(|| {
+                items
+                    .par_iter()
+                    .enumerate()
+                    .map_init(
+                        || self.hasher.clone(),
+                        |h, (i, item)| {
+                            let loc = Location::<F>::new(*starting_leaves + i as u64);
+                            let pos = Position::try_from(loc).expect("valid leaf location");
+                            h.leaf_digest(pos, &item.encode())
+                        },
+                    )
+                    .collect()
+            });
+            for digest in digests {
+                self.inner = self.inner.add_leaf_digest(digest);
+            }
+        } else {
+            for item in &*items {
+                let encoded = item.encode();
+                self.inner = self.inner.add(&self.hasher, &encoded);
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
         for item in &*items {
             let encoded = item.encode();
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
+
         let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
