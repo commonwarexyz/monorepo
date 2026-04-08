@@ -991,15 +991,15 @@ mod tests {
 
         // Base: 4 bits, all set (previous commit at loc 3).
         // Segment of 4 operations starting at base_size=4.
-        // Diff: key1 active at loc=4 (in segment), key2 active at loc=99 (not in segment,
-        // so superseded within this segment).
+        // Diff: key1 active at loc=4 (in batch), key2 active at loc=99 (not in batch,
+        // so superseded within this batch).
         let base = make_bitmap(&[true; 4]);
         let mut diff = BTreeMap::new();
         diff.insert(
             key1,
             DiffEntry::Active {
                 value: 100u64,
-                loc: Location::new(4), // offset 0 in segment
+                loc: Location::new(4), // offset 0 in batch
                 base_old_loc: None,
             },
         );
@@ -1007,7 +1007,7 @@ mod tests {
             key2,
             DiffEntry::Active {
                 value: 200u64,
-                loc: Location::new(99), // not in segment [4,8), so superseded
+                loc: Location::new(99), // not in batch [4,8), so superseded
                 base_old_loc: None,
             },
         );

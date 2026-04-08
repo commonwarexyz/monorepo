@@ -2451,7 +2451,7 @@ pub mod tests {
     }
 
     /// Regression: bitmap ancestor skip logic must correctly pair each ancestor's
-    /// bitmap data with its seg_end. Requires a 3-ancestor chain (A->B->C->D)
+    /// bitmap data with its batch_end. Requires a 3-ancestor chain (A->B->C->D)
     /// to expose ordering bugs.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_bitmap_ordering() {
@@ -2490,7 +2490,7 @@ pub mod tests {
                 .unwrap();
 
             // Apply A only, then apply D (B and C uncommitted).
-            // D has 3 ancestors: [C, B, A] (parent-first) with seg_ends [C.total, B.total, A.total].
+            // D has 3 ancestors: [C, B, A] (parent-first) with batch_ends [C.total, B.total, A.total].
             // Bitmap ancestors are also parent-first: [C, B, A].
             db.apply_batch(a).await.unwrap();
             db.apply_batch(d.clone()).await.unwrap();
