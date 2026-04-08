@@ -2599,8 +2599,7 @@ mod tests {
         executor.start(test_merkleize_with_apply_inner::<mmb::Family>);
     }
 
-    /// merkleize_with shares the Arc: the caller's clone and the batch's
-    /// internal batch point to the same allocation.
+    /// merkleize_with stores the caller's Arc directly (no deep copy).
     async fn test_merkleize_with_shares_arc_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "mw-arc", 3).await;
 
