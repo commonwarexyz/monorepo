@@ -404,21 +404,20 @@ where
         // Attempt to dispatch the next finalized block to the application, if it is ready.
         self.try_dispatch_blocks(&mut application).await;
 
-        // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        if self
-            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await
-        {
-            self.sync_finalized().await;
-        }
-
         // If finalizations extend beyond our last stored finalized block,
         // try to fill them from local data (e.g. notarized blocks in the
         // buffer/cache) and fetch the rest by commitment.
-        if self
+        let mut wrote = self
             .repair_trailing_finalized(&mut buffer, &mut resolver, &mut application)
-            .await
-        {
+            .await;
+
+        // Attempt to repair any gaps in the finalized blocks archive, if there are any.
+        wrote |= self
+            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+            .await;
+
+        // Flush any blocks written by trailing or gap repair in a single sync.
+        if wrote {
             self.sync_finalized().await;
         }
 
