@@ -200,7 +200,7 @@ mod tests {
 
     // Directly writes blocks and finalizations into the storage archives
     // used by the marshal, bypassing the normal finalization flow. This lets
-    // us manufacture inconsistent on-disk state (e.g. a finalization without
+    // us manufacture inconsistent on-disk state (a finalization without
     // its corresponding block) to simulate crash-recovery scenarios.
     async fn seed_inconsistent_restart_state(
         context: deterministic::Context,
@@ -783,6 +783,7 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
+
             // Walk through sequential acks to confirm no repair was needed.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
@@ -858,6 +859,7 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
+
             // Walk through both blocks to confirm repair recovered them.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
