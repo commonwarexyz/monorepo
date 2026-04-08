@@ -687,7 +687,7 @@ impl<const N: usize> BitmapBatch<N> {
                 // Extend bitmap to the overlay's length.
                 bitmap.extend_to(overlay.len);
                 // Overwrite dirty chunks.
-                for (&idx, &chunk_bytes) in &overlay.chunks {
+                for (&idx, chunk_bytes) in &overlay.chunks {
                     if idx >= bitmap.pruned_chunks() {
                         bitmap.set_chunk_by_index(idx, &chunk_bytes);
                     }
@@ -739,11 +739,9 @@ impl<const N: usize> BitmapBatch<N> {
         let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
         for overlay in overlays.into_iter().rev() {
             // Extend bitmap to the overlay's length.
-            while bitmap.len() < overlay.len {
-                bitmap.push(false);
-            }
+            bitmap.extend_to(overlay.len);
             // Apply dirty chunks.
-            for (&idx, &chunk_bytes) in &overlay.chunks {
+            for (&idx, chunk_bytes) in &overlay.chunks {
                 if BitMap::<N>::to_chunk_index(idx as u64 * ChunkOverlay::<N>::CHUNK_BITS)
                     >= bitmap.pruned_chunks()
                 {

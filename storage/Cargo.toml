@@ -84,12 +84,6 @@ path = "src/qmdb/benches/bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]
-name = "qmdb-merkleize"
-harness = false
-path = "src/qmdb/benches/bench_merkleize.rs"
-required-features = ["test-traits"]
-
-[[bench]]
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
