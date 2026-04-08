@@ -1243,7 +1243,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Commit a and drop it.
+            // Commit a and drop it. b's Weak<a> becomes invalid.
             db.apply_batch(a).await.unwrap();
             db.commit().await.unwrap();
 
@@ -1275,8 +1275,9 @@ pub(crate) mod test {
     }
 
     /// Regression: applying a batch after its ancestor Arc is dropped (without
-    /// committing) must still apply the ancestor's snapshot diffs via inherited
-    /// ancestor data.
+    /// committing) must still apply the ancestor's snapshot diffs. Before the
+    /// fix, the Weak parent chain was dead and ancestor diffs were silently
+    /// lost, causing the journal and snapshot to diverge.
     #[test_traced("WARN")]
     fn test_apply_batch_after_ancestor_dropped_without_commit() {
         let executor = deterministic::Runner::default();
@@ -1316,7 +1317,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Drop a and b without committing.
+            // Drop a and b without committing. Their Weak refs in c are now dead.
             drop(a);
             drop(b);
 

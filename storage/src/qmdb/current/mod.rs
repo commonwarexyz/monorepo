@@ -2194,7 +2194,7 @@ pub mod tests {
             }
             let c_m = c.merkleize(&db, None).await.unwrap();
 
-            // Drop A and B without committing.
+            // Drop A and B without committing. Their Weak refs in C are now dead.
             drop(a_m);
             drop(b_m);
 
@@ -2490,8 +2490,8 @@ pub mod tests {
                 .unwrap();
 
             // Apply A only, then apply D (B and C uncommitted).
-            // D has 3 ancestors: [C, B, A] (tip-to-root) with seg_ends [C.total, B.total, A.total].
-            // Bitmap ancestors are also tip-to-root: [C, B, A].
+            // D has 3 ancestors: [C, B, A] (parent-first) with seg_ends [C.total, B.total, A.total].
+            // Bitmap ancestors are also parent-first: [C, B, A].
             db.apply_batch(a).await.unwrap();
             db.apply_batch(d.clone()).await.unwrap();
 

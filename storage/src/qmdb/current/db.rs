@@ -573,8 +573,7 @@ where
             }
             // Apply in chronological order (deepest ancestor first).
             for overlay in overlays.into_iter().rev() {
-                self.status
-                    .apply_overlay(ChunkOverlay::clone(&overlay));
+                self.status.apply_overlay(ChunkOverlay::clone(&overlay));
             }
         }
 

@@ -45,7 +45,7 @@ type AnyUVar = commonware_storage::qmdb::any::unordered::variable::Db<
     Sha256,
     EightCap,
 >;
-type CurUFix = commonware_storage::qmdb::current::unordered::fixed::Db<
+type CurUFix32 = commonware_storage::qmdb::current::unordered::fixed::Db<
     Context,
     Digest,
     Digest,
@@ -53,13 +53,32 @@ type CurUFix = commonware_storage::qmdb::current::unordered::fixed::Db<
     EightCap,
     CHUNK_SIZE,
 >;
-type CurUVar = commonware_storage::qmdb::current::unordered::variable::Db<
+type CurUVar32 = commonware_storage::qmdb::current::unordered::variable::Db<
     Context,
     Digest,
     Digest,
     Sha256,
     EightCap,
     CHUNK_SIZE,
+>;
+
+const LARGE_CHUNK_SIZE: usize = 256;
+
+type CurUFix256 = commonware_storage::qmdb::current::unordered::fixed::Db<
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurUVar256 = commonware_storage::qmdb::current::unordered::variable::Db<
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
 >;
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
@@ -171,8 +190,10 @@ async fn run_bench<
 enum Variant {
     AnyFixed,
     AnyVariable,
-    CurrentFixed,
-    CurrentVariable,
+    CurrentFixed32,
+    CurrentVariable32,
+    CurrentFixed256,
+    CurrentVariable256,
 }
 
 impl Variant {
@@ -180,17 +201,21 @@ impl Variant {
         match self {
             Self::AnyFixed => "any::unordered::fixed",
             Self::AnyVariable => "any::unordered::variable",
-            Self::CurrentFixed => "current::unordered::fixed",
-            Self::CurrentVariable => "current::unordered::variable",
+            Self::CurrentFixed32 => "current::unordered::fixed::chunk=32",
+            Self::CurrentVariable32 => "current::unordered::variable::chunk=32",
+            Self::CurrentFixed256 => "current::unordered::fixed::chunk=256",
+            Self::CurrentVariable256 => "current::unordered::variable::chunk=256",
         }
     }
 }
 
-const VARIANTS: [Variant; 4] = [
+const VARIANTS: [Variant; 6] = [
     Variant::AnyFixed,
     Variant::AnyVariable,
-    Variant::CurrentFixed,
-    Variant::CurrentVariable,
+    Variant::CurrentFixed32,
+    Variant::CurrentVariable32,
+    Variant::CurrentFixed256,
+    Variant::CurrentVariable256,
 ];
 
 fn bench_merkleize(c: &mut Criterion) {
@@ -226,7 +251,7 @@ fn bench_merkleize(c: &mut Criterion) {
                                 let db = AnyUVar::init(ctx, cfg).await.unwrap();
                                 run_bench(db, num_keys, iters).await
                             }
-                            Variant::CurrentFixed => {
+                            Variant::CurrentFixed32 => {
                                 let cfg = commonware_storage::qmdb::current::FixedConfig {
                                     mmr_config: mmr_cfg(&ctx, pc.clone()),
                                     journal_config: fix_log_cfg(pc),
@@ -235,10 +260,10 @@ fn bench_merkleize(c: &mut Criterion) {
                                     ),
                                     translator: EightCap,
                                 };
-                                let db = CurUFix::init(ctx, cfg).await.unwrap();
+                                let db = CurUFix32::init(ctx, cfg).await.unwrap();
                                 run_bench(db, num_keys, iters).await
                             }
-                            Variant::CurrentVariable => {
+                            Variant::CurrentVariable32 => {
                                 let cfg = commonware_storage::qmdb::current::VariableConfig {
                                     mmr_config: mmr_cfg(&ctx, pc.clone()),
                                     journal_config: var_log_cfg(pc),
@@ -247,7 +272,31 @@ fn bench_merkleize(c: &mut Criterion) {
                                     ),
                                     translator: EightCap,
                                 };
-                                let db = CurUVar::init(ctx, cfg).await.unwrap();
+                                let db = CurUVar32::init(ctx, cfg).await.unwrap();
+                                run_bench(db, num_keys, iters).await
+                            }
+                            Variant::CurrentFixed256 => {
+                                let cfg = commonware_storage::qmdb::current::FixedConfig {
+                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
+                                    journal_config: fix_log_cfg(pc),
+                                    grafted_mmr_metadata_partition: format!(
+                                        "grafted-mmr-metadata-{PARTITION}"
+                                    ),
+                                    translator: EightCap,
+                                };
+                                let db = CurUFix256::init(ctx, cfg).await.unwrap();
+                                run_bench(db, num_keys, iters).await
+                            }
+                            Variant::CurrentVariable256 => {
+                                let cfg = commonware_storage::qmdb::current::VariableConfig {
+                                    mmr_config: mmr_cfg(&ctx, pc.clone()),
+                                    journal_config: var_log_cfg(pc),
+                                    grafted_mmr_metadata_partition: format!(
+                                        "grafted-mmr-metadata-{PARTITION}"
+                                    ),
+                                    translator: EightCap,
+                                };
+                                let db = CurUVar256::init(ctx, cfg).await.unwrap();
                                 run_bench(db, num_keys, iters).await
                             }
                         }

@@ -27,19 +27,15 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 type Error = crate::qmdb::Error<mmr::Family>;
 
-/// Bitmap pushes and clears for a single ancestor batch.
-/// Speculative chunk-level bitmap overlay.
+/// Bitmap pushes and clears for a single ancestor batch. Speculative chunk-level bitmap overlay.
 ///
-/// Instead of tracking individual pushed bits and cleared locations, maintains
-/// materialized chunk bytes for every chunk that differs from the parent bitmap.
-/// This directly produces the chunk data needed for grafted MMR leaf computation.
+/// Instead of tracking individual pushed bits and cleared locations, maintains materialized chunk
+/// bytes for every chunk that differs from the parent bitmap. This directly produces the chunk data
+/// needed for grafted MMR leaf computation.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
@@ -51,15 +47,15 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 impl<const N: usize> ChunkOverlay<N> {
     const CHUNK_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
-    fn new(len: u64) -> Self {
+    const fn new(len: u64) -> Self {
         Self {
             chunks: BTreeMap::new(),
             len,
         }
     }
 
-    /// Load-or-create a chunk: returns a mutable reference to the materialized
-    /// chunk bytes. On first access for an existing chunk, reads from `base`.
+    /// Load-or-create a chunk: returns a mutable reference to the materialized chunk bytes. On
+    /// first access for an existing chunk, reads from `base`.
     fn chunk_mut<B: BitmapReadable<N>>(&mut self, base: &B, idx: usize) -> &mut [u8; N] {
         self.chunks.entry(idx).or_insert_with(|| {
             let base_len = base.len();
@@ -102,7 +98,7 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 
     /// Number of complete chunks.
-    pub(crate) fn complete_chunks(&self) -> usize {
+    pub(crate) const fn complete_chunks(&self) -> usize {
         (self.len / Self::CHUNK_BITS) as usize
     }
 }
@@ -427,6 +423,7 @@ where
 /// the committed DB location (`base_old_loc`).
 /// Build a [`ChunkOverlay`] for this batch by setting active bits and clearing
 /// superseded locations directly in materialized chunk bytes.
+#[allow(clippy::type_complexity)]
 fn build_chunk_overlay<U, B: BitmapReadable<N>, const N: usize>(
     base: &B,
     segment_len: usize,
@@ -456,8 +453,8 @@ where
             }
         }
 
-        // Clear the most recent superseded location. Older locations were already
-        // cleared by the ancestor batch that superseded them.
+        // Clear the most recent superseded location. Older locations were already cleared by the
+        // ancestor batch that superseded them.
         let mut prev_loc = entry.base_old_loc();
         for ancestor_diff in ancestor_diffs {
             if let Some(ancestor_entry) = ancestor_diff.get(key) {
@@ -470,10 +467,9 @@ where
         }
     }
 
-    // Ensure all new complete chunks beyond the parent are materialized,
-    // so downstream consumers don't read from the parent and panic on
-    // out-of-range indices. Uses chunk_mut to inherit the parent's partial
-    // chunk data when idx == parent_complete (avoiding loss of existing bits).
+    // Ensure all new complete chunks beyond the parent are materialized, so downstream consumers
+    // don't read from the parent and panic on out-of-range indices. Uses chunk_mut to inherit the
+    // parent's partial chunk data when idx == parent_complete (avoiding loss of existing bits).
     let parent_complete = base.complete_chunks();
     let new_complete = overlay.complete_chunks();
     for idx in parent_complete..new_complete {
@@ -678,9 +674,8 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 }
 
 impl<const N: usize> BitmapBatch<N> {
-    /// Apply a chunk overlay to this bitmap. When `self` is `Base` with sole
-    /// ownership, writes overlay chunks directly into the bitmap. Otherwise
-    /// creates a new `Layer`.
+    /// Apply a chunk overlay to this bitmap. When `self` is `Base` with sole ownership, writes
+    /// overlay chunks directly into the bitmap. Otherwise creates a new `Layer`.
     pub(super) fn apply_overlay(&mut self, overlay: ChunkOverlay<N>) {
         if overlay.chunks.is_empty() {
             return;
@@ -749,9 +744,8 @@ impl<const N: usize> BitmapBatch<N> {
             }
             // Apply dirty chunks.
             for (&idx, &chunk_bytes) in &overlay.chunks {
-                if BitMap::<N>::to_chunk_index(
-                    idx as u64 * ChunkOverlay::<N>::CHUNK_BITS,
-                ) >= bitmap.pruned_chunks()
+                if BitMap::<N>::to_chunk_index(idx as u64 * ChunkOverlay::<N>::CHUNK_BITS)
+                    >= bitmap.pruned_chunks()
                 {
                     bitmap.set_chunk_by_index(idx, &chunk_bytes);
                 }
@@ -1047,9 +1041,8 @@ mod tests {
 
         let overlay = build_chunk_overlay::<U, _, N>(&base, 4, 4, &diff, &[]);
 
-        // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1),
-        // bits 5-6 false (inactive), bit 7 set (CommitFloor at loc 7).
-        // Also bit 3 cleared (previous commit).
+        // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
+        // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
         assert_ne!(c0[0] & (1 << 4), 0); // key1 active
         assert_eq!(c0[0] & (1 << 5), 0); // inactive
@@ -1116,9 +1109,9 @@ mod tests {
         assert_eq!(c0[1] & (1 << 3), 1 << 3); // bit 11 still set
     }
 
-    /// Regression: when the parent bitmap has a partial last chunk that becomes
-    /// complete in the child (without any active bits landing in that chunk),
-    /// the overlay must inherit the parent's partial chunk data, not zero it out.
+    /// Regression: when the parent bitmap has a partial last chunk that becomes complete in the
+    /// child (without any active bits landing in that chunk), the overlay must inherit the parent's
+    /// partial chunk data, not zero it out.
     #[test]
     fn chunk_overlay_preserves_partial_parent_chunk() {
         use crate::qmdb::any::value::FixedEncoding;
@@ -1131,10 +1124,9 @@ mod tests {
         let base = make_bitmap(&[true; 20]);
         assert_eq!(base.complete_chunks(), 0); // partial
 
-        // Segment of 20 ops starting at loc 20. This pushes total to 40 bits,
-        // completing chunk 0 (32 bits) and starting chunk 1.
-        // Diff: only one active key at loc 35 (in chunk 1), plus CommitFloor at loc 39.
-        // No active bits land in chunk 0's new region (bits 20-31).
+        // Segment of 20 ops starting at loc 20. This pushes total to 40 bits, completing chunk 0
+        // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
+        // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let mut diff = BTreeMap::new();
         diff.insert(
