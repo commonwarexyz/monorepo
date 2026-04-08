@@ -114,7 +114,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
     /// may override this to acquire the write lock once for all items.
     ///
-    /// No-ops if there are no items, returning the current size (next append position).
+    /// No-ops if items is empty, returning the current size (next append position).
     fn append_many<'a>(
         &'a mut self,
         items: Many<'a, Self::Item>,
