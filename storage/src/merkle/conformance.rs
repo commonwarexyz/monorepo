@@ -18,15 +18,15 @@ where
     F: Family,
     H: Hasher<F, Digest = sha256::Digest>,
 {
-    let changeset = {
+    let batch = {
         let mut batch = mem.new_batch();
         for i in 0u64..elements {
             let element = hasher.digest(&i.to_be_bytes());
             batch = batch.add(hasher, &element);
         }
-        batch.merkleize(hasher).finalize()
+        batch.merkleize(&mem, hasher)
     };
-    mem.apply(changeset).unwrap();
+    mem.apply_batch(&batch).unwrap();
     mem
 }
 

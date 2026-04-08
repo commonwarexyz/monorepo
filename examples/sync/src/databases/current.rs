@@ -20,7 +20,7 @@ use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::unordered::{fixed::Operation as FixedOperation, Update},
@@ -39,7 +39,7 @@ const CHUNK_SIZE: usize = sha256::Digest::SIZE;
 pub type Database<E> = current::unordered::fixed::Db<E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
 
 /// Operation type alias. Same as the `any` operation type.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
@@ -101,7 +101,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error> {
+    ) -> Result<(), qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             error!("operations must end with a commit");
             return Ok(());
@@ -117,8 +117,8 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let finalized = batch.merkleize(metadata, self).await?.finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(self, metadata).await?;
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -146,7 +146,8 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         // Return ops-level proofs (not grafted proofs) for the sync engine.
         self.ops_historical_proof(op_count, start_loc, max_ops)
     }
@@ -154,7 +155,7 @@ where
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
 

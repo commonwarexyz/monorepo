@@ -116,7 +116,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{Location, Position, StandardHasher as Standard};
+    use crate::merkle::mmr::{Location, Position, StandardHasher as Standard};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 

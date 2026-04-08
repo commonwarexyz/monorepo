@@ -17,7 +17,9 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
+    utils::{
+        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+    },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -25,7 +27,7 @@ use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
-use futures::{future::BoxFuture, FutureExt};
+use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -42,7 +44,6 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
-    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -141,6 +142,14 @@ pub struct Config {
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
 
+    /// Stack size to use for runtime-owned threads.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [utils::thread::system_thread_stack_size].
+    thread_stack_size: usize,
+
     /// Whether or not to catch panics.
     catch_panics: bool,
 
@@ -170,6 +179,7 @@ impl Config {
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
@@ -188,6 +198,11 @@ impl Config {
     /// See [Config]
     pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
         self
     }
     /// See [Config]
@@ -239,6 +254,10 @@ impl Config {
     /// See [Config]
     pub const fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -297,6 +316,7 @@ pub struct Executor {
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    thread_stack_size: usize,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -334,6 +354,7 @@ impl crate::Runner for Runner {
         let runtime = Builder::new_multi_thread()
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
+            .thread_stack_size(self.cfg.thread_stack_size)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
@@ -368,6 +389,7 @@ impl crate::Runner for Runner {
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
+                            thread_stack_size: self.cfg.thread_stack_size,
                         },
                         iouring_registry,
                         storage_buffer_pool.clone(),
@@ -404,6 +426,7 @@ impl crate::Runner for Runner {
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
+                    thread_stack_size: self.cfg.thread_stack_size,
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
@@ -435,6 +458,7 @@ impl crate::Runner for Runner {
             runtime,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            thread_stack_size: self.cfg.thread_stack_size,
         });
 
         // Get metrics
@@ -561,14 +585,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future: BoxFuture<'_, T> = if is_instrumented {
+        let future = if is_instrumented {
             let span = info_span!("task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            f(self).instrument(span).boxed()
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
@@ -578,7 +602,7 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            thread::spawn({
+            utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
@@ -849,7 +873,6 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BufferPoolThreadCache;
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -858,14 +881,33 @@ mod tests {
         assert_eq!(cfg.worker_threads, 8);
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        let cfg = Config::new();
+        assert_eq!(
+            cfg.thread_stack_size(),
+            utils::thread::system_thread_stack_size()
+        );
+    }
+
+    #[test]
+    fn test_thread_stack_size_override() {
+        let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
+        assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
     }
 
     #[test]
@@ -882,13 +924,17 @@ mod tests {
 
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(2))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(2))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::Disabled
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_disabled()
+                .thread_cache_config
         );
     }
 }

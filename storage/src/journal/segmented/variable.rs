@@ -491,12 +491,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         ))
     }
 
-    /// Appends an item to `Journal` in a given `section`, returning the offset
-    /// where the item was written and the size of the item (which may now be smaller
-    /// than the encoded size from the codec, if compression is enabled).
-    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        // Create buffer with item data (no checksum, no alignment)
-        let (buf, item_len) = if let Some(compression) = self.compression {
+    /// Encode an item.
+    ///
+    /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
+    /// possibly compressed) payload, excluding the size prefix.
+    pub(crate) fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
+        if let Some(compression) = compression {
             // Compressed: encode first, then compress
             let encoded = item.encode();
             let compressed =
@@ -515,7 +515,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             UInt(item_len_u32).write(&mut buf);
             buf.put_slice(&compressed);
 
-            (buf, item_len)
+            Ok((buf, item_len_u32))
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
             let item_len = item.encode_size();
@@ -532,19 +532,30 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             UInt(item_len_u32).write(&mut buf);
             item.write(&mut buf);
 
-            (buf, item_len)
-        };
+            Ok((buf, item_len_u32))
+        }
+    }
 
-        // Get or create blob
+    /// Appends an item to `Journal` in a given `section`, returning the offset
+    /// where the item was written and the size of the item (which may differ
+    /// from the raw encoded size if compression is enabled).
+    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
+        let (buf, item_len) = Self::encode_item(self.compression, item)?;
+        self.append_raw(section, &buf)
+            .await
+            .map(|offset| (offset, item_len))
+    }
+
+    /// Append pre-encoded bytes to the given section, returning the byte offset
+    /// where the data was written.
+    ///
+    /// The buffer must be in the on-disk format produced by [Self::encode_item].
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
-
-        // Get current position - this is where we'll write (no alignment)
         let offset = blob.size().await;
-
-        // Append item to blob
-        blob.append(&buf).await?;
+        blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
-        Ok((offset, item_len as u32))
+        Ok(offset)
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.

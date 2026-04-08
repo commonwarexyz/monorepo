@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -125,6 +125,12 @@ impl<D: Digest> Write for Chunk<D> {
         self.index.write(writer);
         self.proof.write(writer);
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.shard.write_bufs(buf);
+        self.index.write(buf);
+        self.proof.write(buf);
+    }
 }
 
 impl<D: Digest> Read for Chunk<D> {
@@ -146,6 +152,10 @@ impl<D: Digest> Read for Chunk<D> {
 impl<D: Digest> EncodeSize for Chunk<D> {
     fn encode_size(&self) -> usize {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.shard.encode_inline_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -647,8 +657,10 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
     use commonware_utils::NZU16;
 
     type RS = ReedSolomon<Sha256>;
@@ -1060,6 +1072,24 @@ mod tests {
             &STRATEGY,
         )
         .is_err())
+    }
+
+    #[test]
+    fn test_chunk_encode_with_pool_matches_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let data = b"pool encoding test";
+            let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
+            let chunk = &chunks[0];
+
+            let encoded = chunk.encode();
+            let mut encoded_pool = chunk.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
     }
 
     #[cfg(feature = "arbitrary")]

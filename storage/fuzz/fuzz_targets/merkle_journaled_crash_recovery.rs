@@ -1,27 +1,29 @@
 #![no_main]
 
-//! Fuzz test for MMR Journaled crash recovery with fault injection.
+//! Fuzz test for Merkle Journaled crash recovery with fault injection.
+//! Tests both MMR and MMB families.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
-use commonware_storage::mmr::{
-    journaled::{Config, Mmr as JournaledMmr},
-    Location, StandardHasher,
+use commonware_storage::merkle::{
+    hasher::Standard as StandardHasher, journaled::Config, mmb, mmr, Family as MerkleFamily,
+    Location,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
-/// Data size for MMR leaves.
+/// Data size for leaves.
 const DATA_SIZE: usize = 32;
 
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Mmr = JournaledMmr<deterministic::Context, Digest>;
+type Journaled<F> =
+    commonware_storage::merkle::journaled::Journaled<F, deterministic::Context, Digest>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -44,12 +46,12 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
     Ok(f64::from(percent) / 100.0)
 }
 
-/// Operations that can be performed on the MMR.
+/// Operations that can be performed on the Merkle structure.
 #[derive(Arbitrary, Debug, Clone)]
-enum MmrOperation {
-    /// Add a leaf to the MMR.
+enum MerkleOperation {
+    /// Add a leaf.
     Add { data: [u8; DATA_SIZE] },
-    /// Sync the MMR to storage.
+    /// Sync to storage.
     Sync,
     /// Prune leaves up to a location.
     PruneToLoc { loc: u64 },
@@ -81,10 +83,10 @@ struct FuzzInput {
     #[arbitrary(with = bounded_nonzero_rate)]
     write_failure_rate: f64,
     /// Sequence of operations to execute.
-    operations: Vec<MmrOperation>,
+    operations: Vec<MerkleOperation>,
 }
 
-fn mmr_config(
+fn merkle_config(
     partition_suffix: &str,
     pooler: &impl BufferPooler,
     page_size: NonZeroU16,
@@ -93,8 +95,8 @@ fn mmr_config(
     write_buffer: NonZeroUsize,
 ) -> Config {
     Config {
-        journal_partition: format!("mmr-journal-{partition_suffix}"),
-        metadata_partition: format!("mmr-metadata-{partition_suffix}"),
+        journal_partition: format!("journal-{partition_suffix}"),
+        metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
@@ -102,7 +104,7 @@ fn mmr_config(
     }
 }
 
-/// Expected bounds for MMR state after recovery.
+/// Expected bounds for state after recovery.
 struct ExpectedBounds {
     min_size: u64,
     max_size: u64,
@@ -112,40 +114,36 @@ struct ExpectedBounds {
     max_pruned: u64,
 }
 
-async fn run_operations(
-    mmr: &mut Mmr,
+async fn run_operations<F: MerkleFamily>(
+    merkle: &mut Journaled<F>,
     hasher: &StandardHasher<Sha256>,
-    operations: &[MmrOperation],
+    operations: &[MerkleOperation],
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
-    let mut max_size = mmr.size().as_u64();
+    let mut max_size = merkle.size().as_u64();
     let mut min_leaves = 0u64;
-    let mut max_leaves = mmr.leaves().as_u64();
+    let mut max_leaves = merkle.leaves().as_u64();
     let mut min_pruned = 0u64;
-    let mut max_pruned = mmr.bounds().start.as_u64();
+    let mut max_pruned = merkle.bounds().start.as_u64();
 
     for op in operations.iter() {
         let failed = match op {
-            MmrOperation::Add { data } => {
-                let changeset = mmr
-                    .new_batch()
-                    .add(hasher, data)
-                    .merkleize(hasher)
-                    .finalize();
-                mmr.apply(changeset).unwrap();
-                max_size = max_size.max(mmr.size().as_u64());
-                max_leaves = max_leaves.max(mmr.leaves().as_u64());
+            MerkleOperation::Add { data } => {
+                let batch = merkle.new_batch().add(hasher, data);
+                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                merkle.apply_batch(&batch).unwrap();
+                max_size = max_size.max(merkle.size().as_u64());
+                max_leaves = max_leaves.max(merkle.leaves().as_u64());
                 false
             }
 
-            MmrOperation::Sync => {
-                if mmr.sync().await.is_err() {
+            MerkleOperation::Sync => {
+                if merkle.sync().await.is_err() {
                     true
                 } else {
-                    // Sync commits state: update all bounds to current values
-                    let size = mmr.size().as_u64();
-                    let leaves = mmr.leaves().as_u64();
-                    let pruned = mmr.bounds().start.as_u64();
+                    let size = merkle.size().as_u64();
+                    let leaves = merkle.leaves().as_u64();
+                    let pruned = merkle.bounds().start.as_u64();
                     min_size = size;
                     max_size = max_size.max(size);
                     min_leaves = leaves;
@@ -156,24 +154,21 @@ async fn run_operations(
                 }
             }
 
-            MmrOperation::PruneToLoc { loc } => {
-                let leaves = *mmr.leaves();
-                let current_pruned = *mmr.bounds().start;
+            MerkleOperation::PruneToLoc { loc } => {
+                let leaves = *merkle.leaves();
+                let current_pruned = *merkle.bounds().start;
                 let safe_loc = (*loc).min(leaves);
 
                 if safe_loc <= current_pruned {
-                    // No-op: already pruned past this point
                     false
                 } else {
-                    match mmr.prune(Location::new(safe_loc)).await {
+                    match merkle.prune(Location::new(safe_loc)).await {
                         Err(_) => {
-                            // Partial prune possible
                             max_pruned = max_pruned.max(safe_loc);
                             true
                         }
                         Ok(_) => {
-                            // Prune commits: update both bounds to actual value
-                            let pruned = mmr.bounds().start.as_u64();
+                            let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             false
@@ -182,23 +177,20 @@ async fn run_operations(
                 }
             }
 
-            MmrOperation::PruneAll => {
-                let leaves = mmr.leaves().as_u64();
-                let current_pruned = mmr.bounds().start.as_u64();
+            MerkleOperation::PruneAll => {
+                let leaves = merkle.leaves().as_u64();
+                let current_pruned = merkle.bounds().start.as_u64();
 
                 if leaves == 0 || current_pruned >= leaves {
-                    // No-op: nothing to prune
                     false
                 } else {
-                    match mmr.prune_all().await {
+                    match merkle.prune_all().await {
                         Err(_) => {
-                            // Partial prune possible
                             max_pruned = max_pruned.max(leaves);
                             true
                         }
                         Ok(_) => {
-                            // Prune commits: update both bounds to actual value
-                            let pruned = mmr.bounds().start.as_u64();
+                            let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             false
@@ -223,7 +215,7 @@ async fn run_operations(
     }
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     if input.operations.is_empty() {
         return;
     }
@@ -233,9 +225,9 @@ fn fuzz(input: FuzzInput) {
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_suffix = format!("crash-recovery-{}", input.seed);
+    let partition_suffix = format!("crash-{suffix}-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
-    let operations = input.operations;
+    let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
 
@@ -245,10 +237,10 @@ fn fuzz(input: FuzzInput) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                ctx.with_label("mmr"),
+            let mut merkle = Journaled::<F>::init(
+                ctx.with_label("merkle"),
                 &hasher,
-                mmr_config(
+                merkle_config(
                     &partition_suffix,
                     &ctx,
                     page_size,
@@ -267,7 +259,7 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
 
-            run_operations(&mut mmr, &hasher, &operations).await
+            run_operations(&mut merkle, &hasher, &operations).await
         }
     });
 
@@ -277,10 +269,10 @@ fn fuzz(input: FuzzInput) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = Mmr::init(
+        let mut merkle = Journaled::<F>::init(
             ctx.with_label("recovered"),
             &hasher,
-            mmr_config(
+            merkle_config(
                 &partition_suffix,
                 &ctx,
                 page_size,
@@ -290,12 +282,12 @@ fn fuzz(input: FuzzInput) {
             ),
         )
         .await
-        .expect("MMR recovery should succeed");
+        .expect("recovery should succeed");
 
         // Verify recovered state is within expected bounds
-        let size = mmr.size().as_u64();
-        let leaves = mmr.leaves().as_u64();
-        let pruned = mmr.bounds().start.as_u64();
+        let size = merkle.size().as_u64();
+        let leaves = merkle.leaves().as_u64();
+        let pruned = merkle.bounds().start.as_u64();
 
         assert!(
             size <= bounds.max_size,
@@ -336,14 +328,16 @@ fn fuzz(input: FuzzInput) {
 
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
-        let changeset = mmr
-            .new_batch()
-            .add(&hasher, &test_data)
-            .merkleize(&hasher)
-            .finalize();
-        mmr.apply(changeset).unwrap();
-        mmr.destroy().await.expect("Should be able to destroy MMR");
+        let batch = merkle.new_batch().add(&hasher, &test_data);
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle.apply_batch(&batch).unwrap();
+        merkle.destroy().await.expect("should be able to destroy");
     });
+}
+
+fn fuzz(input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&input, "mmr");
+    fuzz_family::<mmb::Family>(&input, "mmb");
 }
 
 fuzz_target!(|input: FuzzInput| {

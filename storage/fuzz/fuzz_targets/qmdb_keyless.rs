@@ -5,9 +5,9 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location, StandardHasher as Standard},
+    merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
-        keyless::{Config, Keyless},
+        keyless::variable::{Config, Db as Keyless},
         verify_proof,
     },
 };
@@ -122,7 +122,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(127);
 const PAGE_CACHE_SIZE: usize = 8;
 
-type Db = Keyless<deterministic::Context, Vec<u8>, Sha256>;
+type Db<F> = Keyless<F, deterministic::Context, Vec<u8>, Sha256>;
 
 fn test_config(
     test_name: &str,
@@ -130,8 +130,8 @@ fn test_config(
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr: MmrConfig {
-            journal_partition: format!("{test_name}-mmr"),
+        merkle: MerkleConfig {
+            journal_partition: format!("{test_name}-journal"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
@@ -149,13 +149,13 @@ fn test_config(
     }
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config("keyless-fuzz-test", &context);
-        let mut db = Db::init(context.clone(), cfg)
+        let cfg = test_config(suffix, &context);
+        let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
@@ -169,14 +169,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(metadata_bytes.clone()).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone());
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                 }
 
@@ -193,14 +191,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, None);
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     db.prune(db.last_commit_loc())
                         .await
@@ -208,14 +204,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, None);
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.sync().await.expect("Sync should not fail");
                 }
 
@@ -232,14 +226,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, None);
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     let _ = db.root();
                 }
@@ -252,18 +244,16 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, None);
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let start_loc = Location::new(start_loc);
+                    let start_loc: Location<F> = Location::new(start_loc);
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
@@ -282,21 +272,19 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for v in pending_appends.drain(..) {
-                            batch = batch.append(v);
-                        }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let mut batch = db.new_batch();
+                    for v in pending_appends.drain(..) {
+                        batch = batch.append(v);
+                    }
+                    let merkleized = batch.merkleize(&db, None);
+                    db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
                     let op_count = db.bounds().await.end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                    let size = Location::new(size);
+                    let size: Location<F> = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
-                    let start_loc = Location::new(start_loc);
+                    let start_loc: Location<F> = Location::new(start_loc);
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let root = db.root();
                     if let Ok((proof, ops)) = db
@@ -313,7 +301,7 @@ fn fuzz(input: FuzzInput) {
                     pending_appends.clear();
                     drop(db);
 
-                    let cfg = test_config("keyless-fuzz-test", &context);
+                    let cfg = test_config(suffix, &context);
                     db = Db::init(
                         context.with_label("db").with_attribute("instance", restarts),
                         cfg,
@@ -325,18 +313,17 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let finalized = {
-            let mut batch = db.new_batch();
-            for v in pending_appends.drain(..) {
-                batch = batch.append(v);
-            }
-            batch.merkleize(None).finalize()
-        };
-        db.apply_batch(finalized).await.expect("Commit should not fail");
+        let mut batch = db.new_batch();
+        for v in pending_appends.drain(..) {
+            batch = batch.append(v);
+        }
+        let merkleized = batch.merkleize(&db, None);
+        db.apply_batch(merkleized).await.expect("Commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "fuzz-mmr");
+    fuzz_family::<mmb::Family>(&input, "fuzz-mmb");
 });

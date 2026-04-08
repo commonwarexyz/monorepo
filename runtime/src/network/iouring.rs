@@ -25,7 +25,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    utils, Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, types::Fd};
@@ -71,6 +71,8 @@ pub struct Config {
     pub read_buffer_size: usize,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Stack size for the dedicated send and receive io_uring threads.
+    pub thread_stack_size: usize,
 }
 
 impl Default for Config {
@@ -82,6 +84,7 @@ impl Default for Config {
             read_write_timeout: iouring_config.max_op_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
 }
@@ -134,13 +137,13 @@ impl Network {
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_submitter, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
-        std::thread::spawn(move || send_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_submitter, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
-        std::thread::spawn(move || recv_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
@@ -664,7 +667,8 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _, Stream as _,
+        thread, BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _,
+        Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
@@ -675,6 +679,14 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        assert_eq!(
+            Config::default().thread_stack_size,
+            thread::system_thread_stack_size()
+        );
     }
 
     #[tokio::test]

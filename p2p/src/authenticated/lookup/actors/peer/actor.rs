@@ -169,7 +169,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &self.sent_messages,
                                 &mut batch,
                                 metrics::Message::new_ping(&peer),
-                                types::Message::Ping.encode_with_pool(&pool).into(),
+                                types::Message::Ping.encode_with_pool(&pool),
                             );
                             Self::extend_send_many(
                                 &peer,

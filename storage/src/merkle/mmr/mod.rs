@@ -79,7 +79,7 @@ cfg_if::cfg_if! {
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle;
 pub use crate::merkle::{hasher, Readable};
-pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
@@ -161,10 +161,6 @@ impl merkle::Family for Family {
 
     fn peaks(size: Position) -> impl Iterator<Item = (Position, u32)> {
         iterator::PeakIterator::new(size)
-    }
-
-    fn nodes_to_pin(_leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
-        iterator::nodes_to_pin(prune_loc).collect()
     }
 
     fn children(pos: Position, height: u32) -> (Position, Position) {
@@ -362,12 +358,12 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_valid_size());
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 batch = batch.add(&hasher, &digest);
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmr, &hasher)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }
         assert!(!Position::new(u64::MAX).is_valid_size());

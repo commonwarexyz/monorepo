@@ -9,6 +9,8 @@ pub mod batch;
 #[cfg(test)]
 pub(crate) mod conformance;
 pub mod hasher;
+#[cfg(feature = "std")]
+pub mod journaled;
 mod location;
 pub mod mem;
 pub mod mmb;
@@ -19,6 +21,8 @@ mod proof;
 mod read;
 #[cfg(feature = "std")]
 pub mod storage;
+#[cfg(feature = "std")]
+pub mod verification;
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -65,13 +69,26 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
 
-    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`
-    /// in a structure with the given leaf count.
+    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
+    ///
+    /// The default implementation returns the peaks of the sub-structure at `prune_loc`,
+    /// which is sufficient for both root computation and re-merkleization of retained leaves.
+    /// Implementations may override to return a conservative superset of the minimally
+    /// required nodes. Callers must therefore treat the result as "safe to retain" rather
+    /// than assuming it is minimal or canonical.
     ///
     /// # Panics
     ///
-    /// Panics if leaves or prune_loc are invalid.
-    fn nodes_to_pin(leaves: Location<Self>, prune_loc: Location<Self>) -> Vec<Position<Self>>;
+    /// Implementations panic if `prune_loc` is invalid (i.e., exceeds
+    /// [`MAX_LEAVES`](Self::MAX_LEAVES)). Callers must validate inputs before calling.
+    fn nodes_to_pin(prune_loc: Location<Self>) -> impl Iterator<Item = Position<Self>> + Send {
+        let prune_pos = Self::location_to_position(prune_loc);
+        Self::peaks(prune_pos)
+            .filter(move |&(pos, _)| pos < prune_pos)
+            .map(|(pos, _)| pos)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 
     /// Return the positions of the left and right children of the node at `pos` with the
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).
@@ -122,12 +139,22 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Changeset was created against a different state.
-    #[error("stale changeset: expected size {expected}, actual {actual}")]
-    StaleChangeset {
-        /// The size the changeset was built against.
+    /// Structure has diverged incompatibly from the batch's ancestor chain.
+    #[error("stale batch: base size {expected}, current size {actual}")]
+    StaleBatch {
+        /// The base size when the batch chain was forked.
         expected: Position<F>,
-        /// The current size.
+        /// The current structure size.
+        actual: Position<F>,
+    },
+
+    /// An ancestor batch was dropped before this batch was applied, causing
+    /// data loss. All ancestors must be kept alive until descendants are applied.
+    #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
+    AncestorDropped {
+        /// The expected size after applying all ancestors + this batch.
+        expected: Position<F>,
+        /// The actual size (less than expected due to missing ancestor data).
         actual: Position<F>,
     },
 

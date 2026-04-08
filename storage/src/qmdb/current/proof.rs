@@ -6,20 +6,22 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    merkle::{hasher::Hasher as _, storage::Storage},
-    mmr::{self, verification, Location, Proof},
-    qmdb::{
-        current::{batch::BitmapRead, grafting},
-        Error,
+    merkle::{
+        hasher::Hasher as _,
+        mmr::{self, verification, Location, Proof},
+        storage::Storage,
     },
+    qmdb::current::grafting,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -43,7 +45,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &impl BitmapRead<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         range: Range<Location>,
         ops_root: D,
@@ -84,7 +86,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &impl BitmapRead<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         log: &C,
         start_loc: Location,
@@ -250,7 +252,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<mmr::Family, Digest = D>>(
         hasher: &mut H,
-        status: &impl BitmapRead<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         loc: Location,
         ops_root: D,
