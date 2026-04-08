@@ -115,8 +115,8 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Delete { key } => {
-                    let k = Key::new(*key);
                     // Check if the key exists in committed state or pending writes.
+                    let k = Key::new(*key);
                     let exists = db.get(&k).await.expect("get should not fail").is_some()
                         || pending_expected
                             .get(key)

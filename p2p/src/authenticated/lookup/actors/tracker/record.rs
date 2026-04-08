@@ -16,7 +16,7 @@ pub enum Address {
     /// Peer is the local node.
     Myself,
 
-    /// Address is provided when peer is registered.
+    /// Address is provided when peer is tracked.
     Known(types::Address),
 }
 

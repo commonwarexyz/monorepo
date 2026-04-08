@@ -19,7 +19,8 @@
 //! # Peer Management
 //!
 //! Only peers in `latest.primary` may buffer messages (see [commonware_p2p::Provider]). When a peer
-//! is no longer in `latest.primary`, all its buffered messages are evicted.
+//! is no longer in `latest.primary`, its buffered messages are evicted unless buffered by any other
+//! primary peer.
 
 mod config;
 pub use config::Config;

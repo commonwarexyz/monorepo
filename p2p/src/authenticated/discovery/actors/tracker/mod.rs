@@ -5,13 +5,13 @@ use commonware_cryptography::Signer;
 use std::{num::NonZeroUsize, time::Duration};
 
 mod actor;
+mod bit_set;
 mod directory;
 pub(crate) mod ingress;
 mod metadata;
 mod metrics;
 mod record;
 mod reservation;
-mod bit_set;
 
 pub use actor::Actor;
 pub use ingress::{Message, Oracle};

@@ -1579,8 +1579,8 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_end", 50).await;
 
-            let size = journal.size().await;
             // Request proof starting near the end
+            let size = journal.size().await;
             let (proof, ops) = journal
                 .historical_proof(size, Location::new(40), NZU64!(20))
                 .await
@@ -1631,8 +1631,8 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_start_oob", 5).await;
 
-            let size = journal.size().await;
             // Request proof starting at size (should fail)
+            let size = journal.size().await;
             let result = journal.historical_proof(size, size, NZU64!(1)).await;
 
             assert!(matches!(

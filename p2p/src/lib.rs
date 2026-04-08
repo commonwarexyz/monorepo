@@ -224,17 +224,17 @@ stability_scope!(BETA {
         pub index: u64,
         /// The primary and secondary peers in the new set.
         pub latest: TrackedPeers<P>,
-        /// Union of primary and secondary peers across all retained peer sets.
+        /// Union of primary and secondary peers across all tracked peer sets.
         pub all: TrackedPeers<P>,
     }
 
     /// Alias for the subscription type returned by [`Provider::subscribe`].
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
 
-    /// Primary and secondary peers registered together for [`Manager::track`].
+    /// Primary and secondary peers provided together to [`Manager::track`].
     ///
     /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
-    /// treats the peer as primary only (it is omitted from the stored secondary set).
+    /// deduplicates overlapping keys, storing them as primary only.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct TrackedPeers<P: PublicKey> {
         /// Peers eligible for primary-only policies.
@@ -270,10 +270,10 @@ stability_scope!(BETA {
         }
     }
 
-    /// Primary and secondary peers registered together for [`AddressableManager::track`].
+    /// Primary and secondary peers provided together to [`AddressableManager::track`].
     ///
-    /// If the same public key appears in both maps, the primary entry is authoritative
-    /// for address and role (the key is not registered as secondary).
+    /// The same public key may appear in both maps. [`AddressableManager::track`]
+    /// deduplicates overlapping keys, storing them as primary only.
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
@@ -303,7 +303,7 @@ stability_scope!(BETA {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
-        /// Fetch the primary and secondary peers registered at the given ID.
+        /// Fetch the primary and secondary peers tracked at the given ID.
         fn peer_set(
             &mut self,
             id: u64,
@@ -314,7 +314,7 @@ stability_scope!(BETA {
         /// Returns a receiver of [`PeerSetUpdate`] notifications. Each update's
         /// `latest` reflects how [`Manager::track`] stored the set: a peer listed in
         /// both roles appears only under `latest.primary`. The `all` field aggregates
-        /// across retained sets with the same rule (secondary excludes keys present as primary).
+        /// across tracked sets with the same rule (secondary excludes keys present as primary).
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
@@ -326,20 +326,19 @@ stability_scope!(BETA {
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are
-        /// registered.
+        /// tracked.
         ///
-        /// For good connectivity, all peers must register the same peer sets at the same ID.
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
         ///
         /// Callers may pass either a list of primary peers or a [`TrackedPeers`] value containing both primary and secondary peers.
         ///
-        /// Overlapping keys in [`TrackedPeers`] are allowed; primary takes precedence for role
-        /// and for the stored secondary list (see [`TrackedPeers`]).
+        /// Overlapping keys in [`TrackedPeers`] are allowed; they are deduplicated as primary only.
         ///
         /// ## Primary vs Secondary Peers
         ///
         /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
-        /// When both are registered, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
         fn track<R>(
             &mut self,
@@ -356,9 +355,9 @@ stability_scope!(BETA {
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are
-        /// registered.
+        /// tracked.
         ///
-        /// For good connectivity, all peers must register the same peer sets at the same ID.
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
         ///
         /// Callers may pass either a list of primary peers or a [`AddressableTrackedPeers`] value containing
         /// both primary and secondary peers.
@@ -369,7 +368,7 @@ stability_scope!(BETA {
         ///
         /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
-        /// When both are registered, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
         fn track<R>(
             &mut self,

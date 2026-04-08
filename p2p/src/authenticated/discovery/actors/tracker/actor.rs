@@ -157,16 +157,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Secondary peers are not checked here because max_peer_set_size
                 // exists to cap the bitvec size, which only covers primary peers.
                 let max = self.max_peer_set_size;
-                let primary = peers.primary;
-                let secondary = peers.secondary;
                 assert!(
-                    primary.len() as u64 <= max,
+                    peers.primary.len() as u64 <= max,
                     "primary peer set too large: {} > {max}",
-                    primary.len()
+                    peers.primary.len()
                 );
 
                 // Attempt to update peer set membership.
-                if !self.directory.track(index, primary, secondary) {
+                if !self.directory.track(index, peers) {
                     return;
                 }
 
@@ -530,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_construct_no_sets_registered() {
+    fn test_construct_no_sets_tracked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
@@ -978,7 +976,7 @@ mod tests {
     fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Same key in both sets; track() counts primary only. Peer stays eligible and acceptable.
+            // Same key in both sets; deduplicated as primary only.
             let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
@@ -1005,7 +1003,7 @@ mod tests {
             assert!(update.latest.primary.position(&pk).is_some());
             assert!(
                 update.latest.secondary.is_empty(),
-                "overlap peer is stored as primary only"
+                "overlap peer is deduplicated as primary only"
             );
             assert_eq!(update.all.primary, update.latest.primary);
             assert!(

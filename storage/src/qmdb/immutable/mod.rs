@@ -77,6 +77,7 @@ pub mod batch;
 mod operation;
 pub use operation::Operation;
 
+/// Authenticated variable-length journal over [`Operation`] entries.
 type Journal<E, K, V, H> = authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H>;
 
 pub mod sync;
@@ -1490,8 +1491,8 @@ pub(super) mod test {
     fn test_immutable_batch_sequential_key_override() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = db_config("key-override", &context);
             // Use items_per_section=1 so pruning is granular.
+            let mut cfg = db_config("key-override", &context);
             cfg.log.items_per_section = NZU64!(1);
             let mut db: Db = Immutable::init(context.with_label("db"), cfg)
                 .await
