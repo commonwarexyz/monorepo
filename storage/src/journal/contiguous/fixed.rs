@@ -655,10 +655,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Append items to the journal, returning the position of the last item appended.
     ///
     /// Acquires the write lock once for all items instead of per-item.
-    /// No-ops if items is empty, returning the current size (next append position).
+    /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
         if items.is_empty() {
-            return Ok(self.inner.read().await.size);
+            return Err(Error::EmptyAppend);
         }
 
         // Encode all items into a single contiguous buffer before taking the write guard.
