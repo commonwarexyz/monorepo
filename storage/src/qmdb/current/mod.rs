@@ -1585,6 +1585,69 @@ pub mod tests {
         });
     }
 
+    /// Verify that reopening and proving a pruned MMB database does not panic when the pruned
+    /// prefix contains sub-grafting-height peaks that require chunk regrouping.
+    ///
+    /// With 100 single-key commits the MMB has 301 leaves (100 writes + 100 commit floors +
+    /// 101 internal nodes). The first 256 leaves span three sub-grafting-height ops peaks
+    /// (128 + 64 + 64), so grafted root recomposition must regroup them as chunk 0. After
+    /// pruning, chunk 0 is gone and get_chunk(0) would panic without the pruned-chunk guard.
+    #[test_traced("INFO")]
+    fn test_current_mmb_reopen_and_prove_after_prune_multi_peak_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 100;
+
+            let partition = "current-mmb-reopen-prove-after-prune";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected = None;
+            for round in 0..COMMITS {
+                expected = Some(val(50_000 + round));
+                let mut batch = db.new_batch();
+                batch = batch.write(k, expected);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+
+            let root_before = db.root();
+            assert!(
+                *db.inactivity_floor_loc() >= 256,
+                "expected inactivity floor past chunk 0"
+            );
+
+            db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
+            assert_eq!(db.pruned_bits(), 256);
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen: compute_grafted_root must handle pruned chunk 0.
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), root_before);
+            assert_eq!(reopened.get(&k).await.unwrap(), expected);
+
+            // key_value_proof: RangeProof::new must also handle pruned chunk 0.
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_current_rewind_small_delta_large_history() {
         let executor = deterministic::Runner::default();

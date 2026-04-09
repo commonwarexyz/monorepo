@@ -696,6 +696,7 @@ pub(super) async fn compute_grafted_root<
 
     let grafting_height = grafting::height::<N>();
     let complete_chunks = status.complete_chunks() as u64;
+    let pruned_chunks = status.pruned_chunks() as u64;
 
     Ok(grafting::grafted_root(
         hasher,
@@ -704,7 +705,14 @@ pub(super) async fn compute_grafted_root<
         grafting_height,
         |chunk_idx| {
             if chunk_idx < complete_chunks {
-                Some(status.get_chunk(chunk_idx as usize))
+                // Pruned chunks are guaranteed to be all-zero (only chunks with no active
+                // operations are prunable), so a synthetic zero chunk produces the correct grafted
+                // digest via the zero-chunk identity shortcut.
+                if chunk_idx < pruned_chunks {
+                    Some([0u8; N])
+                } else {
+                    Some(status.get_chunk(chunk_idx as usize))
+                }
             } else {
                 None
             }
