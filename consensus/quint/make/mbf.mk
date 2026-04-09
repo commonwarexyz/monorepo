@@ -8,7 +8,11 @@
 MBF_TLC_PORT ?= 2023
 MBF_FAULTS ?= 0
 
-.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live
+MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
+MBF_TRACE_GEN_FUZZ_RUNS ?= -1
+MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
+
+.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_generator
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
@@ -16,6 +20,7 @@ mutate_traces:
 	MUTATOR_MUT_PER_TRACE=$(MUTATOR_MUT_PER_TRACE) \
 	MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
 	MUTATED_TRACES_SEED_DIR=$(MUTATED_TRACES_SEED_DIR) \
+	MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 	MUTATOR_FAULTS=$(MBF_FAULTS) \
 	MUTATOR_DEBUG=true \
 	cargo run -p commonware-consensus-fuzz --bin trace_mutator
@@ -70,6 +75,7 @@ mbf_live_fuzz:
 		MUTATOR_MUT_PER_TRACE=$(MUTATOR_MUT_PER_TRACE) \
 		MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
 		MUTATED_TRACES_SEED_DIR=$(MUTATED_TRACES_SEED_DIR) \
+		MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 		MUTATOR_FAULTS=$(MBF_FAULTS) \
 		cargo run -p commonware-consensus-fuzz --bin trace_mutator; \
 	'
@@ -111,4 +117,38 @@ mbf_live: clean_mutated_traces
 		sleep 5; \
 		kill $$watcher 2>/dev/null || true; \
 		wait $$watcher 2>/dev/null || true; \
+	'
+
+mbf_live_trace_gen:
+	@bash -eu -o pipefail -c '\
+		src="$(MBF_TRACE_GEN_SRC)"; \
+		dst="$(MUTATION_SEEDS_FOLDER)"; \
+		mkdir -p "$$dst"; \
+		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
+		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" -- -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) & \
+		fuzz=$$!; \
+		cleanup() { \
+			kill $$fuzz 2>/dev/null || true; \
+			wait $$fuzz 2>/dev/null || true; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		seen_dir="$$dst/.seen"; \
+		mkdir -p "$$seen_dir"; \
+		echo "generating traces into $$src, copying to $$dst..."; \
+		while kill -0 $$fuzz 2>/dev/null; do \
+			if [ -d "$$src" ]; then \
+				for f in "$$src"/*.json; do \
+					[ -f "$$f" ] || continue; \
+					name=$$(basename "$$f"); \
+					[ -f "$$seen_dir/$$name" ] && continue; \
+					cp "$$f" "$$dst/$$name"; \
+					: > "$$seen_dir/$$name"; \
+					echo "copied $$name -> $$dst"; \
+				done; \
+			fi; \
+			sleep 2; \
+		done; \
+		wait $$fuzz; \
 	'

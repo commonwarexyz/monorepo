@@ -15,6 +15,7 @@ MIN_REQUIRED_CONTAINERS ?= 3
 MAX_REQUIRED_CONTAINERS ?= 10
 
 # Model-based fuzzing (mbf)
+MUTATION_SEEDS_FOLDER ?= ../fuzz/corpus/tlc_mutator
 MUTATED_TRACES_DIR ?= ../fuzz/artifacts/mutated_traces
 MUTATED_TRACES_SEED_DIR ?=
 MUTATOR_ITERATIONS ?= 1000
