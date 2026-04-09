@@ -35,6 +35,7 @@
 //!   * `MUTATOR_SEED`          - PRNG seed, default `0`
 //!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default `3`
 //!   * `MUTATOR_RESEED_FREQ`   - iterations between queue reseeds, default `100`
+//!   * `MUTATOR_FAULTS`        - override `faults` in persisted traces, default inherits from seed
 
 use commonware_consensus_fuzz::{
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
@@ -43,10 +44,9 @@ use commonware_consensus_fuzz::{
         sniffer::{TraceEntry, TracedCert, TracedVote},
     },
 };
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256::Sha256 as Sha256Hasher, Hasher};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
 use std::{
     collections::{HashSet, VecDeque},
     env, fs,
@@ -58,6 +58,7 @@ const DEFAULT_ITERATIONS: usize = 1000;
 const DEFAULT_SEED: u64 = 0;
 const DEFAULT_MUT_PER_TRACE: usize = 3;
 const DEFAULT_RESEED_FREQ: usize = 100;
+const DEFAULT_FAULTS: Option<usize> = None;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -263,6 +264,13 @@ fn reseed_freq_from_env() -> usize {
         .unwrap_or(DEFAULT_RESEED_FREQ)
 }
 
+fn faults_from_env() -> Option<usize> {
+    env::var("MUTATOR_FAULTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or(DEFAULT_FAULTS)
+}
+
 /// Hex sha1 of the canonical-ish JSON encoding of a trace, used as the
 /// on-disk file name. Two traces that serialize to the same bytes
 /// collapse to the same file (idempotent).
@@ -280,11 +288,9 @@ fn trace_filename(json: &str) -> String {
 /// Hex sha256 of arbitrary bytes. Mirrors the `crypto/sha256` digests used
 /// by `TLCStateGuider.Check` for trace and state-trace dedup.
 fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let digest = Sha256Hasher::hash(bytes);
+    let mut hex = String::with_capacity(digest.0.len() * 2);
+    for byte in digest.0 {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
@@ -305,6 +311,7 @@ fn main() {
     let seed = seed_from_env();
     let mut_per_trace = mut_per_trace_from_env();
     let reseed_freq = reseed_freq_from_env().max(1);
+    let faults_override = faults_from_env();
 
     let seeds = load_seeds(&seeds_dir());
     if seeds.is_empty() {
@@ -319,12 +326,13 @@ fn main() {
     }
 
     println!(
-        "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} url={}",
+        "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} faults={} url={}",
         seeds.len(),
         iterations,
         seed,
         mut_per_trace,
         reseed_freq,
+        faults_override.map_or("inherit".to_string(), |f| f.to_string()),
         url,
     );
 
@@ -436,6 +444,13 @@ fn main() {
                 states_map.len(),
             );
             continue;
+        }
+
+        // Override faults in persisted traces if requested (e.g. the TLC
+        // model validates all-correct behaviour so faults=0 is appropriate).
+        let mut trace = trace;
+        if let Some(f) = faults_override {
+            trace.faults = f;
         }
 
         // Persist the keeper as pretty JSON named by sha1 of its bytes.

@@ -212,7 +212,11 @@ run() {
 
     # NOTE: -mapperparams entries are separated by ';', not ','. See
     # tlc2.TLC.handleParameters where it does args[index].split(";").
+    # -Xss64m: Quint compiles variant matches and let-bindings into deeply
+    # nested TLA+ LET-INs; TLC recurses one JVM frame per sub-expression.
+    # -Xmx4g: large state spaces need more heap than the JVM default.
     cd "$TLC_BUILD_DIR" && exec java \
+        -Xss64m -Xmx4g \
         "-DTLA-Library=$TLC_TLA_LIB" \
         -cp "$TLC_JAR" \
         tlc2.TLCServer \
