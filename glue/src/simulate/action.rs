@@ -2,6 +2,7 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::Link;
+use commonware_runtime::deterministic;
 use std::time::Duration;
 
 /// Crash strategy for a simulation run.
@@ -59,6 +60,9 @@ impl<P: PublicKey> Default for Schedule<P> {
 /// A single simulation action to apply at a specific time.
 #[derive(Clone)]
 pub enum Action<P: PublicKey> {
+    /// Update deterministic storage fault injection.
+    SetStorageFault(deterministic::FaultConfig),
+
     /// Reset all directed links, restoring full connectivity with the given link.
     Heal(Link),
 
