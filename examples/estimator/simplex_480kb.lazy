@@ -1,0 +1,18 @@
+# Simplex (480KB block, no Coding)
+#
+# Scenario: EU proposer, US validator testnet
+# Observed: ~400ms from proposal certificate to payload receipt
+
+## Propose a block (480KB payload)
+propose{0, size=491520}
+
+## Multicast notarize (32B digest + 8B view)
+wait{0, threshold=1}
+broadcast{1, size=40}
+
+## Multicast finalize after observing 2f+1 notarize (32B digest + 8B view)
+wait{1, threshold=67%}
+broadcast{2, size=40}
+
+## Wait for 2f+1 finalize
+wait{2, threshold=67%}
