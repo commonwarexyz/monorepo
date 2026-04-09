@@ -999,4 +999,51 @@ mod tests {
              broadcast -> finalize quorum -> finalization broadcast path must fire",
         );
     }
+
+    const REGRESSION_PORT: u16 = 2026;
+
+    /// Loads the regression fixture `35d8bbc9bac04cc106d4c9e32f8f4c0985186069`,
+    /// encodes it into TLC JSON actions via [`TlcMapper`], submits to the
+    /// controlled TLC server, and prints how many state changes occurred.
+    ///
+    /// Run with:
+    ///
+    ///   cargo test -p commonware-consensus-fuzz --lib \
+    ///       tlc::tests::test_regression_35d8bbc9 -- --nocapture
+    #[test]
+    fn test_regression_35d8bbc9() {
+        require_jar();
+        require_tla_build();
+
+        let fixture = fuzz_dir()
+            .join("src/tracing/tests/fixtures/regressions/35d8bbc9bac04cc106d4c9e32f8f4c0985186069");
+        let json = std::fs::read_to_string(&fixture).expect("read regression fixture");
+        let trace: TraceData = serde_json::from_str(&json).expect("parse regression fixture");
+
+        let actions = TlcMapper::map_trace(&trace);
+        assert!(!actions.is_empty(), "regression fixture produced no actions");
+
+        let _server = start_server_for_tla_build(REGRESSION_PORT);
+        let url = format!("http://localhost:{REGRESSION_PORT}/execute");
+        let client = TlcClient::new(&url);
+
+        let response = client.execute_full(&actions).expect("execute");
+        let verdict = verdict_for(&actions, &response);
+        let distinct_states: std::collections::HashSet<_> =
+            response.keys.iter().copied().collect();
+
+        let accepted = accepted_action_count(&response);
+        println!(
+            "[regression_35d8bbc9] sent={} accepted={} keys={} distinct_states={} verdict={:?}",
+            non_reset_action_count(&actions),
+            accepted,
+            response.keys.len(),
+            distinct_states.len(),
+            verdict,
+        );
+        assert!(
+            accepted > 200,
+            "expected more than 200 accepted states, got {accepted}",
+        );
+    }
 }
