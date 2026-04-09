@@ -212,29 +212,22 @@ fn run_encoder_roundtrip_impl(fuzz_target: &str, trace_dir: &str, hash: &str) {
 
 #[test]
 fn test_encoder_roundtrip_d8bc163602d7759db2b7ea48a17eae663c3ee47c() {
-    run_encoder_roundtrip("d8bc163602d7759db2b7ea48a17eae663c3ee47c");
+    run_encoder_roundtrip_json("d8bc163602d7759db2b7ea48a17eae663c3ee47c");
 }
 
 #[test]
 fn test_encoder_roundtrip_449b2497101c43ad3c59f77013977e8bbb9e1340() {
-    run_encoder_roundtrip("449b2497101c43ad3c59f77013977e8bbb9e1340");
+    run_encoder_roundtrip_json("449b2497101c43ad3c59f77013977e8bbb9e1340");
 }
 
 #[test]
 fn test_encoder_roundtrip_da39a3ee5e6b4b0d3255bfef95601890afd80709() {
-    run_encoder_roundtrip_impl(
-        "simplex_ed25519_quint_byzantine",
-        "simplex_ed25519_quint_byzantine",
-        "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-    );
+    run_encoder_roundtrip_json("da39a3ee5e6b4b0d3255bfef95601890afd80709");
 }
 
 #[test]
 fn test_encoder_roundtrip_b12ca0d39b9286468f2ce0d791750bda4b6d3f37() {
-    run_encoder_roundtrip_target(
-        "simplex_ed25519_quint_byzantine",
-        "b12ca0d39b9286468f2ce0d791750bda4b6d3f37",
-    );
+    run_encoder_roundtrip_json("b12ca0d39b9286468f2ce0d791750bda4b6d3f37");
 }
 
 #[test]
