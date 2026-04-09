@@ -8,9 +8,10 @@ use crate::simulate::{
     processed::ProcessedHeight,
     property::Property,
 };
-use commonware_cryptography::ed25519;
+use commonware_cryptography::{ed25519, PublicKey};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
+use commonware_runtime::deterministic;
 use multi_db_app::MultiDbEngine;
 use properties::{BlockAgreementAtHeight, LateJoinerStateSyncHandoff};
 use single_db_app::SingleDbEngine;
@@ -28,6 +29,13 @@ const NUM_VALIDATORS: u32 = 5;
 fn all_validators_finalize_and_commit() {
     run_finalize(SingleDbEngine::new(NUM_VALIDATORS));
     run_finalize(MultiDbEngine::new(NUM_VALIDATORS));
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn all_validators_finalize_and_commit_with_storage_faults() {
+    run_finalize_with_storage_faults(SingleDbEngine::new(NUM_VALIDATORS));
+    run_finalize_with_storage_faults(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
 #[test_group("slow")]
@@ -56,6 +64,13 @@ fn delayed_start_one_validator() {
 fn state_sync_hands_off_to_marshal() {
     run_state_sync(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
     run_state_sync(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn state_sync_hands_off_to_marshal_with_storage_faults() {
+    run_state_sync_with_storage_faults(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
+    run_state_sync_with_storage_faults(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
 }
 
 #[test_group("slow")]
@@ -148,12 +163,79 @@ where
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    finalize_plan(engine).run().unwrap();
+}
+
+fn run_finalize_with_storage_faults<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let participants = engine.participants();
+    finalize_plan(engine)
+        .crash(Crash::Schedule(default_storage_fault_schedule(
+            participants,
+        )))
+        .timeout(Duration::from_secs(45))
+        .run()
+        .unwrap();
+}
+
+fn finalize_plan<D>(engine: D) -> PlanBuilder<D>
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
     PlanBuilder::new(engine)
         .seeds(0..5)
         .exit_condition(ProcessedHeightAtLeast::new(100))
         .property(BlockAgreementAtHeight::new(100))
-        .run()
-        .unwrap();
+}
+
+fn storage_fault_config() -> deterministic::FaultConfig {
+    deterministic::FaultConfig::default().sync(0.01)
+}
+
+fn default_storage_fault_schedule<P>(restart_order: impl IntoIterator<Item = P>) -> Schedule<P>
+where
+    P: PublicKey,
+{
+    storage_fault_schedule(
+        restart_order,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_millis(2500),
+    )
+}
+
+fn storage_fault_schedule<P>(
+    restart_order: impl IntoIterator<Item = P>,
+    fault_at: Duration,
+    clear_at: Duration,
+    restart_at: Duration,
+) -> Schedule<P>
+where
+    P: PublicKey,
+{
+    let mut schedule = Schedule::new()
+        .at(fault_at, Action::SetStorageFault(storage_fault_config()))
+        .at(
+            clear_at,
+            Action::SetStorageFault(deterministic::FaultConfig::default()),
+        );
+
+    for (index, participant) in restart_order.into_iter().enumerate() {
+        schedule = schedule.at(
+            restart_at + Duration::from_millis(250 * index as u64),
+            Action::Restart(participant),
+        );
+    }
+
+    schedule
 }
 
 fn run_determinism<D>(engine: D)
@@ -232,6 +314,35 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    state_sync_plan(engine).run().unwrap();
+}
+
+fn run_state_sync_with_storage_faults<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let participants = engine.participants();
+    state_sync_plan(engine)
+        .crash(Crash::Schedule(default_storage_fault_schedule(
+            state_sync_restart_order(&participants),
+        )))
+        .timeout(Duration::from_secs(90))
+        .run()
+        .unwrap();
+}
+
+fn state_sync_plan<D>(engine: D) -> PlanBuilder<D>
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
     PlanBuilder::new(engine)
         .seeds(0..5)
         .crash(Crash::Delay {
@@ -241,8 +352,16 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
-        .run()
-        .unwrap();
+}
+
+fn state_sync_restart_order<P: PublicKey>(participants: &[P]) -> Vec<P> {
+    let Some((late_joiner, active)) = participants.split_first() else {
+        return Vec::new();
+    };
+
+    let mut restart_order = active.to_vec();
+    restart_order.push(late_joiner.clone());
+    restart_order
 }
 
 fn run_lossy<D>(engine: D, link: Link)

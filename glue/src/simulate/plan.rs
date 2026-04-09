@@ -85,6 +85,9 @@ pub struct Plan<D: EngineDefinition> {
     /// Maximum simulation wall-clock time (deterministic time).
     pub timeout: Option<Duration>,
 
+    /// Optional storage fault injection configuration.
+    pub storage_fault: Option<deterministic::FaultConfig>,
+
     /// Properties checked after each finalization.
     pub finalization_property: Vec<Box<dyn FinalizationProperty<D::State>>>,
 
@@ -106,6 +109,7 @@ pub struct PlanBuilder<D: EngineDefinition> {
     required_finalizations: u64,
     exit_condition: Option<ExitConditionFactory<D>>,
     timeout: Option<Duration>,
+    storage_fault: Option<deterministic::FaultConfig>,
     finalization_property: Vec<FinalizationPropertyFactory<D>>,
     property: Vec<PropertyFactory<D>>,
 }
@@ -149,6 +153,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             required_finalizations: 10,
             exit_condition: None,
             timeout: None,
+            storage_fault: None,
             finalization_property: vec![],
             property: vec![],
         }
@@ -220,6 +225,12 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         self
     }
 
+    /// Enable deterministic storage fault injection for the simulation.
+    pub const fn with_storage_fault(mut self, faults: deterministic::FaultConfig) -> Self {
+        self.storage_fault = Some(faults);
+        self
+    }
+
     pub fn finalization_property(
         mut self,
         property: impl FinalizationProperty<D::State> + Clone + 'static,
@@ -269,6 +280,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             required_finalizations: self.required_finalizations,
             exit_condition,
             timeout: self.timeout,
+            storage_fault: self.storage_fault.clone(),
             finalization_property,
             property,
         }
@@ -287,6 +299,16 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 }
 
 impl<D: EngineDefinition> Plan<D> {
+    fn uses_storage_faults(&self) -> bool {
+        self.storage_fault.is_some()
+            || self.schedules().any(|schedule| {
+                schedule
+                    .events
+                    .iter()
+                    .any(|(_, action)| matches!(action, Action::SetStorageFault(_)))
+            })
+    }
+
     fn delay_crash(&self) -> Option<(usize, u64)> {
         self.crashes.iter().find_map(|crash| match crash {
             Crash::Delay { count, after } => Some((*count, *after)),
@@ -417,6 +439,15 @@ impl<D: EngineDefinition> Plan<D> {
         )
         .await;
 
+        if let Some(storage_fault) = &self.storage_fault {
+            *ctx.storage_fault_config().write() = storage_fault.clone();
+            info!(
+                target: "simulator",
+                ?storage_fault,
+                "enabled storage fault injection"
+            );
+        }
+
         // Spawn crash ticker for Random crashes.
         if let Some((frequency, _, _)) = self.random_crash() {
             let crash_tx = crash_tx.clone();
@@ -433,6 +464,7 @@ impl<D: EngineDefinition> Plan<D> {
         // Spawn action schedule actors.
         for schedule in self.schedules() {
             let schedule = schedule.clone();
+            let scheduler_ctx = ctx.clone();
             let oracle_clone = oracle.clone();
             let participants = self.participants.clone();
             let schedule_tx_clone = schedule_tx.clone();
@@ -440,6 +472,7 @@ impl<D: EngineDefinition> Plan<D> {
             ctx.clone().spawn(move |ctx| async move {
                 Self::run_action_scheduler(
                     ctx,
+                    scheduler_ctx,
                     schedule,
                     &oracle_clone,
                     &participants,
@@ -647,6 +680,7 @@ impl<D: EngineDefinition> Plan<D> {
     /// select loop which owns the team.
     async fn run_action_scheduler(
         ctx: deterministic::Context,
+        fault_ctx: deterministic::Context,
         schedule: Schedule<D::PublicKey>,
         oracle: &simulated::Oracle<D::PublicKey, deterministic::Context>,
         participants: &[D::PublicKey],
@@ -663,6 +697,11 @@ impl<D: EngineDefinition> Plan<D> {
                 ctx.sleep(time - elapsed).await;
             }
             match action {
+                Action::SetStorageFault(storage_fault) => {
+                    *fault_ctx.storage_fault_config().write() = storage_fault.clone();
+                    actions_applied.fetch_add(1, Ordering::Relaxed);
+                    info!(target: "simulator", ?storage_fault, "storage faults updated");
+                }
                 Action::Heal(ref link) => {
                     for v1 in participants {
                         for v2 in participants {
@@ -716,6 +755,7 @@ impl<D: EngineDefinition> Plan<D> {
     pub fn run_with_seed(&self, seed: u64) -> Result<PlanResult<D>, String> {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
+            .with_catch_panics(self.uses_storage_faults())
             .with_timeout(self.timeout);
         let runner = deterministic::Runner::new(cfg);
         runner.start(|ctx| self.run_inner(ctx))
