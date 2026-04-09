@@ -87,6 +87,7 @@ impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {

@@ -8,7 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
     Spawner, Storage, StreamOf,
 };
-use commonware_storage::qmdb::sync::Target;
+use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
@@ -106,7 +106,7 @@ async fn maybe_add_operations<DB, E>(
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: Storage + Clock + Metrics + RngCore,
 {
     let now = context.current();
@@ -155,7 +155,7 @@ async fn handle_get_sync_target<DB>(
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
 
@@ -186,7 +186,7 @@ async fn handle_get_operations<DB>(
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -263,7 +263,7 @@ async fn handle_message<DB>(
     message: wire::Message<DB::Operation, Key>,
 ) -> wire::Message<DB::Operation, Key>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     let request_id = message.request_id();
     match message {
@@ -317,7 +317,7 @@ async fn recv_loop<DB, E>(
     response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
     client_addr: SocketAddr,
 ) where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Metrics + Network + Spawner,
@@ -367,7 +367,7 @@ async fn handle_client<DB, E>(
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner,
@@ -408,7 +408,7 @@ async fn initialize_database<DB, E>(
     context: &mut E,
 ) -> Result<DB, Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: RngCore,
 {
     info!("starting {} database", DB::name());
@@ -446,7 +446,7 @@ async fn run_helper<DB, E>(
     database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
