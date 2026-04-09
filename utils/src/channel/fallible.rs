@@ -94,7 +94,9 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.request(make_msg).await.unwrap_or(default)
+        FallibleExt::request(self, make_msg)
+            .await
+            .unwrap_or(default)
     }
 
     async fn request_or_default<R, F>(&self, make_msg: F) -> R
@@ -102,7 +104,9 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.request(make_msg).await.unwrap_or_default()
+        FallibleExt::request(self, make_msg)
+            .await
+            .unwrap_or_default()
     }
 }
 
@@ -178,7 +182,9 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.request(make_msg).await.unwrap_or(default)
+        AsyncFallibleExt::request(self, make_msg)
+            .await
+            .unwrap_or(default)
     }
 
     async fn request_or_default<R, F>(&self, make_msg: F) -> R
@@ -186,7 +192,9 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.request(make_msg).await.unwrap_or_default()
+        AsyncFallibleExt::request(self, make_msg)
+            .await
+            .unwrap_or_default()
     }
 }
 

@@ -26,7 +26,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -640,8 +640,9 @@ impl crate::Spawner for Context {
                         utils::thread::pin_to_core(core);
                     }
 
+                    let owner = mpsc::runtime::LocalOwner::install();
                     let local = tokio::task::LocalSet::new();
-                    handle.block_on(local.run_until(f));
+                    handle.block_on(local.run_until(owner.run(f)));
                 }
             });
         } else if matches!(past, Execution::Colocated) && parent_on_dedicated {
@@ -910,6 +911,16 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Runner as _;
+    use commonware_utils::sync::Mutex;
+    use futures::future::poll_fn;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        task::Poll,
+    };
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -973,5 +984,586 @@ mod tests {
                 .with_thread_cache_disabled()
                 .thread_cache_config
         );
+    }
+
+    #[test]
+    fn test_local_owner_installed_on_dedicated_and_colocated_threads() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            assert_eq!(mpsc::runtime::current_owner_id(), None);
+
+            let (dedicated_owner, colocated_owner, shared_owner) = context
+                .dedicated()
+                .spawn(|context| async move {
+                    let dedicated_owner = mpsc::runtime::current_owner_id();
+                    let colocated_owner = context
+                        .clone()
+                        .colocated()
+                        .spawn(|_| async move { mpsc::runtime::current_owner_id() })
+                        .await
+                        .unwrap();
+                    let shared_owner = context
+                        .clone()
+                        .shared(false)
+                        .spawn(|_| async move { mpsc::runtime::current_owner_id() })
+                        .await
+                        .unwrap();
+                    (dedicated_owner, colocated_owner, shared_owner)
+                })
+                .await
+                .unwrap();
+
+            assert!(dedicated_owner.is_some());
+            assert_eq!(dedicated_owner, colocated_owner);
+            assert_eq!(shared_owner, None);
+        });
+    }
+
+    #[test]
+    fn test_channel_created_in_parent_binds_in_colocated_child_and_promotes() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let (tx, rx) = mpsc::channel(8);
+            let foreign = tx.clone();
+            let (local_sent_tx, local_sent_rx) = tokio::sync::oneshot::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            let handle = context.dedicated().spawn(move |context| async move {
+                context
+                    .colocated()
+                    .spawn(move |_| async move {
+                        let mut rx = rx;
+
+                        poll_fn(|cx| {
+                            assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                            Poll::Ready(())
+                        })
+                        .await;
+
+                        tx.send(1).await.unwrap();
+                        local_sent_tx.send(()).unwrap();
+
+                        let first = rx.recv().await.unwrap();
+                        let second = rx.recv().await.unwrap();
+                        done_tx
+                            .send((mpsc::runtime::current_owner_id(), first, second))
+                            .unwrap();
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            local_sent_rx.await.unwrap();
+            foreign.send(2).await.unwrap();
+
+            let (owner, first, second) = done_rx.await.unwrap();
+            assert!(owner.is_some());
+            assert_eq!((first, second), (1, 2));
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_foreign_receiver_drop_closes_local_channel() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let (tx, rx) = mpsc::channel::<u64>(4);
+            let root_tx = tx.clone();
+            let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+            let (return_tx, return_rx) = tokio::sync::oneshot::channel();
+
+            let handle = context.dedicated().spawn(move |context| async move {
+                context
+                    .colocated()
+                    .spawn(move |_| async move {
+                        let mut rx = rx;
+                        poll_fn(|cx| {
+                            assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                            Poll::Ready(())
+                        })
+                        .await;
+                        bound_tx.send(()).unwrap();
+                        assert!(return_tx.send(rx).is_ok(), "receiver handoff failed");
+                    })
+                    .await
+                    .unwrap();
+
+                tx.closed().await;
+                assert!(tx.is_closed());
+            });
+
+            bound_rx.await.unwrap();
+            let rx = return_rx.await.unwrap();
+            drop(rx);
+
+            handle.await.unwrap();
+            assert!(matches!(
+                root_tx.try_send(1),
+                Err(mpsc::error::TrySendError::Closed(1))
+            ));
+        });
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for concurrent first-use send/recv race"]
+    fn test_dedicated_concurrent_first_use_send_recv_completes() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let sender_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let receiver_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let tx_state = Arc::new(Mutex::new(None));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                for _ in 0..256 {
+                    let (tx, mut rx) = mpsc::channel(128);
+                    let root_tx = tx.clone();
+                    *tx_state.lock() = Some(root_tx.clone());
+                    sender_step.store(0, Ordering::Relaxed);
+                    receiver_step.store(0, Ordering::Relaxed);
+                    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+                    let sender_barrier = Arc::clone(&barrier);
+                    let receiver_barrier = Arc::clone(&barrier);
+                    let sender_step_task = Arc::clone(&sender_step);
+                    let receiver_step_task = Arc::clone(&receiver_step);
+
+                    let sender = context.clone().dedicated().spawn(move |_| async move {
+                        sender_step_task.store(1, Ordering::Relaxed);
+                        sender_barrier.wait().await;
+                        sender_step_task.store(2, Ordering::Relaxed);
+                        tx.send(()).await.unwrap();
+                        sender_step_task.store(3, Ordering::Relaxed);
+                    });
+
+                    let receiver = context.clone().dedicated().spawn(move |_| async move {
+                        receiver_step_task.store(1, Ordering::Relaxed);
+                        receiver_barrier.wait().await;
+                        receiver_step_task.store(2, Ordering::Relaxed);
+                        assert_eq!(rx.recv().await, Some(()));
+                        receiver_step_task.store(3, Ordering::Relaxed);
+                    });
+
+                    sender.await.unwrap();
+                    receiver.await.unwrap();
+                    *tx_state.lock() = None;
+                    drop(root_tx);
+                }
+            })
+            .await;
+
+            let tx_state = tx_state.lock();
+            assert!(
+                result.is_ok(),
+                "first-use race diagnostic timed out: sender_step={} receiver_step={} tx={:?}",
+                sender_step.load(Ordering::Relaxed),
+                receiver_step.load(Ordering::Relaxed),
+                tx_state.as_ref(),
+            );
+        });
+    }
+
+    #[test]
+    fn test_pinned_dedicated_ping_pong_channels() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            for _ in 0..32 {
+                let (tx_a, mut rx_a) = mpsc::channel(128);
+                let (tx_b, mut rx_b) = mpsc::channel(128);
+
+                let context_a = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+                let context_b = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+
+                let task_a = context_a.spawn(move |_| async move {
+                    for _ in 0..256 {
+                        tx_a.send(()).await.unwrap();
+                        rx_b.recv().await.unwrap();
+                    }
+                });
+                let task_b = context_b.spawn(move |_| async move {
+                    for _ in 0..256 {
+                        tx_b.send(()).await.unwrap();
+                        rx_a.recv().await.unwrap();
+                    }
+                });
+
+                task_a.await.unwrap();
+                task_b.await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for same-core large-message ping-pong mismatch"]
+    fn test_same_core_large_message_ping_pong_preserves_sequence() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let sample = Arc::new(AtomicUsize::new(usize::MAX));
+            let a_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let b_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let tx_a_state = Arc::new(Mutex::new(None));
+            let tx_b_state = Arc::new(Mutex::new(None));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                for outer in 0..1024 {
+                    sample.store(outer, Ordering::Relaxed);
+                    a_step.store(0, Ordering::Relaxed);
+                    b_step.store(0, Ordering::Relaxed);
+                    let (tx_a, mut rx_a) = mpsc::channel::<[u64; 8]>(128);
+                    let (tx_b, mut rx_b) = mpsc::channel::<[u64; 8]>(128);
+                    *tx_a_state.lock() = Some(tx_a.clone());
+                    *tx_b_state.lock() = Some(tx_b.clone());
+                    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+                    let barrier_a = Arc::clone(&barrier);
+                    let barrier_b = Arc::clone(&barrier);
+                    let a_step_task = Arc::clone(&a_step);
+                    let b_step_task = Arc::clone(&b_step);
+
+                    let context_a = if crate::available_cores().is_some() {
+                        context.clone().pinned(0)
+                    } else {
+                        context.clone().dedicated()
+                    };
+                    let context_b = if crate::available_cores().is_some() {
+                        context.clone().pinned(0)
+                    } else {
+                        context.clone().dedicated()
+                    };
+
+                    let task_a = context_a.spawn(move |_| async move {
+                        a_step_task.store(1, Ordering::Relaxed);
+                        barrier_a.wait().await;
+                        a_step_task.store(2, Ordering::Relaxed);
+                        for inner in 0..64 {
+                            let mut sent = [0u64; 8];
+                            sent[0] = inner;
+                            a_step_task.store(3 + inner as usize * 2, Ordering::Relaxed);
+                            tx_a.send(sent).await.unwrap();
+                            a_step_task.store(4 + inner as usize * 2, Ordering::Relaxed);
+                            let received: [u64; 8] = rx_b.recv().await.unwrap();
+                            assert_eq!(received[0], inner, "task A sequence mismatch");
+                        }
+                        a_step_task.store(usize::MAX - 1, Ordering::Relaxed);
+                    });
+                    let task_b = context_b.spawn(move |_| async move {
+                        b_step_task.store(1, Ordering::Relaxed);
+                        barrier_b.wait().await;
+                        b_step_task.store(2, Ordering::Relaxed);
+                        for inner in 0..64 {
+                            let mut sent = [0u64; 8];
+                            sent[0] = inner;
+                            b_step_task.store(3 + inner as usize * 2, Ordering::Relaxed);
+                            tx_b.send(sent).await.unwrap();
+                            b_step_task.store(4 + inner as usize * 2, Ordering::Relaxed);
+                            let received: [u64; 8] = rx_a.recv().await.unwrap();
+                            assert_eq!(received[0], inner, "task B sequence mismatch");
+                        }
+                        b_step_task.store(usize::MAX - 1, Ordering::Relaxed);
+                    });
+
+                    barrier.wait().await;
+                    task_a.await.unwrap();
+                    task_b.await.unwrap();
+                    *tx_a_state.lock() = None;
+                    *tx_b_state.lock() = None;
+                }
+            })
+            .await;
+
+            let tx_a_state = tx_a_state.lock();
+            let tx_b_state = tx_b_state.lock();
+            assert!(
+                result.is_ok(),
+                "same-core large-message ping-pong failed: sample={} a_step={} b_step={} tx_a={:?} tx_b={:?}",
+                sample.load(Ordering::Relaxed),
+                a_step.load(Ordering::Relaxed),
+                b_step.load(Ordering::Relaxed),
+                tx_a_state.as_ref(),
+                tx_b_state.as_ref(),
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for long same-core large-message ping-pong mismatch"]
+    fn test_same_core_large_message_long_ping_pong_preserves_sequence() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let a_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let b_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let (tx_a, mut rx_a) = mpsc::channel::<[u64; 8]>(128);
+                let (tx_b, mut rx_b) = mpsc::channel::<[u64; 8]>(128);
+                let barrier = Arc::new(tokio::sync::Barrier::new(3));
+                let barrier_a = Arc::clone(&barrier);
+                let barrier_b = Arc::clone(&barrier);
+                let a_step_task = Arc::clone(&a_step);
+                let b_step_task = Arc::clone(&b_step);
+
+                let context_a = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+                let context_b = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+
+                let task_a = context_a.spawn(move |_| async move {
+                    barrier_a.wait().await;
+                    for inner in 0..1_000_000u64 {
+                        let mut sent = [0u64; 8];
+                        sent[0] = inner;
+                        a_step_task.store(inner as usize, Ordering::Relaxed);
+                        tx_a.send(sent).await.unwrap();
+                        let received: [u64; 8] = rx_b.recv().await.unwrap();
+                        assert_eq!(received[0], inner, "task A long sequence mismatch");
+                    }
+                });
+                let task_b = context_b.spawn(move |_| async move {
+                    barrier_b.wait().await;
+                    for inner in 0..1_000_000u64 {
+                        let mut sent = [0u64; 8];
+                        sent[0] = inner;
+                        b_step_task.store(inner as usize, Ordering::Relaxed);
+                        tx_b.send(sent).await.unwrap();
+                        let received: [u64; 8] = rx_a.recv().await.unwrap();
+                        assert_eq!(received[0], inner, "task B long sequence mismatch");
+                    }
+                });
+
+                barrier.wait().await;
+                task_a.await.unwrap();
+                task_b.await.unwrap();
+            })
+            .await;
+
+            assert!(
+                result.is_ok(),
+                "long same-core large-message ping-pong failed: a_step={} b_step={}",
+                a_step.load(Ordering::Relaxed),
+                b_step.load(Ordering::Relaxed),
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for repeated runner same-core large-message ping-pong mismatch"]
+    fn test_repeated_runner_same_core_large_message_ping_pong_preserves_sequence() {
+        let num_cores = crate::available_cores();
+        let cfg = num_cores.map_or_else(Config::new, |n| Config::new().with_worker_threads(n));
+
+        for sample in 0..512usize {
+            let executor = Runner::new(cfg.clone());
+            executor.start(|context| async move {
+                let (tx_a, mut rx_a) = mpsc::channel::<[u64; 8]>(128);
+                let (tx_b, mut rx_b) = mpsc::channel::<[u64; 8]>(128);
+                let barrier = Arc::new(tokio::sync::Barrier::new(3));
+                let barrier_a = Arc::clone(&barrier);
+                let barrier_b = Arc::clone(&barrier);
+
+                let context_a = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+                let context_b = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+
+                let task_a = context_a.spawn(move |_| async move {
+                    barrier_a.wait().await;
+                    for inner in 0..256u64 {
+                        let mut sent = [0u64; 8];
+                        sent[0] = inner;
+                        tx_a.send(sent).await.unwrap();
+                        let received: [u64; 8] = rx_b
+                            .recv()
+                            .await
+                            .unwrap_or_else(|| panic!("task A recv closed: sample={sample} inner={inner}"));
+                        assert_eq!(received[0], inner, "task A repeated-runner mismatch");
+                    }
+                });
+                let task_b = context_b.spawn(move |_| async move {
+                    barrier_b.wait().await;
+                    for inner in 0..256u64 {
+                        let mut sent = [0u64; 8];
+                        sent[0] = inner;
+                        tx_b.send(sent).await.unwrap();
+                        let received: [u64; 8] = rx_a
+                            .recv()
+                            .await
+                            .unwrap_or_else(|| panic!("task B recv closed: sample={sample} inner={inner}"));
+                        assert_eq!(received[0], inner, "task B repeated-runner mismatch");
+                    }
+                });
+
+                barrier.wait().await;
+                task_a.await.unwrap();
+                task_b.await.unwrap();
+            });
+
+            std::hint::black_box(sample);
+        }
+    }
+
+    #[test]
+    #[ignore = "known reproducer for intermittent dedicated commonware ping-pong timeout"]
+    fn test_dedicated_ping_pong_channels_complete_with_timeout() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let sample = Arc::new(AtomicUsize::new(usize::MAX));
+            let a_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let b_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let tx_a_state = Arc::new(Mutex::new(None));
+            let tx_b_state = Arc::new(Mutex::new(None));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                for outer in 0..32 {
+                    sample.store(outer, Ordering::Relaxed);
+                    a_step.store(0, Ordering::Relaxed);
+                    b_step.store(0, Ordering::Relaxed);
+                    let (tx_a, mut rx_a) = mpsc::channel(128);
+                    let (tx_b, mut rx_b) = mpsc::channel(128);
+                    *tx_a_state.lock() = Some(tx_a.clone());
+                    *tx_b_state.lock() = Some(tx_b.clone());
+                    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+                    let barrier_a = Arc::clone(&barrier);
+                    let barrier_b = Arc::clone(&barrier);
+                    let a_step_task = Arc::clone(&a_step);
+                    let b_step_task = Arc::clone(&b_step);
+
+                    let task_a = context.clone().dedicated().spawn(move |_| async move {
+                        a_step_task.store(1, Ordering::Relaxed);
+                        barrier_a.wait().await;
+                        a_step_task.store(2, Ordering::Relaxed);
+                        for inner in 0..256 {
+                            a_step_task.store(3 + inner * 2, Ordering::Relaxed);
+                            tx_a.send(()).await.unwrap();
+                            a_step_task.store(4 + inner * 2, Ordering::Relaxed);
+                            rx_b.recv().await.unwrap();
+                        }
+                        a_step_task.store(usize::MAX - 1, Ordering::Relaxed);
+                    });
+                    let task_b = context.clone().dedicated().spawn(move |_| async move {
+                        b_step_task.store(1, Ordering::Relaxed);
+                        barrier_b.wait().await;
+                        b_step_task.store(2, Ordering::Relaxed);
+                        for inner in 0..256 {
+                            b_step_task.store(3 + inner * 2, Ordering::Relaxed);
+                            tx_b.send(()).await.unwrap();
+                            b_step_task.store(4 + inner * 2, Ordering::Relaxed);
+                            rx_a.recv().await.unwrap();
+                        }
+                        b_step_task.store(usize::MAX - 1, Ordering::Relaxed);
+                    });
+
+                    barrier.wait().await;
+                    task_a.await.unwrap();
+                    task_b.await.unwrap();
+                    *tx_a_state.lock() = None;
+                    *tx_b_state.lock() = None;
+                }
+            })
+            .await;
+
+            let tx_a_state = tx_a_state.lock();
+            let tx_b_state = tx_b_state.lock();
+            assert!(
+                result.is_ok(),
+                "dedicated ping-pong timed out: sample={} a_step={} b_step={} tx_a={:?} tx_b={:?}",
+                sample.load(Ordering::Relaxed),
+                a_step.load(Ordering::Relaxed),
+                b_step.load(Ordering::Relaxed),
+                tx_a_state.as_ref(),
+                tx_b_state.as_ref(),
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for same-core batched dedicated commonware timeout"]
+    fn test_same_core_batched_ping_pong_channels_complete_with_timeout() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let a_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let b_step = Arc::new(AtomicUsize::new(usize::MAX));
+            let tx_a_state = Arc::new(Mutex::new(None));
+            let tx_b_state = Arc::new(Mutex::new(None));
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (tx_a, mut rx_a) = mpsc::channel(128);
+                let (tx_b, mut rx_b) = mpsc::channel(128);
+                *tx_a_state.lock() = Some(tx_a.clone());
+                *tx_b_state.lock() = Some(tx_b.clone());
+                let barrier = Arc::new(tokio::sync::Barrier::new(3));
+                let barrier_a = Arc::clone(&barrier);
+                let barrier_b = Arc::clone(&barrier);
+                let a_step_task = Arc::clone(&a_step);
+                let b_step_task = Arc::clone(&b_step);
+
+                let context_a = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+                let context_b = if crate::available_cores().is_some() {
+                    context.clone().pinned(0)
+                } else {
+                    context.clone().dedicated()
+                };
+
+                let task_a = context_a.spawn(move |_| async move {
+                    barrier_a.wait().await;
+                    for round in 0..10_000usize {
+                        for inner in 0..100usize {
+                            a_step_task.store(round * 10_000 + inner, Ordering::Relaxed);
+                            tx_a.send(()).await.unwrap();
+                        }
+                        for inner in 0..100usize {
+                            a_step_task
+                                .store(1_000_000 + round * 10_000 + inner, Ordering::Relaxed);
+                            rx_b.recv().await.unwrap();
+                        }
+                    }
+                });
+                let task_b = context_b.spawn(move |_| async move {
+                    barrier_b.wait().await;
+                    for round in 0..10_000usize {
+                        for inner in 0..100usize {
+                            b_step_task.store(round * 10_000 + inner, Ordering::Relaxed);
+                            tx_b.send(()).await.unwrap();
+                        }
+                        for inner in 0..100usize {
+                            b_step_task
+                                .store(1_000_000 + round * 10_000 + inner, Ordering::Relaxed);
+                            rx_a.recv().await.unwrap();
+                        }
+                    }
+                });
+
+                barrier.wait().await;
+                task_a.await.unwrap();
+                task_b.await.unwrap();
+            })
+            .await;
+
+            let tx_a_state = tx_a_state.lock();
+            let tx_b_state = tx_b_state.lock();
+            assert!(
+                result.is_ok(),
+                "same-core batched ping-pong timed out: a_step={} b_step={} tx_a={:?} tx_b={:?}",
+                a_step.load(Ordering::Relaxed),
+                b_step.load(Ordering::Relaxed),
+                tx_a_state.as_ref(),
+                tx_b_state.as_ref(),
+            );
+        });
     }
 }

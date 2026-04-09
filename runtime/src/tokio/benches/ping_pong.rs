@@ -2,15 +2,16 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Handle, Runner as _, Spawner as _,
 };
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::mpsc as commonware_mpsc;
 use criterion::{Criterion, Throughput};
+use futures::channel::mpsc as futures_mpsc;
 use std::{
     future::Future,
     mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Barrier;
+use tokio::sync::{mpsc as tokio_mpsc, Barrier};
 
 const BATCHES: &[u64] = &[1, 10, 100];
 const MSG_SIZES: &[usize] = &[1, 4, 8, 16, 32];
@@ -48,21 +49,39 @@ trait Channel<T> {
 }
 
 trait Sender<T> {
-    fn send(&self, value: T) -> impl Future<Output = ()> + Send + '_;
+    fn send(&mut self, value: T) -> impl Future<Output = ()> + Send + '_;
 }
 
 trait Receiver<T> {
     fn recv(&mut self) -> impl Future<Output = T> + Send + '_;
 }
 
-struct Mpsc;
+struct CommonwareMpsc;
+struct FuturesMpsc;
+struct TokioMpsc;
 struct Local;
 
-impl<T: Send + 'static> Channel<T> for Mpsc {
-    type Sender = mpsc::Sender<T>;
-    type Receiver = mpsc::Receiver<T>;
+impl<T: Send + 'static> Channel<T> for CommonwareMpsc {
+    type Sender = commonware_mpsc::Sender<T>;
+    type Receiver = commonware_mpsc::Receiver<T>;
     fn channel(capacity: usize) -> (Self::Sender, Self::Receiver) {
-        mpsc::channel(capacity)
+        commonware_mpsc::channel(capacity)
+    }
+}
+
+impl<T: Send + 'static> Channel<T> for TokioMpsc {
+    type Sender = tokio_mpsc::Sender<T>;
+    type Receiver = tokio_mpsc::Receiver<T>;
+    fn channel(capacity: usize) -> (Self::Sender, Self::Receiver) {
+        tokio_mpsc::channel(capacity)
+    }
+}
+
+impl<T: Send + 'static> Channel<T> for FuturesMpsc {
+    type Sender = futures_mpsc::Sender<T>;
+    type Receiver = futures_mpsc::Receiver<T>;
+    fn channel(capacity: usize) -> (Self::Sender, Self::Receiver) {
+        futures_mpsc::channel(capacity)
     }
 }
 
@@ -74,23 +93,51 @@ impl<T: Send + 'static> Channel<T> for Local {
     }
 }
 
-impl<T: Send> Sender<T> for mpsc::Sender<T> {
+impl<T: Send> Sender<T> for commonware_mpsc::Sender<T> {
     #[inline]
-    async fn send(&self, value: T) {
+    async fn send(&mut self, value: T) {
         Self::send(self, value).await.unwrap();
     }
 }
 
-impl<T: Send> Receiver<T> for mpsc::Receiver<T> {
+impl<T: Send> Receiver<T> for commonware_mpsc::Receiver<T> {
     #[inline]
     async fn recv(&mut self) -> T {
         Self::recv(self).await.unwrap()
     }
 }
 
+impl<T: Send> Sender<T> for tokio_mpsc::Sender<T> {
+    #[inline]
+    async fn send(&mut self, value: T) {
+        Self::send(self, value).await.unwrap();
+    }
+}
+
+impl<T: Send> Receiver<T> for tokio_mpsc::Receiver<T> {
+    #[inline]
+    async fn recv(&mut self) -> T {
+        Self::recv(self).await.unwrap()
+    }
+}
+
+impl<T: Send> Sender<T> for futures_mpsc::Sender<T> {
+    #[inline]
+    async fn send(&mut self, value: T) {
+        futures::SinkExt::send(self, value).await.unwrap();
+    }
+}
+
+impl<T: Send> Receiver<T> for futures_mpsc::Receiver<T> {
+    #[inline]
+    fn recv(&mut self) -> impl Future<Output = T> + Send + '_ {
+        async move { futures::StreamExt::next(self).await.unwrap() }
+    }
+}
+
 impl<T: Send> Sender<T> for local_channel::Sender<T> {
     #[inline]
-    async fn send(&self, value: T) {
+    async fn send(&mut self, value: T) {
         Self::send(self, value).await
     }
 }
@@ -106,7 +153,7 @@ impl<T: Send> Receiver<T> for local_channel::Receiver<T> {
 /// Waits on the barrier before starting.
 #[inline]
 async fn ping_pong<const N: usize>(
-    tx: impl Sender<[u64; N]>,
+    mut tx: impl Sender<[u64; N]>,
     mut rx: impl Receiver<[u64; N]>,
     barrier: Arc<Barrier>,
     batch: u64,
@@ -217,11 +264,11 @@ pub fn bench(c: &mut Criterion) {
                 )
             };
 
-            group.bench_function(id("shared"), |b| {
+            group.bench_function(id("shared_commonware"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
-                        Mpsc,
+                        CommonwareMpsc,
                         bench_ping_pong,
                         cfg.clone(),
                         batch,
@@ -233,11 +280,75 @@ pub fn bench(c: &mut Criterion) {
                 });
             });
 
-            group.bench_function(id("colocated"), |b| {
+            group.bench_function(id("shared_tokio"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
-                        Mpsc,
+                        TokioMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Shared,
+                        Shared,
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("shared_futures"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        FuturesMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Shared,
+                        Shared,
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("colocated_commonware"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        CommonwareMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Colocated,
+                        Colocated,
+                        Some(Dedicated)
+                    )
+                });
+            });
+
+            group.bench_function(id("colocated_tokio"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        TokioMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Colocated,
+                        Colocated,
+                        Some(Dedicated)
+                    )
+                });
+            });
+
+            group.bench_function(id("colocated_futures"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        FuturesMpsc,
                         bench_ping_pong,
                         cfg.clone(),
                         batch,
@@ -265,11 +376,43 @@ pub fn bench(c: &mut Criterion) {
                 });
             });
 
-            group.bench_function(id("dedicated"), |b| {
+            group.bench_function(id("dedicated_commonware"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
-                        Mpsc,
+                        CommonwareMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Dedicated,
+                        Dedicated,
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("dedicated_tokio"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        TokioMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Dedicated,
+                        Dedicated,
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("dedicated_futures"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        FuturesMpsc,
                         bench_ping_pong,
                         cfg.clone(),
                         batch,
@@ -288,11 +431,11 @@ pub fn bench(c: &mut Criterion) {
                 continue;
             };
 
-            group.bench_function(id("colocated_pinned"), |b| {
+            group.bench_function(id("colocated_pinned_commonware"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
-                        Mpsc,
+                        CommonwareMpsc,
                         bench_ping_pong,
                         cfg.clone(),
                         batch,
@@ -304,7 +447,39 @@ pub fn bench(c: &mut Criterion) {
                 });
             });
 
-            group.bench_function(id("colocated_local_pinned"), |b| {
+            group.bench_function(id("colocated_pinned_tokio"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        TokioMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Colocated,
+                        Colocated,
+                        Some(Pinned(0))
+                    )
+                });
+            });
+
+            group.bench_function(id("colocated_pinned_futures"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        FuturesMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Colocated,
+                        Colocated,
+                        Some(Pinned(0))
+                    )
+                });
+            });
+
+            group.bench_function(id("colocated_pinned_local"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
@@ -320,11 +495,43 @@ pub fn bench(c: &mut Criterion) {
                 });
             });
 
-            group.bench_function(id("dedicated_same_core"), |b| {
+            group.bench_function(id("dedicated_same_core_commonware"), |b| {
                 b.iter_custom(|iters| {
                     dispatch!(
                         msg_size,
-                        Mpsc,
+                        CommonwareMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Pinned(0),
+                        Pinned(0),
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("dedicated_same_core_tokio"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        TokioMpsc,
+                        bench_ping_pong,
+                        cfg.clone(),
+                        batch,
+                        iters,
+                        Pinned(0),
+                        Pinned(0),
+                        None
+                    )
+                });
+            });
+
+            group.bench_function(id("dedicated_same_core_futures"), |b| {
+                b.iter_custom(|iters| {
+                    dispatch!(
+                        msg_size,
+                        FuturesMpsc,
                         bench_ping_pong,
                         cfg.clone(),
                         batch,
@@ -337,11 +544,43 @@ pub fn bench(c: &mut Criterion) {
             });
 
             if let Some((core_a, core_b)) = cores_same_die {
-                group.bench_function(id("dedicated_different_core"), |b| {
+                group.bench_function(id("dedicated_different_core_commonware"), |b| {
                     b.iter_custom(|iters| {
                         dispatch!(
                             msg_size,
-                            Mpsc,
+                            CommonwareMpsc,
+                            bench_ping_pong,
+                            cfg.clone(),
+                            batch,
+                            iters,
+                            Pinned(core_a),
+                            Pinned(core_b),
+                            None
+                        )
+                    });
+                });
+
+                group.bench_function(id("dedicated_different_core_tokio"), |b| {
+                    b.iter_custom(|iters| {
+                        dispatch!(
+                            msg_size,
+                            TokioMpsc,
+                            bench_ping_pong,
+                            cfg.clone(),
+                            batch,
+                            iters,
+                            Pinned(core_a),
+                            Pinned(core_b),
+                            None
+                        )
+                    });
+                });
+
+                group.bench_function(id("dedicated_different_core_futures"), |b| {
+                    b.iter_custom(|iters| {
+                        dispatch!(
+                            msg_size,
+                            FuturesMpsc,
                             bench_ping_pong,
                             cfg.clone(),
                             batch,
@@ -355,11 +594,43 @@ pub fn bench(c: &mut Criterion) {
             }
 
             if let Some((core_a, core_b)) = cores_diff_die {
-                group.bench_function(id("dedicated_different_die"), |b| {
+                group.bench_function(id("dedicated_different_die_commonware"), |b| {
                     b.iter_custom(|iters| {
                         dispatch!(
                             msg_size,
-                            Mpsc,
+                            CommonwareMpsc,
+                            bench_ping_pong,
+                            cfg.clone(),
+                            batch,
+                            iters,
+                            Pinned(core_a),
+                            Pinned(core_b),
+                            None
+                        )
+                    });
+                });
+
+                group.bench_function(id("dedicated_different_die_tokio"), |b| {
+                    b.iter_custom(|iters| {
+                        dispatch!(
+                            msg_size,
+                            TokioMpsc,
+                            bench_ping_pong,
+                            cfg.clone(),
+                            batch,
+                            iters,
+                            Pinned(core_a),
+                            Pinned(core_b),
+                            None
+                        )
+                    });
+                });
+
+                group.bench_function(id("dedicated_different_die_futures"), |b| {
+                    b.iter_custom(|iters| {
+                        dispatch!(
+                            msg_size,
+                            FuturesMpsc,
                             bench_ping_pong,
                             cfg.clone(),
                             batch,
