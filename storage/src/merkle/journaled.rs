@@ -781,7 +781,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// This is the starting point for building owned batch chains.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D>> {
         let inner = self.inner.read();
-        batch::MerkleizedBatch::from_mem(&inner.mem)
+        let mut batch = batch::MerkleizedBatch::from_mem(&inner.mem);
+        #[cfg(feature = "std")]
+        if let Some(pool) = &self.pool {
+            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
+        }
+        batch
     }
 
     /// Borrow the committed Mem through the read lock. Holds the lock for
