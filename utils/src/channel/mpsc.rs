@@ -50,6 +50,7 @@ impl Mode {
         }
     }
 
+    #[inline(always)]
     const fn from_u8(mode: u8) -> Self {
         match mode {
             MODE_UNINITIALIZED => Self::Uninitialized,
@@ -110,47 +111,14 @@ impl<T> Common<T> {
         Mode::from_u8(self.mode.load(Ordering::Acquire))
     }
 
-    #[inline]
-    fn load_mode_relaxed(&self) -> Mode {
-        Mode::from_u8(self.mode.load(Ordering::Relaxed))
+    #[inline(always)]
+    fn load_mode_raw_relaxed(&self) -> u8 {
+        self.mode.load(Ordering::Relaxed)
     }
 
     #[inline]
     fn current_is_owner(&self) -> bool {
         runtime::current_owner_id_raw() == self.owner_id.load(Ordering::Relaxed)
-    }
-
-    fn try_initialize(&self) {
-        let owner = runtime::current_owner();
-        let binding = if owner.is_some() {
-            Mode::BindingLocal
-        } else {
-            Mode::BindingShared
-        };
-        if self
-            .mode
-            .compare_exchange(
-                Mode::Uninitialized.as_u8(),
-                binding.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return;
-        }
-
-        match owner {
-            Some(owner) => {
-                self.owner_id.store(owner.id, Ordering::Release);
-                *self.owner.lock() = Some(owner);
-                self.mode.store(Mode::Local.as_u8(), Ordering::Release);
-            }
-            None => {
-                self.mode.store(Mode::Shared.as_u8(), Ordering::Release);
-            }
-        }
-        self.notify_state_change();
     }
 
     fn set_closed(&self) -> bool {
@@ -317,7 +285,6 @@ struct BoundedInner<T> {
     common: Common<T>,
     capacity: usize,
     promotion_fallback: Mutex<Option<tokio_mpsc::Sender<T>>>,
-    promotion_fallback_released: AtomicBool,
     space_notify: Notify,
 }
 
@@ -327,20 +294,42 @@ impl<T> BoundedInner<T> {
             common: Common::new(capacity),
             capacity,
             promotion_fallback: Mutex::new(Some(fallback)),
-            promotion_fallback_released: AtomicBool::new(false),
             space_notify: Notify::new(),
         }
     }
 
-    fn release_promotion_fallback(&self) {
-        if self.promotion_fallback_released.load(Ordering::Relaxed) {
+    fn try_initialize(&self) {
+        let owner = runtime::current_owner();
+        let binding = if owner.is_some() {
+            Mode::BindingLocal
+        } else {
+            Mode::BindingShared
+        };
+        if self
+            .common
+            .mode
+            .compare_exchange(
+                Mode::Uninitialized.as_u8(),
+                binding.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
             return;
         }
-        if !self
-            .promotion_fallback_released
-            .swap(true, Ordering::AcqRel)
-        {
-            self.promotion_fallback.lock().take();
+
+        match owner {
+            Some(owner) => {
+                self.common.owner_id.store(owner.id, Ordering::Release);
+                *self.common.owner.lock() = Some(owner);
+                self.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+                self.common.notify_state_change();
+            }
+            None => {
+                self.promotion_fallback.lock().take();
+                self.common.publish_shared();
+            }
         }
     }
 
@@ -371,6 +360,7 @@ impl<T> BoundedInner<T> {
         Ok(())
     }
 
+    #[inline(always)]
     fn try_send_shared(
         &self,
         fallback: &tokio_mpsc::Sender<T>,
@@ -429,7 +419,7 @@ impl<T> BoundedInner<T> {
             // The owner already finished draining or tearing down the local
             // state and is in the middle of publishing shared mode.
             this.common.clear_local_queue();
-            this.release_promotion_fallback();
+            this.promotion_fallback.lock().take();
             this.common.publish_shared();
             this.notify_space_all();
             return;
@@ -441,7 +431,7 @@ impl<T> BoundedInner<T> {
         if runtime::enqueue_promotion(&owner, request).is_err() {
             // The owner loop is gone, so no thread will touch the local queue.
             this.common.clear_local_queue();
-            this.release_promotion_fallback();
+            this.promotion_fallback.lock().take();
             this.common.publish_shared();
             this.notify_space_all();
             return;
@@ -485,7 +475,7 @@ impl<T> BoundedInner<T> {
             }
         }
 
-        self.release_promotion_fallback();
+        self.promotion_fallback.lock().take();
         self.common.publish_shared();
         self.notify_space_all();
     }
@@ -545,30 +535,26 @@ impl<T> Drop for Sender<T> {
 }
 
 impl<T> Sender<T> {
+    #[inline]
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
-        match self.inner.common.load_mode_relaxed() {
-            Mode::Local if self.inner.common.current_is_owner() => {
-                return self.send_local_owner(value).await;
-            }
-            Mode::Shared => return self.send_shared(value).await,
-            _ => {}
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            return match self.fallback.send(value).await {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.inner.common.set_closed();
+                    Err(err)
+                }
+            };
+        }
+        if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            return self.send_local_owner(value).await;
         }
         self.send_slow_async(value).await
     }
 }
 
 impl<T> Sender<T> {
-    async fn send_shared(&self, value: T) -> Result<(), SendError<T>> {
-        self.inner.release_promotion_fallback();
-        match self.fallback.send(value).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                self.inner.common.set_closed();
-                Err(err)
-            }
-        }
-    }
-
     async fn send_local_owner(&self, mut value: T) -> Result<(), SendError<T>> {
         loop {
             match self.inner.try_send_local(value) {
@@ -615,7 +601,7 @@ impl<T> Sender<T> {
 
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => {
                     self.inner.common.wait_binding_complete();
                 }
@@ -658,9 +644,14 @@ impl<T> Sender<T> {
                     self.inner.common.wait_mode_change_async(Mode::Promoting).await;
                 }
                 Mode::Shared => {
-                    return self
-                        .send_shared(value.take().expect("value must be present"))
-                        .await;
+                    return match self.fallback.send(value.take().expect("value must be present")).await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(err) => {
+                            self.inner.common.set_closed();
+                            Err(err)
+                        }
+                    };
                 }
             }
         }
@@ -685,25 +676,23 @@ impl<T> Sender<T> {
 
     #[inline]
     fn try_send_fast_local(&self, value: T) -> Result<Result<(), TrySendError<T>>, T> {
-        match self.inner.common.load_mode_relaxed() {
-            Mode::Local if self.inner.common.current_is_owner() => {
-                Ok(self.inner.try_send_local(value))
-            }
-            _ => Err(value),
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            Ok(self.inner.try_send_local(value))
+        } else {
+            Err(value)
         }
     }
 
     #[inline]
     fn try_send_fast(&self, value: T) -> Result<Result<(), TrySendError<T>>, T> {
-        match self.inner.common.load_mode_relaxed() {
-            Mode::Local if self.inner.common.current_is_owner() => {
-                Ok(self.inner.try_send_local(value))
-            }
-            Mode::Shared => {
-                self.inner.release_promotion_fallback();
-                Ok(self.inner.try_send_shared(&self.fallback, value))
-            }
-            _ => Err(value),
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            Ok(self.inner.try_send_shared(&self.fallback, value))
+        } else if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            Ok(self.inner.try_send_local(value))
+        } else {
+            Err(value)
         }
     }
 
@@ -712,7 +701,7 @@ impl<T> Sender<T> {
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_send_local(value);
@@ -734,7 +723,6 @@ impl<T> Sender<T> {
                     self.inner.common.wait_mode_change_blocking(Mode::Promoting);
                 }
                 Mode::Shared => {
-                    self.inner.release_promotion_fallback();
                     return self.inner.try_send_shared(&self.fallback, value);
                 }
             }
@@ -758,34 +746,37 @@ impl<T> core::fmt::Debug for Receiver<T> {
 }
 
 impl<T> Receiver<T> {
-    fn prepare_shared_fallback(&mut self) {
-        self.inner.release_promotion_fallback();
-    }
-
     #[inline]
     pub fn recv(&mut self) -> impl Future<Output = Option<T>> + '_ {
         BoundedRecvFuture { receiver: self }
     }
 
+    #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        match self.inner.common.load_mode_relaxed() {
-            Mode::Local if self.inner.common.current_is_owner() => self.inner.try_recv_local(),
-            Mode::Shared => self.try_recv_shared(),
-            _ => self.try_recv_slow(),
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            self.try_recv_shared()
+        } else if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            self.inner.try_recv_local()
+        } else {
+            self.try_recv_slow()
         }
     }
 
+    #[inline]
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        match self.inner.common.load_mode_relaxed() {
-            Mode::Local if self.inner.common.current_is_owner() => self.poll_recv_fast_local(cx),
-            Mode::Shared => self.poll_recv_shared(cx),
-            _ => self.poll_recv_slow(cx),
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            self.poll_recv_shared(cx)
+        } else if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            self.poll_recv_fast_local(cx)
+        } else {
+            self.poll_recv_slow(cx)
         }
     }
 
     #[inline]
     fn try_recv_shared(&mut self) -> Result<T, TryRecvError> {
-        self.prepare_shared_fallback();
         self.fallback.try_recv()
     }
 
@@ -808,7 +799,6 @@ impl<T> Receiver<T> {
 
     #[inline]
     fn poll_recv_shared(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.prepare_shared_fallback();
         Pin::new(&mut self.fallback).poll_recv(cx)
     }
 
@@ -817,7 +807,7 @@ impl<T> Receiver<T> {
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => {
                     self.inner
                         .common
@@ -844,7 +834,7 @@ impl<T> Receiver<T> {
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => {
                     let mode = self.inner.common.load_mode();
                     self.inner.common.recv_waker.register(cx.waker());
@@ -881,7 +871,7 @@ impl<T> Receiver<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => {
-                    self.inner.common.try_initialize();
+                    self.inner.try_initialize();
                     return;
                 }
                 Mode::BindingLocal | Mode::BindingShared => {
@@ -900,7 +890,6 @@ impl<T> Receiver<T> {
                 }
                 Mode::Promoting => self.inner.common.wait_mode_change_blocking(Mode::Promoting),
                 Mode::Shared => {
-                    self.prepare_shared_fallback();
                     if !self.fallback_closed {
                         self.fallback.close();
                         self.fallback_closed = true;
@@ -920,6 +909,7 @@ impl<T> Drop for Receiver<T> {
         match self.inner.common.load_mode() {
             Mode::Local | Mode::Promoting if self.inner.common.current_is_owner() => {
                 self.inner.common.clear_local_queue();
+                self.inner.promotion_fallback.lock().take();
                 self.inner.common.publish_shared();
             }
             Mode::Local => BoundedInner::start_promotion(&self.inner),
@@ -931,7 +921,6 @@ impl<T> Drop for Receiver<T> {
 struct UnboundedInner<T> {
     common: Common<T>,
     promotion_fallback: Mutex<Option<tokio_mpsc::UnboundedSender<T>>>,
-    promotion_fallback_released: AtomicBool,
 }
 
 impl<T> UnboundedInner<T> {
@@ -939,19 +928,41 @@ impl<T> UnboundedInner<T> {
         Self {
             common: Common::new(0),
             promotion_fallback: Mutex::new(Some(fallback)),
-            promotion_fallback_released: AtomicBool::new(false),
         }
     }
 
-    fn release_promotion_fallback(&self) {
-        if self.promotion_fallback_released.load(Ordering::Relaxed) {
+    fn try_initialize(&self) {
+        let owner = runtime::current_owner();
+        let binding = if owner.is_some() {
+            Mode::BindingLocal
+        } else {
+            Mode::BindingShared
+        };
+        if self
+            .common
+            .mode
+            .compare_exchange(
+                Mode::Uninitialized.as_u8(),
+                binding.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
             return;
         }
-        if !self
-            .promotion_fallback_released
-            .swap(true, Ordering::AcqRel)
-        {
-            self.promotion_fallback.lock().take();
+
+        match owner {
+            Some(owner) => {
+                self.common.owner_id.store(owner.id, Ordering::Release);
+                *self.common.owner.lock() = Some(owner);
+                self.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+                self.common.notify_state_change();
+            }
+            None => {
+                self.promotion_fallback.lock().take();
+                self.common.publish_shared();
+            }
         }
     }
 
@@ -1024,7 +1035,7 @@ impl<T> UnboundedInner<T> {
             // The owner already finished draining or tearing down the local
             // state and is in the middle of publishing shared mode.
             this.common.clear_local_queue();
-            this.release_promotion_fallback();
+            this.promotion_fallback.lock().take();
             this.common.publish_shared();
             return;
         };
@@ -1035,7 +1046,7 @@ impl<T> UnboundedInner<T> {
         if runtime::enqueue_promotion(&owner, request).is_err() {
             // The owner loop is gone, so no thread will touch the local queue.
             this.common.clear_local_queue();
-            this.release_promotion_fallback();
+            this.promotion_fallback.lock().take();
             this.common.publish_shared();
             return;
         }
@@ -1072,7 +1083,7 @@ impl<T> UnboundedInner<T> {
             }
         }
 
-        self.release_promotion_fallback();
+        self.promotion_fallback.lock().take();
         self.common.publish_shared();
     }
 }
@@ -1131,11 +1142,19 @@ impl<T> Drop for UnboundedSender<T> {
 }
 
 impl<T> UnboundedSender<T> {
+    #[inline]
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            return self.inner.try_send_shared(&self.fallback, value);
+        }
+        if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            return self.inner.try_send_local(value);
+        }
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_send_local(value);
@@ -1157,7 +1176,6 @@ impl<T> UnboundedSender<T> {
                     self.inner.common.wait_mode_change_blocking(Mode::Promoting);
                 }
                 Mode::Shared => {
-                    self.inner.release_promotion_fallback();
                     return self.inner.try_send_shared(&self.fallback, value);
                 }
             }
@@ -1189,20 +1207,24 @@ impl<T> core::fmt::Debug for UnboundedReceiver<T> {
 }
 
 impl<T> UnboundedReceiver<T> {
-    fn prepare_shared_fallback(&mut self) {
-        self.inner.release_promotion_fallback();
-    }
-
     #[inline]
     pub fn recv(&mut self) -> impl Future<Output = Option<T>> + '_ {
         UnboundedRecvFuture { receiver: self }
     }
 
+    #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            return self.fallback.try_recv();
+        }
+        if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            return self.inner.try_recv_local();
+        }
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => {
                     self.inner
                         .common
@@ -1219,22 +1241,21 @@ impl<T> UnboundedReceiver<T> {
                     self.inner.run_promotion();
                 }
                 Mode::Promoting => self.inner.common.wait_mode_change_blocking(Mode::Promoting),
-                Mode::Shared => {
-                    self.prepare_shared_fallback();
-                    return match self.fallback.try_recv() {
-                        Ok(value) => Ok(value),
-                        Err(err) => Err(err),
-                    };
-                }
+                Mode::Shared => return self.fallback.try_recv(),
             }
         }
     }
 
+    #[inline]
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        let mode = self.inner.common.load_mode_raw_relaxed();
+        if mode == MODE_SHARED {
+            return Pin::new(&mut self.fallback).poll_recv(cx);
+        }
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
-                Mode::Uninitialized => self.inner.common.try_initialize(),
+                Mode::Uninitialized => self.inner.try_initialize(),
                 Mode::BindingLocal | Mode::BindingShared => {
                     let mode = self.inner.common.load_mode();
                     self.inner.common.recv_waker.register(cx.waker());
@@ -1271,15 +1292,7 @@ impl<T> UnboundedReceiver<T> {
                     }
                     return Poll::Pending;
                 }
-                Mode::Shared => {
-                    self.prepare_shared_fallback();
-                    let poll = Pin::new(&mut self.fallback).poll_recv(cx);
-                    return match poll {
-                        Poll::Ready(Some(value)) => Poll::Ready(Some(value)),
-                        Poll::Ready(None) => Poll::Ready(None),
-                        Poll::Pending => Poll::Pending,
-                    };
-                }
+                Mode::Shared => return Pin::new(&mut self.fallback).poll_recv(cx),
             }
         }
     }
@@ -1290,7 +1303,7 @@ impl<T> UnboundedReceiver<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => {
-                    self.inner.common.try_initialize();
+                    self.inner.try_initialize();
                     return;
                 }
                 Mode::BindingLocal | Mode::BindingShared => {
@@ -1309,7 +1322,6 @@ impl<T> UnboundedReceiver<T> {
                 }
                 Mode::Promoting => self.inner.common.wait_mode_change_blocking(Mode::Promoting),
                 Mode::Shared => {
-                    self.prepare_shared_fallback();
                     if !self.fallback_closed {
                         self.fallback.close();
                         self.fallback_closed = true;
@@ -1328,6 +1340,7 @@ impl<T> Drop for UnboundedReceiver<T> {
         match self.inner.common.load_mode() {
             Mode::Local | Mode::Promoting if self.inner.common.current_is_owner() => {
                 self.inner.common.clear_local_queue();
+                self.inner.promotion_fallback.lock().take();
                 self.inner.common.publish_shared();
             }
             Mode::Local => UnboundedInner::start_promotion(&self.inner),
