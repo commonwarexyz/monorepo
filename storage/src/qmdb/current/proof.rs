@@ -253,6 +253,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let range_for_layout = range.clone();
         let start_chunk = *range.start / BitMap::<N>::CHUNK_SIZE_BITS;
         let complete_chunks = status.complete_chunks() as u64;
+        let pruned_chunks = status.pruned_chunks() as u64;
         let proof = merkle::verification::range_proof(&std_hasher, storage, range).await?;
         let layout = peak_layout(proof.leaves, range_for_layout)?;
         let grafting_height = grafting::height::<N>();
@@ -283,7 +284,14 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 grafting_height,
                 |idx| {
                     if idx < complete_chunks {
-                        Some(status.get_chunk(idx as usize))
+                        // Pruned chunks are guaranteed all-zero (only chunks with no active
+                        // operations are prunable), so a synthetic zero chunk produces the correct
+                        // grafted digest via the zero-chunk identity shortcut.
+                        if idx < pruned_chunks {
+                            Some([0u8; N])
+                        } else {
+                            Some(status.get_chunk(idx as usize))
+                        }
                     } else {
                         None
                     }
