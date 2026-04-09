@@ -317,7 +317,8 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Panics
     ///
-    /// Panics if the chunk is pruned or out of bounds.
+    /// Panics if the chunk is pruned or out of bounds, or if this is the last partial
+    /// chunk and `chunk_data` has non-zero bits beyond `len()`.
     pub fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
             chunk_index >= self.pruned_chunks,
@@ -325,6 +326,27 @@ impl<const N: usize> Prunable<N> {
             self.pruned_chunks
         );
         let bitmap_chunk_idx = chunk_index - self.pruned_chunks;
+
+        // Reject non-zero trailing bits in the last partial chunk to maintain the
+        // canonicalization invariant required by the codec.
+        if bitmap_chunk_idx + 1 == self.bitmap.chunks_len() {
+            let trailing = self.bitmap.len() % Self::CHUNK_SIZE_BITS;
+            if trailing != 0 {
+                let last_byte = ((trailing - 1) / 8) as usize;
+                let bits_in_last_byte = (trailing % 8) as u32;
+                let byte_mask = if bits_in_last_byte != 0 {
+                    !((1u8 << bits_in_last_byte) - 1)
+                } else {
+                    0
+                };
+                assert!(
+                    chunk_data[last_byte] & byte_mask == 0
+                        && chunk_data[last_byte + 1..] == [0u8; N][last_byte + 1..],
+                    "non-zero bits beyond bitmap length"
+                );
+            }
+        }
+
         self.bitmap.set_chunk_by_index(bitmap_chunk_idx, chunk_data);
     }
 
@@ -1405,6 +1427,65 @@ mod tests {
         for i in 65..100 {
             assert!(!p.get_bit(i), "extended bit {i} should be false");
         }
+    }
+
+    // set_chunk_by_index must reject non-zero bits beyond len() in the last partial chunk.
+
+    #[test]
+    fn test_set_chunk_by_index_accepts_valid_partial_chunk() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 1 full chunk + 3 bits in chunk 1
+                         // Only the low 3 bits of byte 0 are valid; rest must be zero.
+        p.set_chunk_by_index(1, &[0b0000_0111, 0, 0, 0]);
+        assert_eq!(p.get_chunk(1), &[0b0000_0111, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_set_chunk_by_index_accepts_full_chunk() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(64); // 2 full chunks
+                         // Full chunk: any byte pattern is valid.
+        p.set_chunk_by_index(1, &[0xFF; 4]);
+        assert_eq!(p.get_chunk(1), &[0xFF; 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_high_bits_in_last_byte() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+                         // Bit 3 (0b0000_1000) is beyond len.
+        p.set_chunk_by_index(1, &[0b0000_1000, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_nonzero_trailing_bytes() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+                         // Byte 1 is entirely beyond len.
+        p.set_chunk_by_index(1, &[0, 0xFF, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_nonzero_final_byte() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+        p.set_chunk_by_index(1, &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_set_chunk_by_index_roundtrips_codec() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35);
+        p.set_chunk_by_index(1, &[0b0000_0101, 0, 0, 0]);
+
+        let encoded = p.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX)
+            .expect("valid chunk should round-trip");
+        assert_eq!(decoded.len(), 35);
+        assert_eq!(decoded.get_chunk(1), &[0b0000_0101, 0, 0, 0]);
     }
 
     #[cfg(feature = "arbitrary")]
