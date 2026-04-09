@@ -4,9 +4,10 @@
 //! `consensus/quint/modelfuzz/`. The high-level design mirrors
 //! `modelfuzz.Fuzzer.Run` + `TLCStateGuider.Check`:
 //!
-//!   1. Load every JSON trace under
-//!      `consensus/fuzz/src/tracing/tests/fixtures/` as the initial
-//!      seed population.
+//!   1. Copy JSON fixtures from `consensus/fuzz/src/tracing/tests/fixtures/`
+//!      into the seed folder (`MUTATION_SEEDS_FOLDER`, default
+//!      `consensus/fuzz/corpus/tlc_mutator/`) and load all JSON traces
+//!      from there as the initial seed population.
 //!   2. Maintain a `mutated_traces_queue: VecDeque<TraceData>` seeded
 //!      from the initial population.
 //!   3. Per iteration: pop a trace from the queue (or fall back to a
@@ -36,6 +37,7 @@
 //!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default `3`
 //!   * `MUTATOR_RESEED_FREQ`   - iterations between queue reseeds, default `100`
 //!   * `MUTATOR_FAULTS`        - override `faults` in persisted traces, default inherits from seed
+//!   * `MUTATION_SEEDS_FOLDER` - seed corpus directory, default `corpus/tlc_mutator/`
 
 use commonware_consensus_fuzz::{
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
@@ -64,8 +66,14 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn seeds_dir() -> PathBuf {
+fn fixtures_dir() -> PathBuf {
     manifest_dir().join("src/tracing/tests/fixtures")
+}
+
+fn seed_dir() -> PathBuf {
+    env::var("MUTATION_SEEDS_FOLDER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest_dir().join("corpus/tlc_mutator"))
 }
 
 fn output_dir() -> PathBuf {
@@ -85,6 +93,10 @@ fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Skip hidden directories (e.g. .seen marker dir)
+            if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                continue;
+            }
             out.extend(find_json_files(&path));
         } else if path.extension().is_some_and(|ext| ext == "json") {
             out.push(path);
@@ -296,6 +308,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
+/// Copies all JSON fixtures into the seed folder so the mutator works
+/// from its own corpus directory. Existing files with the same name are
+/// overwritten (fixtures are canonical seeds).
+fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
+    let fixtures = fixtures_dir();
+    if !fixtures.is_dir() {
+        return;
+    }
+    fs::create_dir_all(seed_dir).ok();
+    for path in find_json_files(&fixtures) {
+        if let Some(name) = path.file_name() {
+            let dst = seed_dir.join(name);
+            if let Err(e) = fs::copy(&path, &dst) {
+                eprintln!(
+                    "warning: failed to copy {} -> {}: {e}",
+                    path.display(),
+                    dst.display()
+                );
+            }
+        }
+    }
+}
+
 /// Pushes the initial seed population onto `queue`, mirroring
 /// `Fuzzer.seed()`.
 fn seed_queue(queue: &mut VecDeque<TraceData>, seeds: &[TraceData]) {
@@ -313,9 +348,12 @@ fn main() {
     let reseed_freq = reseed_freq_from_env().max(1);
     let faults_override = faults_from_env();
 
-    let seeds = load_seeds(&seeds_dir());
+    let seed_dir = seed_dir();
+    copy_fixtures_to_seed_dir(&seed_dir);
+
+    let mut seeds = load_seeds(&seed_dir);
     if seeds.is_empty() {
-        eprintln!("no usable seed traces under {}", seeds_dir().display());
+        eprintln!("no usable seed traces under {}", seed_dir.display());
         process::exit(1);
     }
 
@@ -361,9 +399,15 @@ fn main() {
     let mut random_executions = 0usize;
 
     for iter in 0..iterations {
-        // Periodic reseed: refill the queue from the initial population
-        // (mirrors `Fuzzer.Run`'s `if i % reseedFrequency == 0 { seed() }`).
+        // Periodic reseed: reload from disk (picks up new traces added by
+        // mbf_live_trace_gen) and refill the queue.
         if iter > 0 && iter % reseed_freq == 0 {
+            seeds = load_seeds(&seed_dir);
+            println!(
+                "[iter {iter}] reseed: loaded {} seeds from {}",
+                seeds.len(),
+                seed_dir.display(),
+            );
             seed_queue(&mut queue, &seeds);
         }
 
