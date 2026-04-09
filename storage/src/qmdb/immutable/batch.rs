@@ -77,14 +77,14 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
 
     /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
     /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
+    /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
     #[allow(clippy::type_complexity)]
     pub(super) ancestor_diffs: Vec<Arc<BTreeMap<K, DiffEntry<F, V::Value>>>>,
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
-    pub(super) ancestor_seg_ends: Vec<u64>,
+    /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
+    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
+    pub(super) ancestor_diff_ends: Vec<u64>,
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -192,13 +192,13 @@ where
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         let mut ancestor_diffs = Vec::new();
-        let mut ancestor_seg_ends = Vec::new();
+        let mut ancestor_diff_ends = Vec::new();
         if let Some(parent) = &self.parent {
             ancestor_diffs.push(Arc::clone(&parent.diff));
-            ancestor_seg_ends.push(parent.total_size);
+            ancestor_diff_ends.push(parent.total_size);
             for batch in parent.ancestors() {
                 ancestor_diffs.push(Arc::clone(&batch.diff));
-                ancestor_seg_ends.push(batch.total_size);
+                ancestor_diff_ends.push(batch.total_size);
             }
         }
 
@@ -210,7 +210,7 @@ where
             total_size,
             db_size: self.db_size,
             ancestor_diffs,
-            ancestor_seg_ends,
+            ancestor_diff_ends,
         })
     }
 }
@@ -299,7 +299,7 @@ where
             total_size: journal_size,
             db_size: journal_size,
             ancestor_diffs: Vec::new(),
-            ancestor_seg_ends: Vec::new(),
+            ancestor_diff_ends: Vec::new(),
         })
     }
 }

@@ -57,7 +57,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::Mutable,
+        contiguous::{Many, Mutable},
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
@@ -648,33 +648,48 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
-        self.append_many(std::slice::from_ref(item)).await
+        self.append_many(Many::Flat(std::slice::from_ref(item)))
+            .await
     }
 
-    /// Append multiple items to the journal, returning the position of the last item appended.
+    /// Append items to the journal, returning the position of the last item appended.
     ///
     /// Acquires the write lock once for all items instead of per-item.
     /// Returns [Error::EmptyAppend] if items is empty.
-    pub async fn append_many(&self, items: &[A]) -> Result<u64, Error> {
+    pub async fn append_many<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
 
         // Encode all items into a single contiguous buffer before taking the write guard.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let mut items_buf = Vec::with_capacity(items.len() * A::SIZE);
-        for item in items {
-            item.write(&mut items_buf);
+        let items_count = match &items {
+            Many::Flat(items) => items.len(),
+            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
+        };
+        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
+        match &items {
+            Many::Flat(items) => {
+                for item in *items {
+                    item.write(&mut items_buf);
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in *nested_items {
+                    for item in *items {
+                        item.write(&mut items_buf);
+                    }
+                }
+            }
         }
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
-
         let mut written = 0;
-        while written < items.len() {
+        while written < items_count {
             let (section, pos_in_section) = self.position_to_section(inner.size);
             let remaining_space = (self.items_per_blob - pos_in_section) as usize;
-            let batch_count = remaining_space.min(items.len() - written);
+            let batch_count = remaining_space.min(items_count - written);
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
 
@@ -866,7 +881,7 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::append(self, item).await
     }
 
-    async fn append_many(&mut self, items: &[Self::Item]) -> Result<u64, Error> {
+    async fn append_many<'a>(&'a mut self, items: Many<'a, Self::Item>) -> Result<u64, Error> {
         Self::append_many(self, items).await
     }
 

@@ -17,105 +17,88 @@ use crate::{
             ValueEncoding,
         },
         current::{
-            db::{compute_db_root, compute_grafted_leaves, partial_chunk},
+            db::{compute_db_root, compute_grafted_leaves},
             grafting,
         },
-        operation::{Key, Operation as OperationTrait},
+        operation::Key,
     },
     Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::{Arc, Weak},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 type Error = crate::qmdb::Error<mmr::Family>;
 
-/// Cleared bitmap bits tracked in two synchronized views.
+/// Speculative chunk-level bitmap overlay.
 ///
-/// `locations` preserves the original clear operations so batch chaining, flattening, and
-/// finalization can replay them in order. `masks` indexes the same clears by chunk, allowing
-/// [`apply_push_clear`] to zero an entire chunk without rescanning every cleared location.
+/// Instead of tracking individual pushed bits and cleared locations, maintains materialized chunk
+/// bytes for every chunk that differs from the parent bitmap. This directly produces the chunk data
+/// needed for grafted MMR leaf computation.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ClearSet<const N: usize> {
-    locations: Vec<Location>,
-    masks: BTreeMap<usize, [u8; N]>,
+pub(crate) struct ChunkOverlay<const N: usize> {
+    /// Dirty chunks: chunk_idx -> materialized chunk bytes.
+    pub(crate) chunks: BTreeMap<usize, [u8; N]>,
+    /// Total number of bits (parent + new operations).
+    pub(crate) len: u64,
 }
 
-impl<const N: usize> ClearSet<N> {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+impl<const N: usize> ChunkOverlay<N> {
+    const CHUNK_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+
+    const fn new(len: u64) -> Self {
         Self {
-            locations: Vec::with_capacity(capacity),
-            masks: BTreeMap::new(),
+            chunks: BTreeMap::new(),
+            len,
         }
     }
 
-    pub(crate) fn push(&mut self, loc: Location) {
-        self.locations.push(loc);
-        let chunk_idx = BitMap::<N>::to_chunk_index(*loc);
-        let rel = (*loc % BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-        let chunk = self.masks.entry(chunk_idx).or_insert([0u8; N]);
+    /// Load-or-create a chunk: returns a mutable reference to the materialized chunk bytes. On
+    /// first access for an existing chunk, reads from `base`.
+    fn chunk_mut<B: BitmapReadable<N>>(&mut self, base: &B, idx: usize) -> &mut [u8; N] {
+        self.chunks.entry(idx).or_insert_with(|| {
+            let base_len = base.len();
+            let base_complete = base.complete_chunks();
+            let base_has_partial = !base_len.is_multiple_of(Self::CHUNK_BITS);
+            if idx < base_complete {
+                base.get_chunk(idx)
+            } else if idx == base_complete && base_has_partial {
+                base.last_chunk().0
+            } else {
+                [0u8; N]
+            }
+        })
+    }
+
+    /// Set a single bit (used for pushes and active operations).
+    fn set_bit<B: BitmapReadable<N>>(&mut self, base: &B, loc: u64) {
+        let idx = BitMap::<N>::to_chunk_index(loc);
+        let rel = (loc % Self::CHUNK_BITS) as usize;
+        let chunk = self.chunk_mut(base, idx);
         chunk[rel / 8] |= 1 << (rel % 8);
     }
 
-    pub(crate) fn merge(&mut self, other: &Self) {
-        self.locations.extend_from_slice(&other.locations);
-        for (&idx, other_mask) in &other.masks {
-            let chunk = self.masks.entry(idx).or_insert([0u8; N]);
-            for (byte, &m) in chunk.iter_mut().zip(other_mask) {
-                *byte |= m;
-            }
+    /// Clear a single bit (used for superseded locations).
+    /// Skips locations in pruned chunks — those bits are already inactive.
+    fn clear_bit<B: BitmapReadable<N>>(&mut self, base: &B, loc: u64) {
+        let idx = BitMap::<N>::to_chunk_index(loc);
+        if idx < base.pruned_chunks() {
+            return;
         }
+        let rel = (loc % Self::CHUNK_BITS) as usize;
+        let chunk = self.chunk_mut(base, idx);
+        chunk[rel / 8] &= !(1 << (rel % 8));
     }
 
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.locations.is_empty()
+    /// Get a dirty chunk's bytes, or `None` if unmodified.
+    pub(crate) fn get(&self, idx: usize) -> Option<&[u8; N]> {
+        self.chunks.get(&idx)
     }
 
-    pub(crate) fn locations(&self) -> &[Location] {
-        &self.locations
-    }
-
-    pub(crate) fn mask(&self, idx: usize) -> Option<&[u8; N]> {
-        self.masks.get(&idx)
-    }
-}
-
-/// Apply pushed bits and cleared bits to `chunk` at absolute position `chunk_start`.
-///
-/// `push_start` is the absolute bit index where pushes begin (i.e. the parent's length).
-/// `clear_mask` is the chunk-local view returned by [`ClearSet::mask`].
-fn apply_push_clear<const N: usize>(
-    chunk: &mut [u8; N],
-    chunk_start: u64,
-    push_start: u64,
-    pushed_bits: &[bool],
-    clear_mask: Option<&[u8; N]>,
-) {
-    let chunk_end = chunk_start + BitMap::<N>::CHUNK_SIZE_BITS;
-
-    let push_end = push_start + pushed_bits.len() as u64;
-    if push_start < chunk_end && push_end > chunk_start {
-        let abs_start = push_start.max(chunk_start);
-        let abs_end = push_end.min(chunk_end);
-        let from = (abs_start - push_start) as usize;
-        let to = (abs_end - push_start) as usize;
-        let rel_offset = (abs_start - chunk_start) as usize;
-        for (j, &bit) in pushed_bits[from..to].iter().enumerate() {
-            if bit {
-                let rel = rel_offset + j;
-                chunk[rel / 8] |= 1 << (rel % 8);
-            }
-        }
-    }
-
-    if let Some(clear_mask) = clear_mask {
-        for (byte, mask) in chunk.iter_mut().zip(clear_mask) {
-            *byte &= !mask;
-        }
+    /// Number of complete chunks.
+    pub(crate) const fn complete_chunks(&self) -> usize {
+        (self.len / Self::CHUNK_BITS) as usize
     }
 }
 
@@ -160,110 +143,6 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
             }
         }
         None
-    }
-}
-
-/// Uncommitted bitmap changes on top of a base bitmap. Records pushed bits and cleared bits
-/// without cloning the base. Implements [`BitmapReadable`] for read-through access.
-pub struct BitmapDiff<'a, B: BitmapReadable<N>, const N: usize> {
-    /// The parent bitmap this diff is built on top of.
-    base: &'a B,
-    /// Number of bits in the base bitmap at diff creation time.
-    base_len: u64,
-    /// New bits appended beyond the base bitmap.
-    pushed_bits: Vec<bool>,
-    /// Base bits that have been deactivated, plus chunk masks derived from them.
-    clears: ClearSet<N>,
-    /// Chunk indices containing cleared bits that need grafted MMR recomputation.
-    dirty_chunks: HashSet<usize>,
-    /// Number of complete chunks in the base bitmap at diff creation time.
-    old_grafted_leaves: usize,
-}
-
-impl<'a, B: BitmapReadable<N>, const N: usize> BitmapDiff<'a, B, N> {
-    const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
-
-    fn new(base: &'a B, old_grafted_leaves: usize) -> Self {
-        Self {
-            base_len: base.len(),
-            base,
-            pushed_bits: Vec::new(),
-            clears: ClearSet::default(),
-            dirty_chunks: HashSet::new(),
-            old_grafted_leaves,
-        }
-    }
-
-    fn push_bit(&mut self, active: bool) {
-        self.pushed_bits.push(active);
-    }
-
-    fn clear_bit(&mut self, loc: Location) {
-        self.clears.push(loc);
-        let chunk = BitMap::<N>::to_chunk_index(*loc);
-        if chunk < self.old_grafted_leaves {
-            self.dirty_chunks.insert(chunk);
-        }
-    }
-
-    /// Consume the diff, returning the parts needed for a [`BitmapBatchLayer`].
-    fn into_parts(self) -> (u64, Vec<bool>, ClearSet<N>) {
-        (self.base_len, self.pushed_bits, self.clears)
-    }
-}
-
-impl<B: BitmapReadable<N>, const N: usize> BitmapReadable<N> for BitmapDiff<'_, B, N> {
-    fn complete_chunks(&self) -> usize {
-        (self.len() / Self::CHUNK_SIZE_BITS) as usize
-    }
-
-    fn get_chunk(&self, idx: usize) -> [u8; N] {
-        let chunk_start = idx as u64 * Self::CHUNK_SIZE_BITS;
-
-        // Start with base data.
-        let base_complete = self.base.complete_chunks();
-        let base_has_partial = !self.base_len.is_multiple_of(Self::CHUNK_SIZE_BITS);
-        let mut chunk = if idx < base_complete {
-            self.base.get_chunk(idx)
-        } else if idx == base_complete && base_has_partial {
-            self.base.last_chunk().0
-        } else {
-            [0u8; N]
-        };
-
-        apply_push_clear(
-            &mut chunk,
-            chunk_start,
-            self.base_len,
-            &self.pushed_bits,
-            self.clears.mask(idx),
-        );
-        chunk
-    }
-
-    fn last_chunk(&self) -> ([u8; N], u64) {
-        let total = self.len();
-        if total == 0 {
-            return ([0u8; N], 0);
-        }
-        let rem = total % Self::CHUNK_SIZE_BITS;
-        let bits_in_last = if rem == 0 { Self::CHUNK_SIZE_BITS } else { rem };
-        let last_idx = self.complete_chunks();
-        // If chunk-aligned, last complete chunk is at complete_chunks - 1.
-        let idx = if rem == 0 {
-            last_idx.saturating_sub(1)
-        } else {
-            last_idx
-        };
-        (self.get_chunk(idx), bits_in_last)
-    }
-
-    fn pruned_chunks(&self) -> usize {
-        self.base.pruned_chunks()
-    }
-
-    fn len(&self) -> u64 {
-        self.base_len + self.pushed_bits.len() as u64
     }
 }
 
@@ -382,9 +261,6 @@ where
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
     inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
 
-    /// Parent batch in the chain. `None` for batches created directly from the DB.
-    parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
-
     /// Parent's grafted MMR state.
     grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
 
@@ -405,33 +281,14 @@ where
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
     pub(crate) inner: Arc<any::batch::MerkleizedBatch<mmr::Family, D, U>>,
 
-    /// The parent batch in the chain, if any.
-    pub(crate) parent: Option<Weak<Self>>,
-
-    /// This batch's local bitmap pushes.
-    pub(crate) bitmap_pushes: Arc<Vec<bool>>,
-
-    /// This batch's local bitmap clears.
-    pub(crate) bitmap_clears: Arc<ClearSet<N>>,
-
     /// Grafted MMR state.
     pub(crate) grafted: Arc<mmr::batch::MerkleizedBatch<D>>,
 
-    /// COW bitmap state (for use as a parent in `BitmapDiff`).
-    bitmap: BitmapBatch<N>,
+    /// COW bitmap state (for use as a parent in speculative batches).
+    pub(crate) bitmap: BitmapBatch<N>,
 
     /// The canonical root (ops root + grafted root + partial chunk).
     pub(crate) canonical_root: D,
-
-    /// Arc refs to each ancestor's bitmap pushes, collected during
-    /// `compute_current_layer()` while the parent is alive. Parent-first order
-    /// (matching `ancestor_seg_ends`).
-    pub(crate) ancestor_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-
-    /// Arc refs to each ancestor's bitmap clears, collected during
-    /// `compute_current_layer()` while the parent is alive. Parent-first order
-    /// (matching `ancestor_seg_ends`).
-    pub(crate) ancestor_bitmap_clears: Vec<Arc<ClearSet<N>>>,
 }
 
 impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>
@@ -442,13 +299,11 @@ where
 {
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
-        parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
         grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
             inner,
-            parent,
             grafted_parent,
             bitmap_parent,
         }
@@ -499,7 +354,6 @@ where
     {
         let Self {
             inner,
-            parent,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -507,7 +361,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
-        compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -546,7 +400,6 @@ where
     {
         let Self {
             inner,
-            parent,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -554,97 +407,83 @@ where
         let inner = inner
             .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
-        compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
-/// Push one bitmap bit per operation in `segment`. An Update is active only if
-/// the merged diff shows it as the final location for its key.
-fn push_operation_bits<U, B, const N: usize>(
-    bitmap: &mut BitmapDiff<'_, B, N>,
-    segment: &[Operation<mmr::Family, U>],
-    segment_base: u64,
-    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
-) where
-    U: update::Update,
-    B: BitmapReadable<N>,
-    Operation<mmr::Family, U>: Codec,
-{
-    for (i, op) in segment.iter().enumerate() {
-        let op_loc = Location::new(segment_base + i as u64);
-        match op {
-            Operation::Update(update) => {
-                let is_active = diff
-                    .get(update.key())
-                    .is_some_and(|entry| entry.loc() == Some(op_loc));
-                bitmap.push_bit(is_active);
-            }
-            Operation::CommitFloor(..) => {
-                // Active until the next commit supersedes it.
-                bitmap.push_bit(true);
-            }
-            Operation::Delete(..) => {
-                bitmap.push_bit(false);
-            }
-        }
-    }
-}
-
-/// Clear bits for base-DB operations superseded by this chain's diff.
-fn clear_base_old_locs<K, V, B, const N: usize>(
-    bitmap: &mut BitmapDiff<'_, B, N>,
-    diff: &BTreeMap<K, DiffEntry<mmr::Family, V>>,
-) where
-    K: Ord,
-    B: BitmapReadable<N>,
-{
-    for entry in diff.values() {
-        if let Some(old) = entry.base_old_loc() {
-            bitmap.clear_bit(old);
-        }
-    }
-}
-
-/// Clear bits for ancestor-segment operations superseded by a later segment.
-/// Only relevant for chained batches (chain length > 1).
-#[allow(clippy::type_complexity)]
-fn clear_ancestor_superseded<U, B, const N: usize>(
-    bitmap: &mut BitmapDiff<'_, B, N>,
-    chain: &[std::sync::Arc<Vec<Operation<mmr::Family, U>>>],
-    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
-    db_base: u64,
-) where
-    U: update::Update,
-    B: BitmapReadable<N>,
-    Operation<mmr::Family, U>: Codec,
-{
-    let mut seg_base = db_base;
-    for ancestor_seg in &chain[..chain.len() - 1] {
-        for (j, op) in ancestor_seg.iter().enumerate() {
-            if let Some(key) = op.key() {
-                let ancestor_loc = Location::new(seg_base + j as u64);
-                if let Some(entry) = diff.get(key) {
-                    if entry.loc() != Some(ancestor_loc) {
-                        bitmap.clear_bit(ancestor_loc);
-                    }
-                }
-            }
-        }
-        seg_base += ancestor_seg.len() as u64;
-    }
-}
-
-/// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized
-/// any batch.
+/// Derive all bitmap mutations (pushes + clears) for this batch in a single pass over the diff and
+/// ancestor diffs. Avoids iterating raw operations.
 ///
-/// Creates a `BitmapDiff` and grafted MMR batch from the immediate parent's state, and
-/// produces the `Arc<MerkleizedBatch>` directly. This batch's local bitmap pushes/clears
-/// are stored alongside the batch; `apply_batch()` walks the parent chain to collect all
-/// ancestors' pushes/clears.
+/// Pushes: one bit per operation in the batch. All false except active diff entries (whose `loc`
+/// falls in the batch) and the CommitFloor (last op).
+///
+/// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
+/// search back through ancestors to find the most recent active location; if none exists, we clear
+/// the committed DB location (`base_old_loc`).
+#[allow(clippy::type_complexity)]
+fn build_chunk_overlay<U, B: BitmapReadable<N>, const N: usize>(
+    base: &B,
+    batch_len: usize,
+    batch_base: u64,
+    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
+    ancestor_diffs: &[Arc<BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>>],
+) -> ChunkOverlay<N>
+where
+    U: update::Update,
+{
+    let total_bits = base.len() + batch_len as u64;
+    let mut overlay = ChunkOverlay::new(total_bits);
+
+    // 1. CommitFloor (last op) is always active.
+    let commit_loc = batch_base + batch_len as u64 - 1;
+    overlay.set_bit(base, commit_loc);
+
+    // 2. Inactivate previous CommitFloor.
+    overlay.clear_bit(base, batch_base - 1);
+
+    // 3. Set active bits + clear superseded locations from the diff.
+    for (key, entry) in diff {
+        // Set the active bit for this key's final location.
+        if let Some(loc) = entry.loc() {
+            if *loc >= batch_base && *loc < batch_base + batch_len as u64 {
+                overlay.set_bit(base, *loc);
+            }
+        }
+
+        // Clear the most recent superseded location. Older locations were already cleared by the
+        // ancestor batch that superseded them.
+        let mut prev_loc = entry.base_old_loc();
+        for ancestor_diff in ancestor_diffs {
+            if let Some(ancestor_entry) = ancestor_diff.get(key) {
+                prev_loc = ancestor_entry.loc();
+                break;
+            }
+        }
+        if let Some(old) = prev_loc {
+            overlay.clear_bit(base, *old);
+        }
+    }
+
+    // Ensure all new complete chunks beyond the parent are materialized, so downstream consumers
+    // don't read from the parent and panic on out-of-range indices. Uses chunk_mut to inherit the
+    // parent's partial chunk data when idx == parent_complete (avoiding loss of existing bits).
+    let parent_complete = base.complete_chunks();
+    let new_complete = overlay.complete_chunks();
+    for idx in parent_complete..new_complete {
+        overlay.chunk_mut(base, idx);
+    }
+
+    overlay
+}
+
+/// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized any
+/// batch.
+///
+/// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
+/// produces the `Arc<MerkleizedBatch>` directly.
 async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: Arc<any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
-    parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
     grafted_parent: &Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<H::Digest, U, N>>, Error>
@@ -656,57 +495,26 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    let old_grafted_leaves = *grafted_parent.leaves() as usize;
-    let mut bitmap = BitmapDiff::new(bitmap_parent, old_grafted_leaves);
+    let batch_len = inner.journal_batch.items().len();
+    let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
 
-    let this_segment = inner.journal_batch.items();
-    let segment_base = *inner.new_last_commit_loc + 1 - this_segment.len() as u64;
+    // Build chunk overlay: materialized bytes for every dirty chunk.
+    let overlay = build_chunk_overlay::<U, _, N>(
+        bitmap_parent,
+        batch_len,
+        batch_base,
+        &inner.diff,
+        &inner.ancestor_diffs,
+    );
 
-    // 1. Inactivate previous commit.
-    let prev_commit_loc = Location::new(segment_base - 1);
-    bitmap.clear_bit(prev_commit_loc);
-
-    // 2. Push bitmap bits for this segment's operations.
-    push_operation_bits(&mut bitmap, this_segment, segment_base, &inner.diff);
-
-    // 3. Clear superseded base-DB operations.
-    clear_base_old_locs(&mut bitmap, &inner.diff);
-
-    // 4. Clear ancestor-segment superseded operations (chaining only).
-    // Collect ancestor segments from the parent chain to clear superseded ops.
-    let db_base_leaves = *current_db.any.last_commit_loc + 1;
-    let has_ancestors = inner
-        .ancestors()
-        .next()
-        .is_some_and(|p| p.journal_batch.size() > db_base_leaves);
-    if has_ancestors {
-        // Build the chain of segments (ancestor-first order) for clear_ancestor_superseded.
-        let mut ancestor_segments: Vec<Arc<Vec<Operation<mmr::Family, U>>>> = Vec::new();
-        for batch in inner.ancestors() {
-            let items = batch.journal_batch.items();
-            if !items.is_empty() && batch.journal_batch.size() > db_base_leaves {
-                ancestor_segments.push(items.clone());
-            }
-        }
-        ancestor_segments.reverse();
-        // Append this segment to form the full chain (ancestors + this).
-        ancestor_segments.push(inner.journal_batch.items().clone());
-        clear_ancestor_superseded(
-            &mut bitmap,
-            &ancestor_segments,
-            &inner.diff,
-            *current_db.any.last_commit_loc + 1,
-        );
-    }
-
-    // 5. Compute grafted leaves for dirty + new chunks.
-    //    dirty_chunks contains indices < old_grafted_leaves (existing chunks
-    //    modified by clears). New chunks are in [old_grafted_leaves, new_grafted_leaves).
-    //    These ranges never overlap, so each chunk is processed exactly once.
-    let new_grafted_leaves = bitmap.complete_chunks();
-    let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-        .chain(bitmap.dirty_chunks.iter().copied())
-        .map(|i| (i, bitmap.get_chunk(i)));
+    // Grafted MMR recomputation: iterate complete chunks in the overlay.
+    // This covers both new chunks and dirty existing chunks in a single pass.
+    let new_grafted_leaves = overlay.complete_chunks();
+    let chunks_to_update = overlay
+        .chunks
+        .iter()
+        .filter(|(&idx, _)| idx < new_grafted_leaves)
+        .map(|(&idx, &chunk)| (idx, chunk));
     let ops_mmr_adapter =
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
     let hasher = StandardHasher::<H>::new();
@@ -718,7 +526,7 @@ where
     )
     .await?;
 
-    // 6. Build grafted MMR from parent batch (owned, no borrow).
+    // Build grafted MMR from parent batch.
     let grafting_height = grafting::height::<N>();
     let grafted_batch = {
         let mut grafted_batch = grafted_parent
@@ -739,52 +547,41 @@ where
         grafted_batch.merkleize(&current_db.grafted_mmr, &gh)
     };
 
-    // 7. Compute canonical root. The grafted batch alone cannot resolve committed nodes,
-    //    so layer it over the committed grafted MMR.
+    // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
+    // so layer it over the committed grafted MMR.
     let ops_root = inner.root();
     let layered = BatchOverMem {
         batch: &grafted_batch,
         mem: &current_db.grafted_mmr,
     };
     let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_mmr_adapter);
-    let partial = partial_chunk(&bitmap);
+    // Compute partial chunk (last incomplete chunk, if any).
+    let partial = {
+        let rem = overlay.len % ChunkOverlay::<N>::CHUNK_BITS;
+        if rem == 0 {
+            None
+        } else {
+            let idx = new_grafted_leaves;
+            let chunk = overlay
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
+            Some((chunk, rem))
+        }
+    };
     let canonical_root =
         compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
 
-    // 8. Extract diff data and build COW bitmap layer.
-    let (parent_len, pushed_bits, clears) = bitmap.into_parts();
-    let pushed_bits = Arc::new(pushed_bits);
-    let clears = Arc::new(clears);
-
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
-        parent_len,
-        pushed_bits: Arc::clone(&pushed_bits),
-        clears: Arc::clone(&clears),
+        overlay: Arc::new(overlay),
     }));
-
-    // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
-    // truncate the walk (committed-and-dropped ancestors are skipped). The walk
-    // yields parent-first order, matching ancestor_seg_ends.
-    let mut ancestor_bitmap_pushes = Vec::new();
-    let mut ancestor_bitmap_clears = Vec::new();
-    let mut current = parent.as_ref().and_then(Weak::upgrade);
-    while let Some(batch) = current {
-        ancestor_bitmap_pushes.push(Arc::clone(&batch.bitmap_pushes));
-        ancestor_bitmap_clears.push(Arc::clone(&batch.bitmap_clears));
-        current = batch.parent.as_ref().and_then(Weak::upgrade);
-    }
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
-        parent,
-        bitmap_pushes: pushed_bits,
-        bitmap_clears: clears,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
-        ancestor_bitmap_pushes,
-        ancestor_bitmap_clears,
     }))
 }
 
@@ -802,13 +599,9 @@ pub(crate) enum BitmapBatch<const N: usize> {
 /// The data behind a [`BitmapBatch::Layer`].
 #[derive(Debug)]
 pub(crate) struct BitmapBatchLayer<const N: usize> {
-    parent: BitmapBatch<N>,
-    /// Cached `parent.len()` at layer creation time.
-    parent_len: u64,
-    /// New bits appended contiguously from `parent_len`.
-    pushed_bits: Arc<Vec<bool>>,
-    /// Parent bits that were deactivated, plus chunk masks derived from them.
-    clears: Arc<ClearSet<N>>,
+    pub(crate) parent: BitmapBatch<N>,
+    /// Chunk-level overlay: materialized bytes for every chunk that differs from parent.
+    pub(crate) overlay: Arc<ChunkOverlay<N>>,
 }
 
 impl<const N: usize> BitmapBatch<N> {
@@ -824,25 +617,12 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
         match self {
             Self::Base(bm) => *bm.get_chunk(idx),
             Self::Layer(layer) => {
-                let chunk_start = idx as u64 * Self::CHUNK_SIZE_BITS;
-
-                // Start with parent's data, or zeroed if this chunk is
-                // entirely beyond the parent's range (created by pushes).
-                let parent_chunks = layer.parent_len.div_ceil(Self::CHUNK_SIZE_BITS);
-                let mut chunk = if (idx as u64) < parent_chunks {
-                    layer.parent.get_chunk(idx)
+                // Check overlay first; fall through to parent if unmodified.
+                if let Some(&chunk) = layer.overlay.get(idx) {
+                    chunk
                 } else {
-                    [0u8; N]
-                };
-
-                apply_push_clear(
-                    &mut chunk,
-                    chunk_start,
-                    layer.parent_len,
-                    &layer.pushed_bits,
-                    layer.clears.mask(idx),
-                );
-                chunk
+                    layer.parent.get_chunk(idx)
+                }
             }
         }
     }
@@ -872,27 +652,33 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     fn len(&self) -> u64 {
         match self {
             Self::Base(bm) => BitmapReadable::<N>::len(bm.as_ref()),
-            Self::Layer(layer) => layer.parent_len + layer.pushed_bits.len() as u64,
+            Self::Layer(layer) => layer.overlay.len,
         }
     }
 }
 
 impl<const N: usize> BitmapBatch<N> {
-    /// Push a batch as a new layer on top of this bitmap, mutating `self` in place.
-    ///
-    /// The old value becomes the parent of the new layer.
-    pub(super) fn push_batch(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
-        if pushed_bits.is_empty() && clears.is_empty() {
-            return;
+    /// Apply a chunk overlay to this bitmap. When `self` is `Base` with sole ownership, writes
+    /// overlay chunks directly into the bitmap. Otherwise creates a new `Layer`.
+    pub(super) fn apply_overlay(&mut self, overlay: Arc<ChunkOverlay<N>>) {
+        // Fast path: write overlay chunks directly into the Base bitmap.
+        if let Self::Base(base) = self {
+            if let Some(bitmap) = Arc::get_mut(base) {
+                // Extend bitmap to the overlay's length.
+                bitmap.extend_to(overlay.len);
+                // Overwrite dirty chunks.
+                for (&idx, chunk_bytes) in &overlay.chunks {
+                    if idx >= bitmap.pruned_chunks() {
+                        bitmap.set_chunk_by_index(idx, chunk_bytes);
+                    }
+                }
+                return;
+            }
         }
-        let parent_len = self.len();
+
+        // Slow path: create a new layer.
         let parent = self.clone();
-        *self = Self::Layer(Arc::new(BitmapBatchLayer {
-            parent,
-            parent_len,
-            pushed_bits: Arc::new(pushed_bits),
-            clears: Arc::new(clears),
-        }));
+        *self = Self::Layer(Arc::new(BitmapBatchLayer { parent, overlay }));
     }
 
     /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
@@ -908,35 +694,33 @@ impl<const N: usize> BitmapBatch<N> {
         // artificially inflated by a clone.
         let mut owned = std::mem::replace(self, Self::Base(Arc::new(BitMap::default())));
 
-        // Collect layers from tip to base.
-        let mut layers = Vec::new();
+        // Collect overlays from tip to base.
+        let mut overlays = Vec::new();
         let base = loop {
             match owned {
                 Self::Base(bm) => break bm,
                 Self::Layer(layer) => match Arc::try_unwrap(layer) {
                     Ok(inner) => {
-                        layers.push((inner.pushed_bits, inner.clears));
+                        overlays.push(inner.overlay);
                         owned = inner.parent;
                     }
                     Err(arc) => {
-                        layers.push((arc.pushed_bits.clone(), arc.clears.clone()));
+                        overlays.push(arc.overlay.clone());
                         owned = arc.parent.clone();
                     }
                 },
             }
         };
 
-        // Replay mutations from base to tip.
+        // Apply overlays from base to tip.
         let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
-        for (pushed, clears) in layers.into_iter().rev() {
-            for &bit in pushed.iter() {
-                bitmap.push(bit);
-            }
-            for &loc in clears.locations() {
-                // Clears computed before a prune may reference pruned chunks.
-                // Those bits are already inactive; skip them.
-                if BitMap::<N>::to_chunk_index(*loc) >= bitmap.pruned_chunks() {
-                    bitmap.set_bit(*loc, false);
+        for overlay in overlays.into_iter().rev() {
+            // Extend bitmap to the overlay's length.
+            bitmap.extend_to(overlay.len);
+            // Apply dirty chunks.
+            for (&idx, chunk_bytes) in &overlay.chunks {
+                if idx >= bitmap.pruned_chunks() {
+                    bitmap.set_chunk_by_index(idx, chunk_bytes);
                 }
             }
         }
@@ -974,7 +758,6 @@ where
     {
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
-            Some(Arc::downgrade(self)),
             Arc::clone(&self.grafted),
             self.bitmap.clone(),
         )
@@ -1010,14 +793,9 @@ where
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
-            parent: None,
-            bitmap_pushes: Arc::new(Vec::new()),
-            bitmap_clears: Arc::new(ClearSet::default()),
             grafted,
             bitmap: self.status.clone(),
             canonical_root: self.root,
-            ancestor_bitmap_pushes: Vec::new(),
-            ancestor_bitmap_clears: Vec::new(),
         })
     }
 }
@@ -1197,164 +975,31 @@ mod tests {
         bm
     }
 
-    // ---- BitmapDiff tests ----
+    // ---- build_chunk_overlay tests ----
 
     #[test]
-    fn bitmap_diff_push_only() {
-        let base = Bm::new();
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-        for i in 0..10 {
-            diff.push_bit(i % 2 == 0);
-        }
-        assert_eq!(diff.len(), 10);
-        assert_eq!(diff.complete_chunks(), 0);
-
-        let chunk = diff.get_chunk(0);
-        // Bits 0,2,4,6,8 set -> 0b_0000_0001_0101_0101 in LE byte order
-        // byte 0: bits 0..7 -> 0b0101_0101 = 0x55
-        // byte 1: bits 8..9 -> bit 8 set -> 0b0000_0001 = 0x01
-        assert_eq!(chunk[0], 0x55);
-        assert_eq!(chunk[1], 0x01);
-        assert_eq!(chunk[2], 0);
-        assert_eq!(chunk[3], 0);
-    }
-
-    #[test]
-    fn bitmap_diff_clear_on_base() {
-        // Base has bits 0..8 all set.
-        let base = make_bitmap(&[true; 8]);
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-
-        // Clear bit 3.
-        diff.clear_bit(Location::new(3));
-        let chunk = diff.get_chunk(0);
-        // 0xFF with bit 3 cleared -> 0b1111_0111 = 0xF7
-        assert_eq!(chunk[0], 0xF7);
-    }
-
-    #[test]
-    fn bitmap_diff_push_and_clear_same_chunk() {
-        // Base has 8 bits set.
-        let base = make_bitmap(&[true; 8]);
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-
-        // Push 2 more bits (active).
-        diff.push_bit(true);
-        diff.push_bit(true);
-        assert_eq!(diff.len(), 10);
-
-        // Clear base bit 0.
-        diff.clear_bit(Location::new(0));
-        let chunk = diff.get_chunk(0);
-        // Base byte 0: 0xFF -> clear bit 0 -> 0xFE
-        // Pushed bits at positions 8,9 -> byte 1: bit 0 and 1 set -> 0x03
-        assert_eq!(chunk[0], 0xFE);
-        assert_eq!(chunk[1], 0x03);
-    }
-
-    #[test]
-    fn bitmap_diff_cross_chunk_boundary() {
-        // Base has 30 bits (partial first chunk, CHUNK_SIZE_BITS=32).
-        let base = make_bitmap(&[true; 30]);
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-
-        // Push 5 bits to cross into second chunk (total 35).
-        for _ in 0..5 {
-            diff.push_bit(true);
-        }
-        assert_eq!(diff.len(), 35);
-        assert_eq!(diff.complete_chunks(), 1);
-
-        // First chunk (32 bits) should be all ones.
-        let c0 = diff.get_chunk(0);
-        assert_eq!(c0, [0xFF, 0xFF, 0xFF, 0xFF]);
-
-        // Second chunk: 3 bits set (positions 32,33,34).
-        let c1 = diff.get_chunk(1);
-        assert_eq!(c1[0], 0x07);
-        assert_eq!(c1[1], 0);
-    }
-
-    #[test]
-    fn bitmap_diff_last_chunk_partial() {
-        let base = Bm::new();
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-        // Push 5 bits.
-        for _ in 0..5 {
-            diff.push_bit(true);
-        }
-        let (chunk, bits_in_last) = diff.last_chunk();
-        assert_eq!(bits_in_last, 5);
-        assert_eq!(chunk[0], 0x1F); // lower 5 bits set
-    }
-
-    #[test]
-    fn bitmap_diff_last_chunk_aligned() {
-        let base = Bm::new();
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
-        // Push exactly CHUNK_SIZE_BITS = 32 bits.
-        for _ in 0..32 {
-            diff.push_bit(true);
-        }
-        let (chunk, bits_in_last) = diff.last_chunk();
-        assert_eq!(bits_in_last, 32);
-        assert_eq!(chunk, [0xFF; 4]);
-    }
-
-    #[test]
-    fn bitmap_diff_dirty_chunks_tracking() {
-        // 3 complete chunks = 96 bits.
-        let base = make_bitmap(&[true; 96]);
-        assert_eq!(base.complete_chunks(), 3);
-
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 3);
-
-        // Clear bit in chunk 1 (bit 40 -> chunk 40/32 = 1).
-        diff.clear_bit(Location::new(40));
-        assert!(diff.dirty_chunks.contains(&1));
-
-        // Push a bit, then clear it. It's beyond old_grafted_leaves, so
-        // dirty_chunks should still only contain {1}.
-        diff.push_bit(true);
-        diff.clear_bit(Location::new(96)); // in the pushed region
-        assert_eq!(diff.dirty_chunks.len(), 1);
-        assert!(diff.dirty_chunks.contains(&1));
-    }
-
-    // ---- push_operation_bits test ----
-
-    #[test]
-    fn push_operation_bits_mixed() {
-        use crate::qmdb::any::{
-            operation::{update, Operation},
-            value::FixedEncoding,
-        };
+    fn chunk_overlay_pushes() {
+        use crate::qmdb::any::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
         type V = FixedEncoding<u64>;
-        type U = update::Unordered<K, V>;
-        type Op = Operation<mmr::Family, U>;
+        type U = crate::qmdb::any::operation::update::Unordered<K, V>;
 
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let key2 = FixedBytes::from([2, 0, 0, 0]);
-        let key3 = FixedBytes::from([3, 0, 0, 0]);
 
-        // Segment: Update(key1), Update(key2), Delete(key3), CommitFloor
-        let segment: Vec<Op> = vec![
-            Op::Update(update::Unordered(key1.clone(), 100u64)),
-            Op::Update(update::Unordered(key2.clone(), 200u64)),
-            Op::Delete(key3),
-            Op::CommitFloor(None, Location::new(99)),
-        ];
-
-        // Diff: key1 active at loc=0, key2 superseded (active at loc=99, not loc=1).
+        // Base: 4 bits, all set (previous commit at loc 3).
+        // Segment of 4 operations starting at base_size=4.
+        // Diff: key1 active at loc=4 (in batch), key2 active at loc=99 (not in batch,
+        // so superseded within this batch).
+        let base = make_bitmap(&[true; 4]);
         let mut diff = BTreeMap::new();
         diff.insert(
             key1,
             DiffEntry::Active {
                 value: 100u64,
-                loc: Location::new(0),
+                loc: Location::new(4), // offset 0 in batch
                 base_old_loc: None,
             },
         );
@@ -1362,34 +1007,43 @@ mod tests {
             key2,
             DiffEntry::Active {
                 value: 200u64,
-                loc: Location::new(99), // not loc=1, so superseded
+                loc: Location::new(99), // not in batch [4,8), so superseded
                 base_old_loc: None,
             },
         );
 
-        let base = Bm::new();
-        let mut bitmap = BitmapDiff::<Bm, N>::new(&base, 0);
-        push_operation_bits::<U, Bm, N>(&mut bitmap, &segment, 0, &diff);
+        let overlay = build_chunk_overlay::<U, _, N>(&base, 4, 4, &diff, &[]);
 
-        // Expected: [true(key1 active), false(key2 superseded), false(delete), true(commit)]
-        assert_eq!(bitmap.pushed_bits, [true, false, false, true]);
+        // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
+        // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
+        let c0 = overlay.get(0).expect("chunk 0 should be dirty");
+        assert_ne!(c0[0] & (1 << 4), 0); // key1 active
+        assert_eq!(c0[0] & (1 << 5), 0); // inactive
+        assert_eq!(c0[0] & (1 << 6), 0); // inactive
+        assert_ne!(c0[0] & (1 << 7), 0); // CommitFloor
+        assert_eq!(c0[0] & (1 << 3), 0); // previous commit cleared
     }
 
-    // ---- clear_base_old_locs test ----
-
     #[test]
-    fn clear_base_old_locs_mixed() {
-        type K = u64;
+    fn chunk_overlay_clears() {
+        use crate::qmdb::any::value::FixedEncoding;
+        use commonware_utils::sequence::FixedBytes;
 
-        // Base bitmap with 64 bits.
+        type K = FixedBytes<4>;
+        type U = crate::qmdb::any::operation::update::Unordered<K, FixedEncoding<u64>>;
+
+        let key1 = FixedBytes::from([1, 0, 0, 0]);
+        let key2 = FixedBytes::from([2, 0, 0, 0]);
+        let key3 = FixedBytes::from([3, 0, 0, 0]);
+
+        // Base bitmap with 64 bits, all set.
         let base = make_bitmap(&[true; 64]);
-        let mut bitmap = BitmapDiff::<Bm, N>::new(&base, 2);
 
         let mut diff: BTreeMap<K, DiffEntry<mmr::Family, u64>> = BTreeMap::new();
 
         // key1: Active with base_old_loc = Some(5) -> should clear bit 5.
         diff.insert(
-            1,
+            key1,
             DiffEntry::Active {
                 value: 100,
                 loc: Location::new(70),
@@ -1399,7 +1053,7 @@ mod tests {
 
         // key2: Deleted with base_old_loc = Some(10) -> should clear bit 10.
         diff.insert(
-            2,
+            key2,
             DiffEntry::Deleted {
                 base_old_loc: Some(Location::new(10)),
             },
@@ -1407,7 +1061,7 @@ mod tests {
 
         // key3: Active with base_old_loc = None -> no clear.
         diff.insert(
-            3,
+            key3,
             DiffEntry::Active {
                 value: 300,
                 loc: Location::new(71),
@@ -1415,18 +1069,58 @@ mod tests {
             },
         );
 
-        clear_base_old_locs::<K, u64, Bm, N>(&mut bitmap, &diff);
+        // Segment of 8 ops starting at 64; previous commit at loc 63.
+        let overlay = build_chunk_overlay::<U, _, N>(&base, 8, 64, &diff, &[]);
 
-        assert_eq!(bitmap.clears.locations().len(), 2);
-
-        // Verify bits 5 and 10 are cleared.
-        let c0 = bitmap.get_chunk(0);
+        // Verify bits 5 and 10 are cleared in chunk 0.
+        let c0 = overlay.get(0).expect("chunk 0 should be dirty");
         assert_eq!(c0[0] & (1 << 5), 0); // bit 5 cleared
         assert_eq!(c0[1] & (1 << 2), 0); // bit 10 = byte 1, bit 2 cleared
 
         // Other bits should still be set.
         assert_eq!(c0[0] & (1 << 4), 1 << 4); // bit 4 still set
         assert_eq!(c0[1] & (1 << 3), 1 << 3); // bit 11 still set
+    }
+
+    /// Regression: when the parent bitmap has a partial last chunk that becomes complete in the
+    /// child (without any active bits landing in that chunk), the overlay must inherit the parent's
+    /// partial chunk data, not zero it out.
+    #[test]
+    fn chunk_overlay_preserves_partial_parent_chunk() {
+        use crate::qmdb::any::value::FixedEncoding;
+        use commonware_utils::sequence::FixedBytes;
+
+        type K = FixedBytes<4>;
+        type U = crate::qmdb::any::operation::update::Unordered<K, FixedEncoding<u64>>;
+
+        // Base: 20 bits set (partial chunk 0, CHUNK_SIZE_BITS=32).
+        let base = make_bitmap(&[true; 20]);
+        assert_eq!(base.complete_chunks(), 0); // partial
+
+        // Segment of 20 ops starting at loc 20. This pushes total to 40 bits, completing chunk 0
+        // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
+        // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
+        let key1 = FixedBytes::from([1, 0, 0, 0]);
+        let mut diff = BTreeMap::new();
+        diff.insert(
+            key1,
+            DiffEntry::Active {
+                value: 42u64,
+                loc: Location::new(35),
+                base_old_loc: None,
+            },
+        );
+
+        let overlay = build_chunk_overlay::<U, _, N>(&base, 20, 20, &diff, &[]);
+
+        // Chunk 0 should be materialized and preserve the parent's first 20 bits.
+        let c0 = overlay.get(0).expect("chunk 0 should be in overlay");
+        // Bits 0-7 all set -> byte 0 = 0xFF
+        assert_eq!(c0[0], 0xFF);
+        // Bits 8-15 all set -> byte 1 = 0xFF
+        assert_eq!(c0[1], 0xFF);
+        // Bits 16-18 set, bit 19 cleared (previous commit), 20-23 not set -> byte 2 = 0x07
+        assert_eq!(c0[2], 0x07);
     }
 
     // ---- FloorScan tests ----
@@ -1541,41 +1235,31 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_scan_with_bitmap_diff() {
-        // Base: bits 0..8 all active.
+    fn test_apply_overlay() {
+        // Base: 8 bits all set, sole owner -> fast path.
         let base = make_bitmap(&[true; 8]);
-        let mut diff = BitmapDiff::<Bm, N>::new(&base, 0);
+        let mut batch = BitmapBatch::Base(Arc::new(base));
 
-        // Clear bits 2 and 5.
-        diff.clear_bit(Location::new(2));
-        diff.clear_bit(Location::new(5));
+        let mut overlay = ChunkOverlay::new(12);
+        let mut c0 = [0u8; N];
+        c0[0] = 0b1111_0111; // bits 0-7 set except bit 3
+        c0[1] = 0b0000_0100; // bit 10 set
+        overlay.chunks.insert(0, c0);
+        batch.apply_overlay(Arc::new(overlay));
 
-        // Push two inactive bits and one active bit beyond the base.
-        diff.push_bit(false);
-        diff.push_bit(false);
-        diff.push_bit(true);
+        // Fast path keeps Base, extends length, applies chunks.
+        assert!(matches!(batch, BitmapBatch::Base(_)));
+        assert_eq!(batch.len(), 12);
+        assert_eq!(batch.get_chunk(0)[0] & (1 << 3), 0);
+        assert_ne!(batch.get_chunk(0)[1] & (1 << 2), 0);
 
-        let mut scan = BitmapScan::<BitmapDiff<'_, Bm, N>, N>::new(&diff);
-
-        // Should skip bit 2 (cleared), return 0.
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 11),
-            Some(Location::new(0))
-        );
-        // From 2: skip cleared bit 2, return 3.
-        assert_eq!(
-            scan.next_candidate(Location::new(2), 11),
-            Some(Location::new(3))
-        );
-        // From 5: skip cleared bit 5, return 6.
-        assert_eq!(
-            scan.next_candidate(Location::new(5), 11),
-            Some(Location::new(6))
-        );
-        // From 8: skip pushed inactive 8,9, return active pushed 10.
-        assert_eq!(
-            scan.next_candidate(Location::new(8), 11),
-            Some(Location::new(10))
-        );
+        // Shared Arc -> slow path creates Layer.
+        let BitmapBatch::Base(ref base_arc) = batch else {
+            panic!("expected Base");
+        };
+        let _shared = Arc::clone(base_arc);
+        let overlay2 = ChunkOverlay::new(12);
+        batch.apply_overlay(Arc::new(overlay2));
+        assert!(matches!(batch, BitmapBatch::Layer(_)));
     }
 }
