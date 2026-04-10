@@ -126,7 +126,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         {
             // Parallel path: encode items and compute leaf digests on the thread pool,
             // then feed the pre-computed digests sequentially into the MMR batch.
-            use crate::mmr::hasher::Hasher as _;
+            use crate::merkle::hasher::Hasher as _;
             use rayon::prelude::*;
 
             let starting_leaves = self.inner.leaves();
