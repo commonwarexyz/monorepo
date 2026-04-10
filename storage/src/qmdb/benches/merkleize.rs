@@ -247,9 +247,9 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 
 // -- Config --
 
-// Use huge blobs so avoid iteration times being affected by multiple fsyncs from crossing blob
+// Use huge blobs to avoid iteration times being affected by multiple fsyncs from crossing blob
 // boundaries.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
