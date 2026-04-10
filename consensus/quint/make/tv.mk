@@ -1,4 +1,4 @@
-# Trace validation: fuzz -> quint trace -> quint test pipeline.
+# Trace validation(tv): get traces from the real implementation, encode them into quint tests, run the test in the Quint simulator.
 
 .PHONY: get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces clean_traces tv tv_live tv_live_fuzz tv_live_watch test_encoder
 

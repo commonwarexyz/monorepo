@@ -1,4 +1,4 @@
-# tlc-controlled: install, build, sync, compile spec, run server.
+# tla+ and tlc-controlled helpers: install, build, sync, compile spec, run server.
 #
 # All runtime targets delegate to scripts/tlc.sh; see that script for
 # env var overrides (TLC_PORT, TLC_BUILD_DIR, TLC_JAR, ...).

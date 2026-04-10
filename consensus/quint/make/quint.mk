@@ -1,4 +1,4 @@
-# Quint spec targets: typecheck, test, run, repl.
+# Quint spec targets: typecheck, test, run, verification scripts.
 
 .PHONY: typecheck test longtest repl run
 

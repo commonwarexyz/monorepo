@@ -1,9 +1,10 @@
-# Model-based fuzzing (mbf): mutate traces, validate via tlc-controlled,
-# replay accepted mutations on the real implementation.
+# Model-based fuzzing (mbf): get traces from the real implementation, mutate traces, get feedback via tlc-controlled,
+# replay accepted mutations on the implementation.
 #
 #   make mbf_live          # run both in parallel (fuzz + watch)
 #   make mbf_live_fuzz     # mutator + tlc-controlled only
 #   make mbf_live_watch    # replay watcher only
+#   mbf_live_trace_gen     # run a libfuzzer target and get interesting traces from it
 
 MBF_TLC_PORT ?= 2023
 MBF_FAULTS ?= 0
@@ -16,10 +17,7 @@ MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTI
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
-	MUTATOR_SEED=$(MUTATOR_SEED) \
-	MUTATOR_MUT_PER_TRACE=$(MUTATOR_MUT_PER_TRACE) \
 	MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
-	MUTATED_TRACES_SEED_DIR=$(MUTATED_TRACES_SEED_DIR) \
 	MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 	MUTATOR_FAULTS=$(MBF_FAULTS) \
 	MUTATOR_DEBUG=true \

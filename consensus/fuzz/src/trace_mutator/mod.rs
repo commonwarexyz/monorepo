@@ -1,18 +1,23 @@
-//! Trace fuzzer driven by the controlled TLC server.
+//! Trace mutator used to mutate traces with feedback from the tlc-controlled server.
 //!
 //! Faithful Rust port of the Go `modelfuzz` PoC under
 //! `consensus/quint/modelfuzz/`. The high-level design mirrors
 //! `modelfuzz.Fuzzer.Run` + `TLCStateGuider.Check`:
 //!
+//! `tlc-controlled` must be installed from <https://github.com/burcuku/tlc-controlled>.
+//!
+//! It works like as follows:
+//!
 //!   1. Copy JSON fixtures from `consensus/fuzz/src/tracing/tests/fixtures/`
 //!      into the seed folder (`MUTATION_SEEDS_FOLDER`, default
 //!      `consensus/fuzz/corpus/tlc_mutator/`) and load all JSON traces
-//!      from there as the initial seed population.
+//!      from there as the initial seed population. Optionally, you can run a libfuzzer-based fuzzer
+//!      that will add new implementation traces into `MUTATION_SEEDS_FOLDER`.
 //!   2. Maintain a `mutated_traces_queue: VecDeque<TraceData>` seeded
 //!      from the initial population.
 //!   3. Per iteration: pop a trace from the queue (or fall back to a
 //!      random initial seed when the queue is empty), submit it to the
-//!      controlled TLC server via [`TlcMapper`] / [`TlcClient`], and
+//!      tlc-controlled server via [`TlcMapper`] / [`TlcClient`], and
 //!      count fingerprints (`response.keys`) that are not in the
 //!      cumulative `states_map`.
 //!   4. If the trace produced new fingerprints, persist it under
@@ -25,25 +30,30 @@
 //! There is *no* validity gating: every fingerprint returned by TLC
 //! contributes to coverage, exactly like `TLCStateGuider.Check`.
 //!
+//! All mutations reorder or duplicate entries but never modify message
+//! contents (sender, receiver, vote/certificate fields). Because only the
+//! delivery order changes, `reporter_states` inherited from the parent
+//! trace may become stale: a different ordering can change which views
+//! reach quorum first and therefore which blocks get notarized/finalized.
+//! We keep the inherited `reporter_states` as-is because `replay_trace`
+//! regenerates fresh state by replaying entries through actual engines.
+//!
 //! Environment variables:
 //!
 //!   * `TLC_URL`               - oracle endpoint, default `http://localhost:2023/execute`
-//!   * `MUTATOR_ITERATIONS`    - number of iterations, default `1000`
-//!   * `MUTATOR_SEED`          - PRNG seed, default `0`
-//!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default `3`
+//!   * `MUTATOR_ITERATIONS`    - number of iterations, default `10000`
+//!   * `MUTATOR_SEED`          - PRNG seed, default random (stored in `MUTATION_SEEDS_FOLDER/.tlc_mutator_seed`)
+//!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default random in `[1, 4]`
 //!   * `MUTATOR_RESEED_FREQ`   - iterations between queue reseeds, default `100`
 //!   * `MUTATOR_FAULTS`        - override `faults` in persisted traces, default inherits from seed
 //!   * `MUTATION_SEEDS_FOLDER` - seed corpus directory, default `corpus/tlc_mutator/`
 
 use crate::{
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
-    tracing::{
-        data::TraceData,
-        sniffer::{TraceEntry, TracedCert, TracedVote},
-    },
+    tracing::{data::TraceData, sniffer::TraceEntry},
 };
 use commonware_cryptography::{sha256::Sha256 as Sha256Hasher, Hasher};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use sha1::{Digest, Sha1};
 use std::{
     collections::{HashSet, VecDeque},
@@ -52,9 +62,7 @@ use std::{
     process,
 };
 
-const DEFAULT_ITERATIONS: usize = 1000;
-const DEFAULT_SEED: u64 = 0;
-const DEFAULT_MUT_PER_TRACE: usize = 3;
+const DEFAULT_ITERATIONS: usize = 10000;
 const DEFAULT_RESEED_FREQ: usize = 100;
 const DEFAULT_FAULTS: Option<usize> = None;
 
@@ -76,7 +84,8 @@ fn output_dir() -> PathBuf {
     manifest_dir().join("artifacts/mutated_traces")
 }
 
-/// Recursively walks `dir` and returns every `*.json` path under it.
+/// Recursively walks `dir` and returns every `*.json` path under it,
+/// sorted lexicographically for deterministic ordering across platforms.
 pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -86,8 +95,9 @@ pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
             return out;
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    children.sort();
+    for path in children {
         if path.is_dir() {
             // Skip hidden directories (e.g. .seen marker dir)
             if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
@@ -123,63 +133,85 @@ pub fn load_seeds(dir: &Path) -> Vec<TraceData> {
     seeds
 }
 
+/// Returns the receiver of a trace entry.
+fn entry_receiver(entry: &TraceEntry) -> &str {
+    match entry {
+        TraceEntry::Vote { receiver, .. } | TraceEntry::Certificate { receiver, .. } => receiver,
+    }
+}
+
 /// Mutation kinds applied to a trace.
 #[derive(Clone, Copy, Debug)]
 enum Mutation {
-    /// Swap two entries at random indices.
+    /// Swap two nearby entries at random indices.
     Swap,
-    /// Duplicate the entry at a random index, inserting the copy at
-    /// another random index.
+    /// Duplicate the entry at a random index, inserting the copy after it.
     Duplicate,
-    /// Remove a single entry.
-    Delete,
     /// Reverse a random sub-range of `entries`.
     ReverseRange,
-    /// Bump (or decrement) the `view` field of a random vote/certificate
-    /// by a random delta.
-    BumpView,
+    /// Swap two entries with different recipients.
+    SwapByRecipient,
+    /// Shift a consecutive batch for one recipient later in the trace.
+    DelayRecipient,
+    /// Split a consecutive batch for one recipient by interleaving
+    /// another recipient's entry between them.
+    BatchSplit,
 }
 
 const ALL_MUTATIONS: &[Mutation] = &[
     Mutation::Swap,
     Mutation::Duplicate,
-    Mutation::Delete,
     Mutation::ReverseRange,
-    Mutation::BumpView,
+    Mutation::SwapByRecipient,
+    Mutation::DelayRecipient,
+    Mutation::BatchSplit,
 ];
 
-/// Applies a single mutation to `trace.entries`. Returns `true` if the
-/// mutation actually changed the trace; `false` if the trace was too small
-/// for the chosen mutation (e.g. swap on a 1-element list).
+/// Applies a single mutation to `trace.entries`. Shuffles the mutation
+/// list and tries each one until one succeeds. Returns `false` only if
+/// no mutation is applicable (e.g. empty trace).
 pub fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> bool {
     let len = trace.entries.len();
     if len == 0 {
         return false;
     }
-    let mutation = ALL_MUTATIONS[rng.gen_range(0..ALL_MUTATIONS.len())];
+    let mut candidates: Vec<Mutation> = ALL_MUTATIONS.to_vec();
+    candidates.shuffle(rng);
+    for mutation in candidates {
+        if try_mutation(trace, rng, mutation) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Tries to apply a single mutation kind. Returns `true` if the trace
+/// was actually changed.
+fn try_mutation(trace: &mut TraceData, rng: &mut StdRng, mutation: Mutation) -> bool {
+    let len = trace.entries.len();
     match mutation {
         Mutation::Swap => {
             if len < 2 {
                 return false;
             }
             let i = rng.gen_range(0..len);
-            let mut j = rng.gen_range(0..len);
-            while j == i {
-                j = rng.gen_range(0..len);
+            let diff = rng.gen_range(1..=5);
+            let j = if rng.gen_bool(0.5) {
+                i.saturating_add(diff).min(len - 1)
+            } else {
+                i.saturating_sub(diff)
+            };
+            if i == j {
+                return false;
             }
             trace.entries.swap(i, j);
             true
         }
         Mutation::Duplicate => {
             let src = rng.gen_range(0..len);
-            let dst = rng.gen_range(0..=len);
+            let dst = rng.gen_range(src..=len);
             let copy = trace.entries[src].clone();
             trace.entries.insert(dst, copy);
-            true
-        }
-        Mutation::Delete => {
-            let idx = rng.gen_range(0..len);
-            trace.entries.remove(idx);
             true
         }
         Mutation::ReverseRange => {
@@ -192,43 +224,78 @@ pub fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> bool {
             trace.entries[lo..=hi].reverse();
             true
         }
-        Mutation::BumpView => {
-            let idx = rng.gen_range(0..len);
-            // Random signed delta in [-5, 5] excluding 0 so the view
-            // actually changes.
-            let mut delta: i64 = rng.gen_range(-5..=5);
-            if delta == 0 {
-                delta = 1;
+        Mutation::SwapByRecipient => {
+            // Find two entries with different recipients and swap them.
+            if len < 2 {
+                return false;
             }
-            mutate_view(&mut trace.entries[idx], delta)
+            let i = rng.gen_range(0..len);
+            let recv_i = entry_receiver(&trace.entries[i]).to_string();
+            // Collect indices with a different recipient.
+            let others: Vec<usize> = (0..len)
+                .filter(|&k| entry_receiver(&trace.entries[k]) != recv_i)
+                .collect();
+            if others.is_empty() {
+                return false;
+            }
+            let j = others[rng.gen_range(0..others.len())];
+            trace.entries.swap(i, j);
+            true
         }
-    }
-}
-
-/// Adds `delta` to the `view` of a vote or certificate, saturating at 0.
-/// Returns `true` if the entry exposed a `view` field.
-fn mutate_view(entry: &mut TraceEntry, delta: i64) -> bool {
-    let bump = |view: &mut u64| {
-        let new = (*view as i64).saturating_add(delta).max(0) as u64;
-        *view = new;
-    };
-    match entry {
-        TraceEntry::Vote { vote, .. } => match vote {
-            TracedVote::Notarize { view, .. }
-            | TracedVote::Nullify { view, .. }
-            | TracedVote::Finalize { view, .. } => {
-                bump(view);
-                true
+        Mutation::DelayRecipient => {
+            // Find a consecutive batch for one recipient and shift it
+            // later in the trace.
+            if len < 2 {
+                return false;
             }
-        },
-        TraceEntry::Certificate { cert, .. } => match cert {
-            TracedCert::Notarization { view, .. }
-            | TracedCert::Nullification { view, .. }
-            | TracedCert::Finalization { view, .. } => {
-                bump(view);
-                true
+            let start = rng.gen_range(0..len);
+            let recv = entry_receiver(&trace.entries[start]).to_string();
+            // Find the end of the consecutive batch for this recipient.
+            let mut end = start;
+            while end + 1 < len && entry_receiver(&trace.entries[end + 1]) == recv {
+                end += 1;
             }
-        },
+            let batch_len = end - start + 1;
+            // Nothing after the batch to delay into.
+            if end + 1 >= len {
+                return false;
+            }
+            let shift = rng.gen_range(1..=(len - end - 1).min(10));
+            // Remove the batch and reinsert it shifted later.
+            let batch: Vec<_> = trace.entries.drain(start..=end).collect();
+            let insert_at = (start + shift).min(trace.entries.len());
+            for (offset, entry) in batch.into_iter().enumerate() {
+                trace.entries.insert(insert_at + offset, entry);
+            }
+            // Only count as changed if we actually moved.
+            insert_at != start || batch_len == 0
+        }
+        Mutation::BatchSplit => {
+            // Find a consecutive run of 2+ entries for the same recipient
+            // and interleave an entry from another recipient between them.
+            if len < 3 {
+                return false;
+            }
+            // Find a consecutive pair for the same recipient.
+            let start = rng.gen_range(0..len - 1);
+            let recv = entry_receiver(&trace.entries[start]).to_string();
+            if entry_receiver(&trace.entries[start + 1]) != recv {
+                return false;
+            }
+            // Find an entry from a different recipient to move between them.
+            let others: Vec<usize> = (0..len)
+                .filter(|&k| k != start && k != start + 1 && entry_receiver(&trace.entries[k]) != recv)
+                .collect();
+            if others.is_empty() {
+                return false;
+            }
+            let donor = others[rng.gen_range(0..others.len())];
+            let entry = trace.entries.remove(donor);
+            // Insert between start and start+1 (adjust for removal shift).
+            let insert_at = if donor < start + 1 { start } else { start + 1 };
+            trace.entries.insert(insert_at, entry);
+            true
+        }
     }
 }
 
@@ -244,35 +311,47 @@ pub fn mutate_once(trace: &TraceData, rng: &mut StdRng) -> Option<TraceData> {
     }
 }
 
-fn iterations_from_env() -> usize {
+fn resolve_iterations() -> usize {
     env::var("MUTATOR_ITERATIONS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_ITERATIONS)
 }
 
-fn seed_from_env() -> u64 {
-    env::var("MUTATOR_SEED")
+/// Returns the PRNG seed. If `MUTATOR_SEED` is set, uses that value.
+/// Otherwise generates a random seed and persists it to
+/// `MUTATION_SEEDS_FOLDER/.tlc_mutator_seed` for reproducibility.
+fn resolve_seed(seed_dir: &Path) -> u64 {
+    if let Some(seed) = env::var("MUTATOR_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_SEED)
+    {
+        return seed;
+    }
+    let seed: u64 = rand::random();
+    let seed_file = seed_dir.join(".tlc_mutator_seed");
+    fs::create_dir_all(seed_dir).ok();
+    if let Err(e) = fs::write(&seed_file, seed.to_string()) {
+        eprintln!("warning: failed to write seed to {}: {e}", seed_file.display());
+    }
+    seed
 }
 
-fn mut_per_trace_from_env() -> usize {
+fn resolve_mut_per_trace(rng: &mut StdRng) -> usize {
     env::var("MUTATOR_MUT_PER_TRACE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MUT_PER_TRACE)
+        .unwrap_or_else(|| rng.gen_range(1..=4))
 }
 
-fn reseed_freq_from_env() -> usize {
+fn resolve_reseed_freq() -> usize {
     env::var("MUTATOR_RESEED_FREQ")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_RESEED_FREQ)
 }
 
-fn faults_from_env() -> Option<usize> {
+fn resolve_faults() -> Option<usize> {
     env::var("MUTATOR_FAULTS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -304,26 +383,65 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Copies all JSON fixtures into the seed folder so the mutator works
-/// from its own corpus directory. Existing files with the same name are
-/// overwritten (fixtures are canonical seeds).
+/// Mirrors JSON fixtures into the seed folder, preserving subdirectory
+/// structure. A `.fixture_manifest` file tracks exactly which relative
+/// paths were copied so stale copies are removed when fixtures are
+/// deleted or renamed upstream, without touching user-added seeds.
 fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
     let fixtures = fixtures_dir();
     if !fixtures.is_dir() {
         return;
     }
     fs::create_dir_all(seed_dir).ok();
-    for path in find_json_files(&fixtures) {
-        if let Some(name) = path.file_name() {
-            let dst = seed_dir.join(name);
-            if let Err(e) = fs::copy(&path, &dst) {
-                eprintln!(
-                    "warning: failed to copy {} -> {}: {e}",
-                    path.display(),
-                    dst.display()
-                );
-            }
+
+    let manifest_path = seed_dir.join(".fixture_manifest");
+
+    // Load previous manifest.
+    let prev: HashSet<PathBuf> = fs::read_to_string(&manifest_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect();
+
+    // Current fixture relative paths.
+    let current: HashSet<PathBuf> = find_json_files(&fixtures)
+        .iter()
+        .filter_map(|p| p.strip_prefix(&fixtures).ok().map(PathBuf::from))
+        .collect();
+
+    // Remove stale copies: paths in the old manifest but not in current fixtures.
+    for rel in prev.difference(&current) {
+        let stale = seed_dir.join(rel);
+        fs::remove_file(&stale).ok();
+    }
+
+    // Copy current fixtures.
+    for rel in &current {
+        let src = fixtures.join(rel);
+        let dst = seed_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).ok();
         }
+        if let Err(e) = fs::copy(&src, &dst) {
+            eprintln!(
+                "warning: failed to copy {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            );
+        }
+    }
+
+    // Write updated manifest.
+    let mut manifest: Vec<&PathBuf> = current.iter().collect();
+    manifest.sort();
+    let content = manifest
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(e) = fs::write(&manifest_path, content) {
+        eprintln!("warning: failed to write fixture manifest: {e}");
     }
 }
 
@@ -339,13 +457,12 @@ fn seed_queue(queue: &mut VecDeque<TraceData>, seeds: &[TraceData]) {
 /// Main entry point for the trace mutator fuzzing loop.
 pub fn run() {
     let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
-    let iterations = iterations_from_env();
-    let seed = seed_from_env();
-    let mut_per_trace = mut_per_trace_from_env();
-    let reseed_freq = reseed_freq_from_env().max(1);
-    let faults_override = faults_from_env();
+    let iterations = resolve_iterations();
+    let reseed_freq = resolve_reseed_freq().max(1);
+    let faults_override = resolve_faults();
 
     let seed_dir = seed_dir();
+    let seed = resolve_seed(&seed_dir);
     copy_fixtures_to_seed_dir(&seed_dir);
 
     let mut seeds = load_seeds(&seed_dir);
@@ -360,6 +477,10 @@ pub fn run() {
         process::exit(1);
     }
 
+    let client = TlcClient::new(&url);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut_per_trace = resolve_mut_per_trace(&mut rng);
+
     println!(
         "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} faults={} url={}",
         seeds.len(),
@@ -370,9 +491,6 @@ pub fn run() {
         faults_override.map_or("inherit".to_string(), |f| f.to_string()),
         url,
     );
-
-    let client = TlcClient::new(&url);
-    let mut rng = StdRng::seed_from_u64(seed);
 
     // Coverage signal: cumulative set of state fingerprints observed
     // across all `/execute` calls so far. Mirrors `TLCStateGuider.statesMap`.
@@ -441,14 +559,10 @@ pub fn run() {
         let response = match client.execute_full(&actions) {
             Ok(r) => r,
             Err(e) => {
-                errors += 1;
-                println!(
-                    "[iter {iter}] tlc=error (q={}, traces={}, states={}): {e}",
-                    queue.len(),
-                    traces_map.len(),
-                    states_map.len(),
+                eprintln!(
+                    "tlc oracle error at iter {iter}: {e}",
                 );
-                continue;
+                process::exit(1);
             }
         };
 

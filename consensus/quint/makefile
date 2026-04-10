@@ -12,15 +12,12 @@ TRACE_TARGETS ?= [simplex_ed25519_quint_honest,simplex_ed25519_quint_disrupter, 
 FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
 MIN_REQUIRED_CONTAINERS ?= 3
-MAX_REQUIRED_CONTAINERS ?= 10
+MAX_REQUIRED_CONTAINERS ?= 20
 
 # Model-based fuzzing (mbf)
 MUTATION_SEEDS_FOLDER ?= ../fuzz/corpus/tlc_mutator
 MUTATED_TRACES_DIR ?= ../fuzz/artifacts/mutated_traces
-MUTATED_TRACES_SEED_DIR ?=
-MUTATOR_ITERATIONS ?= 1000
-MUTATOR_SEED ?= 0
-MUTATOR_MUT_PER_TRACE ?= 2
+MUTATOR_ITERATIONS ?= 10000
 MUTATOR_RESEED_FREQ ?= 100
 
 include make/quint.mk
