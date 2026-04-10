@@ -166,6 +166,9 @@ pub struct CacheRef {
     /// Number of page faults (cache misses that enter the fault handler).
     page_faults: Counter,
 
+    /// Number of page evictions (pages removed from the cache).
+    page_evictions: Counter,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
@@ -184,12 +187,19 @@ impl CacheRef {
         let page_size_u64 = page_size.get() as u64;
         let page_faults = Counter::default();
         context.register("page_faults", "Number of page faults", page_faults.clone());
+        let page_evictions = Counter::default();
+        context.register(
+            "page_evictions",
+            "Number of page evictions",
+            page_evictions.clone(),
+        );
 
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             page_faults,
+            page_evictions,
             pool,
         }
     }
@@ -343,6 +353,7 @@ impl CacheRef {
                     let blob = blob.clone();
                     let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
+                    let page_evictions = self.page_evictions.clone();
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
                         if let Err(err) = &result {
@@ -356,7 +367,9 @@ impl CacheRef {
                         // guard remove the entry and let a later reader start a new generation.
                         let mut cache = cache.write();
                         if let Ok(page) = &result {
-                            cache.cache(blob_id, page.as_ref(), page_num);
+                            if cache.cache(blob_id, page.as_ref(), page_num) {
+                                page_evictions.inc();
+                            }
                         }
                         let _ = cache.page_fetches.remove(&key);
                         result
@@ -489,8 +502,9 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache.
-    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+    /// Put the given `page` into the page cache. Returns true if a page had to
+    /// be evicted as a result.
+    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) -> bool {
         assert_eq!(page.len(), self.page_size);
         let key = (blob_id, page_num);
 
@@ -506,7 +520,7 @@ impl Cache {
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
             self.page_slice_mut(slot).copy_from_slice(page);
-            return;
+            return false;
         }
 
         // New entry - check if we need to evict
@@ -519,7 +533,7 @@ impl Cache {
                 referenced: AtomicBool::new(true),
             });
             self.page_slice_mut(slot).copy_from_slice(page);
-            return;
+            return false;
         }
 
         // Cache full: find slot to evict using Clock algorithm
@@ -541,6 +555,7 @@ impl Cache {
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
+        true
     }
 }
 
