@@ -42,7 +42,8 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type CurrentDbHandle<E, C, I, H, U, const N: usize> = Arc<AsyncRwLock<Db<E, C, I, H, U, N>>>;
+type CurrentDbHandle<E, C, I, H, U, const N: usize> =
+    Arc<AsyncRwLock<Db<mmr::Family, E, C, I, H, U, N>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -55,7 +56,7 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    batch: UnmerkleizedBatch<H, U, N>,
+    batch: UnmerkleizedBatch<mmr::Family, H, U, N>,
     db: CurrentDbHandle<E, C, I, H, U, N>,
     metadata: Option<U::Value>,
 }
@@ -103,7 +104,7 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    inner: Arc<MerkleizedBatch<H::Digest, U, N>>,
+    inner: Arc<MerkleizedBatch<mmr::Family, H::Digest, U, N>>,
     db: CurrentDbHandle<E, C, I, H, U, N>,
 }
 
@@ -116,7 +117,7 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    type Target = UnmerkleizedBatch<H, U, N>;
+    type Target = UnmerkleizedBatch<mmr::Family, H, U, N>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
@@ -132,7 +133,7 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    type Target = MerkleizedBatch<H::Digest, U, N>;
+    type Target = MerkleizedBatch<mmr::Family, H::Digest, U, N>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -251,6 +252,7 @@ where
 /// Implement [`ManagedDb`] for unordered current QMDB databases with fixed-size values.
 impl<E, K, V, H, T, const N: usize> ManagedDb<E>
     for Db<
+        mmr::Family,
         E,
         FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
@@ -362,7 +364,7 @@ mod open {
     pub(super) async fn variable<E, K, V, H, T, const N: usize>(
         context: E,
         config: VConfig<T, K, V>,
-    ) -> Result<Db<E, K, V, H, T, N>, Error<mmr::Family>>
+    ) -> Result<Db<mmr::Family, E, K, V, H, T, N>, Error<mmr::Family>>
     where
         E: Storage + Clock + Metrics,
         K: Array,
@@ -378,6 +380,7 @@ mod open {
 /// Implement [`ManagedDb`] for unordered current QMDB databases with variable-size values.
 impl<E, K, V, H, T, const N: usize> ManagedDb<E>
     for Db<
+        mmr::Family,
         E,
         VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
@@ -461,6 +464,7 @@ where
 
 impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
     for Db<
+        mmr::Family,
         E,
         FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
@@ -512,6 +516,7 @@ where
 
 impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
     for Db<
+        mmr::Family,
         E,
         VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
