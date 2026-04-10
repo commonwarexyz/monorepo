@@ -394,6 +394,24 @@ impl<B: Blob> Append<B> {
         buffer.size()
     }
 
+    /// Returns the logical size of the blob if it can be observed without waiting.
+    ///
+    /// This is useful for opportunistic fast paths that should fall back rather than contend with
+    /// concurrent writers.
+    pub fn try_size(&self) -> Option<u64> {
+        let buffer = self.buffer.try_read().ok()?;
+        Some(buffer.size())
+    }
+
+    /// Try to read from the page cache only into the provided buffer.
+    ///
+    /// Returns `true` if all `buf.len()` bytes were in the cache, `false` on any
+    /// cache miss. Does not perform any async I/O. The caller must have already
+    /// validated that `offset + buf.len()` is within the blob's logical size.
+    pub fn try_read_cached(&self, offset: u64, buf: &mut [u8]) -> bool {
+        self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Read into a temporary contiguous buffer and copy back to preserve structure.
