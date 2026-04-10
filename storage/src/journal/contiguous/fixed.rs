@@ -2897,4 +2897,137 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_read_many_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let journal = Journal::<_, Digest>::init(context.with_label("j"), cfg)
+                .await
+                .unwrap();
+
+            let items = journal.reader().await.read_many(&[]).await.unwrap();
+            assert!(items.is_empty());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_single_blob() {
+        // All positions within one blob.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+
+            for i in 0..5u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 5);
+
+            let items = journal.reader().await.read_many(&[0, 2, 4]).await.unwrap();
+            assert_eq!(items, vec![test_digest(0), test_digest(2), test_digest(4)]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_across_blobs() {
+        // Positions spanning multiple blobs (items_per_blob=3).
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+
+            for i in 0..9u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 9);
+            // Blobs: [0,1,2], [3,4,5], [6,7,8]
+
+            let items = journal.reader().await.read_many(&[1, 4, 7]).await.unwrap();
+            assert_eq!(items, vec![test_digest(1), test_digest(4), test_digest(7)]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_after_prune() {
+        // Read from positions that survive pruning.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+
+            for i in 0..9u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 9);
+            journal.sync().await.unwrap();
+
+            // Prune first blob [0,1,2].
+            journal.prune(3).await.unwrap();
+            assert_eq!(journal.bounds().await, 3..9);
+
+            let items = journal.reader().await.read_many(&[3, 5, 8]).await.unwrap();
+            assert_eq!(items, vec![test_digest(3), test_digest(5), test_digest(8)]);
+
+            // Pruned position should error.
+            let err = journal.reader().await.read_many(&[1]).await.unwrap_err();
+            assert!(matches!(err, Error::ItemPruned(1)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_out_of_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+
+            for i in 0..3u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 3);
+
+            let err = journal.reader().await.read_many(&[0, 5]).await.unwrap_err();
+            assert!(matches!(err, Error::ItemOutOfRange(5)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_matches_read() {
+        // Verify batch read matches individual reads across blobs.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 20);
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.reader().await;
+            let batch = reader.read_many(&positions).await.unwrap();
+
+            for &pos in &positions {
+                let single = reader.read(pos).await.unwrap();
+                assert_eq!(batch[pos as usize], single);
+            }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }

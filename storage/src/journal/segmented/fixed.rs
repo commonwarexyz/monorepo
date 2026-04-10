@@ -1353,4 +1353,120 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_get_many_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            journal.append(0, &test_digest(0)).await.unwrap();
+            assert_eq!(journal.section_len(0).await.unwrap(), 1);
+
+            let mut buf = [];
+            let items = journal.get_many(0, &[], &mut buf).await.unwrap();
+            assert!(items.is_empty());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_single_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..5 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 5);
+
+            // Read all 5 items in one call.
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let mut buf = vec![0u8; 5 * chunk];
+            let items = journal
+                .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
+                .await
+                .unwrap();
+
+            for i in 0..5 {
+                assert_eq!(items[i], test_digest(i as u64));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_subset() {
+        // Read a sparse subset of positions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..10 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 10);
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions = [1, 4, 7, 9];
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let items = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(items[i], test_digest(pos));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_bad_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 64];
+            let err = journal.get_many(99, &[0], &mut buf).await.unwrap_err();
+            assert!(matches!(err, Error::SectionOutOfRange(99)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_matches_get() {
+        // Verify batch read matches individual reads.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..8 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 8);
+            journal.sync_all().await.unwrap();
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions: Vec<u64> = (0..8).collect();
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let batch = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for pos in &positions {
+                let single = journal.get(0, *pos).await.unwrap();
+                assert_eq!(batch[*pos as usize], single);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }
