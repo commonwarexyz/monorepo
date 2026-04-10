@@ -24,8 +24,9 @@
 //!      `consensus/fuzz/artifacts/mutated_traces/` and push
 //!      `mut_per_trace * new_states` mutated descendants back onto the
 //!      queue.
-//!   5. Every `reseed_frequency` iterations, reset the queue and re-add
-//!      the initial seed population (mirrors `Fuzzer.seed`).
+//!   5. Every `reseed_frequency` iterations, generate a fresh population
+//!      of mutated traces from the base seeds using the current RNG
+//!      state and refill the queue (mirrors `Fuzzer.seed`).
 //!
 //! There is *no* validity gating: every fingerprint returned by TLC
 //! contributes to coverage, exactly like `TLCStateGuider.Check`.
@@ -45,6 +46,7 @@
 //!   * `MUTATOR_SEED`          - PRNG seed, default random (stored in `MUTATION_SEEDS_FOLDER/.tlc_mutator_seed`)
 //!   * `MUTATOR_MUT_PER_TRACE` - mutations per new state, default random in `[1, 4]`
 //!   * `MUTATOR_RESEED_FREQ`   - iterations between queue reseeds, default `100`
+//!   * `MUTATOR_SEED_POPULATION_SIZE` - traces generated per reseed, default `100`
 //!   * `MUTATOR_FAULTS`        - override `faults` in persisted traces, default inherits from seed
 //!   * `MUTATION_SEEDS_FOLDER` - seed corpus directory, default `corpus/tlc_mutator/`
 
@@ -64,6 +66,7 @@ use std::{
 
 const DEFAULT_ITERATIONS: usize = 10000;
 const DEFAULT_RESEED_FREQ: usize = 100;
+const DEFAULT_SEED_POPULATION_SIZE: usize = 100;
 const DEFAULT_FAULTS: Option<usize> = None;
 
 fn manifest_dir() -> PathBuf {
@@ -445,13 +448,31 @@ fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
     }
 }
 
-/// Pushes the initial seed population onto `queue`, mirroring
-/// `Fuzzer.seed()`.
-fn seed_queue(queue: &mut VecDeque<TraceData>, seeds: &[TraceData]) {
+/// Generates a fresh seed population by mutating randomly chosen base
+/// seeds, then pushes them onto the queue. Mirrors Go's `Fuzzer.seed()`
+/// which regenerates fresh traces each reseed rather than replaying the
+/// same disk seeds.
+fn seed_queue_generated(
+    queue: &mut VecDeque<TraceData>,
+    base_seeds: &[TraceData],
+    rng: &mut StdRng,
+    n: usize,
+) {
     queue.clear();
-    for trace in seeds {
-        queue.push_back(trace.clone());
+    for _ in 0..n {
+        let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
+        match mutate_once(base, rng) {
+            Some(t) => queue.push_back(t),
+            None => queue.push_back(base.clone()),
+        }
     }
+}
+
+fn resolve_seed_population_size() -> usize {
+    env::var("MUTATOR_SEED_POPULATION_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SEED_POPULATION_SIZE)
 }
 
 /// Main entry point for the trace mutator fuzzing loop.
@@ -459,14 +480,15 @@ pub fn run() {
     let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
     let iterations = resolve_iterations();
     let reseed_freq = resolve_reseed_freq().max(1);
+    let seed_population_size = resolve_seed_population_size();
     let faults_override = resolve_faults();
 
     let seed_dir = seed_dir();
     let seed = resolve_seed(&seed_dir);
     copy_fixtures_to_seed_dir(&seed_dir);
 
-    let mut seeds = load_seeds(&seed_dir);
-    if seeds.is_empty() {
+    let mut base_seeds = load_seeds(&seed_dir);
+    if base_seeds.is_empty() {
         eprintln!("no usable seed traces under {}", seed_dir.display());
         process::exit(1);
     }
@@ -482,12 +504,14 @@ pub fn run() {
     let mut_per_trace = resolve_mut_per_trace(&mut rng);
 
     println!(
-        "trace_mutator: seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} faults={} url={}",
-        seeds.len(),
+        "trace_mutator: base_seeds={} iterations={} seed={} mut_per_trace={} reseed_freq={} \
+         seed_population={} faults={} url={}",
+        base_seeds.len(),
         iterations,
         seed,
         mut_per_trace,
         reseed_freq,
+        seed_population_size,
         faults_override.map_or("inherit".to_string(), |f| f.to_string()),
         url,
     );
@@ -504,7 +528,7 @@ pub fn run() {
     // BFS queue of mutated traces to evaluate next, mirrors
     // `Fuzzer.mutatedTracesQueue`.
     let mut queue: VecDeque<TraceData> = VecDeque::new();
-    seed_queue(&mut queue, &seeds);
+    seed_queue_generated(&mut queue, &base_seeds, &mut rng, seed_population_size);
 
     let mut kept = 0usize;
     let mut empty_actions = 0usize;
@@ -514,16 +538,20 @@ pub fn run() {
     let mut random_executions = 0usize;
 
     for iter in 0..iterations {
-        // Periodic reseed: reload from disk (picks up new traces added by
-        // mbf_live_trace_gen) and refill the queue.
+        // Periodic reseed: generate a fresh population from base seeds
+        // using the current RNG state, matching Go's Fuzzer.seed() which
+        // regenerates rather than replaying the same traces.
         if iter > 0 && iter % reseed_freq == 0 {
-            seeds = load_seeds(&seed_dir);
+            let refreshed = load_seeds(&seed_dir);
+            if !refreshed.is_empty() {
+                base_seeds = refreshed;
+            }
+            seed_queue_generated(&mut queue, &base_seeds, &mut rng, seed_population_size);
             println!(
-                "[iter {iter}] reseed: loaded {} seeds from {}",
-                seeds.len(),
-                seed_dir.display(),
+                "[iter {iter}] reseed: generated {} fresh traces from {} base seeds",
+                seed_population_size,
+                base_seeds.len(),
             );
-            seed_queue(&mut queue, &seeds);
         }
 
         // Pop the next mutated trace; fall back to a random initial seed
@@ -535,7 +563,8 @@ pub fn run() {
             }
             None => {
                 random_executions += 1;
-                seeds[rng.gen_range(0..seeds.len())].clone()
+                let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
+                mutate_once(base, &mut rng).unwrap_or_else(|| base.clone())
             }
         };
 
