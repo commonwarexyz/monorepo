@@ -423,9 +423,11 @@ where
         let mut disk_iter = disk_results.into_iter();
         Ok(results
             .into_iter()
-            .map(|r| match r {
-                Some(op) => op,
-                None => disk_iter.next().expect("disk result count mismatch"),
+            .map(|r| {
+                r.map_or_else(
+                    || disk_iter.next().expect("disk result count mismatch"),
+                    |op| op,
+                )
             })
             .collect())
     }
