@@ -28,6 +28,7 @@ mod harnesses {
 
     impl SyncTestHarness for UnorderedFixedHarness {
         type Db = crate::qmdb::current::unordered::fixed::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -97,6 +98,7 @@ mod harnesses {
 
     impl SyncTestHarness for UnorderedVariableHarness {
         type Db = crate::qmdb::current::unordered::variable::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -166,6 +168,7 @@ mod harnesses {
 
     impl SyncTestHarness for OrderedFixedHarness {
         type Db = crate::qmdb::current::ordered::fixed::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -233,6 +236,7 @@ mod harnesses {
 
     impl SyncTestHarness for OrderedVariableHarness {
         type Db = crate::qmdb::current::ordered::variable::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
