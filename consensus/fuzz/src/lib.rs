@@ -7,6 +7,7 @@ pub mod replayer;
 pub mod simplex;
 pub mod strategy;
 pub mod tlc;
+pub mod trace_mutator;
 pub mod tracing;
 pub mod types;
 pub mod utils;
