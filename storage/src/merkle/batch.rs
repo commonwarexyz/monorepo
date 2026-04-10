@@ -132,7 +132,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
 
     /// Return a reference to the thread pool, if any.
     #[cfg(feature = "std")]
-    pub fn pool(&self) -> Option<&ThreadPool> {
+    pub const fn pool(&self) -> Option<&ThreadPool> {
         self.pool.as_ref()
     }
 
