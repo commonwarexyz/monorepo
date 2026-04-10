@@ -11,8 +11,10 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch, hasher::Standard as StandardHasher, journaled::Journaled, Family, Location,
-        Position, Proof, Readable,
+        self, batch,
+        hasher::{Hasher as _, Standard as StandardHasher},
+        journaled::Journaled,
+        Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -126,7 +128,6 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         {
             // Parallel path: encode items and compute leaf digests on the thread pool,
             // then feed the pre-computed digests sequentially into the MMR batch.
-            use crate::merkle::hasher::Hasher as _;
             use rayon::prelude::*;
 
             let starting_leaves = self.inner.leaves();
