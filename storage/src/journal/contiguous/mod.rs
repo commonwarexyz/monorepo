@@ -71,6 +71,27 @@ pub trait Contiguous: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send;
 }
 
+/// Items to append via [`Mutable::append_many`].
+///
+/// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices that are
+/// appended in order under a single lock acquisition.
+pub enum Many<'a, T> {
+    /// A single contiguous slice of items.
+    Flat(&'a [T]),
+    /// Multiple slices of items, appended in order.
+    Nested(&'a [&'a [T]]),
+}
+
+impl<T> Many<'_, T> {
+    /// Returns `true` if there are no items across all segments.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Flat(items) => items.is_empty(),
+            Self::Nested(nested_items) => nested_items.iter().all(|items| items.is_empty()),
+        }
+    }
+}
+
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
 pub trait Mutable: Contiguous + Send + Sync {
     /// Append a new item to the journal, returning its position.
@@ -88,23 +109,37 @@ pub trait Mutable: Contiguous + Send + Sync {
         item: &Self::Item,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
-    /// Append multiple items to the journal, returning the position of the last item appended.
+    /// Append items to the journal, returning the position of the last item appended.
     ///
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
     /// may override this to acquire the write lock once for all items.
     ///
-    /// No-ops if items is empty, returning the current size (next append position).
-    fn append_many(
-        &mut self,
-        items: &[Self::Item],
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send
+    /// Returns [Error::EmptyAppend] if items is empty.
+    fn append_many<'a>(
+        &'a mut self,
+        items: Many<'a, Self::Item>,
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send + 'a
     where
         Self::Item: Sync,
     {
         async move {
+            if items.is_empty() {
+                return Err(Error::EmptyAppend);
+            }
             let mut last_pos = self.size().await;
-            for item in items {
-                last_pos = self.append(item).await?;
+            match items {
+                Many::Flat(items) => {
+                    for item in items {
+                        last_pos = self.append(item).await?;
+                    }
+                }
+                Many::Nested(nested_items) => {
+                    for items in nested_items {
+                        for item in *items {
+                            last_pos = self.append(item).await?;
+                        }
+                    }
+                }
             }
             Ok(last_pos)
         }

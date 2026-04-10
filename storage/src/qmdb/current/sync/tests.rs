@@ -28,6 +28,7 @@ mod harnesses {
 
     impl SyncTestHarness for UnorderedFixedHarness {
         type Db = crate::qmdb::current::unordered::fixed::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -73,26 +74,20 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let finalized = {
-                let mut batch = db.new_batch();
-                for op in ops {
-                    match op {
-                        Operation::Update(Update(key, value)) => {
-                            batch = batch.write(key, Some(value));
-                        }
-                        Operation::Delete(key) => {
-                            batch = batch.write(key, None);
-                        }
-                        Operation::CommitFloor(_, _) => {}
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(Update(key, value)) => {
+                        batch = batch.write(key, Some(value));
                     }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
                 }
-                batch
-                    .merkleize(None::<Digest>, &db)
-                    .await
-                    .unwrap()
-                    .finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -103,6 +98,7 @@ mod harnesses {
 
     impl SyncTestHarness for UnorderedVariableHarness {
         type Db = crate::qmdb::current::unordered::variable::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -148,26 +144,20 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let finalized = {
-                let mut batch = db.new_batch();
-                for op in ops {
-                    match op {
-                        Operation::Update(Update(key, value)) => {
-                            batch = batch.write(key, Some(value));
-                        }
-                        Operation::Delete(key) => {
-                            batch = batch.write(key, None);
-                        }
-                        Operation::CommitFloor(_, _) => {}
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(Update(key, value)) => {
+                        batch = batch.write(key, Some(value));
                     }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
                 }
-                batch
-                    .merkleize(None::<Digest>, &db)
-                    .await
-                    .unwrap()
-                    .finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -178,6 +168,7 @@ mod harnesses {
 
     impl SyncTestHarness for OrderedFixedHarness {
         type Db = crate::qmdb::current::ordered::fixed::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -221,26 +212,20 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let finalized = {
-                let mut batch = db.new_batch();
-                for op in ops {
-                    match op {
-                        Operation::Update(Update { key, value, .. }) => {
-                            batch = batch.write(key, Some(value));
-                        }
-                        Operation::Delete(key) => {
-                            batch = batch.write(key, None);
-                        }
-                        Operation::CommitFloor(_, _) => {}
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(Update { key, value, .. }) => {
+                        batch = batch.write(key, Some(value));
                     }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
                 }
-                batch
-                    .merkleize(None::<Digest>, &db)
-                    .await
-                    .unwrap()
-                    .finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -251,6 +236,7 @@ mod harnesses {
 
     impl SyncTestHarness for OrderedVariableHarness {
         type Db = crate::qmdb::current::ordered::variable::Db<
+            mmr::Family,
             Context,
             Digest,
             Digest,
@@ -296,26 +282,20 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let finalized = {
-                let mut batch = db.new_batch();
-                for op in ops {
-                    match op {
-                        Operation::Update(Update { key, value, .. }) => {
-                            batch = batch.write(key, Some(value));
-                        }
-                        Operation::Delete(key) => {
-                            batch = batch.write(key, None);
-                        }
-                        Operation::CommitFloor(_, _) => {}
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(Update { key, value, .. }) => {
+                        batch = batch.write(key, Some(value));
                     }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
                 }
-                batch
-                    .merkleize(None::<Digest>, &db)
-                    .await
-                    .unwrap()
-                    .finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }

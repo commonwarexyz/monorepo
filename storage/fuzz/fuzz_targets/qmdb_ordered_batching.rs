@@ -63,14 +63,12 @@ async fn commit_pending<F: MerkleFamily>(
     pending_deletes: &mut HashSet<RawKey>,
     metadata: Option<Value>,
 ) {
-    let finalized = {
-        let mut batch = db.new_batch();
-        for (k, v) in pending_writes.drain(..) {
-            batch = batch.write(k, v);
-        }
-        batch.merkleize(metadata, db).await.unwrap().finalize()
-    };
-    db.apply_batch(finalized)
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = batch.merkleize(db, metadata).await.unwrap();
+    db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
     db.commit().await.expect("commit fsync should not fail");

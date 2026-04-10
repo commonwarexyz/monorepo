@@ -1,6 +1,6 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Reader as _};
+use super::{Contiguous, Many, Reader as _};
 use crate::{
     journal::{contiguous::Mutable, Error},
     Persistable,
@@ -1110,7 +1110,7 @@ where
     }
 }
 
-/// Test append_many with empty slice is a no-op.
+/// Test append_many with empty slice returns an error.
 async fn test_append_many_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1122,9 +1122,11 @@ where
     journal.append(&10).await.unwrap();
     journal.append(&20).await.unwrap();
 
-    // append_many with empty slice should no-op and return current size.
-    let pos = journal.append_many(&[]).await.unwrap();
-    assert_eq!(pos, 2);
+    // append_many with empty slice should return an error.
+    assert!(matches!(
+        journal.append_many(Many::Flat(&[])).await,
+        Err(Error::EmptyAppend)
+    ));
     assert_eq!(get_bounds(&journal).await.end, 2);
 
     journal.destroy().await.unwrap();
@@ -1138,7 +1140,10 @@ where
 {
     let mut journal = factory("append-many-basic".into()).await.unwrap();
 
-    let pos = journal.append_many(&[100, 200, 300]).await.unwrap();
+    let pos = journal
+        .append_many(Many::Flat(&[100, 200, 300]))
+        .await
+        .unwrap();
     assert_eq!(pos, 2);
     assert_eq!(get_bounds(&journal).await.end, 3);
 
@@ -1159,7 +1164,7 @@ where
 
     // Append 25 items in one call, crossing section boundaries at 10 and 20.
     let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
-    let pos = journal.append_many(&items).await.unwrap();
+    let pos = journal.append_many(Many::Flat(&items)).await.unwrap();
     assert_eq!(pos, 24);
     assert_eq!(get_bounds(&journal).await.end, 25);
 
@@ -1178,7 +1183,10 @@ where
 {
     let mut journal = factory("append-many-then-single".into()).await.unwrap();
 
-    journal.append_many(&[10, 20, 30]).await.unwrap();
+    journal
+        .append_many(Many::Flat(&[10, 20, 30]))
+        .await
+        .unwrap();
     let pos = journal.append(&40).await.unwrap();
     assert_eq!(pos, 3);
 
@@ -1198,7 +1206,7 @@ where
 {
     let mut journal = factory("append-many-single".into()).await.unwrap();
 
-    let pos = journal.append_many(&[42]).await.unwrap();
+    let pos = journal.append_many(Many::Flat(&[42])).await.unwrap();
     assert_eq!(pos, 0);
     assert_eq!(read_item(&journal, 0).await.unwrap(), 42);
 

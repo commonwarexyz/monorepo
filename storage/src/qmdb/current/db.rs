@@ -9,11 +9,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        batch::MIN_TO_PARALLELIZE,
-        hasher::Hasher as _,
-        mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
-        storage::Storage as MerkleStorage,
-        Family as _,
+        self, batch::MIN_TO_PARALLELIZE, hasher::Standard as StandardHasher, mem::Mem,
+        storage::Storage as MerkleStorage, Location, Position, Readable,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -27,6 +24,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
         },
         operation::Operation as _,
+        Error,
     },
     Context, Persistable,
 };
@@ -44,10 +42,7 @@ use rayon::prelude::*;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
-/// Convenience alias: all `current` databases use the MMR family.
-type Error = crate::qmdb::Error<mmr::Family>;
-
-/// Prefix used for the metadata key for grafted MMR pinned nodes.
+/// Prefix used for the metadata key for grafted tree pinned nodes.
 const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
@@ -55,37 +50,35 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
+    F: merkle::Graftable,
     E: Context,
     C: Contiguous<Item: CodecShared>,
-    I: UnorderedIndex<Value = Location>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
     const N: usize,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<mmr::Family, E, C, I, H, U>,
+    pub(super) any: any::db::Db<F, E, C, I, H, U>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     ///
     /// Stored as a [`BitmapBatch`] so that `apply_batch` can
-    /// push layers in O(changeset) instead of deep-cloning.
+    /// push layers in O(batch) instead of deep-cloning.
     pub(super) status: BitmapBatch<N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
     ///
-    /// Internal nodes are hashed using their position in the ops MMR rather than their
+    /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
-    ///
-    /// Stored as a [`mmr::batch::MerkleizedBatch`] so that `apply_batch` can push layers
-    /// in O(changeset) instead of deep-cloning.
-    pub(super) grafted_mmr: mmr::batch::MerkleizedBatch<H::Digest>,
+    pub(super) grafted_tree: Mem<F, H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
-    /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
+    /// - The grafted tree pinned nodes at key [NODE_PREFIX]
     pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
     /// Optional thread pool for parallelizing grafted leaf computation.
@@ -97,18 +90,19 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<mmr::Family, U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
+    pub const fn inactivity_floor_loc(&self) -> Location<F> {
         self.any.inactivity_floor_loc()
     }
 
@@ -118,13 +112,13 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error<F>> {
         self.any.get_metadata().await
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location> {
+    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds().await
     }
 
@@ -132,9 +126,9 @@ where
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
         hasher: &mut H,
-        proof: &RangeProof<H::Digest>,
-        start_loc: Location,
-        ops: &[Operation<mmr::Family, U>],
+        proof: &RangeProof<F, H::Digest>,
+        start_loc: Location<F>,
+        ops: &[Operation<F, U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -143,21 +137,22 @@ where
 }
 
 // Functionality requiring non-mutable journal.
-impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<mmr::Family, U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
-    /// above the grafting height, returns grafted MMR node. For positions below the grafting
-    /// height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl MerkleStorage<mmr::Family, Digest = H::Digest> + '_ {
+    /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
+    /// or above the grafting height, returns the grafted node. For positions below the grafting
+    /// height, the ops tree is used.
+    fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
         grafting::Storage::new(
-            &self.grafted_mmr,
+            &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
         )
@@ -169,10 +164,10 @@ where
         self.root
     }
 
-    /// Returns the ops MMR root.
+    /// Returns the ops tree root.
     ///
     /// This is the root of the raw operations log, without the activity bitmap. It is used as the
-    /// sync target because the sync engine verifies batches against the ops MMR, not the canonical
+    /// sync target because the sync engine verifies batches against the ops root, not the canonical
     /// root.
     ///
     /// See the [Root structure](super) section in the module documentation.
@@ -180,28 +175,15 @@ where
         self.any.log.root()
     }
 
-    /// Snapshot of the grafted MMR for use in batch chains.
-    ///
-    /// Wraps in a `Checkpoint` when the state has layers, so that `base_size() == size()` for
-    /// the batch chain. When the state is already `Base`, `base_size()` naturally equals the tip.
-    pub(super) fn grafted_snapshot(&self) -> mmr::batch::MerkleizedBatch<H::Digest> {
-        let state = self.grafted_mmr.clone();
-        if matches!(state, mmr::batch::MerkleizedBatch::Base(_)) {
-            return state;
-        }
-        let size = state.size();
-        mmr::batch::MerkleizedBatch::Checkpoint {
-            inner: Arc::new(state),
-            size,
-        }
+    /// Snapshot of the grafted tree for use in batch chains.
+    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest>> {
+        merkle::batch::MerkleizedBatch::from_mem(&self.grafted_tree)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            Vec::new(),
-            Vec::new(),
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -211,8 +193,8 @@ where
     pub(super) async fn operation_proof(
         &self,
         hasher: &mut H,
-        loc: Location,
-    ) -> Result<OperationProof<H::Digest, N>, Error> {
+        loc: Location<F>,
+    ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         OperationProof::new(hasher, &self.status, &storage, loc, ops_root).await
@@ -225,22 +207,16 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LEAVES].
-    /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk. Returns
+    /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
+    /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
+    /// `start_loc` >= number of leaves in the tree.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
-        start_loc: Location,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<
-        (
-            RangeProof<H::Digest>,
-            Vec<Operation<mmr::Family, U>>,
-            Vec<[u8; N]>,
-        ),
-        Error,
-    > {
+    ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
@@ -257,48 +233,46 @@ where
 }
 
 // Functionality requiring mutable journal.
-impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<mmr::Family, U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
-    /// activity bitmap, this returns standard MMR proofs suitable for state sync.
+    /// activity bitmap, this returns standard range proofs suitable for state sync.
     pub async fn ops_historical_proof(
         &self,
-        historical_size: Location,
-        start_loc: Location,
+        historical_size: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<mmr::Family, U>>), Error> {
+    ) -> Result<(merkle::Proof<F, H::Digest>, Vec<Operation<F, U>>), Error<F>> {
         self.any
             .historical_proof(historical_size, start_loc, max_ops)
             .await
     }
 
-    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
-    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+    /// Return the pinned nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.any.pinned_nodes_at(loc).await
     }
 
-    /// Collapse accumulated `Layer` chains in the bitmap and grafted MMR into flat `Base`
-    /// representations.
+    /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
     ///
-    /// Each [`Db::apply_batch`] pushes a new `Layer` on both the bitmap and the grafted MMR.
-    /// These layers are cheap to create (O(changeset)) but make subsequent reads walk the full
-    /// chain. Calling `flatten` collapses the chain into a single `Base`, bounding lookup cost
-    /// and reducing memory overhead from stale intermediate layers.
+    /// Each [`Db::apply_batch`] pushes a new `Layer` on the bitmap. These layers are cheap
+    /// to create but make subsequent reads walk the full chain. Calling `flatten` collapses
+    /// the chain into a single `Base`, bounding lookup cost.
     ///
     /// This is called automatically by [`Db::prune`]. Callers that apply many batches without
     /// pruning should call this periodically.
     pub fn flatten(&mut self) {
         self.status.flatten();
-        self.grafted_mmr.flatten();
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -307,32 +281,32 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
         self.flatten();
 
         // Prune bitmap chunks below the inactivity floor.
-        let BitmapBatch::Base(base) = &mut self.status else {
+        let BitmapBatch::<N>::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
         Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
 
-        // Prune the grafted MMR to match the bitmap's pruned chunks.
+        // Prune the grafted tree to match the bitmap's pruned chunks.
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
-            let prune_loc_grafted = Location::new(pruned_chunks);
-            let bounds_start = self.grafted_mmr.pruning_boundary();
+            let prune_loc_grafted = Location::<F>::new(pruned_chunks);
+            let bounds_start = self.grafted_tree.bounds().start;
             let grafted_prune_pos =
                 Position::try_from(prune_loc_grafted).expect("valid leaf count");
             if prune_loc_grafted > bounds_start {
-                let root = self.grafted_mmr.root();
-                let size = self.grafted_mmr.size();
+                let root = *self.grafted_tree.root();
+                let size = self.grafted_tree.size();
 
                 let mut pinned = BTreeMap::new();
-                for (pos, _) in PeakIterator::new(grafted_prune_pos) {
+                for pos in F::nodes_to_pin(prune_loc_grafted) {
                     pinned.insert(
                         pos,
-                        self.grafted_mmr
+                        self.grafted_tree
                             .get_node(pos)
                             .expect("pinned peak must exist"),
                     );
@@ -340,24 +314,19 @@ where
                 let mut retained = Vec::with_capacity((*size - *grafted_prune_pos) as usize);
                 for p in *grafted_prune_pos..*size {
                     retained.push(
-                        self.grafted_mmr
+                        self.grafted_tree
                             .get_node(Position::new(p))
                             .expect("retained node must exist"),
                     );
                 }
-                self.grafted_mmr =
-                    mmr::batch::MerkleizedBatch::Base(mmr::mem::Mmr::from_pruned_with_retained(
-                        root,
-                        grafted_prune_pos,
-                        pinned,
-                        retained,
-                    ));
+                self.grafted_tree =
+                    Mem::from_pruned_with_retained(root, grafted_prune_pos, pinned, retained);
             }
         }
 
-        // Persist grafted MMR pruning state before pruning the ops log. If the subsequent
+        // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
-        // `build_grafted_mmr` will recompute from the (un-pruned) log and the metadata
+        // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
@@ -368,7 +337,7 @@ where
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds the underlying Any database and rebuilds the Current overlay state (bitmap,
-    /// grafted MMR, and canonical root) for the rewound size.
+    /// grafted tree, and canonical root) for the rewound size.
     ///
     /// # Errors
     ///
@@ -385,7 +354,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
-    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         self.flatten();
 
         let rewind_size = *size;
@@ -411,25 +380,25 @@ where
         // discarded.
         {
             let reader = self.any.log.reader().await;
-            let rewind_last_loc = Location::new(rewind_size - 1);
+            let rewind_last_loc = Location::<F>::new(rewind_size - 1);
             let rewind_last_op = reader.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
+                return Err(Error::<F>::UnexpectedData(rewind_last_loc));
             };
             if *rewind_floor < pruned_bits {
-                return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
             }
         }
 
-        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted MMR.
+        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted tree.
         let pinned_nodes = if pruned_chunks > 0 {
-            let mmr_size = Location::new(pruned_chunks as u64);
+            let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
             let mut pinned_nodes = Vec::new();
-            for pos in mmr::Family::nodes_to_pin(mmr_size) {
+            for pos in F::nodes_to_pin(grafted_leaves) {
                 let digest = self
-                    .grafted_mmr
+                    .grafted_tree
                     .get_node(pos)
-                    .ok_or(mmr::Error::MissingNode(pos))?;
+                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
                 pinned_nodes.push(digest);
             }
             pinned_nodes
@@ -443,10 +412,10 @@ where
 
         // Patch bitmap: truncate to rewound size, then mark restored locations as active.
         {
-            let BitmapBatch::Base(base) = &mut self.status else {
+            let BitmapBatch::<N>::Base(base) = &mut self.status else {
                 unreachable!("flatten() guarantees Base");
             };
-            let status = Arc::get_mut(base).expect("flatten ensures sole owner");
+            let status: &mut BitMap<N> = Arc::get_mut(base).expect("flatten ensures sole owner");
             status.truncate(rewind_size);
             for loc in &restored_locs {
                 status.set_bit(**loc, true);
@@ -458,9 +427,9 @@ where
         };
         let status = status.as_ref();
 
-        // Rebuild grafted MMR and canonical root for the patched bitmap.
+        // Rebuild grafted tree and canonical root for the patched bitmap.
         let hasher = StandardHasher::<H>::new();
-        let grafted_mmr = build_grafted_mmr::<H, N>(
+        let grafted_tree = build_grafted_tree::<F, H, N>(
             &hasher,
             status,
             &pinned_nodes,
@@ -469,19 +438,19 @@ where
         )
         .await?;
         let storage =
-            grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.merkle);
+            grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &self.any.log.merkle);
         let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
-        let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
 
-        self.grafted_mmr = mmr::batch::MerkleizedBatch::Base(grafted_mmr);
+        self.grafted_tree = grafted_tree;
         self.root = root;
 
         Ok(())
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error> {
+    pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
         let mut metadata = self.metadata.lock().await;
         metadata.clear();
 
@@ -492,47 +461,42 @@ where
             (self.status.pruned_chunks() as u64).to_be_bytes().to_vec(),
         );
 
-        // Write the grafted MMR pinned nodes. These are the ops-space peaks covering the
-        // pruned portion of the bitmap.
-        let pruned_ops = (self.status.pruned_chunks() as u64)
-            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
-            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
-        let ops_mmr_size = Position::try_from(Location::new(pruned_ops))?;
-        let grafting_height = grafting::height::<N>();
-        for (i, (ops_pos, _)) in PeakIterator::new(ops_mmr_size).enumerate() {
-            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
+        // Write the pinned nodes of the grafted tree.
+        let pruned_chunks = Location::<F>::new(self.status.pruned_chunks() as u64);
+        for (i, grafted_pos) in F::nodes_to_pin(pruned_chunks).enumerate() {
             let digest = self
-                .grafted_mmr
+                .grafted_tree
                 .get_node(grafted_pos)
-                .ok_or(mmr::Error::MissingNode(ops_pos))?;
+                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(mmr::Error::Metadata)?;
+        metadata.sync().await?;
 
         Ok(())
     }
 }
 
 // Functionality requiring mutable + persistable journal.
-impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    pub async fn commit(&self) -> Result<(), Error> {
+    pub async fn commit(&self) -> Result<(), Error<F>> {
         self.any.commit().await
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error<F>> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
@@ -541,75 +505,91 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        // Clean up bitmap metadata partition.
+    pub async fn destroy(self) -> Result<(), Error<F>> {
         self.metadata.into_inner().destroy().await?;
-
-        // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
 }
 
-impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize> Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update + 'static,
-    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
-    /// Apply a changeset to the database, returning the range of written operations.
+    /// Apply a batch to the database, returning the range of written operations.
     ///
-    /// A changeset is only valid if the database has not been modified since the batch that
-    /// produced it was created. Multiple batches can be forked from the same parent for speculative
-    /// execution, but only one may be applied. Applying a stale changeset returns
-    /// [`Error::StaleChangeset`].
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleBatch`].
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the underlying
-    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
+    /// This publishes the batch to the in-memory Current view and appends it to the journal,
+    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
     /// durability.
     pub async fn apply_batch(
         &mut self,
-        batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
-    ) -> Result<Range<Location>, Error> {
-        // Apply inner any batch (writes ops, updates snapshot).
-        let range = self.any.apply_batch(batch.inner).await?;
+        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N>>,
+    ) -> Result<Range<Location<F>>, Error<F>> {
+        // Staleness is checked by self.any.apply_batch() below.
+        let db_size = *self.any.last_commit_loc + 1;
 
-        // Push bitmap mutations as a layer (O(changeset), no deep clone).
-        self.status
-            .push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
+        // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
+        let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // Push grafted changeset as a layer (O(changeset), no deep clone).
-        self.grafted_mmr.push_changeset(batch.grafted_changeset);
+        // 2. Apply bitmap overlay. The batch's bitmap is a Layer whose overlay
+        //    contains all dirty chunks. Walk the layer chain to collect and apply
+        //    all uncommitted ancestor overlays + this batch's overlay.
+        {
+            let mut overlays = Vec::new();
+            let mut current = &batch.bitmap;
+            while let super::batch::BitmapBatch::Layer(layer) = current {
+                if layer.overlay.len <= db_size {
+                    break;
+                }
+                overlays.push(Arc::clone(&layer.overlay));
+                current = &layer.parent;
+            }
+            // Apply in chronological order (deepest ancestor first).
+            for overlay in overlays.into_iter().rev() {
+                self.status.apply_overlay(overlay);
+            }
+        }
 
-        // Use precomputed canonical root from merkleize().
+        // 3. Apply grafted tree (merkle layer handles partial ancestor skipping).
+        self.grafted_tree.apply_batch(&batch.grafted)?;
+
+        // 4. Canonical root.
         self.root = batch.canonical_root;
 
         Ok(range)
     }
 }
 
-impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
+impl<F, E, U, C, I, H, const N: usize> Persistable for Db<F, E, C, I, H, U, N>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<mmr::Family, U>: Codec,
+    Operation<F, U>: Codec,
 {
-    type Error = Error;
+    type Error = Error<F>;
 
-    async fn commit(&self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error<F>> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error<F>> {
         Self::sync(self).await
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), Error<F>> {
         self.destroy().await
     }
 }
@@ -627,13 +607,13 @@ pub(super) fn partial_chunk<B: BitmapReadable<N>, const N: usize>(
     }
 }
 
-/// Compute the canonical root from the ops root, grafted MMR root, and optional partial chunk.
+/// Compute the canonical root from the ops root, grafted tree root, and optional partial chunk.
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) fn combine_roots<H: Hasher>(
     hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
-    grafted_mmr_root: &H::Digest,
+    grafted_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
     match partial {
@@ -641,12 +621,12 @@ pub(super) fn combine_roots<H: Hasher>(
             let next_bit = next_bit.to_be_bytes();
             hasher.hash([
                 ops_root.as_ref(),
-                grafted_mmr_root.as_ref(),
+                grafted_root.as_ref(),
                 next_bit.as_slice(),
                 last_chunk_digest.as_ref(),
             ])
         }
-        None => hasher.hash([ops_root.as_ref(), grafted_mmr_root.as_ref()]),
+        None => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
     }
 }
 
@@ -654,17 +634,20 @@ pub(super) fn combine_roots<H: Hasher>(
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
+    F: merkle::Graftable,
     H: Hasher,
-    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
-    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
+    B: BitmapReadable<N>,
+    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, G, S>,
+    status: &B,
+    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
-) -> Result<H::Digest, Error> {
-    let grafted_mmr_root = compute_grafted_mmr_root(hasher, storage).await?;
+) -> Result<H::Digest, Error<F>> {
+    let grafted_root = compute_grafted_root(hasher, status, storage).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -672,155 +655,199 @@ pub(super) async fn compute_db_root<
     Ok(combine_roots(
         hasher,
         ops_root,
-        &grafted_mmr_root,
+        &grafted_root,
         partial.as_ref().map(|(nb, d)| (*nb, d)),
     ))
 }
 
-/// Compute the root of the grafted MMR.
+/// Compute the root of the grafted structure represented by `storage`.
 ///
-/// `storage` is the grafted storage over the grafted MMR and the ops MMR.
-pub(super) async fn compute_grafted_mmr_root<
+/// We use [`grafting::grafted_root`] instead of a standard `hasher.root()` fold to correctly handle
+/// grafting over MMB (Merkle Mountain Belt) structures. In an MMB, the trailing operations at the
+/// right edge of the structure might not be numerous enough to form a complete subtree at the
+/// grafting height. Therefore, a single bitmap chunk may span across multiple smaller ops peaks.
+/// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height
+/// peaks, hash them together with their corresponding bitmap chunks, and then complete the final
+/// fold. For MMR, this produces the exact same result as `hasher.root()`.
+pub(super) async fn compute_grafted_root<
+    F: merkle::Graftable,
     H: Hasher,
-    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
-    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
+    B: BitmapReadable<N>,
+    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    S: MerkleStorage<F, Digest = H::Digest>,
+    const N: usize,
 >(
     hasher: &StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, G, S>,
-) -> Result<H::Digest, Error> {
+    status: &B,
+    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
+) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)?;
 
-    // Collect peak digests from the grafted storage, which transparently dispatches
-    // to the grafted MMR or the ops MMR based on height.
-    let mut peaks = Vec::new();
-    for (peak_pos, _) in PeakIterator::new(size) {
+    // Collect peak digests of the grafted structure.
+    let mut peaks: Vec<H::Digest> = Vec::new();
+    for (peak_pos, _) in F::peaks(size) {
         let digest = storage
             .get_node(peak_pos)
             .await?
-            .ok_or(mmr::Error::MissingNode(peak_pos))?;
+            .ok_or(merkle::Error::<F>::MissingNode(peak_pos))?;
         peaks.push(digest);
     }
 
-    Ok(hasher.root(leaves, peaks.iter()))
+    let grafting_height = grafting::height::<N>();
+    let complete_chunks = status.complete_chunks() as u64;
+    let pruned_chunks = status.pruned_chunks() as u64;
+
+    Ok(grafting::grafted_root(
+        hasher,
+        leaves,
+        &peaks,
+        grafting_height,
+        |chunk_idx| {
+            if chunk_idx < complete_chunks {
+                // Pruned chunks are guaranteed to be all-zero (only chunks with no active
+                // operations are prunable), so a synthetic zero chunk produces the correct grafted
+                // digest via the zero-chunk identity shortcut.
+                if chunk_idx < pruned_chunks {
+                    Some([0u8; N])
+                } else {
+                    Some(status.get_chunk(chunk_idx as usize))
+                }
+            } else {
+                None
+            }
+        },
+    ))
 }
 
-/// Compute grafted leaf digests for the given bitmap chunks as `(ops_pos, digest)` pairs.
+/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
 ///
-/// Each grafted leaf is `hash(chunk || ops_subtree_root)`, except for all-zero chunks where
-/// the grafted leaf equals the ops subtree root directly (zero-chunk identity).
+/// For each chunk, reads the covering peak digests from the ops structure via
+/// [`Graftable::chunk_peaks`](merkle::Graftable::chunk_peaks), folds them into a single
+/// `chunk_ops_digest`, then combines with the bitmap chunk: `hash(chunk || chunk_ops_digest)`. For
+/// all-zero chunks the grafted leaf equals the `chunk_ops_digest` directly (zero-chunk identity).
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
-pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
+pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
-    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
-) -> Result<Vec<(Position, H::Digest)>, Error> {
+) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
     let grafting_height = grafting::height::<N>();
+    let ops_size = ops_tree.size().await;
 
-    // (ops_pos, ops_digest, chunk) for each chunk, where ops_pos is the position of the ops MMR
-    // node on which to graft the chunk, and ops_digest is the digest of that node.
-    let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| {
-        let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
-        async move {
-            let ops_digest = ops_mmr
-                .get_node(ops_pos)
+    // For each chunk, read the covering peak digests and fold them into a single
+    // chunk_ops_digest. With MMR there is always exactly one peak; with MMB there
+    // may be multiple. The fold happens inline to avoid per-chunk Vec allocations.
+    let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
+        let mut chunk_ops_digest: Option<H::Digest> = None;
+        for (pos, _) in F::chunk_peaks(ops_size, chunk_idx as u64, grafting_height) {
+            let digest = ops_tree
+                .get_node(pos)
                 .await?
-                .ok_or(mmr::Error::MissingGraftedLeaf(ops_pos))?;
-            Ok::<_, Error>((ops_pos, ops_digest, chunk))
+                .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
+            chunk_ops_digest = Some(
+                chunk_ops_digest.map_or(digest, |acc| hasher.hash([acc.as_ref(), digest.as_ref()])),
+            );
         }
+        let chunk_ops_digest =
+            chunk_ops_digest.expect("chunk must have at least one covering peak");
+        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
     }))
     .await?;
 
-    // Compute grafted leaf for each chunk.
+    // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
+    // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
     let zero_chunk = [0u8; N];
+    let graft =
+        |h: &StandardHasher<H>, chunk_idx: usize, chunk_ops_digest: H::Digest, chunk: [u8; N]| {
+            if chunk == zero_chunk {
+                (chunk_idx, chunk_ops_digest)
+            } else {
+                (
+                    chunk_idx,
+                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                )
+            }
+        };
+
     Ok(match pool.filter(|_| inputs.len() >= MIN_TO_PARALLELIZE) {
         Some(pool) => pool.install(|| {
             inputs
                 .into_par_iter()
                 .map_init(
                     || hasher.clone(),
-                    |h, (ops_pos, ops_digest, chunk)| {
-                        if chunk == zero_chunk {
-                            (ops_pos, ops_digest)
-                        } else {
-                            (ops_pos, h.hash([chunk.as_slice(), ops_digest.as_ref()]))
-                        }
+                    |h, (chunk_idx, chunk_ops_digest, chunk)| {
+                        graft(h, chunk_idx, chunk_ops_digest, chunk)
                     },
                 )
                 .collect()
         }),
         None => inputs
             .into_iter()
-            .map(|(ops_pos, ops_digest, chunk)| {
-                if chunk == zero_chunk {
-                    (ops_pos, ops_digest)
-                } else {
-                    (
-                        ops_pos,
-                        hasher.hash([chunk.as_slice(), ops_digest.as_ref()]),
-                    )
-                }
+            .map(|(chunk_idx, chunk_ops_digest, chunk)| {
+                graft(hasher, chunk_idx, chunk_ops_digest, chunk)
             })
             .collect(),
     })
 }
 
-/// Build a grafted [mmr::mem::Mmr] from scratch using bitmap chunks and the ops MMR.
+/// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
 ///
 /// For each non-pruned complete chunk (index in `pruned_chunks..complete_chunks`), reads the
-/// ops MMR node at the grafting height to compute the grafted leaf (see the
+/// ops tree node at the grafting height to compute the grafted leaf (see the
 /// [grafted leaf formula](super) in the module documentation). The caller must ensure that all
-/// ops MMR nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops MMR
+/// ops tree nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops tree
 /// (i.e., not pruned from the journal).
-pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
+pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
+) -> Result<Mem<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
 
     // Compute grafted leaves for each unpruned complete chunk.
-    let leaves = compute_grafted_leaves::<H, N>(
+    let leaves = compute_grafted_leaves::<F, H, N>(
         hasher,
-        ops_mmr,
+        ops_tree,
         (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, *bitmap.get_chunk(chunk_idx))),
         pool,
     )
     .await?;
 
-    // Build a base Mmr: either from pruned components or empty.
-    let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
-    let mut grafted_mmr = if pruned_chunks > 0 {
-        let grafted_pruning_boundary = Location::new(pruned_chunks as u64);
-        mmr::mem::Mmr::from_components(
+    // Build the base grafted tree: either from pruned components or empty.
+    let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+    let mut grafted_tree = if pruned_chunks > 0 {
+        let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
+        Mem::from_components(
             &grafted_hasher,
             Vec::new(),
             grafted_pruning_boundary,
             pinned_nodes.to_vec(),
-        )?
+        )
+        .map_err(|_| Error::<F>::DataCorrupted("grafted tree rebuild failed"))?
     } else {
-        mmr::mem::Mmr::new(&grafted_hasher)
+        Mem::new(&grafted_hasher)
     };
 
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
-        let changeset = {
-            let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
+        let batch = {
+            let mut batch = grafted_tree.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
                 batch = batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize(&grafted_tree, &grafted_hasher)
         };
-        grafted_mmr.apply(changeset)?;
+        grafted_tree.apply_batch(&batch)?;
     }
 
-    Ok(grafted_mmr)
+    Ok(grafted_tree)
 }
 
 /// Load the metadata and recover the pruning state persisted by previous runs.
@@ -828,15 +855,15 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 /// The metadata store holds two kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
-/// - **Pinned node digests** ([NODE_PREFIX]): grafted MMR digests at peak positions whose
-///   underlying data has been pruned. These are needed to recompute the grafted MMR root without
+/// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
+///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
 ///
 /// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_metadata<E: Context, D: Digest>(
+pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     context: E,
     partition: &str,
-) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {
+) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
     let metadata_cfg = MConfig {
         partition: partition.into(),
         codec_config: ((0..).into(), ()),
@@ -848,7 +875,7 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
     let pruned_chunks = match metadata.get(&key) {
         Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
             error!("pruned chunks value not a valid u64");
-            Error::DataCorrupted("pruned chunks value not a valid u64")
+            Error::<F>::DataCorrupted("pruned chunks value not a valid u64")
         })?),
         None => {
             warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
@@ -860,17 +887,20 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
     let pinned_nodes = if pruned_chunks > 0 {
-        let pruned_loc = Location::new(pruned_chunks as u64);
+        let pruned_loc = Location::<F>::new(pruned_chunks as u64);
         if !pruned_loc.is_valid() {
             return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
         }
         let mut pinned = Vec::new();
-        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
+        for (index, _pos) in F::nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
-                return Err(mmr::Error::MissingNode(pos).into());
+                return Err(Error::DataCorrupted(
+                    "missing pinned node in grafted tree metadata",
+                ));
             };
-            let digest = D::decode(bytes.as_ref()).map_err(|_| mmr::Error::MissingNode(pos))?;
+            let digest = D::decode(bytes.as_ref())
+                .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
             pinned.push(digest);
         }
         pinned

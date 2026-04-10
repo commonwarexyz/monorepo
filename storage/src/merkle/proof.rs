@@ -357,8 +357,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
         true
     }
 
-    /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`,
-    /// every `(position, digest)` pair encountered during reconstruction is appended.
+    /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`, every
+    /// `(position, digest)` pair encountered during reconstruction is appended.
     pub(crate) fn reconstruct_root_collecting<H, E>(
         &self,
         hasher: &H,
@@ -401,30 +401,25 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return Err(ReconstructionError::MissingDigests);
         }
 
+        // Blueprint's fetch_nodes contains after_peaks then the DFS sibling digests. We need to
+        // know how many after_peaks there are to skip over them.
         let after_start = prefix_digests;
-        // Blueprint's fetch_nodes contains after_peaks then the DFS sibling digests
-        // We need to know how many after_peaks there are to skip over them
         let after_peaks_count = bp.after_peaks.len();
         let after_end = after_start + after_peaks_count;
         let siblings = &self.digests[after_end..];
 
-        let mut acc: Option<D> = if prefix_digests == 1 {
-            Some(self.digests[0])
-        } else {
-            None
-        };
+        // Collect all peak digests to provide to hasher.root().
+        let mut peak_digests = Vec::new();
+        if !bp.fold_prefix.is_empty() {
+            peak_digests.push(self.digests[0]);
+        }
 
-        // Reconstruct each range peak and fold into acc.
         let mut sibling_cursor = 0usize;
         let mut elements_iter = elements.iter();
-        for peak in &bp.range_peaks {
+        for &peak in &bp.range_peaks {
             let peak_digest = reconstruct_peak_from_range(
                 hasher,
-                Subtree {
-                    pos: peak.pos,
-                    height: peak.height,
-                    leaf_start: peak.leaf_start,
-                },
+                peak,
                 &bp.range,
                 &mut elements_iter,
                 siblings,
@@ -434,16 +429,15 @@ impl<F: Family, D: Digest> Proof<F, D> {
             if let Some(ref mut cd) = collected {
                 cd.push((peak.pos, peak_digest));
             }
-            acc = Some(acc.map_or(peak_digest, |a| hasher.fold(&a, &peak_digest)));
+            peak_digests.push(peak_digest);
         }
 
-        // Fold after-peaks digests.
         for (i, &after_peak_pos) in bp.after_peaks.iter().enumerate() {
             let digest = self.digests[after_start + i];
             if let Some(ref mut cd) = collected {
                 cd.push((after_peak_pos, digest));
             }
-            acc = Some(acc.map_or(digest, |a| hasher.fold(&a, &digest)));
+            peak_digests.push(digest);
         }
 
         // Verify all elements were consumed.
@@ -456,16 +450,13 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return Err(ReconstructionError::ExtraDigests);
         }
 
-        // Hash the leaf count into the final result.
-        Ok(acc.map_or_else(
-            || hasher.digest(&self.leaves.to_be_bytes()),
-            |peaks_acc| hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()]),
-        ))
+        Ok(hasher.root(self.leaves, peak_digests.iter()))
     }
 }
 
 /// A perfect binary subtree within a peak, identified by its root position, height,
 /// and the first leaf location it covers.
+#[derive(Copy, Clone)]
 pub(crate) struct Subtree<F: Family> {
     /// Position of the subtree root node.
     pub pos: Position<F>,
@@ -584,16 +575,8 @@ impl<F: Family> Blueprint<F> {
         );
 
         let mut fetch_nodes = after_peaks.clone();
-        for peak in &range_peaks {
-            collect_siblings_dfs(
-                Subtree {
-                    pos: peak.pos,
-                    height: peak.height,
-                    leaf_start: peak.leaf_start,
-                },
-                &range,
-                &mut fetch_nodes,
-            );
+        for &peak in &range_peaks {
+            collect_siblings_dfs(peak, &range, &mut fetch_nodes);
         }
 
         Ok(Self {
@@ -811,6 +794,7 @@ mod tests {
     use crate::merkle::{
         hasher::Standard,
         mem::Mem,
+        mmb, mmr,
         proof::{nodes_required_for_multi_proof, Blueprint, Proof},
         Family, Location, LocationRangeExt as _,
     };
@@ -829,14 +813,14 @@ mod tests {
     /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
     fn build_raw<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
         let mut mem = Mem::new(hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for i in 0..n {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(&mem, hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         mem
     }
 
@@ -864,14 +848,14 @@ mod tests {
         let element = D::from(*b"01234567012345670123456701234567");
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for _ in 0..11 {
                 batch = batch.add(&hasher, &element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         // Confirm the proof of inclusion for each leaf verifies.
@@ -954,14 +938,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         // Test range proofs over all possible ranges of at least 2 elements.
@@ -1063,14 +1047,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Confirm we can successfully prove all retained elements after pruning.
         let root = *mem.root();
@@ -1101,14 +1085,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Prune up to the first peak.
         let prune_loc = Location::<F>::new(32);
@@ -1138,14 +1122,14 @@ mod tests {
 
         // Add more nodes, prune again, and test again.
         let new_elements: Vec<_> = (0..37).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &new_elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         elements.extend(new_elements);
         mem.prune(Location::new(66)).unwrap();
         assert_eq!(mem.bounds().start, Location::new(66));
@@ -1169,14 +1153,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Generate proofs over all possible ranges of elements and confirm each
         // serializes=>deserializes correctly.
@@ -1236,14 +1220,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..20).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         let root = mem.root();
 
@@ -1391,14 +1375,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..30).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Get individual proofs that will share some digests (elements in same subtree).
         let proof1 = mem.proof(&hasher, Location::new(0)).unwrap();
@@ -1441,14 +1425,14 @@ mod tests {
         let elements: Vec<D> = (0..252u16)
             .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&i.to_be_bytes()))
             .collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mem, &hasher)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         let loc = Location::new(240);
@@ -1780,79 +1764,79 @@ mod tests {
 
     #[test]
     fn mmr_empty_proof() {
-        empty_proof::<crate::mmr::Family>();
+        empty_proof::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_element() {
-        verify_element::<crate::mmr::Family>();
+        verify_element::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_range() {
-        verify_range::<crate::mmr::Family>();
+        verify_range::<mmr::Family>();
     }
     #[test_traced]
     fn mmr_retained_nodes_provable_after_pruning() {
-        retained_nodes_provable_after_pruning::<crate::mmr::Family>();
+        retained_nodes_provable_after_pruning::<mmr::Family>();
     }
     #[test]
     fn mmr_ranges_provable_after_pruning() {
-        ranges_provable_after_pruning::<crate::mmr::Family>();
+        ranges_provable_after_pruning::<mmr::Family>();
     }
     #[test]
     fn mmr_proof_serialization() {
-        proof_serialization::<crate::mmr::Family>();
+        proof_serialization::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_generation_and_verify() {
-        multi_proof_generation_and_verify::<crate::mmr::Family>();
+        multi_proof_generation_and_verify::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_deduplication() {
-        multi_proof_deduplication::<crate::mmr::Family>();
+        multi_proof_deduplication::<mmr::Family>();
     }
     #[test]
     fn mmr_proof_leaves_malleability() {
-        proof_leaves_malleability::<crate::mmr::Family>();
+        proof_leaves_malleability::<mmr::Family>();
     }
     #[test]
     fn mmr_blueprint_errors() {
-        blueprint_errors::<crate::mmr::Family>();
+        blueprint_errors::<mmr::Family>();
     }
     #[test]
     fn mmr_single_element_proof_reconstruction() {
-        single_element_proof_reconstruction::<crate::mmr::Family>();
+        single_element_proof_reconstruction::<mmr::Family>();
     }
     #[test]
     fn mmr_range_proof_reconstruction() {
-        range_proof_reconstruction::<crate::mmr::Family>();
+        range_proof_reconstruction::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_element_inclusion() {
-        verify_element_inclusion::<crate::mmr::Family>();
+        verify_element_inclusion::<mmr::Family>();
     }
     #[test]
     fn mmr_full_range() {
-        full_range::<crate::mmr::Family>();
+        full_range::<mmr::Family>();
     }
     #[test]
     fn mmr_empty_proof_verifies_empty_tree() {
-        empty_proof_verifies_empty_tree::<crate::mmr::Family>();
+        empty_proof_verifies_empty_tree::<mmr::Family>();
     }
     #[test]
     fn mmr_every_element_contributes_to_root() {
-        every_element_contributes_to_root::<crate::mmr::Family>();
+        every_element_contributes_to_root::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_generation_and_verify_raw() {
-        multi_proof_generation_and_verify_raw::<crate::mmr::Family>();
+        multi_proof_generation_and_verify_raw::<mmr::Family>();
     }
     #[test]
     fn mmr_tampered_proof_digests_rejected() {
-        tampered_proof_digests_rejected::<crate::mmr::Family>();
+        tampered_proof_digests_rejected::<mmr::Family>();
     }
     #[test]
     fn mmr_no_duplicate_positions() {
-        no_duplicate_positions::<crate::mmr::Family>();
+        no_duplicate_positions::<mmr::Family>();
     }
 
     // ---------------------------------------------------------------------------
@@ -1861,78 +1845,78 @@ mod tests {
 
     #[test]
     fn mmb_empty_proof() {
-        empty_proof::<crate::mmb::Family>();
+        empty_proof::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_element() {
-        verify_element::<crate::mmb::Family>();
+        verify_element::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_range() {
-        verify_range::<crate::mmb::Family>();
+        verify_range::<mmb::Family>();
     }
     #[test_traced]
     fn mmb_retained_nodes_provable_after_pruning() {
-        retained_nodes_provable_after_pruning::<crate::mmb::Family>();
+        retained_nodes_provable_after_pruning::<mmb::Family>();
     }
     #[test]
     fn mmb_ranges_provable_after_pruning() {
-        ranges_provable_after_pruning::<crate::mmb::Family>();
+        ranges_provable_after_pruning::<mmb::Family>();
     }
     #[test]
     fn mmb_proof_serialization() {
-        proof_serialization::<crate::mmb::Family>();
+        proof_serialization::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_generation_and_verify() {
-        multi_proof_generation_and_verify::<crate::mmb::Family>();
+        multi_proof_generation_and_verify::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_deduplication() {
-        multi_proof_deduplication::<crate::mmb::Family>();
+        multi_proof_deduplication::<mmb::Family>();
     }
     #[test]
     fn mmb_proof_leaves_malleability() {
-        proof_leaves_malleability::<crate::mmb::Family>();
+        proof_leaves_malleability::<mmb::Family>();
     }
     #[test]
     fn mmb_blueprint_errors() {
-        blueprint_errors::<crate::mmb::Family>();
+        blueprint_errors::<mmb::Family>();
     }
     #[test]
     fn mmb_single_element_proof_reconstruction() {
-        single_element_proof_reconstruction::<crate::mmb::Family>();
+        single_element_proof_reconstruction::<mmb::Family>();
     }
     #[test]
     fn mmb_range_proof_reconstruction() {
-        range_proof_reconstruction::<crate::mmb::Family>();
+        range_proof_reconstruction::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_element_inclusion() {
-        verify_element_inclusion::<crate::mmb::Family>();
+        verify_element_inclusion::<mmb::Family>();
     }
     #[test]
     fn mmb_full_range() {
-        full_range::<crate::mmb::Family>();
+        full_range::<mmb::Family>();
     }
     #[test]
     fn mmb_empty_proof_verifies_empty_tree() {
-        empty_proof_verifies_empty_tree::<crate::mmb::Family>();
+        empty_proof_verifies_empty_tree::<mmb::Family>();
     }
     #[test]
     fn mmb_every_element_contributes_to_root() {
-        every_element_contributes_to_root::<crate::mmb::Family>();
+        every_element_contributes_to_root::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_generation_and_verify_raw() {
-        multi_proof_generation_and_verify_raw::<crate::mmb::Family>();
+        multi_proof_generation_and_verify_raw::<mmb::Family>();
     }
     #[test]
     fn mmb_tampered_proof_digests_rejected() {
-        tampered_proof_digests_rejected::<crate::mmb::Family>();
+        tampered_proof_digests_rejected::<mmb::Family>();
     }
     #[test]
     fn mmb_no_duplicate_positions() {
-        no_duplicate_positions::<crate::mmb::Family>();
+        no_duplicate_positions::<mmb::Family>();
     }
 }

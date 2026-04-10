@@ -1718,13 +1718,8 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            let finalized = db
-                .new_batch()
-                .merkleize(None::<Digest>, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -1783,13 +1778,12 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
-            let finalized = db
+            let merkleized = db
                 .new_batch()
-                .merkleize(None::<Vec<u8>>, &db)
+                .merkleize(&db, None::<Vec<u8>>)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -1845,13 +1839,8 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            let finalized = db
-                .new_batch()
-                .merkleize(None::<Digest>, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -1915,13 +1904,12 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
-            let finalized = db
+            let merkleized = db
                 .new_batch()
-                .merkleize(None::<Vec<u8>>, &db)
+                .merkleize(&db, None::<Vec<u8>>)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }

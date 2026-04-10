@@ -194,18 +194,15 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)), &db)
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -224,18 +221,15 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)), &db)
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -278,14 +272,12 @@ fn fuzz(mut input: FuzzInput) {
             }
         }
 
-        let finalized = {
-            let mut batch = db.new_batch();
-            for (k, v) in pending_writes.drain(..) {
-                batch = batch.write(k, v);
-            }
-            batch.merkleize(None, &db).await.unwrap().finalize()
-        };
-        db.apply_batch(finalized)
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");

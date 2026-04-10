@@ -185,6 +185,15 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push(bit);
     }
 
+    /// Extend the bitmap to `new_len` total bits (including pruned bits), filling new positions
+    /// with zero. No-op if `new_len <= self.len()`.
+    pub fn extend_to(&mut self, new_len: u64) {
+        let current = self.len();
+        if new_len > current {
+            self.bitmap.extend_to(new_len - self.pruned_bits());
+        }
+    }
+
     /// Remove and return the last bit from the bitmap.
     ///
     /// # Warning
@@ -308,14 +317,36 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Panics
     ///
-    /// Panics if the chunk is pruned or out of bounds.
-    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
+    /// Panics if the chunk is pruned or out of bounds, or if this is the last partial
+    /// chunk and `chunk_data` has non-zero bits beyond `len()`.
+    pub fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
             chunk_index >= self.pruned_chunks,
             "cannot set pruned chunk {chunk_index} (pruned_chunks: {})",
             self.pruned_chunks
         );
         let bitmap_chunk_idx = chunk_index - self.pruned_chunks;
+
+        // Reject non-zero trailing bits in the last partial chunk to maintain the
+        // canonicalization invariant required by the codec.
+        if bitmap_chunk_idx + 1 == self.bitmap.chunks_len() {
+            let trailing = self.bitmap.len() % Self::CHUNK_SIZE_BITS;
+            if trailing != 0 {
+                let last_byte = ((trailing - 1) / 8) as usize;
+                let bits_in_last_byte = (trailing % 8) as u32;
+                let byte_mask = if bits_in_last_byte != 0 {
+                    !((1u8 << bits_in_last_byte) - 1)
+                } else {
+                    0
+                };
+                assert!(
+                    chunk_data[last_byte] & byte_mask == 0
+                        && chunk_data[last_byte + 1..] == [0u8; N][last_byte + 1..],
+                    "non-zero bits beyond bitmap length"
+                );
+            }
+        }
+
         self.bitmap.set_chunk_by_index(bitmap_chunk_idx, chunk_data);
     }
 
@@ -1365,6 +1396,96 @@ mod tests {
         let ones: Vec<u64> = Readable::ones_iter_from(&p, 0).collect();
         let expected: Vec<u64> = (32..64).collect();
         assert_eq!(ones, expected);
+    }
+
+    #[test]
+    fn test_extend_to() {
+        let mut p = Prunable::<4>::new();
+        for i in 0..30u64 {
+            p.push(i % 2 == 0);
+        }
+
+        // No-op when target is smaller.
+        p.extend_to(5);
+        assert_eq!(p.len(), 30);
+
+        // Extends across a chunk boundary, new bits are zero.
+        p.extend_to(65);
+        assert_eq!(p.len(), 65);
+        for i in 0..30 {
+            assert_eq!(p.get_bit(i), i % 2 == 0, "original bit {i}");
+        }
+        for i in 30..65 {
+            assert!(!p.get_bit(i), "extended bit {i} should be false");
+        }
+
+        // Works correctly with a pruned prefix.
+        p.prune_to_bit(32);
+        p.extend_to(100);
+        assert_eq!(p.len(), 100);
+        assert_eq!(p.pruned_bits(), 32);
+        for i in 65..100 {
+            assert!(!p.get_bit(i), "extended bit {i} should be false");
+        }
+    }
+
+    // set_chunk_by_index must reject non-zero bits beyond len() in the last partial chunk.
+
+    #[test]
+    fn test_set_chunk_by_index_accepts_valid_partial_chunk() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 1 full chunk + 3 bits in chunk 1
+                         // Only the low 3 bits of byte 0 are valid; rest must be zero.
+        p.set_chunk_by_index(1, &[0b0000_0111, 0, 0, 0]);
+        assert_eq!(p.get_chunk(1), &[0b0000_0111, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_set_chunk_by_index_accepts_full_chunk() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(64); // 2 full chunks
+                         // Full chunk: any byte pattern is valid.
+        p.set_chunk_by_index(1, &[0xFF; 4]);
+        assert_eq!(p.get_chunk(1), &[0xFF; 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_high_bits_in_last_byte() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+                         // Bit 3 (0b0000_1000) is beyond len.
+        p.set_chunk_by_index(1, &[0b0000_1000, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_nonzero_trailing_bytes() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+                         // Byte 1 is entirely beyond len.
+        p.set_chunk_by_index(1, &[0, 0xFF, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero bits beyond bitmap length")]
+    fn test_set_chunk_by_index_rejects_nonzero_final_byte() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35); // 3 valid bits in chunk 1
+        p.set_chunk_by_index(1, &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_set_chunk_by_index_roundtrips_codec() {
+        let mut p = Prunable::<4>::new();
+        p.extend_to(35);
+        p.set_chunk_by_index(1, &[0b0000_0101, 0, 0, 0]);
+
+        let encoded = p.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX)
+            .expect("valid chunk should round-trip");
+        assert_eq!(decoded.len(), 35);
+        assert_eq!(decoded.get_chunk(1), &[0b0000_0101, 0, 0, 0]);
     }
 
     #[cfg(feature = "arbitrary")]

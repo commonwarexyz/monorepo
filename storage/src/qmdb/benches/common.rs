@@ -9,7 +9,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            traits::{DbAny, UnmerkleizedBatch as _},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
@@ -41,23 +41,25 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 pub type AnyUFixDb = UFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
 pub type AnyOFixDb = OFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUFixDb = UCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOFixDb = OCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurUFixDb = UCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOFixDb = OCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Fixed value (Digest), variable storage layout --
 // Measures overhead of variable-capable storage when values are fixed-size.
 
 pub type AnyUVarDigestDb = UVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
 pub type AnyOVarDigestDb = OVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUVarDigestDb = UCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarDigestDb = OCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurUVarDigestDb =
+    UCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarDigestDb =
+    OCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Variable value (Vec<u8>), variable storage layout --
 
 pub type AnyUVarVecDb = UVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
 pub type AnyOVarVecDb = OVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type CurUVarVecDb = UCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarVecDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurUVarVecDb = UCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarVecDb = OCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Keyless --
 
@@ -187,9 +189,9 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
+        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
 }
@@ -210,9 +212,9 @@ pub fn cur_var_digest_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -233,9 +235,9 @@ pub fn cur_var_vec_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -509,8 +511,8 @@ pub async fn gen_random_kv<M>(
             let k = Sha256::hash(&i.to_be_bytes());
             batch = batch.write(k, Some(make_value(&mut rng)));
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     // Perform `num_operations` random updates/deletes, committing periodically.
@@ -525,14 +527,14 @@ pub async fn gen_random_kv<M>(
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
             if let Some(freq) = commit_frequency {
                 if rng.next_u32() % freq == 0 {
-                    let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-                    db.apply_batch(finalized).await.unwrap();
+                    let merkleized = batch.merkleize(db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
                     batch = db.new_batch();
                 }
             }
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 }
 

@@ -1,6 +1,4 @@
-//! Benchmark entry point for all QMDB benchmarks.
-//!
-//! Run with: `cargo bench --bench qmdb`
+//! Benchmark entry point for the generate & init QMDB benchmarks.
 
 use criterion::criterion_main;
 
