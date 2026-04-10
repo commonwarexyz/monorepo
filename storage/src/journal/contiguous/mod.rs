@@ -35,7 +35,7 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
-    /// Read multiple items at sorted positions.
+    /// Read multiple items at the given positions, which must be sorted in ascending order.
     ///
     /// The default implementation calls [`read`](Self::read) in a loop.
     /// Fixed-size journal implementations override this to amortize lock

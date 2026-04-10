@@ -203,6 +203,10 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
+        debug_assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be sorted and unique"
+        );
         // Validate all positions.
         for &pos in positions {
             if pos >= self.guard.size {

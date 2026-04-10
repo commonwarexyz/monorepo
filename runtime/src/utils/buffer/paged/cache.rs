@@ -239,7 +239,7 @@ impl CacheRef {
 
     /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
-    /// Each element of `ranges` is `(logical_offset, dest_slice)`. Returns the number of
+    /// Each element of `ranges` is `(dest_slice, logical_offset)`. Returns the number of
     /// ranges that were *fully* read from cache before encountering a miss. Ranges must be
     /// sorted by offset and non-overlapping.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut [(&mut [u8], u64)]) -> usize {

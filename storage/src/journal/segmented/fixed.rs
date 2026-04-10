@@ -181,10 +181,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
-    /// Read multiple items from the same section at sorted positions into a caller buffer.
+    /// Read multiple items from the same section into a caller buffer.
     ///
     /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
-    /// within the section's bounds.
+    /// sorted in ascending order, non-overlapping, and within the section's bounds.
     pub async fn get_many(
         &self,
         section: u64,
@@ -212,7 +212,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(bytes::Bytes::copy_from_slice(slice)).map_err(Error::Codec)?);
+            items.push(A::decode(&slice[..]).map_err(Error::Codec)?);
         }
         Ok(items)
     }
