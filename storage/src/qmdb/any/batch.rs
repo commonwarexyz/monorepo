@@ -341,8 +341,29 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Try to resolve an operation from in-memory sources (this batch or the ancestor chain).
-    /// Returns `None` for locations in the committed journal that require disk I/O.
+    /// Sync cache check: resolve from this batch's ops or the ancestor chain.
+    /// Returns `None` for committed-journal locations that need disk I/O.
+    fn try_read_cached(
+        &self,
+        loc: Location<F>,
+        batch_ops: &[Operation<F, U>],
+    ) -> Option<Operation<F, U>> {
+        let loc = *loc;
+
+        if loc >= self.base_size {
+            return Some(batch_ops[(loc - self.base_size) as usize].clone());
+        }
+
+        if loc >= self.db_size {
+            return Some(
+                read_chain_item_from_ancestors(&self.ancestors, loc, self.db_size).clone(),
+            );
+        }
+
+        None
+    }
+
+    /// Read a single operation by location.
     ///
     /// The operation space is divided into three contiguous regions:
     ///
@@ -357,43 +378,38 @@ where
     ///
     /// For batches created directly from the DB (no uncommitted ancestors),
     /// the ancestor region is empty (`db_size == base_size`).
-    fn try_read_cached(
+    ///
+    /// In-memory locations are resolved synchronously. Only committed-journal locations
+    /// await the `reader`.
+    async fn read_op<R: Reader<Item = Operation<F, U>>>(
         &self,
         loc: Location<F>,
         batch_ops: &[Operation<F, U>],
-    ) -> Option<Operation<F, U>> {
-        let loc = *loc;
-
-        if loc >= self.base_size {
-            // This batch's own operations (user mutations, or earlier floor-raise ops).
-            return Some(batch_ops[(loc - self.base_size) as usize].clone());
+        reader: &R,
+    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>> {
+        match self.try_read_cached(loc, batch_ops) {
+            Some(op) => Ok(op),
+            None => Ok(reader.read(*loc).await?),
         }
-
-        if loc >= self.db_size {
-            // Parent batch chain's operations (in-memory). Walk the ancestors.
-            return Some(
-                read_chain_item_from_ancestors(&self.ancestors, loc, self.db_size).clone(),
-            );
-        }
-
-        // Committed journal -- needs disk I/O.
-        None
     }
 
     /// Read multiple operations by location.
     ///
-    /// In-memory locations (this batch and ancestor chain) are resolved synchronously.
-    /// Remaining disk locations are read concurrently via the provided `reader`.
+    /// In-memory locations are resolved synchronously. Remaining disk locations
+    /// are read concurrently via `try_join_all` on the provided `reader`.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Resolve in-memory hits synchronously.
+        // Resolve hits synchronously: batch/ancestor first, then journal page cache.
         let results: Vec<Option<Operation<F, U>>> = locations
             .iter()
-            .map(|loc| self.try_read_cached(*loc, batch_ops))
+            .map(|loc| {
+                self.try_read_cached(*loc, batch_ops)
+                    .or_else(|| reader.try_read_cached(**loc))
+            })
             .collect();
 
         // Batch-read disk misses concurrently.
@@ -410,9 +426,8 @@ where
         let mut disk_iter = disk_results.into_iter();
         Ok(results
             .into_iter()
-            .map(|r| match r {
-                Some(op) => op,
-                None => disk_iter.next().expect("disk result count mismatch"),
+            .map(|r| {
+                r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch"))
             })
             .collect())
     }
@@ -555,26 +570,32 @@ where
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let fixed_tip = self.base_size + ops.len() as u64;
             let mut moved = 0u64;
+            let mut scan_from = floor;
 
             while moved < total_steps {
-                // Collect candidates, capped to bound concurrent I/O.
-                let limit = (total_steps - moved).min(MAX_CONCURRENT_READS) as usize;
+                // Collect candidates, capped by the number of active ops still needed.
+                // `scan_from` tracks prefetch progress separately from `floor`, so
+                // early exit cannot leave `floor` past unprocessed candidates.
+                let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
                 let mut candidates = Vec::with_capacity(limit);
                 while candidates.len() < limit {
-                    let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
+                    let Some(candidate) = scan.next_candidate(scan_from, fixed_tip) else {
                         break;
                     };
                     candidates.push(candidate);
-                    floor = Location::new(*candidate + 1);
+                    scan_from = Location::new(*candidate + 1);
                 }
                 if candidates.is_empty() {
                     break;
                 }
 
-                // Resolve in-memory candidates synchronously.
+                // Resolve cached candidates synchronously: batch/ancestor then page cache.
                 let cached: Vec<Option<Operation<F, U>>> = candidates
                     .iter()
-                    .map(|c| self.try_read_cached(*c, &ops))
+                    .map(|c| {
+                        self.try_read_cached(*c, &ops)
+                            .or_else(|| reader.try_read_cached(**c))
+                    })
                     .collect();
 
                 // Batch-read disk misses concurrently.
@@ -590,10 +611,10 @@ where
                 // Process results in order, moving active ops to the tip.
                 let mut disk_iter = disk_results.into_iter();
                 for (candidate, cached_op) in candidates.into_iter().zip(cached) {
-                    let op = match cached_op {
-                        Some(op) => op,
-                        None => disk_iter.next().expect("disk result count mismatch"),
-                    };
+                    let op = cached_op.unwrap_or_else(|| {
+                        disk_iter.next().expect("disk result count mismatch")
+                    });
+                    floor = Location::new(*candidate + 1);
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
                     };
@@ -1050,10 +1071,7 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op = match m.try_read_cached(*loc, &[]) {
-                    Some(op) => op,
-                    None => reader.read(**loc).await?,
-                };
+                let op = m.read_op(*loc, &[], &reader).await?;
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("ancestor diff Active should reference Update op"),
@@ -1737,6 +1755,36 @@ mod tests {
                     Operation::Update(update::Unordered(key_current, value_current)),
                 ]
             );
+
+            // read_op: single-location reads across all three sources.
+            let reader = db.log.reader().await;
+            let disk_op = merkleizer
+                .read_op(committed_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                disk_op,
+                Operation::Update(update::Unordered(key_db, value_db))
+            );
+
+            let ancestor_op = merkleizer
+                .read_op(parent_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                ancestor_op,
+                Operation::Update(update::Unordered(key_parent, value_parent))
+            );
+
+            let current_op = merkleizer
+                .read_op(current_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                current_op,
+                Operation::Update(update::Unordered(key_current, value_current))
+            );
+            drop(reader);
 
             db.destroy().await.unwrap();
         });

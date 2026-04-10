@@ -35,6 +35,14 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
+    /// Try to read an item from the page cache only, without async I/O.
+    ///
+    /// Returns `Some(item)` if all data was in cache, `None` on any miss.
+    /// The default returns `None` (no cache available).
+    fn try_read_cached(&self, _position: u64) -> Option<Self::Item> {
+        None
+    }
+
     /// Return a stream of all items starting from `start_pos`.
     ///
     /// Because the reader holds the lock, validation and stream setup happen

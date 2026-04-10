@@ -181,6 +181,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
+    /// Try to read an item using only the page cache. Returns `None` on any cache miss.
+    ///
+    /// The caller must have already validated that the position is within bounds.
+    pub fn try_get_cached(&self, section: u64, position: u64) -> Option<A> {
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
+        let buf = blob.try_read_cached(offset, Self::CHUNK_SIZE)?;
+        A::decode(buf.coalesce()).ok()
+    }
+
     /// Read the last item in a section, if any.
     ///
     /// Returns `Ok(None)` if the section is empty.
