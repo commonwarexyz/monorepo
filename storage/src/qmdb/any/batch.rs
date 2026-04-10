@@ -568,17 +568,19 @@ where
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let fixed_tip = self.base_size + ops.len() as u64;
             let mut moved = 0u64;
+            let mut scan_from = floor;
 
             while moved < total_steps {
-                // Collect candidates, capped to bound concurrent I/O.
-                let limit = (total_steps - moved).min(MAX_CONCURRENT_READS) as usize;
-                let mut candidates = Vec::with_capacity(limit);
-                while candidates.len() < limit {
-                    let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
+                // Collect candidates. The batch size is always MAX_CONCURRENT_READS
+                // because floor advances during processing (not collection), so
+                // early exit cannot leave floor past unprocessed candidates.
+                let mut candidates = Vec::with_capacity(MAX_CONCURRENT_READS as usize);
+                while candidates.len() < MAX_CONCURRENT_READS as usize {
+                    let Some(candidate) = scan.next_candidate(scan_from, fixed_tip) else {
                         break;
                     };
                     candidates.push(candidate);
-                    floor = Location::new(*candidate + 1);
+                    scan_from = Location::new(*candidate + 1);
                 }
                 if candidates.is_empty() {
                     break;
@@ -589,6 +591,7 @@ where
 
                 // Process results in order, moving active ops to the tip.
                 for (candidate, op) in candidates.into_iter().zip(results) {
+                    floor = Location::new(*candidate + 1);
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
                     };
@@ -1732,14 +1735,32 @@ mod tests {
 
             // read_op: single-location reads across all three sources.
             let reader = db.log.reader().await;
-            let disk_op = merkleizer.read_op(committed_loc, &batch_ops, &reader).await.unwrap();
-            assert_eq!(disk_op, Operation::Update(update::Unordered(key_db, value_db)));
+            let disk_op = merkleizer
+                .read_op(committed_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                disk_op,
+                Operation::Update(update::Unordered(key_db, value_db))
+            );
 
-            let ancestor_op = merkleizer.read_op(parent_loc, &batch_ops, &reader).await.unwrap();
-            assert_eq!(ancestor_op, Operation::Update(update::Unordered(key_parent, value_parent)));
+            let ancestor_op = merkleizer
+                .read_op(parent_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                ancestor_op,
+                Operation::Update(update::Unordered(key_parent, value_parent))
+            );
 
-            let current_op = merkleizer.read_op(current_loc, &batch_ops, &reader).await.unwrap();
-            assert_eq!(current_op, Operation::Update(update::Unordered(key_current, value_current)));
+            let current_op = merkleizer
+                .read_op(current_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                current_op,
+                Operation::Update(update::Unordered(key_current, value_current))
+            );
             drop(reader);
 
             db.destroy().await.unwrap();
