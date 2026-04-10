@@ -496,7 +496,11 @@ impl<B: Blob> Append<B> {
             .iter()
             .map(|&(idx, len, offset)| {
                 let start = idx * item_size;
+                // SAFETY: start < buf.len() because idx < offsets.len() and
+                // buf.len() == offsets.len() * item_size.
                 let ptr = unsafe { buf.as_mut_ptr().add(start) };
+                // SAFETY: Each idx is unique so the resulting slices are
+                // non-overlapping, and len <= item_size keeps each within its slot.
                 let slice = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
                 (slice, offset)
             })

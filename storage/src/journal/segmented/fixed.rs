@@ -212,7 +212,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(&slice[..]).map_err(Error::Codec)?);
+            items.push(A::decode(slice).map_err(Error::Codec)?);
         }
         Ok(items)
     }
@@ -1391,8 +1391,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            for i in 0..5 {
-                assert_eq!(items[i], test_digest(i as u64));
+            for (i, item) in items.iter().enumerate() {
+                assert_eq!(*item, test_digest(i as u64));
             }
 
             journal.destroy().await.unwrap();
