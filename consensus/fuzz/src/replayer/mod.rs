@@ -38,12 +38,19 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 /// Replays a trace by injecting messages into isolated engines and extracting
 /// observable state from reporters.
-pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
+///
+/// `faults_override` overrides the trace's `faults` field, controlling how
+/// many leading nodes are skipped as Byzantine. Pass `Some(0)` to replay on
+/// all `n` nodes as correct (matching the TLC all-correct model).
+pub fn replay_trace(
+    trace: &TraceData,
+    faults_override: Option<usize>,
+) -> Vec<ReplayedReplicaState> {
     let executor = deterministic::Runner::timed(Duration::from_secs(120));
 
     executor.start(|mut context| async move {
         let n = trace.n;
-        let faults = trace.faults;
+        let faults = faults_override.unwrap_or(trace.faults);
         let epoch = trace.epoch;
 
         // Generate deterministic ed25519 keys (same as fuzzer)
@@ -90,15 +97,14 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
             let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
 
-            // Application (always certify, fast latency)
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 me: validator.clone(),
-                propose_latency: (1.0, 0.1),
-                verify_latency: (1.0, 0.1),
-                certify_latency: (1.0, 0.1),
-                should_certify: application::Certifier::Always,
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);
@@ -199,8 +205,8 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
 }
 
 /// Replays a trace and runs invariant checks on the extracted state.
-pub fn replay_and_check(trace: &TraceData) {
-    let states = replay_trace(trace);
+pub fn replay_and_check(trace: &TraceData, faults_override: Option<usize>) {
+    let states = replay_trace(trace, faults_override);
     // Convert to ReplicaState tuples for invariant checking
     let replica_states: Vec<_> = states
         .iter()

@@ -6,8 +6,8 @@
 #   make mbf_live_watch    # replay watcher only
 #   mbf_live_trace_gen     # run a libfuzzer target and get interesting traces from it
 
-MBF_TLC_PORT ?= 2023
-MBF_FAULTS ?= 0
+MBF_TLC_PORT ?= 2023 # TLC-controlled server port
+MBF_FAULTS ?= 0 # number of faulty nodes
 
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
@@ -33,7 +33,7 @@ replay_mutated_traces:
 		[ -f "$$f" ] || continue; \
 		total=$$((total + 1)); \
 		echo "=== Replaying $$f ==="; \
-		if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
+		if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 			echo "PASS"; \
 		else \
 			echo "FAIL"; \
@@ -90,7 +90,7 @@ mbf_live_watch:
 				hash=$$(basename "$$f" .json); \
 				[ -f "$$seen_dir/$$hash" ] && continue; \
 				echo "=== Replaying $$f ==="; \
-				if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
+				if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 					echo "PASS"; \
 				else \
 					echo "FAIL"; \

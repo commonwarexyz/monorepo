@@ -23,10 +23,17 @@ fn main() {
         process::exit(1);
     });
 
-    let trace: TraceData = serde_json::from_str(&json).unwrap_or_else(|e| {
+    let mut trace: TraceData = serde_json::from_str(&json).unwrap_or_else(|e| {
         eprintln!("Error parsing {trace_path}: {e}");
         process::exit(1);
     });
+
+    let faults_override: Option<usize> = env::var("REPLAY_FAULTS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    if let Some(f) = faults_override {
+        trace.faults = f;
+    }
 
     println!(
         "Replaying trace: n={}, faults={}, epoch={}, entries={}, required_containers={}",
@@ -37,7 +44,7 @@ fn main() {
         trace.required_containers
     );
 
-    let states = replayer::replay_trace(&trace);
+    let states = replayer::replay_trace(&trace, faults_override);
 
     println!("Extracted state for {} correct node(s):", states.len());
     for (i, state) in states.iter().enumerate() {
