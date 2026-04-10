@@ -146,13 +146,14 @@ impl CertItem {
         match self {
             CertItem::Notarization {
                 view,
+                parent_view,
                 payload,
                 signers,
                 ..
             } => {
                 let mut sorted = signers.clone();
                 sorted.sort();
-                format!("N:{}:{}:{}", view, payload, sorted.join(","))
+                format!("N:{}:{}:{}:{}", view, parent_view, payload, sorted.join(","))
             }
             CertItem::Nullification { view, signers, .. } => {
                 let mut sorted = signers.clone();
@@ -161,13 +162,14 @@ impl CertItem {
             }
             CertItem::Finalization {
                 view,
+                parent_view,
                 payload,
                 signers,
                 ..
             } => {
                 let mut sorted = signers.clone();
                 sorted.sort();
-                format!("F:{}:{}:{}", view, payload, sorted.join(","))
+                format!("F:{}:{}:{}:{}", view, parent_view, payload, sorted.join(","))
             }
         }
     }
@@ -182,29 +184,19 @@ impl CertItem {
     }
 }
 
-fn cert_to_item(
-    cert: &TracedCert,
-    block_map: &[(String, String)],
-    proposals: &HashMap<ProposalKey, ViewProposal>,
-) -> CertItem {
-    let lookup_parent = |view: u64, payload: &str| {
-        proposals
-            .get(&proposal_key(view, payload))
-            .map(|p| p.view_parent)
-            .unwrap_or(0)
-    };
+fn cert_to_item(cert: &TracedCert, block_map: &[(String, String)]) -> CertItem {
     match cert {
         TracedCert::Notarization {
             view,
+            parent,
             block,
             signers,
             ghost_sender,
         } => {
             let payload = map_block(block, block_map);
-            let parent_view = lookup_parent(*view, &payload);
             CertItem::Notarization {
                 view: *view,
-                parent_view,
+                parent_view: *parent,
                 payload,
                 signers: signers.clone(),
                 ghost_sender: ghost_sender.clone(),
@@ -221,15 +213,15 @@ fn cert_to_item(
         },
         TracedCert::Finalization {
             view,
+            parent,
             block,
             signers,
             ghost_sender,
         } => {
             let payload = map_block(block, block_map);
-            let parent_view = lookup_parent(*view, &payload);
             CertItem::Finalization {
                 view: *view,
-                parent_view,
+                parent_view: *parent,
                 payload,
                 signers: signers.clone(),
                 ghost_sender: ghost_sender.clone(),
@@ -257,14 +249,10 @@ pub struct EncoderConfig {
     pub required_containers: u64,
 }
 
-/// Proposal information reconstructed from trace data.
-struct ViewProposal {
-    view_parent: u64,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ProposalKey {
     view: u64,
+    parent: u64,
     block_name: String,
 }
 
@@ -272,6 +260,7 @@ struct ProposalKey {
 enum VoteReplayKey {
     Notarize {
         view: u64,
+        parent: u64,
         sig: String,
         block: String,
     },
@@ -281,6 +270,7 @@ enum VoteReplayKey {
     },
     Finalize {
         view: u64,
+        parent: u64,
         sig: String,
         block: String,
     },
@@ -288,33 +278,40 @@ enum VoteReplayKey {
 
 fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
     match vote {
-        TracedVote::Notarize { view, block, .. } => VoteReplayKey::Notarize {
+        TracedVote::Notarize {
+            view, parent, block, ..
+        } => VoteReplayKey::Notarize {
             view: *view,
+            parent: *parent,
             sig,
             block: block.clone(),
         },
         TracedVote::Nullify { view, .. } => VoteReplayKey::Nullify { view: *view, sig },
-        TracedVote::Finalize { view, block, .. } => VoteReplayKey::Finalize {
+        TracedVote::Finalize {
+            view, parent, block, ..
+        } => VoteReplayKey::Finalize {
             view: *view,
+            parent: *parent,
             sig,
             block: block.clone(),
         },
     }
 }
 
-fn proposal_key(view: u64, block_name: &str) -> ProposalKey {
+fn proposal_key(view: u64, parent: u64, block_name: &str) -> ProposalKey {
     ProposalKey {
         view,
+        parent,
         block_name: block_name.to_string(),
     }
 }
 
 fn proposal_var_name(key: &ProposalKey) -> String {
-    format!("proposal_v{}_{}", key.view, key.block_name)
+    format!("proposal_v{}_p{}_{}", key.view, key.parent, key.block_name)
 }
 
-fn proposal_ref(view: u64, block_name: &str) -> String {
-    proposal_var_name(&proposal_key(view, block_name))
+fn proposal_ref(view: u64, parent: u64, block_name: &str) -> String {
+    proposal_var_name(&proposal_key(view, parent, block_name))
 }
 
 fn collect_honest_votes(entries: &[TraceEntry], cfg: &EncoderConfig) -> HashSet<VoteReplayKey> {
@@ -449,14 +446,13 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     writeln!(out).unwrap();
 
     // Emit proposal val declarations
-    let mut sorted_proposals: Vec<ProposalKey> = proposals.keys().cloned().collect();
+    let mut sorted_proposals: Vec<ProposalKey> = proposals.iter().cloned().collect();
     sorted_proposals.sort();
     for key in &sorted_proposals {
-        let p = &proposals[key];
-        let parent_str = if p.view_parent == 0 {
+        let parent_str = if key.parent == 0 {
             "GENESIS_VIEW".to_string()
         } else {
-            p.view_parent.to_string()
+            key.parent.to_string()
         };
         writeln!(
             out,
@@ -474,7 +470,7 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     // them as quint action call strings. The same `build_actions_internal`
     // walk drives the TLA+ renderer in `tlc::TlcMapper`, so quint and TLC
     // always agree on the action sequence.
-    let action_items = build_actions_internal(&filtered_entries, &block_map, cfg, &proposals);
+    let action_items = build_actions_internal(&filtered_entries, &block_map, cfg);
     let actions = render_quint_actions(&action_items);
 
     // Split actions into chunks of CHUNK_SIZE, emitting trace_part_NN actions
@@ -557,8 +553,7 @@ pub fn build_action_items(trace_data: &TraceData, cfg: &EncoderConfig) -> Vec<Ac
     let honest_votes = collect_honest_votes(entries, cfg);
     let filtered = filter_invalid_byzantine_votes(entries, cfg, &honest_votes);
     let block_map = build_block_map(trace_data);
-    let proposals = build_view_proposals(&filtered, &block_map, cfg);
-    build_actions_internal(&filtered, &block_map, cfg, &proposals)
+    build_actions_internal(&filtered, &block_map, cfg)
 }
 
 /// Builds the full action list, processing entries in original trace order.
@@ -576,15 +571,14 @@ fn build_actions_internal(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
     cfg: &EncoderConfig,
-    proposals: &HashMap<ProposalKey, ViewProposal>,
 ) -> Vec<ActionItem> {
     let mut actions: Vec<ActionItem> = Vec::new();
-    // Keys include block name for notarize/finalize to handle byzantine equivocation
-    // (same signer, same view, different blocks).
-    let mut sent_votes_emitted: HashSet<(String, u64, String, String)> = HashSet::new();
-    let mut self_delivered: HashSet<(String, u64, String)> = HashSet::new();
+    // Keys include block name and parent for notarize/finalize to handle
+    // byzantine equivocation (same signer, same view, different blocks or parents).
+    let mut sent_votes_emitted: HashSet<(String, u64, u64, String, String)> = HashSet::new();
+    let mut self_delivered: HashSet<(String, u64, u64, String)> = HashSet::new();
     let mut leader_vote_introduced: HashSet<ProposalKey> = HashSet::new();
-    let mut leader_vote_delivered: HashSet<(String, u64, String)> = HashSet::new();
+    let mut leader_vote_delivered: HashSet<(String, u64, u64, String)> = HashSet::new();
     // Dedup cert deliveries per receiver. In the Rust execution, each node
     // broadcasts its assembled cert to all peers, producing up to N^2 total
     // deliveries (N senders x N receivers). In the quint model, the first
@@ -609,12 +603,16 @@ fn build_actions_internal(
                 let byzantine_receiver = is_byzantine_node(receiver, cfg.faults);
 
                 match vote {
-                    TracedVote::Notarize { view, sig, block } => {
+                    TracedVote::Notarize {
+                        view,
+                        parent,
+                        sig,
+                        block,
+                    } => {
                         let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                         let bn = map_block(block, block_map);
-                        let proposal = proposal_key(*view, &bn);
-                        let parent_view =
-                            proposals.get(&proposal).map(|p| p.view_parent).unwrap_or(0);
+                        let proposal = proposal_key(*view, *parent, &bn);
+                        let parent_view = *parent;
                         let leader_id = leader_for_view(cfg, *view);
                         let leader_is_byzantine = is_byzantine_node(&leader_id, cfg.faults);
                         let sender_is_correct = !is_byzantine_node(sender, cfg.faults);
@@ -626,6 +624,7 @@ fn build_actions_internal(
                                     if sent_votes_emitted.insert((
                                         leader_id.clone(),
                                         *view,
+                                        parent_view,
                                         "notarize".into(),
                                         bn.clone(),
                                     )) {
@@ -647,7 +646,7 @@ fn build_actions_internal(
                             }
 
                             if sender != &leader_id
-                                && leader_vote_delivered.insert((sender.clone(), *view, bn.clone()))
+                                && leader_vote_delivered.insert((sender.clone(), *view, parent_view, bn.clone()))
                             {
                                 actions.push(ActionItem::OnNotarize {
                                     receiver: sender.clone(),
@@ -661,6 +660,7 @@ fn build_actions_internal(
                             && sent_votes_emitted.insert((
                                 sig.clone(),
                                 *view,
+                                parent_view,
                                 "notarize".into(),
                                 bn.clone(),
                             ))
@@ -682,6 +682,7 @@ fn build_actions_internal(
                                 && leader_vote_delivered.insert((
                                     receiver.clone(),
                                     *view,
+                                    parent_view,
                                     bn.clone(),
                                 ))
                             {
@@ -703,17 +704,20 @@ fn build_actions_internal(
                             });
                         }
                     }
-                    TracedVote::Finalize { view, sig, block } => {
+                    TracedVote::Finalize {
+                        view,
+                        parent,
+                        sig,
+                        block,
+                    } => {
                         let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                         let bn = map_block(block, block_map);
-                        let parent_view = proposals
-                            .get(&proposal_key(*view, &bn))
-                            .map(|p| p.view_parent)
-                            .unwrap_or(0);
+                        let parent_view = *parent;
 
                         if sent_votes_emitted.insert((
                             sig.clone(),
                             *view,
+                            parent_view,
                             "finalize".into(),
                             bn.clone(),
                         )) {
@@ -731,7 +735,7 @@ fn build_actions_internal(
 
                         // Correct finalize: self-delivery (node counts its own finalize)
                         if !is_byzantine_node(&sig, cfg.faults)
-                            && self_delivered.insert((sig.clone(), *view, "finalize".into()))
+                            && self_delivered.insert((sig.clone(), *view, parent_view, "finalize".into()))
                         {
                             actions.push(ActionItem::OnFinalize {
                                 receiver: sig.clone(),
@@ -756,6 +760,7 @@ fn build_actions_internal(
                         if sent_votes_emitted.insert((
                             sig.clone(),
                             *view,
+                            0,
                             "nullify".into(),
                             String::new(),
                         )) {
@@ -771,7 +776,7 @@ fn build_actions_internal(
 
                         // Correct nullify: self-delivery
                         if !is_byzantine_node(&sig, cfg.faults)
-                            && self_delivered.insert((sig.clone(), *view, "nullify".into()))
+                            && self_delivered.insert((sig.clone(), *view, 0, "nullify".into()))
                         {
                             actions.push(ActionItem::OnNullify {
                                 receiver: sig.clone(),
@@ -790,7 +795,7 @@ fn build_actions_internal(
                 }
             }
             TraceEntry::Certificate { receiver, cert, .. } => {
-                let cert_item = cert_to_item(cert, block_map, proposals);
+                let cert_item = cert_to_item(cert, block_map);
                 let cert_key = cert_item.dedup_key();
 
                 // Emit `send_certificate` once per distinct cert, including
@@ -845,20 +850,23 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
                 leader,
                 view,
                 payload,
-                ..
+                parent_view,
             } => {
-                let pref = proposal_ref(*view, payload);
+                let pref = proposal_ref(*view, *parent_view, payload);
                 result.push(format!(
                     "propose(\"{}\", {}.payload, {}.parent)",
                     leader, pref, pref
                 ));
             }
             ActionItem::SendNotarizeVote {
-                view, payload, sig, ..
+                view,
+                parent_view,
+                payload,
+                sig,
             } => {
                 result.push(format!(
                     "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
-                    proposal_ref(*view, payload),
+                    proposal_ref(*view, *parent_view, payload),
                     sig
                 ));
             }
@@ -869,11 +877,14 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
                 ));
             }
             ActionItem::SendFinalizeVote {
-                view, payload, sig, ..
+                view,
+                parent_view,
+                payload,
+                sig,
             } => {
                 result.push(format!(
                     "send_finalize_vote({{ proposal: {}, sig: \"{}\" }})",
-                    proposal_ref(*view, payload),
+                    proposal_ref(*view, *parent_view, payload),
                     sig
                 ));
             }
@@ -883,14 +894,14 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
             ActionItem::OnNotarize {
                 receiver,
                 view,
+                parent_view,
                 payload,
                 sig,
-                ..
             } => {
                 result.push(format!(
                     "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
                     receiver,
-                    proposal_ref(*view, payload),
+                    proposal_ref(*view, *parent_view, payload),
                     sig
                 ));
             }
@@ -907,13 +918,13 @@ pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
             ActionItem::OnFinalize {
                 receiver,
                 view,
+                parent_view,
                 payload,
                 sig,
-                ..
             } => {
                 let vote = format!(
                     "{{ proposal: {}, sig: \"{}\" }}",
-                    proposal_ref(*view, payload),
+                    proposal_ref(*view, *parent_view, payload),
                     sig
                 );
                 if delivery_seen.insert((receiver.clone(), vote.clone())) {
@@ -937,15 +948,15 @@ fn cert_to_quint(cert: &CertItem) -> String {
     match cert {
         CertItem::Notarization {
             view,
+            parent_view,
             payload,
             signers,
             ghost_sender,
-            ..
         } => {
             let sigs: Vec<String> = signers.iter().map(|s| format!("\"{}\"", s)).collect();
             format!(
                 "notarization({}, Set({}), \"{}\")",
-                proposal_ref(*view, payload),
+                proposal_ref(*view, *parent_view, payload),
                 sigs.join(", "),
                 ghost_sender
             )
@@ -965,15 +976,15 @@ fn cert_to_quint(cert: &CertItem) -> String {
         }
         CertItem::Finalization {
             view,
+            parent_view,
             payload,
             signers,
             ghost_sender,
-            ..
         } => {
             let sigs: Vec<String> = signers.iter().map(|s| format!("\"{}\"", s)).collect();
             format!(
                 "finalization({}, Set({}), \"{}\")",
-                proposal_ref(*view, payload),
+                proposal_ref(*view, *parent_view, payload),
                 sigs.join(", "),
                 ghost_sender
             )
@@ -1051,113 +1062,40 @@ fn map_block(hash: &str, block_map: &[(String, String)]) -> String {
     hash.to_string()
 }
 
-/// Builds proposals from block-carrying entries in the trace.
-///
-/// Twins traces may contain multiple Byzantine proposals in the same view, so
-/// proposals are reconstructed per `(view, block)`. All proposals within a
-/// given view share the same parent view, and the parent for the next view is
-/// chosen from the latest certifiable certificate present in the trace.
+/// Builds proposals from block-carrying entries in the trace, using the
+/// parent stored directly in each entry rather than inferring it.
 fn build_view_proposals(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    cfg: &EncoderConfig,
-) -> HashMap<ProposalKey, ViewProposal> {
-    let mut per_view_blocks: HashMap<u64, HashMap<String, (Vec<String>, usize)>> = HashMap::new();
-    let mut certified_blocks: HashMap<u64, HashMap<String, usize>> = HashMap::new();
-
-    for (idx, entry) in entries.iter().enumerate() {
-        match entry {
+    _cfg: &EncoderConfig,
+) -> HashSet<ProposalKey> {
+    let mut proposals = HashSet::new();
+    for entry in entries {
+        let (view, parent, block) = match entry {
             TraceEntry::Vote {
-                sender,
-                vote: TracedVote::Notarize { view, sig, block },
-                ..
-            } => {
-                let block_name = map_block(block, block_map);
-                let block_entry = per_view_blocks
-                    .entry(*view)
-                    .or_default()
-                    .entry(block_name)
-                    .or_insert_with(|| (Vec::new(), idx));
-                block_entry.1 = idx;
-
-                let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                if !is_byzantine_node(&sig, cfg.faults) {
-                    if !block_entry.0.contains(&sig) {
-                        block_entry.0.push(sig);
+                vote:
+                    TracedVote::Notarize {
+                        view, parent, block, ..
                     }
-                }
-            }
-            TraceEntry::Vote {
-                vote: TracedVote::Finalize { view, block, .. },
+                    | TracedVote::Finalize {
+                        view, parent, block, ..
+                    },
                 ..
-            } => {
-                let block_name = map_block(block, block_map);
-                let block_entry = per_view_blocks
-                    .entry(*view)
-                    .or_default()
-                    .entry(block_name)
-                    .or_insert_with(|| (Vec::new(), idx));
-                block_entry.1 = idx;
-            }
-            TraceEntry::Certificate { cert, .. } => match cert {
-                TracedCert::Notarization { view, block, .. }
-                | TracedCert::Finalization { view, block, .. } => {
-                    let block_name = map_block(block, block_map);
-                    per_view_blocks
-                        .entry(*view)
-                        .or_default()
-                        .entry(block_name.clone())
-                        .or_insert_with(|| (Vec::new(), idx))
-                        .1 = idx;
-                    if is_certifiable(block) {
-                        certified_blocks
-                            .entry(*view)
-                            .or_default()
-                            .insert(block_name, idx);
+            } => (*view, *parent, block.as_str()),
+            TraceEntry::Certificate {
+                cert:
+                    TracedCert::Notarization {
+                        view, parent, block, ..
                     }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
+                    | TracedCert::Finalization {
+                        view, parent, block, ..
+                    },
+                ..
+            } => (*view, *parent, block.as_str()),
+            _ => continue,
+        };
+        proposals.insert(proposal_key(view, parent, &map_block(block, block_map)));
     }
-
-    let mut views: Vec<u64> = per_view_blocks.keys().cloned().collect();
-    views.sort();
-
-    let mut last_parent_view: u64 = 0;
-
-    let mut proposals = HashMap::new();
-    for &view in &views {
-        let mut view_blocks: Vec<(ProposalKey, Vec<String>, usize)> = per_view_blocks[&view]
-            .iter()
-            .map(|(block_name, (correct_notarizers, last_seen_idx))| {
-                (
-                    proposal_key(view, block_name),
-                    correct_notarizers.clone(),
-                    *last_seen_idx,
-                )
-            })
-            .collect();
-        view_blocks.sort_by(|a, b| {
-            a.2.cmp(&b.2)
-                .then_with(|| a.0.block_name.cmp(&b.0.block_name))
-        });
-
-        for (key, _correct_notarizers, _) in &view_blocks {
-            proposals.insert(
-                key.clone(),
-                ViewProposal {
-                    view_parent: last_parent_view,
-                },
-            );
-        }
-
-        if certified_blocks.contains_key(&view) {
-            last_parent_view = view;
-        }
-    }
-
     proposals
 }
 

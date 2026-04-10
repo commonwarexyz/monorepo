@@ -28,7 +28,7 @@ use crate::{
     replayer::{
         compare,
         injected::{self, NullBlocker, NullSender, PendingReceiver},
-        messages::{self, ParentTracker},
+        messages,
     },
     tracing::{
         decoder::{
@@ -279,7 +279,6 @@ fn inject_entry(
     schemes: &[ed25519::Scheme],
     participants: &[commonware_cryptography::ed25519::PublicKey],
     epoch: u64,
-    parents: &messages::ProposalParents,
 ) {
     // Skip self-votes
     if let TraceEntry::Vote {
@@ -308,7 +307,7 @@ fn inject_entry(
 
     let correct_idx = receiver_idx - faults;
 
-    let msg = messages::construct_message(entry, schemes, participants, epoch, parents);
+    let msg = messages::construct_message(entry, schemes, participants, epoch);
 
     if msg.is_certificate {
         cert_injectors[correct_idx].inject(msg.sender_pk, msg.payload);
@@ -480,7 +479,6 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
             (0..session.next_transitions.len()).collect();
 
         let mut block_map: HashMap<String, String> = HashMap::new();
-        let mut parent_tracker = ParentTracker::default();
 
         for step in 0..max_steps {
             // 1. Find an enabled transition (blocking HTTP)
@@ -543,27 +541,22 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                             cert_entries.len(),
                         );
 
-                        // Build trace entries and update parent tracker
                         let mut step_entries = Vec::new();
                         for (receiver, sender, vote) in vote_entries {
                             println!("  vote: {sender} -> {receiver}: {vote:?}");
-                            let entry = TraceEntry::Vote {
+                            step_entries.push(TraceEntry::Vote {
                                 sender,
                                 receiver,
                                 vote,
-                            };
-                            parent_tracker.observe_entry(&entry);
-                            step_entries.push(entry);
+                            });
                         }
                         for (receiver, sender, cert) in cert_entries {
                             println!("  cert: {sender} -> {receiver}: {cert:?}");
-                            let entry = TraceEntry::Certificate {
+                            step_entries.push(TraceEntry::Certificate {
                                 sender,
                                 receiver,
                                 cert,
-                            };
-                            parent_tracker.observe_entry(&entry);
-                            step_entries.push(entry);
+                            });
                         }
 
                         // 4. Inject into engines (1ms per message, like MBT)
@@ -576,7 +569,6 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                                 &schemes,
                                 &participants,
                                 epoch,
-                                parent_tracker.parents(),
                             );
                             context.sleep(Duration::from_millis(1)).await;
                         }

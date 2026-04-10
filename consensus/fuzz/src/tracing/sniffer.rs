@@ -30,6 +30,7 @@ pub enum ChannelKind {
 pub enum TracedVote {
     Notarize {
         view: u64,
+        parent: u64,
         sig: String,
         block: String,
     },
@@ -39,6 +40,7 @@ pub enum TracedVote {
     },
     Finalize {
         view: u64,
+        parent: u64,
         sig: String,
         block: String,
     },
@@ -49,6 +51,7 @@ pub enum TracedVote {
 pub enum TracedCert {
     Notarization {
         view: u64,
+        parent: u64,
         block: String,
         signers: Vec<String>,
         ghost_sender: String,
@@ -60,6 +63,7 @@ pub enum TracedCert {
     },
     Finalization {
         view: u64,
+        parent: u64,
         block: String,
         signers: Vec<String>,
         ghost_sender: String,
@@ -133,6 +137,7 @@ fn extract_vote(vote: &Ed25519Vote) -> TracedVote {
     match vote {
         Vote::Notarize(n) => TracedVote::Notarize {
             view: n.proposal.round.view().get(),
+            parent: n.proposal.parent.get(),
             sig: participant_id(n.signer()),
             block: format_block(&n.proposal.payload),
         },
@@ -142,6 +147,7 @@ fn extract_vote(vote: &Ed25519Vote) -> TracedVote {
         },
         Vote::Finalize(f) => TracedVote::Finalize {
             view: f.proposal.round.view().get(),
+            parent: f.proposal.parent.get(),
             sig: participant_id(f.signer()),
             block: format_block(&f.proposal.payload),
         },
@@ -153,6 +159,7 @@ fn extract_cert(cert: &Ed25519Certificate, sender_id: &str) -> TracedCert {
     match cert {
         Certificate::Notarization(n) => TracedCert::Notarization {
             view: n.proposal.round.view().get(),
+            parent: n.proposal.parent.get(),
             block: format_block(&n.proposal.payload),
             signers: n.certificate.signers.iter().map(participant_id).collect(),
             ghost_sender: sender_id.to_string(),
@@ -164,6 +171,7 @@ fn extract_cert(cert: &Ed25519Certificate, sender_id: &str) -> TracedCert {
         },
         Certificate::Finalization(f) => TracedCert::Finalization {
             view: f.proposal.round.view().get(),
+            parent: f.proposal.parent.get(),
             block: format_block(&f.proposal.payload),
             signers: f.certificate.signers.iter().map(participant_id).collect(),
             ghost_sender: sender_id.to_string(),

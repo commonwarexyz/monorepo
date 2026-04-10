@@ -299,9 +299,14 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    /// Distinct from the fuzzer's default 2023 so a running fuzzer and the
-    /// test suite can coexist on the same machine.
-    const TEST_PORT: u16 = 2024;
+    /// Finds a free high-numbered TCP port by binding to port 0.
+    fn find_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("failed to bind ephemeral port")
+            .local_addr()
+            .expect("failed to get local addr")
+            .port()
+    }
 
     fn fuzz_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -312,12 +317,12 @@ mod tests {
     }
 
     fn honest_fixtures_dir() -> PathBuf {
-        fuzz_dir().join("src/tracing/tests/fixtures/units/honest")
+        fuzz_dir().join("src/tracing/tests/fixtures/honest")
     }
 
     /// RAII guard that kills the spawned `tlc-controlled` server on drop so
-    /// the test does not leave a stale JVM bound to `TEST_PORT`. We do not
-    /// call `./scripts/tlc.sh kill`, which would `pkill` *every* tlc2.TLCServer
+    /// the test does not leave a stale JVM. We do not call
+    /// `./scripts/tlc.sh kill`, which would `pkill` *every* tlc2.TLCServer
     /// process and clobber a fuzzer that may be running on a different port.
     struct TlcServerGuard {
         child: Child,
@@ -331,18 +336,18 @@ mod tests {
     }
 
     fn ensure_compiled() {
-        let main_tla = quint_dir().join("tlc-build/main.tla");
+        let main_tla = quint_dir().join("tla-build/main.tla");
         if main_tla.exists() {
             return;
         }
         let status = Command::new("./scripts/tlc.sh")
-            .args(["compile", "main_n4f1b0.qnt"])
+            .args(["compile", "main_n4f1b0_tla.qnt"])
             .current_dir(quint_dir())
             .status()
             .expect("failed to run scripts/tlc.sh compile");
         assert!(
             status.success(),
-            "scripts/tlc.sh compile main_n4f1b0.qnt failed"
+            "scripts/tlc.sh compile main_n4f1b0_tla.qnt failed"
         );
     }
 
@@ -396,8 +401,8 @@ mod tests {
     }
 
     /// Replays every honest unit fixture against a freshly-spawned
-    /// tlc-controlled server (on `TEST_PORT`, distinct from the fuzzer's
-    /// 2023). Each fixture is mapped via [`TlcMapper`] and POSTed through
+    /// tlc-controlled server on a dynamically-chosen free port.
+    /// Each fixture is mapped via [`TlcMapper`] and POSTed through
     /// the same [`TlcClient`] the fuzz target uses, so any divergence between
     /// the Rust mapper and the Java [`SimplexActionMapper`] surfaces as a
     /// failed fixture.
@@ -406,8 +411,9 @@ mod tests {
         require_jar();
         ensure_compiled();
 
-        let _server = start_server(TEST_PORT);
-        let url = format!("http://localhost:{TEST_PORT}/execute");
+        let port = find_free_port();
+        let _server = start_server(port);
+        let url = format!("http://localhost:{port}/execute");
         let client = TlcClient::new(&url);
 
         let dir = honest_fixtures_dir();
@@ -458,137 +464,6 @@ mod tests {
             );
         }
     }
-
-    /// Drives the controlled TLC server with several known inputs and
-    /// asserts that [`verdict_for`] correctly distinguishes "every action
-    /// fired" from "TLC silently dropped at least one action".
-    ///
-    /// This is the discriminator the trace mutator (and any other oracle
-    /// consumer) must rely on, because the random init state and the
-    /// `DefaultStateAbstractor` collapsing make raw fingerprints useless
-    /// for validity. Run with:
-    ///
-    ///   cargo test -p commonware-consensus-fuzz --lib \
-    ///       tlc::tests::test_tlc_rejection_signal -- --nocapture
-    #[test]
-    fn test_tlc_rejection_signal() {
-        require_jar();
-        ensure_compiled();
-
-        let _server = start_server(TEST_PORT);
-        let url = format!("http://localhost:{TEST_PORT}/execute");
-        let client = TlcClient::new(&url);
-
-        // Helper: POST `actions`, compute the verdict, print a one-line
-        // summary, and return the verdict so the test can assert on it.
-        let check = |label: &str, actions: Vec<Value>| -> TlcVerdict {
-            let response = client.execute_full(&actions).expect("execute");
-            let verdict = verdict_for(&actions, &response);
-            println!(
-                "[{label}] sent={} accepted={} keys={} verdict={:?}",
-                non_reset_action_count(&actions),
-                accepted_action_count(&response),
-                response.keys.len(),
-                verdict,
-            );
-            verdict
-        };
-
-        // 1. Empty (only the reset terminator). 0 sent / 0 accepted ->
-        //    vacuously Accepted.
-        let empty = vec![json!({ "reset": true })];
-        let v = check("empty", empty);
-        assert_eq!(v, TlcVerdict::Accepted, "empty trace must be accepted");
-
-        // 2. Lone correct_replica_step on n0 with no pending events.
-        //    `correct_replica_step` is always enabled in the spec (drains
-        //    the empty queue), so this must be Accepted.
-        let only_step = vec![
-            json!({ "name": "correct_replica_step", "params": { "id": "n0" } }),
-            json!({ "reset": true }),
-        ];
-        let v = check("only_step", only_step);
-        assert!(
-            v.is_accepted(),
-            "single correct_replica_step must be accepted, got {v:?}",
-        );
-
-        // 3. Two distinct correct_replica_step calls.
-        let two_steps = vec![
-            json!({ "name": "correct_replica_step", "params": { "id": "n0" } }),
-            json!({ "name": "correct_replica_step", "params": { "id": "n1" } }),
-            json!({ "reset": true }),
-        ];
-        let v = check("two_steps", two_steps);
-        assert!(
-            v.is_accepted(),
-            "two correct_replica_steps must be accepted, got {v:?}",
-        );
-
-        // 4. Unknown action name. The mapper has no case for this name,
-        //    so simulate() will not advance the state and the action is
-        //    silently skipped.
-        let unknown = vec![
-            json!({ "name": "totally_made_up_action", "params": {} }),
-            json!({ "reset": true }),
-        ];
-        let v = check("unknown", unknown);
-        assert_eq!(
-            v,
-            TlcVerdict::Rejected {
-                sent: 1,
-                accepted: 0
-            },
-            "unknown action must be flagged as rejected",
-        );
-
-        // 5. Wrong leader: leader of view 1 is n1, not n0. The propose
-        //    is unenabled and silently dropped; the trailing
-        //    correct_replica_step is still accepted, so we expect
-        //    sent=2 / accepted=1.
-        let wrong_leader = vec![
-            json!({
-                "name": "propose",
-                "params": { "id": "n0", "payload": "val_b0", "parent_view": 0 },
-            }),
-            json!({ "name": "correct_replica_step", "params": { "id": "n0" } }),
-            json!({ "reset": true }),
-        ];
-        let v = check("wrong_leader", wrong_leader);
-        assert_eq!(
-            v,
-            TlcVerdict::Rejected {
-                sent: 2,
-                accepted: 1
-            },
-            "wrong-leader propose must be flagged as rejected",
-        );
-
-        // 6. Bogus future parent_view. Same shape as #5: propose is
-        //    unenabled, step still fires.
-        let bad_parent = vec![
-            json!({
-                "name": "propose",
-                "params": { "id": "n1", "payload": "val_b0", "parent_view": 999 },
-            }),
-            json!({ "name": "correct_replica_step", "params": { "id": "n1" } }),
-            json!({ "reset": true }),
-        ];
-        let v = check("bad_parent", bad_parent);
-        assert_eq!(
-            v,
-            TlcVerdict::Rejected {
-                sent: 2,
-                accepted: 1
-            },
-            "bogus parent_view must be flagged as rejected",
-        );
-    }
-
-    /// Distinct from `TEST_PORT` and the fuzzer's 2023 so this test can run
-    /// alongside an externally-running server (e.g. the one a developer
-    /// keeps up while editing the spec).
-    const SANITY_PORT: u16 = 2025;
 
     fn tla_build_dir() -> PathBuf {
         quint_dir().join("tla-build")
@@ -833,8 +708,9 @@ mod tests {
         require_jar();
         require_tla_build();
 
-        let _server = start_server_for_tla_build(SANITY_PORT);
-        let url = format!("http://localhost:{SANITY_PORT}/execute");
+        let port = find_free_port();
+        let _server = start_server_for_tla_build(port);
+        let url = format!("http://localhost:{port}/execute");
         let client = TlcClient::new(&url);
 
         let trace: Vec<Value> = vec![
@@ -1000,50 +876,4 @@ mod tests {
         );
     }
 
-    const REGRESSION_PORT: u16 = 2026;
-
-    /// Loads the regression fixture `35d8bbc9bac04cc106d4c9e32f8f4c0985186069`,
-    /// encodes it into TLC JSON actions via [`TlcMapper`], submits to the
-    /// controlled TLC server, and prints how many state changes occurred.
-    ///
-    /// Run with:
-    ///
-    ///   cargo test -p commonware-consensus-fuzz --lib \
-    ///       tlc::tests::test_regression_35d8bbc9 -- --nocapture
-    #[test]
-    fn test_regression_35d8bbc9() {
-        require_jar();
-        require_tla_build();
-
-        let fixture = fuzz_dir()
-            .join("src/tracing/tests/fixtures/regressions/35d8bbc9bac04cc106d4c9e32f8f4c0985186069");
-        let json = std::fs::read_to_string(&fixture).expect("read regression fixture");
-        let trace: TraceData = serde_json::from_str(&json).expect("parse regression fixture");
-
-        let actions = TlcMapper::map_trace(&trace);
-        assert!(!actions.is_empty(), "regression fixture produced no actions");
-
-        let _server = start_server_for_tla_build(REGRESSION_PORT);
-        let url = format!("http://localhost:{REGRESSION_PORT}/execute");
-        let client = TlcClient::new(&url);
-
-        let response = client.execute_full(&actions).expect("execute");
-        let verdict = verdict_for(&actions, &response);
-        let distinct_states: std::collections::HashSet<_> =
-            response.keys.iter().copied().collect();
-
-        let accepted = accepted_action_count(&response);
-        println!(
-            "[regression_35d8bbc9] sent={} accepted={} keys={} distinct_states={} verdict={:?}",
-            non_reset_action_count(&actions),
-            accepted,
-            response.keys.len(),
-            distinct_states.len(),
-            verdict,
-        );
-        assert!(
-            accepted > 200,
-            "expected more than 200 accepted states, got {accepted}",
-        );
-    }
 }

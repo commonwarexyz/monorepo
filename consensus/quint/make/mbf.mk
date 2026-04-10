@@ -6,7 +6,6 @@
 #   make mbf_live_watch    # replay watcher only
 #   mbf_live_trace_gen     # run a libfuzzer target and get interesting traces from it
 
-MBF_TLC_PORT ?= 2023 # TLC-controlled server port
 MBF_FAULTS ?= 0 # number of faulty nodes
 
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
@@ -50,29 +49,30 @@ clean_mutated_traces:
 mbf_live_fuzz:
 	@bash -eu -o pipefail -c '\
 		$(MAKE) -s tlc_compile; \
-		./scripts/tlc.sh run & \
+		port=$$(./scripts/free_port.sh); \
+		echo "using port $$port"; \
+		TLC_PORT=$$port ./scripts/tlc.sh run & \
 		tlc_pid=$$!; \
 		cleanup() { \
 			kill $$tlc_pid 2>/dev/null || true; \
 			wait $$tlc_pid 2>/dev/null || true; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		url="http://localhost:$(MBF_TLC_PORT)/health"; \
-		deadline=$$((SECONDS + 60)); \
+		url="http://localhost:$$port/health"; \
+		deadline=$$((SECONDS + 40)); \
 		while ! curl -fsS --max-time 2 "$$url" >/dev/null 2>&1; do \
 			if [ $$SECONDS -ge $$deadline ]; then \
-				echo "tlc-controlled did not start within 60s"; \
+				echo "tlc-controlled did not start within 40s"; \
 				exit 1; \
 			fi; \
 			sleep 1; \
 		done; \
-		echo "tlc-controlled ready on port $(MBF_TLC_PORT)"; \
-		TLC_URL="http://localhost:$(MBF_TLC_PORT)/execute" \
+		echo "tlc-controlled ready on port $$port"; \
+		TLC_URL="http://localhost:$$port/execute" \
 		MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
 		MUTATOR_SEED=$(MUTATOR_SEED) \
 		MUTATOR_MUT_PER_TRACE=$(MUTATOR_MUT_PER_TRACE) \
 		MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
-		MUTATED_TRACES_SEED_DIR=$(MUTATED_TRACES_SEED_DIR) \
 		MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 		MUTATOR_FAULTS=$(MBF_FAULTS) \
 		cargo run -p commonware-consensus-fuzz --bin trace_mutator; \

@@ -10,7 +10,6 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::IoBuf;
-use std::collections::HashMap;
 
 type S = commonware_consensus::simplex::scheme::ed25519::Scheme;
 
@@ -34,127 +33,14 @@ fn parse_node_id(id: &str) -> usize {
         .expect("invalid node id")
 }
 
-pub type ProposalParents = HashMap<(u64, String), View>;
 
-/// Returns true if the block hash is certifiable, matching the tracing encoder.
-fn is_certifiable(block_hash: &str) -> bool {
-    if block_hash.len() >= 2 {
-        let last_two = &block_hash[block_hash.len() - 2..];
-        let last_byte = u8::from_str_radix(last_two, 16).unwrap_or(0);
-        (last_byte % 11) < 9
-    } else {
-        true
-    }
-}
-
-/// Builds a Proposal for the given view and block digest.
-fn make_proposal(
-    epoch: u64,
-    view: u64,
-    block: &str,
-    parents: &ProposalParents,
-) -> Proposal<Sha256Digest> {
+/// Builds a Proposal for the given view, parent, and block digest.
+fn make_proposal(epoch: u64, view: u64, parent: u64, block: &str) -> Proposal<Sha256Digest> {
     let round = Round::new(Epoch::new(epoch), View::new(view));
-    let parent = parents
-        .get(&(view, block.to_string()))
-        .copied()
-        .unwrap_or_else(|| {
-            if view <= 1 {
-                View::zero()
-            } else {
-                View::new(view - 1)
-            }
-        });
     let payload = digest_from_hex(block);
-    Proposal::new(round, parent, payload)
+    Proposal::new(round, View::new(parent), payload)
 }
 
-/// Tracks parent views for concrete proposals keyed by (view, block).
-#[derive(Default)]
-pub struct ParentTracker {
-    parents: ProposalParents,
-    last_parent_view: u64,
-    current_view: Option<u64>,
-    current_view_certified: bool,
-}
-
-impl ParentTracker {
-    pub fn parents(&self) -> &ProposalParents {
-        &self.parents
-    }
-
-    /// Observes a traced entry and records any proposal parent it implies.
-    pub fn observe_entry(&mut self, entry: &TraceEntry) {
-        match entry {
-            TraceEntry::Vote {
-                vote:
-                    TracedVote::Notarize { view, block, .. } | TracedVote::Finalize { view, block, .. },
-                ..
-            }
-            | TraceEntry::Certificate {
-                cert:
-                    TracedCert::Notarization { view, block, .. }
-                    | TracedCert::Finalization { view, block, .. },
-                ..
-            } => {
-                self.advance_to_view(*view);
-                self.set_parent(*view, block);
-                if let TraceEntry::Certificate { cert, .. } = entry {
-                    if matches!(
-                        cert,
-                        TracedCert::Notarization { .. } | TracedCert::Finalization { .. }
-                    ) && is_certifiable(block)
-                    {
-                        self.current_view_certified = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn advance_to_view(&mut self, view: u64) {
-        match self.current_view {
-            Some(current) if view > current => {
-                if self.current_view_certified && current > self.last_parent_view {
-                    self.last_parent_view = current;
-                }
-                self.current_view = Some(view);
-                self.current_view_certified = false;
-            }
-            None => {
-                self.current_view = Some(view);
-                self.current_view_certified = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn set_parent(&mut self, view: u64, block: &str) {
-        let key = (view, block.to_string());
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.parents.entry(key) {
-            let parent = if self.last_parent_view > 0 {
-                View::new(self.last_parent_view)
-            } else if view <= 1 {
-                View::zero()
-            } else {
-                View::new(view - 1)
-            };
-            entry.insert(parent);
-        }
-    }
-}
-
-/// Builds the same proposal-parent approximation used by the tracing encoder.
-pub fn build_proposal_parents(entries: &[TraceEntry]) -> ProposalParents {
-    let mut tracker = ParentTracker::default();
-    let mut sorted_entries = entries.to_vec();
-    sorted_entries.sort_by_key(|entry| entry.view());
-    for entry in &sorted_entries {
-        tracker.observe_entry(entry);
-    }
-    tracker.parents
-}
 
 /// Result of constructing a message from a trace entry.
 pub struct ConstructedMessage {
@@ -176,7 +62,6 @@ pub fn construct_vote(
     schemes: &[S],
     participants: &[PublicKey],
     epoch: u64,
-    parents: &ProposalParents,
 ) -> ConstructedMessage {
     let receiver_idx = parse_node_id(receiver);
     let signer_idx = match vote {
@@ -187,8 +72,10 @@ pub fn construct_vote(
     let scheme = &schemes[signer_idx];
 
     let encoded: IoBuf = match vote {
-        TracedVote::Notarize { view, block, .. } => {
-            let proposal = make_proposal(epoch, *view, block, parents);
+        TracedVote::Notarize {
+            view, parent, block, ..
+        } => {
+            let proposal = make_proposal(epoch, *view, *parent, block);
             let notarize =
                 Notarize::<S, Sha256Digest>::sign(scheme, proposal).expect("signing must succeed");
             Vote::Notarize(notarize).encode().into()
@@ -199,8 +86,10 @@ pub fn construct_vote(
                 Nullify::<S>::sign::<Sha256Digest>(scheme, round).expect("signing must succeed");
             Vote::<S, Sha256Digest>::Nullify(nullify).encode().into()
         }
-        TracedVote::Finalize { view, block, .. } => {
-            let proposal = make_proposal(epoch, *view, block, parents);
+        TracedVote::Finalize {
+            view, parent, block, ..
+        } => {
+            let proposal = make_proposal(epoch, *view, *parent, block);
             let finalize =
                 Finalize::<S, Sha256Digest>::sign(scheme, proposal).expect("signing must succeed");
             Vote::Finalize(finalize).encode().into()
@@ -223,7 +112,6 @@ pub fn construct_certificate(
     schemes: &[S],
     participants: &[PublicKey],
     epoch: u64,
-    parents: &ProposalParents,
 ) -> ConstructedMessage {
     let receiver_idx = parse_node_id(receiver);
     let strategy = Sequential;
@@ -231,11 +119,12 @@ pub fn construct_certificate(
     let (sender_id, encoded): (&str, IoBuf) = match cert {
         TracedCert::Notarization {
             view,
+            parent,
             block,
             signers,
             ghost_sender,
         } => {
-            let proposal = make_proposal(epoch, *view, block, parents);
+            let proposal = make_proposal(epoch, *view, *parent, block);
             let notarizes: Vec<_> = signers
                 .iter()
                 .map(|s| {
@@ -278,11 +167,12 @@ pub fn construct_certificate(
         }
         TracedCert::Finalization {
             view,
+            parent,
             block,
             signers,
             ghost_sender,
         } => {
-            let proposal = make_proposal(epoch, *view, block, parents);
+            let proposal = make_proposal(epoch, *view, *parent, block);
             let finalizes: Vec<_> = signers
                 .iter()
                 .map(|s| {
@@ -316,81 +206,18 @@ pub fn construct_message(
     schemes: &[S],
     participants: &[PublicKey],
     epoch: u64,
-    parents: &ProposalParents,
 ) -> ConstructedMessage {
     match entry {
         TraceEntry::Vote {
             sender,
             receiver,
             vote,
-        } => construct_vote(
-            receiver,
-            sender,
-            vote,
-            schemes,
-            participants,
-            epoch,
-            parents,
-        ),
+        } => construct_vote(receiver, sender, vote, schemes, participants, epoch),
         TraceEntry::Certificate { receiver, cert, .. } => {
-            let mut msg =
-                construct_certificate(receiver, cert, schemes, participants, epoch, parents);
+            let mut msg = construct_certificate(receiver, cert, schemes, participants, epoch);
             msg.is_certificate = true;
             msg
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn same_view_certifiable_entry_does_not_reparent_same_view_proposals() {
-        let entries = vec![
-            TraceEntry::Vote {
-                sender: "n1".into(),
-                receiver: "n2".into(),
-                vote: TracedVote::Notarize {
-                    view: 1,
-                    sig: "n1".into(),
-                    block: "aa".into(),
-                },
-            },
-            TraceEntry::Certificate {
-                sender: "n1".into(),
-                receiver: "n2".into(),
-                cert: TracedCert::Notarization {
-                    view: 1,
-                    block: "aa".into(),
-                    signers: vec!["n1".into(), "n2".into(), "n3".into()],
-                    ghost_sender: "n1".into(),
-                },
-            },
-            TraceEntry::Vote {
-                sender: "n1".into(),
-                receiver: "n3".into(),
-                vote: TracedVote::Notarize {
-                    view: 1,
-                    sig: "n1".into(),
-                    block: "bb".into(),
-                },
-            },
-            TraceEntry::Vote {
-                sender: "n2".into(),
-                receiver: "n3".into(),
-                vote: TracedVote::Notarize {
-                    view: 2,
-                    sig: "n2".into(),
-                    block: "cc".into(),
-                },
-            },
-        ];
-
-        let parents = build_proposal_parents(&entries);
-
-        assert_eq!(parents.get(&(1, "aa".to_string())), Some(&View::zero()));
-        assert_eq!(parents.get(&(1, "bb".to_string())), Some(&View::zero()));
-        assert_eq!(parents.get(&(2, "cc".to_string())), Some(&View::new(1)));
-    }
-}

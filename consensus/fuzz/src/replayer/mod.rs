@@ -25,7 +25,6 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU16};
 use injected::{channel, NullBlocker, NullSender, PendingReceiver};
-use messages::build_proposal_parents;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -142,10 +141,6 @@ pub fn replay_trace(
             );
         }
 
-        // Reconstruct proposal parents with the same per-(view, block)
-        // heuristic used by the tracing encoder.
-        let proposal_parents = build_proposal_parents(&trace.entries);
-
         // Replay trace entries
         for entry in &trace.entries {
             // Skip self-votes: the engine generates its own votes internally
@@ -183,7 +178,6 @@ pub fn replay_trace(
                 &schemes,
                 &participants,
                 epoch,
-                &proposal_parents,
             );
 
             if msg.is_certificate {
