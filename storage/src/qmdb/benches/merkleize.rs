@@ -139,9 +139,117 @@ type CurUVar256Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     LARGE_CHUNK_SIZE,
 >;
 
+// Ordered variants.
+type AnyOFix = commonware_storage::qmdb::any::ordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
+type AnyOVar = commonware_storage::qmdb::any::ordered::variable::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
+type AnyOFixMmb = commonware_storage::qmdb::any::ordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
+type AnyOVarMmb = commonware_storage::qmdb::any::ordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+>;
+type CurOFix32 = commonware_storage::qmdb::current::ordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurOVar32 = commonware_storage::qmdb::current::ordered::variable::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurOFix32Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurOVar32Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
+type CurOFix256 = commonware_storage::qmdb::current::ordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurOVar256 = commonware_storage::qmdb::current::ordered::variable::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurOFix256Mmb = commonware_storage::qmdb::current::ordered::fixed::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    LARGE_CHUNK_SIZE,
+>;
+
 // -- Config --
 
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
+// Use huge blobs so avoid iteration times being affected by multiple fsyncs from crossing blob
+// boundaries.
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
@@ -332,6 +440,10 @@ enum Variant {
     AnyVariable,
     AnyFixedMmb,
     AnyVariableMmb,
+    AnyOrderedFixed,
+    AnyOrderedVariable,
+    AnyOrderedFixedMmb,
+    AnyOrderedVariableMmb,
     CurrentFixed32,
     CurrentVariable32,
     CurrentFixed32Mmb,
@@ -340,6 +452,14 @@ enum Variant {
     CurrentVariable256,
     CurrentFixed256Mmb,
     CurrentVariable256Mmb,
+    CurrentOrderedFixed32,
+    CurrentOrderedVariable32,
+    CurrentOrderedFixed32Mmb,
+    CurrentOrderedVariable32Mmb,
+    CurrentOrderedFixed256,
+    CurrentOrderedVariable256,
+    CurrentOrderedFixed256Mmb,
+    CurrentOrderedVariable256Mmb,
 }
 
 impl Variant {
@@ -349,6 +469,10 @@ impl Variant {
             Self::AnyVariable => "any::unordered::variable::mmr",
             Self::AnyFixedMmb => "any::unordered::fixed::mmb",
             Self::AnyVariableMmb => "any::unordered::variable::mmb",
+            Self::AnyOrderedFixed => "any::ordered::fixed::mmr",
+            Self::AnyOrderedVariable => "any::ordered::variable::mmr",
+            Self::AnyOrderedFixedMmb => "any::ordered::fixed::mmb",
+            Self::AnyOrderedVariableMmb => "any::ordered::variable::mmb",
             Self::CurrentFixed32 => "current::unordered::fixed::mmr chunk=32",
             Self::CurrentVariable32 => "current::unordered::variable::mmr chunk=32",
             Self::CurrentFixed32Mmb => "current::unordered::fixed::mmb chunk=32",
@@ -357,15 +481,27 @@ impl Variant {
             Self::CurrentVariable256 => "current::unordered::variable::mmr chunk=256",
             Self::CurrentFixed256Mmb => "current::unordered::fixed::mmb chunk=256",
             Self::CurrentVariable256Mmb => "current::unordered::variable::mmb chunk=256",
+            Self::CurrentOrderedFixed32 => "current::ordered::fixed::mmr chunk=32",
+            Self::CurrentOrderedVariable32 => "current::ordered::variable::mmr chunk=32",
+            Self::CurrentOrderedFixed32Mmb => "current::ordered::fixed::mmb chunk=32",
+            Self::CurrentOrderedVariable32Mmb => "current::ordered::variable::mmb chunk=32",
+            Self::CurrentOrderedFixed256 => "current::ordered::fixed::mmr chunk=256",
+            Self::CurrentOrderedVariable256 => "current::ordered::variable::mmr chunk=256",
+            Self::CurrentOrderedFixed256Mmb => "current::ordered::fixed::mmb chunk=256",
+            Self::CurrentOrderedVariable256Mmb => "current::ordered::variable::mmb chunk=256",
         }
     }
 }
 
-const VARIANTS: [Variant; 12] = [
+const VARIANTS: [Variant; 24] = [
     Variant::AnyFixed,
     Variant::AnyVariable,
     Variant::AnyFixedMmb,
     Variant::AnyVariableMmb,
+    Variant::AnyOrderedFixed,
+    Variant::AnyOrderedVariable,
+    Variant::AnyOrderedFixedMmb,
+    Variant::AnyOrderedVariableMmb,
     Variant::CurrentFixed32,
     Variant::CurrentVariable32,
     Variant::CurrentFixed32Mmb,
@@ -374,6 +510,14 @@ const VARIANTS: [Variant; 12] = [
     Variant::CurrentVariable256,
     Variant::CurrentFixed256Mmb,
     Variant::CurrentVariable256Mmb,
+    Variant::CurrentOrderedFixed32,
+    Variant::CurrentOrderedVariable32,
+    Variant::CurrentOrderedFixed32Mmb,
+    Variant::CurrentOrderedVariable32Mmb,
+    Variant::CurrentOrderedFixed256,
+    Variant::CurrentOrderedVariable256,
+    Variant::CurrentOrderedFixed256Mmb,
+    Variant::CurrentOrderedVariable256Mmb,
 ];
 
 /// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db` bound.
@@ -448,6 +592,78 @@ macro_rules! dispatch_variant {
             }
             Variant::CurrentVariable256Mmb => {
                 let $db = CurUVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedFixed => {
+                let $db = AnyOFix::init($ctx.clone(), any_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedVariable => {
+                let $db = AnyOVar::init($ctx.clone(), any_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedFixedMmb => {
+                let $db = AnyOFixMmb::init($ctx.clone(), any_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedVariableMmb => {
+                let $db = AnyOVarMmb::init($ctx.clone(), any_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed32 => {
+                let $db = CurOFix32::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable32 => {
+                let $db = CurOVar32::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed32Mmb => {
+                let $db = CurOFix32Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable32Mmb => {
+                let $db = CurOVar32Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed256 => {
+                let $db = CurOFix256::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable256 => {
+                let $db = CurOVar256::init($ctx.clone(), cur_var_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed256Mmb => {
+                let $db = CurOFix256Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable256Mmb => {
+                let $db = CurOVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
                     .await
                     .unwrap();
                 $body
