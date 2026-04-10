@@ -580,6 +580,45 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(item)
     }
 
+    /// Try to read an item using only the page cache. Returns `None` on any cache miss.
+    ///
+    /// The caller must have already validated that the position is within bounds.
+    pub fn try_get_cached(&self, section: u64, offset: u64) -> Option<V> {
+        let blob = self.manager.get(section).ok()??;
+
+        // Read the varint header to determine item size.
+        let mut header = [0u8; MAX_U32_VARINT_SIZE];
+        if !blob.try_read_cached(offset, &mut header) {
+            return None;
+        }
+        let mut cursor = Cursor::new(&header[..]);
+        let (_, item_info) = find_item(&mut cursor, offset).ok()?;
+
+        let (varint_len, data_len) = match item_info {
+            ItemInfo::Complete {
+                varint_len,
+                data_len,
+            } => (varint_len, data_len),
+            ItemInfo::Incomplete {
+                varint_len,
+                total_len,
+                ..
+            } => (varint_len, total_len),
+        };
+
+        // If the full item fits in the header read, decode directly.
+        if varint_len + data_len <= header.len() {
+            return decode_item::<V>(&header[varint_len..varint_len + data_len], &self.codec_config, self.compression.is_some()).ok();
+        }
+
+        // Otherwise try reading the full item from cache.
+        let mut full = vec![0u8; varint_len + data_len];
+        if !blob.try_read_cached(offset, &mut full) {
+            return None;
+        }
+        decode_item::<V>(&full[varint_len..varint_len + data_len], &self.codec_config, self.compression.is_some()).ok()
+    }
+
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.

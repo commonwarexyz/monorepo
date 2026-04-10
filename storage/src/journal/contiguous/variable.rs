@@ -145,6 +145,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         self.data.get(section, offset).await
     }
+
+    /// Try to read an item from the page cache only. Returns `None` on cache miss.
+    fn try_read_cached(
+        &self,
+        position: u64,
+        items_per_section: u64,
+        offsets: &impl super::Reader<Item = u64>,
+    ) -> Option<V> {
+        if position >= self.size || position < self.pruning_boundary {
+            return None;
+        }
+        let offset = offsets.try_read_cached(position)?;
+        let section = position_to_section(position, items_per_section);
+        self.data.try_get_cached(section, offset)
+    }
 }
 
 /// A contiguous journal with variable-size entries.
@@ -225,6 +240,11 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
         self.guard
             .read(position, self.items_per_section, &self.offsets)
             .await
+    }
+
+    fn try_read_cached(&self, position: u64) -> Option<V> {
+        self.guard
+            .try_read_cached(position, self.items_per_section, &self.offsets)
     }
 
     async fn replay(

@@ -394,6 +394,19 @@ impl<B: Blob> Append<B> {
         buffer.size()
     }
 
+    /// Try to read exactly `len` bytes starting at `offset` from the page cache only.
+    ///
+    /// Returns `Some(buf)` if all bytes were in the cache, `None` on any cache miss.
+    /// Does not perform any async I/O. The caller must have already validated that
+    /// `offset + len` is within the blob's logical size.
+    /// Try to read from the page cache only into the provided buffer.
+    ///
+    /// Returns `true` if all bytes were in the cache, `false` on any cache miss.
+    /// Does not perform any async I/O.
+    pub fn try_read_cached(&self, offset: u64, buf: &mut [u8]) -> bool {
+        self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Read into a temporary contiguous buffer and copy back to preserve structure.
