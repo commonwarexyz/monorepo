@@ -978,10 +978,6 @@ module replica {
     // - if from the leader: validate proposal and send notarize/nullify
     // - otherwise: collect vote, on 2f+1 create notarization cert
     action on_notarize(id: ReplicaId, vote: NotarizeVote): bool = all {
-        // Disjunct precondition: the vote must actually have been sent.
-        // Hoisted from `step` so the disjunct's leaf is a bare operator
-        // call, which lets TLC label the resulting Action with this
-        // operator's name instead of main_replica_step.
         sent_notarize_votes.contains(vote),
         val store_notarize = store_notarize_votes.get(id)
         val store_nullify = store_nullify_votes.get(id)
@@ -1165,7 +1161,6 @@ module replica {
     // - collect votes
     // - on 2f+1: create finalization cert and enter v+1
     action on_finalize(id: ReplicaId, vote: FinalizeVote): bool = all {
-        // See on_notarize for rationale.
         sent_finalize_votes.contains(vote),
         val store_finalize = store_finalize_votes.get(id)
         val self = replica_state.get(id)
@@ -1219,7 +1214,6 @@ module replica {
     // if a non-leader replica receives nullify(v) from the current leader of view v,
     // it treats this as immediate timeout expiry and broadcasts nullify(v) if it is allowed.
     action on_nullify(id: ReplicaId, vote: NullifyVote): bool = all {
-        // See on_notarize for rationale.
         sent_nullify_votes.contains(vote),
         val store_nullify = store_nullify_votes.get(id)
         val self = replica_state.get(id)
@@ -1337,6 +1331,7 @@ module replica {
     action on_certificate(id: ReplicaId, cert: Certificate): bool = all {
         val certs = store_certificates.get(id)
         all {
+            sent_certificates.contains(cert),
             cert_signatures(cert).size() >= Q,
             val duplicate = certs.exists(existing => same_certificate_subject(existing, cert))
             val seen_kind_and_view = certs.exists(existing => same_certificate_kind_and_view(existing, cert))
@@ -1801,275 +1796,4 @@ module replica {
             lastAction'            = "inject_cert",
         }
     }
-
-    // -------------------------------------------------
-        // Invariants
-        // -------------------------------------------------
-
-        // Assumptions and thresholds.
-        val assumptions_valid = all {
-            CORRECT.size() + BYZANTINE.size() == N,
-            CORRECT.intersect(BYZANTINE) == Set(),
-            N >= 3*F + 1,
-            Q == N - F,
-        }
-
-        val agreement = tuples(CORRECT, CORRECT).forall(((id1, id2)) => {
-            val blocks1 = ghost_committed_blocks.get(id1)
-            val blocks2 = ghost_committed_blocks.get(id2)
-            or {
-                id1 == id2,
-                // ignore this case, as there is a symmetric one
-                blocks1.length() > blocks2.length(),
-                // the shorter sequence is a prefix of the longer one
-                blocks1.indices().forall(i => blocks1[i] == blocks2[i])
-            }
-        })
-
-        // A correct replica cannot both nullify and finalize in the same view.
-        // Notarize may coexist with either, matching the protocol's allowed patterns.
-        val no_vote_equivocation_inv = CORRECT.forall(id => {
-            VIEWS.forall(v =>
-                not(broadcast_nullify(id, v) and broadcast_finalize(id, v))
-            )
-        })
-
-        // No view may contain both nullification and finalization certificates.
-        val nullified_views_seen = CORRECT.fold(Set(), (acc, id) =>
-              acc.union(
-                  store_certificates.get(id)
-                      .filter(c => is_nullification_cert(c))
-                      .map(c => cert_view(c))
-              )
-          )
-
-          val finalized_views_seen = CORRECT.fold(Set(), (acc, id) =>
-              acc.union(
-                  store_certificates.get(id)
-                      .filter(c => is_finalization_cert(c))
-                      .map(c => cert_view(c))
-              )
-          )
-
-          val no_nullification_and_finalization_in_the_same_view =
-              nullified_views_seen.intersect(finalized_views_seen) == Set()
-
-        val no_notarize_equivocation = CORRECT.forall(id =>
-              VIEWS.forall(v =>
-                  sent_notarize_votes
-                      .filter(vote => vote.sig == sig_of(id) and vote.proposal.view == v)
-                      .map(vote => vote.proposal)
-                      .size() <= 1
-              )
-          )
-
-        val valid_last_finalized = CORRECT.forall(id => {
-            val self = replica_state.get(id)
-            self.last_finalized <= self.ghost_last_seen_notarization
-        })
-
-        val notarized_consistency = CORRECT.forall(id => {
-            val self = replica_state.get(id)
-            VIEWS.forall(v =>
-                not(broadcast_notarize(id, v))
-                    or is_some(self.proposal.get(v))
-            )
-        })
-
-        def finalized_payloads_seen(view: ViewNumber): Set[Payload] = {
-            CORRECT.fold(Set(), (acc, id) =>
-                acc.union(
-                    store_certificates.get(id).fold(Set(), (cert_acc, c) =>
-                        if (is_finalization_cert(c) and cert_view(c) == view)
-                            match (cert_proposal(c)) {
-                                | Some(p) => cert_acc.union(Set(p.payload))
-                                | None => cert_acc
-                            }
-                        else
-                            cert_acc
-                    )
-                )
-            )
-        }
-
-        // If a payload B for view v is finalized, no other payload B' at v can be finalized.
-        val validity = VIEWS.forall(v =>
-            finalized_payloads_seen(v).size() <= 1
-        )
-
-        val unique_notarized_or_finalized_payload_per_view =
-            tuples(CORRECT, VIEWS).forall(((id, v)) => {
-                val certs = store_certificates.get(id)
-                certs
-                    .filter(c => and {
-                        cert_view(c) == v,
-                        is_notarization_cert(c) or is_finalization_cert(c),
-                    })
-                    .map(c => cert_payload(c))
-                    .size() <= 1
-            })
-
-        val finalize_vote_requires_notarization_cert = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            sent_finalize_votes
-                .filter(v => v.sig == sig_of(id))
-                .forall(v =>
-                    certs.exists(c => and {
-                        is_notarization_cert(c),
-                        cert_proposal(c) == Some(v.proposal),
-                    })
-                )
-        })
-
-        // A finalized view must not contain multiple finalized proposals.
-        val finalized_views_have_unique_proposal = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            VIEWS.forall(v =>
-                certs
-                    .filter(c => is_finalization_cert(c) and cert_view(c) == v)
-                    .map(c => cert_proposal(c))
-                    .size() <= 1
-            )
-        })
-
-        // Every committed proposal must come from a locally stored finalization cert.
-        val committed_blocks_are_finalized = CORRECT.forall(id => {
-            val chain = ghost_committed_blocks.get(id)
-            val certs = store_certificates.get(id)
-            chain.indices().forall(i =>
-                certs.exists(c => is_finalization_cert(c) and cert_proposal(c) == Some(chain[i]))
-            )
-        })
-
-        // The committed chain must follow parent pointers, allowing only nullified
-        // gaps between consecutive finalized proposals.
-        val committed_chain_is_connected = CORRECT.forall(id => {
-            val chain = ghost_committed_blocks.get(id)
-            val certs = store_certificates.get(id)
-            chain.indices().forall(i =>
-                if (i == 0)
-                    and {
-                        chain[i].parent == GENESIS_VIEW,
-                        are_views_nullified(GENESIS_VIEW, chain[i].view, certs),
-                    }
-                else
-                    and {
-                        chain[i].parent == chain[i - 1].view,
-                        are_views_nullified(chain[i - 1].view, chain[i].view, certs),
-                    }
-            )
-        })
-
-        // With watermark-only finalization (no recursive ancestor walk),
-        // committed payloads are not guaranteed to be consecutively parent-linked.
-        // Instead, we verify the weaker property that every committed payload
-        // is distinct (no duplicates).
-        val committed_blocks_no_duplicates = CORRECT.forall(id => {
-            val chain = ghost_committed_blocks.get(id)
-            chain.indices().forall(i =>
-                chain.indices().forall(j =>
-                    (i == j) or (chain[i].view != chain[j].view)
-                )
-            )
-        })
-
-        // A correct replica only re-broadcasts certificates that it has stored locally.
-        val certificates_require_sent_votes =
-            sent_certificates
-                .filter(cert => cert_ghost_sender(cert).in(CorrectSigs))
-                .forall(cert =>
-                    CORRECT.exists(id => and {
-                        sig_of(id) == cert_ghost_sender(cert),
-                        store_certificates.get(id).exists(existing => same_certificate_subject(existing, cert)),
-                    })
-                )
-
-        val safe_invariants = all {
-            no_notarize_equivocation,
-            agreement,
-            no_vote_equivocation_inv,
-            no_nullification_and_finalization_in_the_same_view,
-            validity,
-            valid_last_finalized,
-            notarized_consistency,
-            unique_notarized_or_finalized_payload_per_view,
-            finalize_vote_requires_notarization_cert,
-            finalized_views_have_unique_proposal,
-            committed_blocks_are_finalized,
-            committed_chain_is_connected,
-            committed_blocks_no_duplicates,
-            certificates_require_sent_votes,
-        }
-
-        // Test invariants.
-
-        val correct_nodes_sent_certificates_valid = sent_certificates
-            .filter(cert => cert_ghost_sender(cert).in(CorrectSigs))
-            .forall(cert => cert_signatures(cert).size() >= Q)
-
-        val store_certificates_are_valid = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            certs.forall(cert => cert_signatures(cert).size() >= Q)
-        })
-
-        val certificates_are_valid = and {
-            correct_nodes_sent_certificates_valid,
-            store_certificates_are_valid
-        }
-
-        val test_invariants = all {
-            safe_invariants,
-            certificates_are_valid
-        }
-
-        // Examples.
-
-        // Check this invariant to see an example of having a finalized payload.
-        val block_example = not(CORRECT.exists(id => {
-            ghost_committed_blocks.get(id).length() >= 1
-        }))
-
-        val finalized_example = not(CORRECT.exists(id => {
-            replica_state.get(id).last_finalized >= FIRST_VIEW
-        }))
-
-        val notarized_example = not(CORRECT.exists(id => {
-            replica_state.get(id).ghost_last_seen_notarization >= FIRST_VIEW
-        }))
-
-        val two_chained_blocks_example = not(CORRECT.exists(id => {
-            ghost_committed_blocks.get(id).length() >= 2
-        }))
-
-        // Check this invariant to see an example of having at least one vote.
-        val one_vote_example = CORRECT.forall(id => {
-            and {
-                store_notarize_votes.get(id).size() == 0,
-                store_nullify_votes.get(id).size() == 0,
-                store_finalize_votes.get(id).size() == 0,
-            }
-        })
-
-        // Check this invariant to see an example of having a notarization certificate.
-        val notarization_example = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            certs.filter(c => is_notarization_cert(c)).size()==0
-        })
-
-        // Check this invariant to see an example of having a finalization certificate.
-        val finalization_example = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            certs.filter(c => is_finalization_cert(c)).size()==0
-        })
-
-        // Check this invariant to see an example of having a nullification certificate.
-        val nullification_example = CORRECT.forall(id => {
-            val certs = store_certificates.get(id)
-            certs.filter(c => is_nullification_cert(c)).size()==0
-        })
-
-        // Check this invariant to see an example of a replica reaching view >= 2.
-        val view = CORRECT.forall(id => {
-            replica_state.get(id).view < 3
-        })
 }

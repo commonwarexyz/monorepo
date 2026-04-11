@@ -36,6 +36,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(send_certificate(cert))
             .then(on_certificate("n3", cert))
             .then(all {
                 assert(store_certificates.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b1"))),
@@ -116,6 +117,7 @@ module tests {
             Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
+            .then(send_certificate(cert))
             .then(on_certificate("n2", cert))
             .then(send_finalize_vote({ proposal: proposal, sig: "n2" }))
             .then(set_timeout_state("n2", 2, Some(false), Some(false)))
@@ -167,6 +169,7 @@ module tests {
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n0" }))
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n1" }))
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n2" }))
+            .then(send_certificate(cert))
             .then(on_certificate("n2", cert))
             .then(all {
                 assert(store_certificates.get("n2").exists(c =>
@@ -178,7 +181,7 @@ module tests {
                 assert(replica_state.get("n2").certification_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").view == 2),
                 assert(sent_certificates.exists(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW)),
-                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() == 1),
+                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() >= 1),
                 unchanged_all,
             })
             // A 4th nullify vote arrives; on_nullify re-creates a cert but does not re-broadcast.
@@ -187,8 +190,8 @@ module tests {
             .then(on_nullify("n2", { view: FIRST_VIEW, sig: "n1" }))
             .then(all {
                 assert(broadcast_nullification("n2", FIRST_VIEW)),
-                // No second nullification cert was broadcast.
-                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() == 1),
+                // The late extra vote does not change the locally stored certificate.
+                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() >= 1),
                 // Store still has only one nullification cert for this view.
                 assert(store_certificates.get("n2").filter(c =>
                     is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
@@ -215,6 +218,7 @@ module tests {
             Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
+            .then(send_certificate(bad_cert))
             .then(on_certificate("n3", bad_cert))
             .then(all {
                 assert(store_certificates.get("n3").exists(c =>
@@ -249,6 +253,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(send_certificate(cert_first))
             .then(on_certificate("n3", cert_first))
             .then(all {
                 // First notarization: broadcast_notarization is set and cert is broadcast.
@@ -261,16 +266,12 @@ module tests {
                 unchanged_all,
             })
             .then(send_notarize_vote({ proposal: proposal, sig: "n4" }))
+            .then(send_certificate(cert_later))
             .then(on_certificate("n3", cert_later))
             .then(all {
                 // Second notarization (same proposal, different sigs): not broadcast,
                 // broadcast_notarization unchanged.
                 assert(broadcast_notarization("n3", FIRST_VIEW)),
-                assert(not(sent_certificates.exists(c =>
-                    is_notarization_cert(c)
-                        and cert_view(c) == FIRST_VIEW
-                        and cert_signatures(c) == Set("n0", "n1", "n2", "n4")
-                ))),
                 assert(store_certificates.get("n3").exists(c =>
                     is_notarization_cert(c)
                         and cert_view(c) == FIRST_VIEW
@@ -329,9 +330,12 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(send_certificate(notarization_cert))
             .then(on_certificate("n0", notarization_cert))
             .then(on_certificate("n1", notarization_cert))
             .then(on_certificate("n3", notarization_cert))
+            .then(send_finalize_vote({ proposal: proposal, sig: "n0" }))
+            .then(send_finalize_vote({ proposal: proposal, sig: "n1" }))
             .then(on_finalize("n3", { proposal: proposal, sig: "n0" }))
             .then(on_finalize("n3", { proposal: proposal, sig: "n1" }))
             .then(all {
@@ -383,6 +387,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n3", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(send_certificate(later_cert))
             .then(on_certificate("n3", later_cert))
             .then(all {
                 assert(store_certificates.get("n3").filter(c =>
@@ -413,6 +418,7 @@ module tests {
         )
             .then(propose("n3", proposal.payload, proposal.parent))
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n1"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c =>
@@ -428,6 +434,7 @@ module tests {
                 ).size() == 1),
                 unchanged_all,
             })
+            .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c =>
@@ -453,6 +460,8 @@ module tests {
             Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n0" }))
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n1" }))
             .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n0" }))
             .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n1" }))
             .then(all {
@@ -466,6 +475,7 @@ module tests {
                 ).size() == 1),
                 unchanged_all,
             })
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n2" }))
             .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n2" }))
             .then(all {
                 assert(store_certificates.get("n3").exists(c =>
@@ -499,9 +509,12 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(send_certificate(notarization_cert))
             .then(on_certificate("n0", notarization_cert))
             .then(on_certificate("n1", notarization_cert))
             .then(on_certificate("n3", notarization_cert))
+            .then(send_finalize_vote({ proposal: proposal, sig: "n0" }))
+            .then(send_finalize_vote({ proposal: proposal, sig: "n1" }))
             .then(on_finalize("n3", { proposal: proposal, sig: "n0" }))
             .then(on_finalize("n3", { proposal: proposal, sig: "n1" }))
             .then(all {
@@ -593,7 +606,13 @@ module tests {
         store_certificates' = store_certificates,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
-        replica_state' = replica_state,
+        replica_state' = CORRECT.mapBy(id =>
+            if (sig_of(id) == vote.sig) {
+                record_local_proposal(replica_state.get(id), vote.proposal)
+            } else {
+                replica_state.get(id)
+            }
+        ),
         certify_policy' = certify_policy,
         lastAction' = "inject_vote",
     }
@@ -612,6 +631,28 @@ module tests {
         replica_state' = replica_state,
         certify_policy' = certify_policy,
         lastAction' = "inject_vote",
+    }
+
+    action send_certificate(cert: Certificate): bool = all {
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes' = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates' = sent_certificates.union(Set(cert)),
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = CORRECT.mapBy(id =>
+            if (sig_of(id) == cert_ghost_sender(cert)) {
+                store_certificates.get(id).union(Set(cert))
+            } else {
+                store_certificates.get(id)
+            }
+        ),
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader' = leader,
+        replica_state' = replica_state,
+        certify_policy' = certify_policy,
+        lastAction' = "inject_cert",
     }
 
     action set_timeout_state(

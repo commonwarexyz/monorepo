@@ -891,6 +891,7 @@ module replica {
     // - if from the leader: validate proposal and send notarize/nullify
     // - otherwise: collect vote, on 2f+1 create notarization cert
     action on_notarize(id: ReplicaId, vote: NotarizeVote): bool = all {
+        sent_notarize_votes.contains(vote),
         val store_notarize = store_notarize_votes.get(id)
         val store_nullify = store_nullify_votes.get(id)
         val store_finalize = store_finalize_votes.get(id)
@@ -1073,6 +1074,7 @@ module replica {
     // - collect votes
     // - on 2f+1: create finalization cert and enter v+1
     action on_finalize(id: ReplicaId, vote: FinalizeVote): bool = all {
+        sent_finalize_votes.contains(vote),
         val store_finalize = store_finalize_votes.get(id)
         val self = replica_state.get(id)
         val proposal = vote.proposal
@@ -1125,6 +1127,7 @@ module replica {
     // if a non-leader replica receives nullify(v) from the current leader of view v,
     // it treats this as immediate timeout expiry and broadcasts nullify(v) if it is allowed.
     action on_nullify(id: ReplicaId, vote: NullifyVote): bool = all {
+        sent_nullify_votes.contains(vote),
         val store_nullify = store_nullify_votes.get(id)
         val self = replica_state.get(id)
         all {

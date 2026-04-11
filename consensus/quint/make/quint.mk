@@ -21,6 +21,8 @@ test:
 	cd tests && quint test --max-samples=1000 tests_n4f1b0.qnt
 	cd tests && quint test --max-samples=1000 tests_n4f1b1.qnt
 	cd tests && quint test --max-samples=1000 tests_n5f1b1.qnt
+	cd tests && quint test --max-samples=1000 tests_n4f1b0_tla.qnt
+
 
 longtest:
 	cd tests && quint test --max-samples=100000 --backend=rust tests_n4f1b0.qnt
