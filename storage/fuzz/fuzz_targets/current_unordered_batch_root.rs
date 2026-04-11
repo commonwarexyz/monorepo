@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, R
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{mmb, mmr, Graftable},
-    mmr::journaled::Config as MmrConfig,
+    mmr::journaled::Config as MerkleConfig,
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::OneCap,
 };
@@ -77,8 +77,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str, suffix: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MmrConfig {
-            journal_partition: format!("{name}-mmr-{suffix}"),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{name}-merkle-{suffix}"),
             metadata_partition: format!("{name}-meta-{suffix}"),
             items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),

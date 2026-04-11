@@ -18,11 +18,10 @@
 //! implementation returns the **ops root** (not the canonical root) because that is what the
 //! sync engine verifies against.
 //!
-//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region
-//! are read directly from the ops Merkle tree after it is built. This works because of the zero-chunk
-//! identity: for all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals
-//! the ops subtree root, making the grafted tree structurally identical to the ops tree at and
-//! above the grafting height.
+//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are
+//! computed by building a temporary grafted tree from the pruned chunks' ops subtree digests. This
+//! works because the synced ops tree still contains all nodes, and the zero-chunk identity makes
+//! each pruned chunk's grafted leaf equal to its ops subtree root.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -82,7 +81,7 @@ impl<T: Translator, J: Clone> Config for super::Config<T, J> {
 ///
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
-/// * Extracts grafted pinned nodes from the ops Merkle tree (zero-chunk identity).
+/// * Derives grafted pinned nodes for the pruned prefix from the ops tree.
 /// * Builds the grafted tree from the bitmap and ops Merkle tree.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
@@ -156,39 +155,19 @@ where
     )
     .await?;
 
-    // Extract grafted pinned nodes from the ops Merkle tree.
-    //
-    // With the zero-chunk identity, all-zero bitmap chunks (which all pruned chunks are)
-    // produce grafted leaves equal to the corresponding ops subtree root. The grafted
-    // tree's pinned nodes for the pruned region are therefore the ops peaks at or above
-    // the grafting height.
-    //
-    // This relies on the MMR/MMB peak-scaling invariant: height-filtering the ops
-    // peaks yields the grafted tree's pins in the correct order. A family whose
-    // nodes_to_pin ordering diverges from this would silently produce a wrong
-    // grafted tree (Mem::init only checks count, not order).
-    let grafted_pinned_nodes = {
-        let ops_pruning_boundary =
-            Location::<F>::new(pruned_chunks as u64 * BitMap::<N>::CHUNK_SIZE_BITS);
-        let grafting_height = grafting::height::<N>();
-        let mut pins = Vec::new();
-        for pos in F::nodes_to_pin(ops_pruning_boundary) {
-            if F::pos_to_height(pos) < grafting_height {
-                continue;
-            }
-            let digest = any
-                .log
-                .merkle
-                .get_node(pos)
-                .await?
-                .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
-            pins.push(digest);
-        }
-        pins
-    };
+    // Derive grafted pinned nodes from the ops tree. Pruned chunk digests are reconstructed from
+    // the ops tree's boundary-stable pins, then assembled into a temporary grafted tree so we can
+    // extract the exact grafted pin set in family order.
+    let hasher = StandardHasher::<H>::new();
+    let grafted_pinned_nodes = db::compute_grafted_pinned_nodes::<F, H, N>(
+        &hasher,
+        &any.log.merkle,
+        pruned_chunks,
+        thread_pool.as_ref(),
+    )
+    .await?;
 
     // Build grafted tree.
-    let hasher = StandardHasher::<H>::new();
     let grafted_tree = db::build_grafted_tree::<F, H, N>(
         &hasher,
         &status,

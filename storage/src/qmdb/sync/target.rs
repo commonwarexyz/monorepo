@@ -8,13 +8,21 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_utils::range::NonEmptyRange;
 
 /// Target state to sync to
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Target<F: merkle::Family, D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
     /// Range of operations to sync
     pub range: NonEmptyRange<merkle::Location<F>>,
 }
+
+impl<F: merkle::Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.range == other.range
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Eq for Target<F, D> {}
 
 impl<F: merkle::Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {

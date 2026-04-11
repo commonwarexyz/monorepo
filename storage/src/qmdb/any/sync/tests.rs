@@ -836,7 +836,6 @@ where
     Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
-    H::Family: PartialEq,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -940,7 +939,6 @@ where
     Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
-    H::Family: PartialEq,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1053,7 +1051,6 @@ where
     Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
-    H::Family: PartialEq,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {

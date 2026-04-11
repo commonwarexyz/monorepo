@@ -315,7 +315,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return false;
         }
 
-        let range_end = start_loc + elements.len() as u64;
+        let Some(range_end) = start_loc.checked_add(elements.len() as u64) else {
+            return false;
+        };
         let Ok(bp) = Blueprint::new(self.leaves, start_loc..range_end) else {
             return false;
         };

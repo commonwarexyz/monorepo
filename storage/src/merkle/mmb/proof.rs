@@ -39,7 +39,11 @@ mod tests {
         let proof = mmb
             .range_proof(&hasher, start_loc..Location::new(3))
             .unwrap();
-        let pinned: Vec<_> = mmb.nodes_to_pin(start_loc).into_values().collect();
+        let pinned_map = mmb.nodes_to_pin(start_loc);
+        let pinned: Vec<_> =
+            <crate::merkle::mmb::Family as crate::merkle::Family>::nodes_to_pin(start_loc)
+                .map(|pos| pinned_map[&pos])
+                .collect();
         assert_eq!(pinned.len(), 1);
         assert!(proof.verify_proof_and_pinned_nodes(
             &hasher,
@@ -57,7 +61,11 @@ mod tests {
         let proof = mmb
             .range_proof(&hasher, start_loc..Location::new(5))
             .unwrap();
-        let pinned: Vec<_> = mmb.nodes_to_pin(start_loc).into_values().collect();
+        let pinned_map = mmb.nodes_to_pin(start_loc);
+        let pinned: Vec<_> =
+            <crate::merkle::mmb::Family as crate::merkle::Family>::nodes_to_pin(start_loc)
+                .map(|pos| pinned_map[&pos])
+                .collect();
         assert_eq!(pinned.len(), 2);
         assert!(proof.verify_proof_and_pinned_nodes(
             &hasher,
