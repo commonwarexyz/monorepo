@@ -16,7 +16,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{mmb, mmr, Graftable, Location},
-    mmr::journaled::Config as MmrConfig,
+    mmr::journaled::Config as MerkleConfig,
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
@@ -76,7 +76,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     #[arbitrary(with = bounded_items_per_blob)]
-    mmr_items_per_blob: u64,
+    merkle_items_per_blob: u64,
     #[arbitrary(with = bounded_items_per_blob)]
     log_items_per_blob: u64,
     #[arbitrary(with = bounded_write_buffer)]
@@ -93,16 +93,16 @@ fn make_config(
     suffix: &str,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    mmr_items_per_blob: u64,
+    merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        merkle_config: MmrConfig {
-            journal_partition: format!("crash-mmr-journal-{suffix}"),
-            metadata_partition: format!("crash-mmr-metadata-{suffix}"),
-            items_per_blob: NZU64!(mmr_items_per_blob),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("crash-merkle-journal-{suffix}"),
+            metadata_partition: format!("crash-merkle-metadata-{suffix}"),
+            items_per_blob: NZU64!(merkle_items_per_blob),
             write_buffer,
             thread_pool: None,
             page_cache: page_cache.clone(),
@@ -185,7 +185,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, family_suffix: &str) {
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let mmr_items_per_blob = input.mmr_items_per_blob;
+    let merkle_items_per_blob = input.merkle_items_per_blob;
     let log_items_per_blob = input.log_items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
@@ -209,7 +209,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, family_suffix: &str) {
                     &suffix,
                     page_size,
                     page_cache_size,
-                    mmr_items_per_blob,
+                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),
@@ -292,7 +292,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, family_suffix: &str) {
                     &suffix,
                     page_size,
                     page_cache_size,
-                    mmr_items_per_blob,
+                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),

@@ -1441,7 +1441,7 @@ where
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
         let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
-        let (mmr, journal) = target_db.into_log_components();
+        let (tree, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -1467,7 +1467,7 @@ where
         assert_eq!(sync_db.root(), target_hash);
 
         sync_db.destroy().await.unwrap();
-        mmr.destroy().await.unwrap();
+        tree.destroy().await.unwrap();
     });
 }
 
@@ -1501,7 +1501,7 @@ where
         let target_op_count = source_db.bounds().await.end;
         let target_inactivity_floor = source_db.inactivity_floor_loc().await;
 
-        let (mmr, journal) = source_db.into_log_components();
+        let (tree, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
@@ -1526,7 +1526,7 @@ where
         assert_eq!(db.root(), target_hash);
 
         db.destroy().await.unwrap();
-        mmr.destroy().await.unwrap();
+        tree.destroy().await.unwrap();
     });
 }
 
@@ -1546,7 +1546,7 @@ where
         assert_eq!(source_db.bounds().await.end, Location::new(1));
 
         let target_hash = source_db.root();
-        let (mmr, journal) = source_db.into_log_components();
+        let (tree, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
@@ -1575,7 +1575,7 @@ where
         assert!(synced_db.bounds().await.end > Location::new(1));
 
         synced_db.destroy().await.unwrap();
-        mmr.destroy().await.unwrap();
+        tree.destroy().await.unwrap();
     });
 }
 

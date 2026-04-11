@@ -685,6 +685,8 @@ pub(super) async fn compute_grafted_root<
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
+    // Collect into Vec first because F::peaks() may return a non-Send iterator,
+    // and holding it across .await points would make the future non-Send.
     let peak_positions = F::peaks(size)
         .map(|(peak_pos, _)| peak_pos)
         .collect::<Vec<_>>();

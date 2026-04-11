@@ -273,15 +273,16 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
     ///
-    /// The `pinned_nodes` are the digests of the boundary-stable pinned nodes for the pruned
-    /// prefix `[0, start_loc)`, in the order returned by `Family::nodes_to_pin`.
+    /// The `pinned_nodes` are the digests of the boundary-stable pinned nodes for the pruned prefix
+    /// `[0, start_loc)`, in the order returned by `Family::nodes_to_pin`.
     ///
     /// Proof verification may require a different set of left-of-range subtrees than the persisted
     /// pinned set. The verifier therefore reconstructs every proof-required left subtree from the
     /// pinned nodes and checks that the resulting digests match the proof.
     ///
-    /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
-    /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
+    /// Returns `true` only if the proof reconstructs to `root`, every pinned node is used during
+    /// reconstruction, and the pinned set is exactly the set returned by `Family::nodes_to_pin`.
+    /// When `start_loc` is 0, `pinned_nodes` must be empty.
     pub fn verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
@@ -371,9 +372,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
             }
         }
 
-        // Unused pins are OK: `nodes_to_pin` may return a superset.
-
-        true
+        // nodes_to_pin returns the exact set, so every pin must have been used.
+        used_pins.len() == pinned_map.len()
     }
 
     /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`, every

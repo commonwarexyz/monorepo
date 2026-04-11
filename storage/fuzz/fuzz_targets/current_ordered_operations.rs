@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{mmb, mmr, Graftable, Location},
-    mmr::journaled::Config as MmrConfig,
+    mmr::journaled::Config as MerkleConfig,
     qmdb::current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -79,7 +79,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MMR_ITEMS_PER_BLOB: u64 = 11;
+const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
@@ -118,10 +118,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 NZUsize!(PAGE_CACHE_SIZE),
             );
             let cfg = Config {
-                merkle_config: MmrConfig {
-                    journal_partition: format!("fuzz-current-mmr-journal-{suffix}"),
-                    metadata_partition: format!("fuzz-current-mmr-metadata-{suffix}"),
-                    items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
+                merkle_config: MerkleConfig {
+                    journal_partition: format!("fuzz-current-merkle-journal-{suffix}"),
+                    metadata_partition: format!("fuzz-current-merkle-metadata-{suffix}"),
+                    items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
                     write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                     thread_pool: None,
                     page_cache: page_cache.clone(),
