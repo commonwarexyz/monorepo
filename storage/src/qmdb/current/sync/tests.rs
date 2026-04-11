@@ -724,6 +724,123 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
     });
 }
 
+/// Regression test for sync with multiple pruned chunks.
+///
+/// This tests the scenario where the ops tree has pinned nodes at heights above the grafting
+/// height (covering multiple chunks). With N=32, CHUNK_SIZE_BITS=256, so 2 pruned chunks
+/// requires 512 operations. The bug occurred because `compute_grafted_pinned_nodes` tried to
+/// reconstruct individual chunk digests from ops peaks that spanned multiple chunks, which is
+/// impossible since hash functions are one-way.
+///
+/// The fix uses the zero-chunk identity: for all-zero pruned chunks, the grafted tree's pinned
+/// nodes have identical digests to the ops tree's peaks, so we can directly use the first
+/// `popcount(pruned_chunks)` ops pins.
+#[test_traced("INFO")]
+fn test_current_mmr_sync_with_multiple_pruned_chunks() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context: Context| async move {
+        type Db = crate::qmdb::current::unordered::variable::Db<
+            crate::merkle::mmr::Family,
+            Context,
+            Digest,
+            Digest,
+            Sha256,
+            crate::translator::TwoCap,
+            32,
+        >;
+
+        // With N=32, CHUNK_SIZE_BITS=256. We need > 512 operations to have 2 full pruned chunks.
+        // Each commit adds an operation, but we also need updates to create inactivity.
+        // Use many commits updating the same key to ensure high inactivity floor.
+        const COMMITS: u64 = 600;
+
+        let target_suffix = context.next_u64().to_string();
+        let target_context = context.with_label("target");
+        let mut target_db: Db = Db::init(
+            target_context.clone(),
+            variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+        )
+        .await
+        .unwrap();
+
+        let key = Digest::from([7u8; 32]);
+        let mut expected = None;
+        for round in 0..COMMITS {
+            expected = Some(Digest::from([round as u8; 32]));
+            let merkleized = target_db
+                .new_batch()
+                .write(key, expected)
+                .merkleize(&target_db, None)
+                .await
+                .unwrap();
+            target_db.apply_batch(merkleized).await.unwrap();
+            target_db.commit().await.unwrap();
+        }
+
+        // Verify we have at least 2 complete chunks to prune (512 operations)
+        assert!(
+            *target_db.inactivity_floor_loc() >= 512,
+            "expected inactivity floor past chunk 1 (512), got {}",
+            *target_db.inactivity_floor_loc()
+        );
+
+        target_db
+            .prune(target_db.inactivity_floor_loc())
+            .await
+            .unwrap();
+
+        let sync_root = SyncDatabase::root(&target_db);
+        let verification_root = target_db.root();
+        let lower_bound = target_db.inactivity_floor_loc();
+        let upper_bound = target_db.bounds().await.end;
+
+        // Verify we're testing with 2+ pruned chunks
+        let pruned_chunks = (*lower_bound / 256) as usize;
+        assert!(
+            pruned_chunks >= 2,
+            "expected at least 2 pruned chunks, got {}",
+            pruned_chunks
+        );
+
+        let client_suffix = context.next_u64().to_string();
+        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+        let target_db = std::sync::Arc::new(target_db);
+
+        // This sync would fail before the fix with:
+        // "missing ops pinned node for pruned chunk reconstruction"
+        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+            context: context.with_label("client"),
+            db_config: client_config.clone(),
+            fetch_batch_size: commonware_utils::NZU64!(64),
+            target: crate::qmdb::sync::Target {
+                root: sync_root,
+                range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
+            },
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 4,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(SyncDatabase::root(&synced_db), sync_root);
+        assert_eq!(synced_db.root(), verification_root);
+        assert_eq!(synced_db.inactivity_floor_loc(), lower_bound);
+        assert_eq!(synced_db.get(&key).await.unwrap(), expected);
+
+        synced_db.destroy().await.unwrap();
+        std::sync::Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
 // ===== Test Generation Macro =====
 
 /// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
