@@ -1,6 +1,5 @@
 use crate::{
     merkle::{self, Location},
-    mmr,
     qmdb::{
         self,
         any::{
@@ -223,8 +222,9 @@ impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 // so we use a separate macro.
 macro_rules! impl_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<E, K, V, H, T> Resolver for Arc<$db<mmr::Family, E, K, V, H, T>>
+        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -232,19 +232,19 @@ macro_rules! impl_resolver_immutable {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,
-                op_count: Location<mmr::Family>,
-                start_loc: Location<mmr::Family>,
+                op_count: Location<F>,
+                start_loc: Location<F>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) =
                     self.historical_proof(op_count, start_loc, max_ops).await?;
                 let pinned_nodes = if include_pinned_nodes {
@@ -261,8 +261,9 @@ macro_rules! impl_resolver_immutable {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<mmr::Family, E, K, V, H, T>>>
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -270,20 +271,19 @@ macro_rules! impl_resolver_immutable {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,
-                op_count: Location<mmr::Family>,
-                start_loc: Location<mmr::Family>,
+                op_count: Location<F>,
+                start_loc: Location<F>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>>
-            {
+            ) -> Result<FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let db = self.read().await;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
                 let pinned_nodes = if include_pinned_nodes {
@@ -300,8 +300,9 @@ macro_rules! impl_resolver_immutable {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<mmr::Family, E, K, V, H, T>>>>
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
+            F: merkle::Family,
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
@@ -309,22 +310,21 @@ macro_rules! impl_resolver_immutable {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,
-                op_count: Location<mmr::Family>,
-                start_loc: Location<mmr::Family>,
+                op_count: Location<F>,
+                start_loc: Location<F>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>>
-            {
+            ) -> Result<FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
                 let pinned_nodes = if include_pinned_nodes {
                     Some(db.pinned_nodes_at(start_loc).await?)
