@@ -238,11 +238,11 @@ fn collect_witness_nodes_on_paths<F, D, G>(
     D: Digest,
     G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
 {
-    // Only proceed if `pos` covers at least one target. This helper never recurses below a node
-    // once that node itself is in `target_positions`, so any target still reachable from this frame
-    // cannot be a strict ancestor of `pos`. In a Merkle family, subtree leaf ranges are power-of-2
-    // aligned and non-overlapping, so under that recursion invariant it is enough to test whether
-    // the target's leftmost leaf falls inside `pos`'s leaf range.
+    // Only proceed if `pos` covers at least one target. The predicted target set is non-nested in
+    // grafted space, so once `pos` itself is a target there cannot be a deeper target on the same
+    // branch. In a Merkle family, subtree leaf ranges are power-of-2 aligned and non-overlapping,
+    // so under that invariant it is enough to test whether the target's leftmost leaf falls inside
+    // `pos`'s leaf range.
     let a_left = *F::leftmost_leaf(pos, height);
     let a_width = 1u64 << height;
     let covers_target = target_positions.iter().any(|&target| {
@@ -290,10 +290,157 @@ fn collect_witness_nodes_on_paths<F, D, G>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::Family as _;
+    use crate::merkle::storage::Storage as MerkleStorage;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::sha256;
+    use commonware_cryptography::{sha256, Sha256};
+    use core::{marker::PhantomData, ops::Range};
+    use futures::executor::block_on;
+    use std::collections::BTreeMap;
 
     const N: usize = sha256::Digest::SIZE;
+
+    struct FakeGraftedTree<F: merkle::Graftable> {
+        size: Position<F>,
+        pruning_boundary: Location<F>,
+        nodes: BTreeMap<u64, sha256::Digest>,
+        _family: PhantomData<F>,
+    }
+
+    impl<F: merkle::Graftable> Readable for FakeGraftedTree<F> {
+        type Family = F;
+        type Digest = sha256::Digest;
+        type Error = merkle::Error<F>;
+
+        fn size(&self) -> Position<F> {
+            self.size
+        }
+
+        fn get_node(&self, pos: Position<F>) -> Option<Self::Digest> {
+            self.nodes.get(&*pos).copied()
+        }
+
+        fn root(&self) -> Self::Digest {
+            sha256::Digest([0u8; sha256::Digest::SIZE])
+        }
+
+        fn pruning_boundary(&self) -> Location<F> {
+            self.pruning_boundary
+        }
+
+        fn proof(
+            &self,
+            _hasher: &impl merkle::hasher::Hasher<Self::Family, Digest = Self::Digest>,
+            _loc: Location<F>,
+        ) -> Result<merkle::Proof<F, Self::Digest>, Self::Error> {
+            unreachable!("proof is not used by witness tests")
+        }
+
+        fn range_proof(
+            &self,
+            _hasher: &impl merkle::hasher::Hasher<Self::Family, Digest = Self::Digest>,
+            _range: Range<Location<F>>,
+        ) -> Result<merkle::Proof<F, Self::Digest>, Self::Error> {
+            unreachable!("range_proof is not used by witness tests")
+        }
+    }
+
+    struct FakeOpsTree<F: merkle::Graftable> {
+        size: Position<F>,
+        _family: PhantomData<F>,
+    }
+
+    impl<F: merkle::Graftable> MerkleStorage<F> for FakeOpsTree<F> {
+        type Digest = sha256::Digest;
+
+        async fn size(&self) -> Position<F> {
+            self.size
+        }
+
+        async fn get_node(
+            &self,
+            _position: Position<F>,
+        ) -> Result<Option<Self::Digest>, merkle::Error<F>> {
+            Ok(None)
+        }
+    }
+
+    fn fake_digest(pos: u64) -> sha256::Digest {
+        let mut bytes = [0u8; sha256::Digest::SIZE];
+        bytes[..8].copy_from_slice(&pos.to_be_bytes());
+        sha256::Digest(bytes)
+    }
+
+    fn populate_fake_nodes<F: merkle::Graftable>(
+        pos: Position<F>,
+        height: u32,
+        nodes: &mut BTreeMap<u64, sha256::Digest>,
+    ) {
+        nodes.insert(*pos, fake_digest(*pos));
+        if height == 0 {
+            return;
+        }
+
+        let (left, right) = F::children(pos, height);
+        populate_fake_nodes::<F>(left, height - 1, nodes);
+        populate_fake_nodes::<F>(right, height - 1, nodes);
+    }
+
+    fn captured_witness_positions<F: merkle::Graftable, const N: usize>(
+        pruned_chunks: u64,
+        start_leaves: u64,
+    ) -> Result<BTreeSet<u64>, Error<F>> {
+        let tree = fake_pre_prune_grafted_tree::<F>(pruned_chunks)?;
+        let ops_size = Position::try_from(Location::<F>::new(start_leaves))?;
+        let mut witness = GraftedRootWitness::empty();
+        rebuild_grafted_root_witness::<F, sha256::Digest, _, N>(
+            &tree,
+            ops_size,
+            pruned_chunks,
+            &mut witness,
+        )?;
+        Ok(witness
+            .persisted_entries()
+            .iter()
+            .map(|(pos, _)| *pos)
+            .collect())
+    }
+
+    fn fake_pre_prune_grafted_tree<F: merkle::Graftable>(
+        pruned_chunks: u64,
+    ) -> Result<FakeGraftedTree<F>, Error<F>> {
+        let pruned_loc = Location::<F>::new(pruned_chunks);
+        let pinned_peaks: BTreeSet<Position<F>> = F::nodes_to_pin(pruned_loc).collect();
+        let mut nodes = BTreeMap::new();
+        for &peak in &pinned_peaks {
+            populate_fake_nodes::<F>(peak, F::pos_to_height(peak), &mut nodes);
+        }
+
+        Ok(FakeGraftedTree::<F> {
+            size: Position::try_from(pruned_loc)?,
+            pruning_boundary: pruned_loc,
+            nodes,
+            _family: PhantomData,
+        })
+    }
+
+    fn fake_pruned_grafted_tree<F: merkle::Graftable>(
+        pruned_chunks: u64,
+    ) -> Result<FakeGraftedTree<F>, Error<F>> {
+        let pruned_loc = Location::<F>::new(pruned_chunks);
+        let pinned_peaks: BTreeSet<Position<F>> = F::nodes_to_pin(pruned_loc).collect();
+        let nodes = pinned_peaks
+            .into_iter()
+            .map(|peak| (*peak, fake_digest(*peak)))
+            .collect();
+
+        Ok(FakeGraftedTree::<F> {
+            size: Position::try_from(pruned_loc)?,
+            pruning_boundary: pruned_loc,
+            nodes,
+            _family: PhantomData,
+        })
+    }
 
     fn broad_target_simulation_end<F: merkle::Graftable, const N: usize>(
         pruned_chunks: u64,
@@ -427,6 +574,27 @@ mod tests {
         targets.into_iter().map(|pos| *pos).collect()
     }
 
+    fn first_nested_target_pair<F: merkle::Graftable>(
+        targets: &BTreeSet<u64>,
+    ) -> Option<(u64, u64)> {
+        let positions: Vec<_> = targets
+            .iter()
+            .copied()
+            .map(Position::<F>::new)
+            .collect();
+        for &ancestor in &positions {
+            for &descendant in &positions {
+                if ancestor == descendant {
+                    continue;
+                }
+                if is_strict_descendant_in_grafted_space::<F>(descendant, ancestor) {
+                    return Some((*ancestor, *descendant));
+                }
+            }
+        }
+        None
+    }
+
     fn assert_recursive_targets_match_required_targets<F: merkle::Graftable, const N: usize>() {
         let interesting_offsets = [
             0u64, 1, 2, 3, 7, 15, 31, 63, 127, 128, 129, 255, 256, 257, 383, 511, 512, 513, 767,
@@ -464,6 +632,28 @@ mod tests {
     }
 
     #[test]
+    fn recursive_witness_targets_are_non_nested_in_mmb() {
+        for pruned_chunks in 1..=8u64 {
+            let start = pruned_chunks * BitMap::<N>::CHUNK_SIZE_BITS;
+            let end = broad_target_simulation_end::<crate::merkle::mmb::Family, N>(pruned_chunks)
+                .expect("simulation end");
+            for start_leaves in start..=end {
+                let recursive = recursive_target_positions::<crate::merkle::mmb::Family, N>(
+                    pruned_chunks,
+                    start_leaves,
+                );
+                if let Some((ancestor, descendant)) =
+                    first_nested_target_pair::<crate::merkle::mmb::Family>(&recursive)
+                {
+                    panic!(
+                        "recursive target set should not contain nested grafted targets: pruned_chunks={pruned_chunks}, start_leaves={start_leaves}, ancestor={ancestor}, descendant={descendant}, targets={recursive:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn simulated_ghost_ancestor_is_not_witness_required() {
         let pruned_chunks = 4u64;
         let start_leaves = 1024u64;
@@ -492,5 +682,199 @@ mod tests {
             "ghost ancestor should not be witness-required"
         );
         assert_eq!(recursive, required);
+    }
+
+    #[test]
+    fn pruned_four_chunks_starts_from_two_grafted_height_one_pins() {
+        type F = crate::merkle::mmb::Family;
+
+        let pruned_loc = Location::<F>::new(4);
+        let pinned_peaks: Vec<_> = F::nodes_to_pin(pruned_loc).collect();
+        let pinned_positions: Vec<_> = pinned_peaks.iter().map(|pos| **pos).collect();
+        let pinned_heights: Vec<_> = pinned_peaks.iter().map(|&pos| F::pos_to_height(pos)).collect();
+        let recursive = recursive_target_positions::<F, N>(4, 1200);
+
+        assert_eq!(
+            pinned_positions,
+            vec![2, 5],
+            "the grafted prune boundary at 4 leaves pins the two height-1 peaks, not their unborn height-2 parent"
+        );
+        assert_eq!(pinned_heights, vec![1, 1]);
+        assert_eq!(
+            recursive,
+            BTreeSet::from([3, 4]),
+            "the recursive target set for start_leaves=1200 contains only the two leaf targets under the right pin"
+        );
+    }
+
+    fn current_root_witness_query_positions<F: merkle::Graftable, const N: usize>(
+        pruned_chunks: u64,
+        start_leaves: u64,
+    ) -> Result<Vec<Position<F>>, Error<F>> {
+        let pruned_ops_leaves = pruned_chunks
+            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .ok_or(Error::DataCorrupted("pruned ops leaves overflow"))?;
+        let size = Position::try_from(Location::<F>::new(start_leaves))?;
+        let grafting_height = grafting::height::<N>();
+        let mut queries = Vec::new();
+
+        for (peak_pos, peak_height) in F::peaks(size) {
+            if peak_height < grafting_height {
+                continue;
+            }
+            let leftmost = *F::leftmost_leaf(peak_pos, peak_height);
+            let width = 1u64
+                .checked_shl(peak_height)
+                .ok_or(Error::DataCorrupted("witness subtree width overflow"))?;
+            let rightmost_exclusive = leftmost
+                .checked_add(width)
+                .ok_or(Error::DataCorrupted("witness subtree range overflow"))?;
+            if rightmost_exclusive > pruned_ops_leaves {
+                continue;
+            }
+            queries.push(peak_pos);
+        }
+
+        Ok(queries)
+    }
+
+    #[test]
+    fn rebuilt_witness_includes_all_required_targets_mmb() {
+        let interesting_offsets = [
+            0u64, 1, 2, 3, 7, 15, 31, 63, 127, 128, 129, 255, 256, 257, 383, 511, 512, 513, 767,
+            1023,
+        ];
+
+        for pruned_chunks in 4..=8u64 {
+            let pruned_ops_leaves = pruned_chunks * BitMap::<N>::CHUNK_SIZE_BITS;
+            for offset in interesting_offsets {
+                let start_leaves = pruned_ops_leaves + offset;
+                let required = required_witness_target_positions::<crate::merkle::mmb::Family, N>(
+                    pruned_chunks,
+                    start_leaves,
+                )
+                .expect("required witness targets");
+                let captured = captured_witness_positions::<crate::merkle::mmb::Family, N>(
+                    pruned_chunks,
+                    start_leaves,
+                )
+                .expect("captured witness positions");
+                let missing: Vec<_> = required.difference(&captured).copied().collect();
+                assert!(
+                    missing.is_empty(),
+                    "rebuilt witness missed required targets: pruned_chunks={pruned_chunks}, start_leaves={start_leaves}, missing={missing:?}, required={required:?}, captured={captured:?}"
+                );
+            }
+        }
+    }
+
+    /// A narrower descendant-only window that still passes with the current code.
+    ///
+    /// This is a useful sanity check, but it is not the authoritative regression for the current
+    /// MMB prune/reopen bug. The stronger `rebuilt_witness_covers_current_root_queries_mmb` test
+    /// below checks the exact grafted positions that `compute_grafted_root()` would need from the
+    /// witness and is the one that currently reproduces the missing-node problem.
+    #[test]
+    fn rebuilt_witness_includes_descendant_targets_inside_fragmented_window_mmb() {
+        let pruned_chunks = 4u64;
+        let start_leaves = 1200u64;
+
+        let required = required_witness_target_positions::<crate::merkle::mmb::Family, N>(
+            pruned_chunks,
+            start_leaves,
+        )
+        .expect("required targets should be derivable");
+        let captured = captured_witness_positions::<crate::merkle::mmb::Family, N>(
+            pruned_chunks,
+            start_leaves,
+        )
+        .expect("captured witness should rebuild");
+
+        assert_eq!(
+            captured, required,
+            "captured witness should include every descendant target inside the fragmented MMB window"
+        );
+    }
+
+    /// The decisive storage regression: the witness-backed grafted storage must resolve every ops
+    /// peak that current root recomputation would query inside the pruned region.
+    ///
+    /// This is stricter than the descendant-target sanity checks above because future grafted
+    /// ancestors may be reconstructed from pinned children plus witness digests even when they do
+    /// not appear as direct witness entries.
+    #[test]
+    fn witnessed_storage_covers_current_root_queries_mmb() {
+        let interesting_offsets = [
+            0u64, 1, 2, 3, 7, 15, 31, 63, 127, 128, 129, 255, 256, 257, 383, 511, 512, 513, 767,
+            895, 1023, 1200,
+        ];
+
+        for pruned_chunks in 4..=8u64 {
+            let pruned_ops_leaves = pruned_chunks * BitMap::<N>::CHUNK_SIZE_BITS;
+            for offset in interesting_offsets {
+                let start_leaves = pruned_ops_leaves + offset;
+                let query_peaks = current_root_witness_query_positions::<
+                    crate::merkle::mmb::Family,
+                    N,
+                >(pruned_chunks, start_leaves)
+                .expect("current root query peaks");
+                let pre_prune_grafted_tree =
+                    fake_pre_prune_grafted_tree::<crate::merkle::mmb::Family>(pruned_chunks)
+                        .expect("valid pre-prune grafted tree");
+                let pruned_grafted_tree =
+                    fake_pruned_grafted_tree::<crate::merkle::mmb::Family>(pruned_chunks)
+                        .expect("valid pruned grafted tree");
+                let ops_tree = FakeOpsTree::<crate::merkle::mmb::Family> {
+                    size: Position::try_from(Location::<crate::merkle::mmb::Family>::new(
+                        start_leaves,
+                    ))
+                    .expect("valid ops size"),
+                    _family: PhantomData,
+                };
+                let witness = {
+                    let mut witness = GraftedRootWitness::empty();
+                    rebuild_grafted_root_witness::<crate::merkle::mmb::Family, sha256::Digest, _, N>(
+                        &pre_prune_grafted_tree,
+                        Position::try_from(
+                            Location::<crate::merkle::mmb::Family>::new(start_leaves),
+                        )
+                        .expect("valid ops size"),
+                        pruned_chunks,
+                        &mut witness,
+                    )
+                    .expect("rebuild witness");
+                    witness
+                };
+                let storage = grafting::Storage::new(
+                    &pruned_grafted_tree,
+                    grafting::height::<N>(),
+                    &ops_tree,
+                    &witness,
+                    merkle::hasher::Standard::<Sha256>::new(),
+                );
+
+                let mut missing = Vec::new();
+                for peak_pos in query_peaks {
+                    let digest =
+                        block_on(storage.get_node(peak_pos)).expect("storage query should succeed");
+                    if digest.is_none() {
+                        missing.push(*grafting::ops_to_grafted_pos::<crate::merkle::mmb::Family>(
+                            peak_pos,
+                            grafting::height::<N>(),
+                        ));
+                    }
+                }
+
+                let captured = captured_witness_positions::<crate::merkle::mmb::Family, N>(
+                    pruned_chunks,
+                    start_leaves,
+                )
+                .expect("captured witness positions");
+                assert!(
+                    missing.is_empty(),
+                    "witness-backed storage missed current root queries: pruned_chunks={pruned_chunks}, start_leaves={start_leaves}, missing={missing:?}, captured={captured:?}"
+                );
+            }
+        }
     }
 }

@@ -310,18 +310,16 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(
+        &grafted_tree,
+        grafting::height::<N>(),
+        &any.log.merkle,
+        &witness,
+        hasher.clone(),
+    );
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(
-        &hasher,
-        &status,
-        &storage,
-        &witness,
-        partial_chunk,
-        &ops_root,
-    )
-    .await?;
+    let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -1685,10 +1683,21 @@ pub mod tests {
                 db.commit().await.unwrap();
             }
 
+            let mut round = COMMITS;
+            while *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() <= 383 {
+                expected = Some(val(50_000 + round));
+                let mut batch = db.new_batch();
+                batch = batch.write(k, expected);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                round += 1;
+            }
+
             let root_before = db.root();
             assert!(
-                *db.inactivity_floor_loc() >= 256,
-                "expected inactivity floor past chunk 0"
+                *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() > 383,
+                "expected chunk 0 to be both inactive and settled"
             );
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
@@ -1947,14 +1956,15 @@ pub mod tests {
             let expected_ops_root = db.ops_root();
             let expected_value = db.get(&key(0)).await.unwrap();
 
-            // A tiny requested prune still advances the bitmap to the inactivity floor, so rewind
-            // targets that are retained in the log can still be below the bitmap floor.
+            // A tiny requested prune still advances the bitmap well past the requested ops-log
+            // boundary, so rewind targets that are retained in the log can still be below the
+            // bitmap floor.
             let prune_loc = Location::new(32);
             db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
                 pruned_bits > 0,
-                "bitmap should still prune to inactivity floor: floor={:?}",
+                "bitmap should still prune ahead of the requested ops boundary: floor={:?}",
                 db.inactivity_floor_loc()
             );
             let retained_start = db.bounds().await.start;
@@ -2967,10 +2977,21 @@ pub mod tests {
                 db.commit().await.unwrap();
             }
 
+            let mut round = 200u64;
+            while *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() <= 639 {
+                expected = Some(val(60_000 + round));
+                let mut batch = db.new_batch();
+                batch = batch.write(k, expected);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                round += 1;
+            }
+
             assert!(
-                *db.inactivity_floor_loc() >= 512,
-                "expected inactivity floor past chunk 1, got {}",
-                *db.inactivity_floor_loc()
+                *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() > 639,
+                "expected chunk 1 to be both inactive and settled, got {}",
+                *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap()
             );
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
@@ -3039,6 +3060,279 @@ pub mod tests {
 
                 drop(prev_db);
             }
+        });
+    }
+
+    /// Narrower end-to-end MMB regression around the first failing post-prune growth window.
+    ///
+    /// We grow both a pruned DB and an unpruned reference DB until the inactivity floor first
+    /// reaches the 4-chunk boundary (1024 ops), prune the Current DB there, then advance one
+    /// commit at a time while comparing the two roots. This pins down whether the live divergence
+    /// happens in the same narrow post-prune window isolated by the witness oracle tests.
+    #[test_traced]
+    fn test_current_mmb_stepwise_growth_matches_unpruned_reference_near_first_failure_window() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_stepwise");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_stepwise", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref_stepwise");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_prune_stepwise_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut commit_idx = 0u64;
+
+            while *db.inactivity_floor_loc() < 1024 {
+                let value = Some(val(80_000 + commit_idx));
+
+                let mut batch = db.new_batch();
+                batch = batch.write(k, value);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+
+                let mut ref_batch = ref_db.new_batch();
+                ref_batch = ref_batch.write(k, value);
+                let ref_merkleized = ref_batch.merkleize(&ref_db, None).await.unwrap();
+                ref_db.apply_batch(ref_merkleized).await.unwrap();
+                ref_db.commit().await.unwrap();
+
+                commit_idx += 1;
+            }
+
+            let floor_before_prune = *db.inactivity_floor_loc();
+            assert!(
+                floor_before_prune < 1280,
+                "expected first 4-chunk prune window, got floor={floor_before_prune}"
+            );
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.sync().await.unwrap();
+            assert_eq!(
+                db.pruned_bits(),
+                768,
+                "expected youngest inactive chunk to remain retained until its MMB grafted digest settles"
+            );
+            assert_eq!(db.root(), ref_db.root(), "root mismatch immediately after prune");
+
+            loop {
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                if db_leaves >= 1560 {
+                    break;
+                }
+
+                let value = Some(val(80_000 + commit_idx));
+
+                let mut batch = db.new_batch();
+                batch = batch.write(k, value);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+
+                let mut ref_batch = ref_db.new_batch();
+                ref_batch = ref_batch.write(k, value);
+                let ref_merkleized = ref_batch.merkleize(&ref_db, None).await.unwrap();
+                ref_db.apply_batch(ref_merkleized).await.unwrap();
+                ref_db.commit().await.unwrap();
+
+                commit_idx += 1;
+
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                let floor = *db.inactivity_floor_loc();
+                let pruned_bits = db.pruned_bits();
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "stepwise MMB root mismatch after prune: leaves={db_leaves}, floor={floor}, pruned_bits={pruned_bits}, commit_idx={commit_idx}"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    ref_db.ops_root(),
+                    "stepwise MMB ops root mismatch after prune: leaves={db_leaves}, floor={floor}, pruned_bits={pruned_bits}, commit_idx={commit_idx}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    value,
+                    "stepwise MMB value mismatch after prune: leaves={db_leaves}, floor={floor}, pruned_bits={pruned_bits}, commit_idx={commit_idx}"
+                );
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// End-to-end MMB prune/grow regression against an unpruned reference database.
+    ///
+    /// This is the higher-level companion to the witness oracle tests in `current::witness`: the
+    /// pruned database is grown and pruned repeatedly, reopened each round, and compared against an
+    /// unpruned reference DB for root, ops root, value reads, and proof generation. It currently
+    /// reproduces the post-prune MMB divergence that the narrower witness regression isolates.
+    #[test_traced]
+    fn test_current_mmb_large_repeated_prune_matches_unpruned_reference() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const ROUNDS: u64 = 8;
+            const COMMITS_PER_ROUND: u64 = 120;
+
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_large", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_prune_large_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected = None;
+
+            for round in 0..ROUNDS {
+                for i in 0..COMMITS_PER_ROUND {
+                    let value = Some(val(round * 10_000 + i));
+                    expected = value;
+
+                    let mut batch = db.new_batch();
+                    batch = batch.write(k, value);
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
+                    db.commit().await.unwrap();
+
+                    let mut ref_batch = ref_db.new_batch();
+                    ref_batch = ref_batch.write(k, value);
+                    let ref_merkleized = ref_batch.merkleize(&ref_db, None).await.unwrap();
+                    ref_db.apply_batch(ref_merkleized).await.unwrap();
+                    ref_db.commit().await.unwrap();
+                }
+
+                let expected_root = ref_db.root();
+                let expected_ops_root = ref_db.ops_root();
+                let expected_bounds = ref_db.bounds().await.end;
+                let inactivity_floor = *db.inactivity_floor_loc();
+                let pruned_bits = db.pruned_bits();
+
+                assert_eq!(
+                    db.root(),
+                    expected_root,
+                    "pruned/live root mismatch before prune at round {round}; floor={inactivity_floor}, pruned_bits={pruned_bits}"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    expected_ops_root,
+                    "pruned/live ops root mismatch before prune at round {round}"
+                );
+                assert_eq!(
+                    db.bounds().await.end,
+                    expected_bounds,
+                    "pruned/live bounds mismatch before prune at round {round}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected,
+                    "pruned/live value mismatch before prune at round {round}"
+                );
+
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.sync().await.unwrap();
+
+                let inactivity_floor = *db.inactivity_floor_loc();
+                let pruned_bits = db.pruned_bits();
+
+                assert_eq!(
+                    db.root(),
+                    expected_root,
+                    "pruned root mismatch before reopen at round {round}; floor={inactivity_floor}, pruned_bits={pruned_bits}"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    expected_ops_root,
+                    "pruned ops root mismatch before reopen at round {round}"
+                );
+                assert_eq!(
+                    db.bounds().await.end,
+                    expected_bounds,
+                    "pruned bounds mismatch before reopen at round {round}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected,
+                    "pruned value mismatch before reopen at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                    &mut hasher,
+                    k,
+                    expected.expect("value should exist"),
+                    &proof,
+                    &db.root()
+                ));
+
+                db_ctx = context.with_label(&format!("db_reopen_{round}"));
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_prune_large", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(
+                    db.root(),
+                    expected_root,
+                    "reopened root mismatch at round {round}"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    expected_ops_root,
+                    "reopened ops root mismatch at round {round}"
+                );
+                assert_eq!(
+                    db.bounds().await.end,
+                    expected_bounds,
+                    "reopened bounds mismatch at round {round}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected,
+                    "reopened value mismatch at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                    &mut hasher,
+                    k,
+                    expected.expect("value should exist"),
+                    &proof,
+                    &db.root()
+                ));
+
+                drop(prev_db);
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
         });
     }
 }

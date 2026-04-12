@@ -41,9 +41,12 @@
 //! The grafted tree is incrementally maintained via [GraftedHasher] when grafted leaves
 //! change.
 
-use crate::merkle::{
-    self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
-    Location, Position, Readable,
+use crate::{
+    merkle::{
+        self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
+        Location, Position, Readable,
+    },
+    qmdb::current::witness::GraftedRootWitness,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
@@ -372,25 +375,27 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
     }
 }
 
-/// A virtual [StorageTrait] that presents a grafted tree and ops tree as a single combined Merkle
-/// structure.
+/// A virtual storage over the ops tree and grafted tree for canonical root and proof
+/// reconstruction.
 ///
-/// Nodes below the grafting height are served from the ops tree. Nodes at or above the grafting
-/// height are served from the grafted tree (with ops-to-grafted position conversion). This allows
-/// standard proof generation to work transparently over the combined structure.
-///
-/// Both the ops structure and the grafted structure use the same [Family] `F`. The combined storage
-/// presents as `StorageTrait<F>` so that callers generic over `F` can use it transparently.
+/// Below the grafting height, nodes are read directly from the ops tree. At or above the grafting
+/// height, positions are mapped into grafted space. Plain grafted-tree lookup is not sufficient
+/// for pruned MMB state, because delayed merges can later query grafted ancestors that were
+/// compacted away. This storage fills that gap by reconstructing missing pruned grafted nodes from
+/// still-materialized grafted nodes, pinned descendants, and persisted witness digests.
 pub(super) struct Storage<
     'a,
     F: Graftable,
     D: Digest,
     G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
     S: StorageTrait<F, Digest = D>,
+    H: HasherTrait<F, Digest = D> + Clone,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
     ops_tree: &'a S,
+    witness: &'a GraftedRootWitness<D>,
+    grafted_hasher: GraftedHasher<F, H>,
     _phantom: PhantomData<(F, D)>,
 }
 
@@ -400,16 +405,51 @@ impl<
         D: Digest,
         G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
         S: StorageTrait<F, Digest = D>,
-    > Storage<'a, F, D, G, S>
+        H: HasherTrait<F, Digest = D> + Clone,
+    > Storage<'a, F, D, G, S, H>
 {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
+    pub(super) const fn new(
+        grafted_tree: &'a G,
+        grafting_height: u32,
+        ops_tree: &'a S,
+        witness: &'a GraftedRootWitness<D>,
+        hasher: H,
+    ) -> Self {
         Self {
             grafted_tree,
             grafting_height,
             ops_tree,
+            witness,
+            grafted_hasher: GraftedHasher::new(hasher, grafting_height),
             _phantom: PhantomData,
         }
+    }
+
+    /// Reconstructs a grafted-space node from the materialized grafted tree plus witness state.
+    ///
+    /// This first prefers directly stored nodes, then exact witness entries, and finally
+    /// recursively hashes child digests when only descendants are retained.
+    fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<D> {
+        if let Some(node) = self.grafted_tree.get_node(pos) {
+            return Some(node);
+        }
+        if let Some(node) = self.witness.get(*pos).copied() {
+            return Some(node);
+        }
+
+        let height = F::pos_to_height(pos);
+        if height == 0 {
+            return None;
+        }
+
+        let (left, right) = F::children(pos, height);
+        let left_digest = self.reconstruct_grafted_node(left)?;
+        let right_digest = self.reconstruct_grafted_node(right)?;
+        Some(
+            self.grafted_hasher
+                .node_digest(pos, &left_digest, &right_digest),
+        )
     }
 }
 
@@ -418,7 +458,8 @@ impl<
         D: Digest,
         G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
         S: StorageTrait<F, Digest = D>,
-    > StorageTrait<F> for Storage<'_, F, D, G, S>
+        H: HasherTrait<F, Digest = D> + Clone + Send + Sync,
+    > StorageTrait<F> for Storage<'_, F, D, G, S, H>
 {
     type Digest = D;
 
@@ -431,9 +472,9 @@ impl<
         if ops_height < self.grafting_height {
             return self.ops_tree.get_node(pos).await;
         }
-        // Convert the ops-family position to a grafted position (same family F).
+
         let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
-        Ok(self.grafted_tree.get_node(grafted_pos))
+        Ok(self.reconstruct_grafted_node(grafted_pos))
     }
 }
 
@@ -762,7 +803,14 @@ mod tests {
             let ops_root = *ops_mmr.root();
 
             {
-                let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+                let empty_witness = GraftedRootWitness::default();
+                let combined = Storage::new(
+                    &grafted,
+                    GRAFTING_HEIGHT,
+                    &ops_mmr,
+                    &empty_witness,
+                    hasher.clone(),
+                );
                 assert_eq!(combined.size().await, ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
@@ -891,7 +939,14 @@ mod tests {
 
             ops_mmr.apply_batch(&batch).unwrap();
 
-            let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            let empty_witness = GraftedRootWitness::default();
+            let combined = Storage::new(
+                &grafted,
+                GRAFTING_HEIGHT,
+                &ops_mmr,
+                &empty_witness,
+                hasher.clone(),
+            );
             assert_eq!(combined.size().await, ops_mmr.size());
 
             // Compute the grafted root.
@@ -1029,7 +1084,14 @@ mod tests {
                     &chunks,
                     grafting_height,
                 );
-                let combined = Storage::<F, _, _, _>::new(&grafted, grafting_height, &ops);
+                let empty_witness = GraftedRootWitness::default();
+                let combined = Storage::new(
+                    &grafted,
+                    grafting_height,
+                    &ops,
+                    &empty_witness,
+                    hasher.clone(),
+                );
 
                 let leaves = merkle::Location::<F>::try_from(size).unwrap();
                 let mut peaks = Vec::new();

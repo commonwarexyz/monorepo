@@ -10,7 +10,7 @@ use crate::{
     },
     merkle::{
         self, batch::MIN_TO_PARALLELIZE, hasher::Standard as StandardHasher, mem::Mem,
-        storage::Storage as MerkleStorage, Location, Position, Readable,
+        storage::Storage as MerkleStorage, Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -51,10 +51,11 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// Prefix used for the metadata key for grafted root witness digests.
 ///
-/// These are the grafted-tree digests for every ops peak at height >= grafting_height in the
-/// complete-chunk region. They are captured before pruning (when the grafted tree is fully
-/// materialized) and consumed on reopen by `compute_grafted_root` to avoid reading pruned
-/// grafted interior nodes that may not be individually stored in the grafted Mem.
+/// Each entry is a `(grafted_position, digest)` pair for a non-pinned interior node in the
+/// pruned grafted subtree that `compute_grafted_root` may need when delayed MMB merges expose
+/// nodes no longer individually materialized in the grafted Mem. Entries are captured before
+/// pruning and rebuilt at each prune cycle; see [`witness::rebuild_grafted_root_witness`] for
+/// the selection algorithm.
 const GRAFTED_ROOT_WITNESS_PREFIX: u8 = 2;
 
 pub(super) use super::witness::GraftedRootWitness;
@@ -99,10 +100,10 @@ pub struct Db<
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
 
-    /// Grafted root witness: grafted-tree digests for ops peaks at height >= grafting_height
-    /// in the complete-chunk region. Captured before pruning and persisted to metadata so that
-    /// reopen can reconstruct the canonical root without reading pruned grafted interior nodes.
-    /// Empty when the grafted tree has never been pruned.
+    /// Grafted root witness: `(grafted_position, digest)` pairs for non-pinned interior nodes in
+    /// the pruned grafted subtree. Captured before pruning and persisted to metadata so that
+    /// `compute_grafted_root` can resolve nodes that delayed MMB merges expose after the grafted
+    /// Mem has been compacted. Empty when the grafted tree has never been pruned.
     pub(super) grafted_root_witness: GraftedRootWitness<H::Digest>,
 }
 
@@ -164,6 +165,41 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Returns the most aggressive bitmap/grafted prune boundary that is both inactivity-safe and
+    /// fully settled for the current family.
+    ///
+    /// For MMB, the youngest complete chunk can keep changing briefly after it becomes inactive
+    /// because delayed merges may still change its `chunk_peaks(...)` digest. In that case we keep
+    /// that one chunk unpruned and only advance the bitmap/grafted floor to the previous complete
+    /// chunk. Earlier complete chunks are already settled.
+    fn settled_bitmap_prune_loc(
+        &self,
+        inactivity_floor: Location<F>,
+    ) -> Result<Location<F>, Error<F>> {
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let mut pruned_chunks = *inactivity_floor / chunk_bits;
+        if pruned_chunks == 0 {
+            return Ok(Location::new(0));
+        }
+
+        let current_ops_leaves = Location::<F>::try_from(self.any.log.merkle.size())?.as_u64();
+        let grafting_height = grafting::height::<N>();
+        let last_complete_chunk = pruned_chunks - 1;
+        let chunk_start = last_complete_chunk
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
+        let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
+        let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
+        if current_ops_leaves <= stable_after {
+            pruned_chunks -= 1;
+        }
+
+        let settled_bits = pruned_chunks
+            .checked_mul(chunk_bits)
+            .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
+        Ok(Location::new(settled_bits))
+    }
+
     /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
     /// or above the grafting height, returns the grafted node. For positions below the grafting
     /// height, the ops tree is used.
@@ -172,6 +208,8 @@ where
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
+            &self.grafted_root_witness,
+            StandardHasher::<H>::new(),
         )
     }
 
@@ -306,8 +344,9 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// The bitmap is unconditionally pruned to the inactivity floor, while the ops log still prunes
-    /// only to `prune_loc`. As a result, the bitmap pruning boundary may advance past
+    /// The bitmap/grafted overlay prunes as far as the inactivity floor allows, except that it
+    /// retains the youngest complete chunk until its grafted digest has settled. The ops log still
+    /// prunes only to `prune_loc`. As a result, the bitmap pruning boundary may advance past
     /// [`Db::bounds`].start, and some log-retained history may no longer be rewindable because the
     /// bitmap chunks needed to reconstruct historical activity state have already been discarded.
     ///
@@ -324,13 +363,14 @@ where
 
         self.flatten();
 
-        // The Current overlay can safely prune bitmap/grafted state all the way to the
-        // inactivity floor, even if the caller requests a smaller ops-log prune. Operations
-        // below that floor are known inactive, so their bitmap chunks are dead history.
+        // The Current overlay can prune bitmap/grafted state ahead of the ops log because
+        // operations below the inactivity floor are known inactive. For MMB, keep the youngest
+        // complete chunk until its grafted digest has settled under delayed merges.
+        let settled_bitmap_floor = self.settled_bitmap_prune_loc(inactivity_floor)?;
         let BitmapBatch::<N>::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
-        Arc::make_mut(base).prune_to_bit(*inactivity_floor);
+        Arc::make_mut(base).prune_to_bit(*settled_bitmap_floor);
 
         // Prune the grafted tree to match the bitmap's pruned chunks.
         let pruned_chunks = self.status.pruned_chunks() as u64;
@@ -480,19 +520,16 @@ where
             self.thread_pool.as_ref(),
         )
         .await?;
-        let storage =
-            grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &self.any.log.merkle);
+        let storage = grafting::Storage::new(
+            &grafted_tree,
+            grafting::height::<N>(),
+            &self.any.log.merkle,
+            &self.grafted_root_witness,
+            hasher.clone(),
+        );
         let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
-        let root = compute_db_root(
-            &hasher,
-            status,
-            &storage,
-            &self.grafted_root_witness,
-            partial_chunk,
-            &ops_root,
-        )
-        .await?;
+        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
 
         self.grafted_tree = grafted_tree;
         self.root = root;
@@ -702,18 +739,16 @@ pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,
     B: BitmapReadable<N>,
-    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
     status: &B,
-    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
-    witness: &GraftedRootWitness<H::Digest>,
+    storage: &S,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
-    let grafted_root = compute_grafted_root(hasher, status, storage, witness).await?;
+    let grafted_root = compute_grafted_root(hasher, status, storage).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -739,35 +774,28 @@ pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
     B: BitmapReadable<N>,
-    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
     status: &B,
-    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
-    witness: &GraftedRootWitness<H::Digest>,
+    storage: &S,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)?;
 
-    // Collect peak digests of the grafted structure. For peaks at height >= grafting_height,
-    // if the grafted Mem doesn't have the node (pruned interior), look it up in the witness
-    // by grafted position.
-    let grafting_height = grafting::height::<N>();
+    // Collect peak digests of the grafted structure. The storage layer resolves nodes below the
+    // grafting height from the ops tree and may reconstruct missing pruned grafted nodes from
+    // pinned descendants plus witness digests.
     let mut peaks: Vec<H::Digest> = Vec::new();
     for (peak_pos, _) in F::peaks(size) {
-        let digest = if let Some(digest) = storage.get_node(peak_pos).await? {
-            digest
-        } else {
-            let grafted_pos = grafting::ops_to_grafted_pos::<F>(peak_pos, grafting_height);
-            witness
-                .get(*grafted_pos)
-                .copied()
-                .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?
-        };
+        let digest = storage
+            .get_node(peak_pos)
+            .await?
+            .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?;
         peaks.push(digest);
     }
+    let grafting_height = grafting::height::<N>();
     let complete_chunks = status.complete_chunks() as u64;
     let pruned_chunks = status.pruned_chunks() as u64;
 

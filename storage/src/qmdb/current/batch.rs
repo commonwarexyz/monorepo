@@ -607,7 +607,13 @@ where
         batch: &grafted_batch,
         mem: &current_db.grafted_tree,
     };
-    let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter);
+    let grafted_storage = grafting::Storage::new(
+        &layered,
+        grafting_height,
+        &ops_tree_adapter,
+        &current_db.grafted_root_witness,
+        hasher.clone(),
+    );
     // Compute partial chunk (last incomplete chunk, if any).
     let partial = {
         let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
@@ -619,11 +625,10 @@ where
             Some((chunk, rem))
         }
     };
-    let canonical_root = compute_db_root::<F, H, _, _, _, N>(
+    let canonical_root = compute_db_root::<F, H, _, _, N>(
         &hasher,
         &bitmap_batch,
         &grafted_storage,
-        &current_db.grafted_root_witness,
         partial,
         &ops_root,
     )
