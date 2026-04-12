@@ -1024,6 +1024,9 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         let Some(bytes) = metadata.get(&key) else {
             break;
         };
+        if bytes.len() < size_of::<u64>() {
+            return Err(Error::<F>::DataCorrupted("invalid witness pos"));
+        }
         let pos = u64::from_be_bytes(
             bytes[0..8]
                 .try_into()
