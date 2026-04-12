@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{
@@ -24,7 +24,6 @@ use crate::{
             proof::{OperationProof, RangeProof},
             witness,
         },
-        operation::Operation as _,
         Error,
     },
     Context, Persistable,
@@ -190,7 +189,7 @@ where
             .ok_or(Error::DataCorrupted("chunk start overflow"))?;
         let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
         let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
-        if current_ops_leaves <= stable_after {
+        if current_ops_leaves < stable_after {
             pruned_chunks -= 1;
         }
 
@@ -346,9 +345,8 @@ where
     ///
     /// The bitmap/grafted overlay prunes as far as the inactivity floor allows, except that it
     /// retains the youngest complete chunk until its grafted digest has settled. The ops log still
-    /// prunes only to `prune_loc`. As a result, the bitmap pruning boundary may advance past
-    /// [`Db::bounds`].start, and some log-retained history may no longer be rewindable because the
-    /// bitmap chunks needed to reconstruct historical activity state have already been discarded.
+    /// prunes only to `prune_loc`, so the bitmap pruning boundary may advance past
+    /// [`Db::bounds`].start.
     ///
     /// # Errors
     ///
@@ -415,128 +413,6 @@ where
 
         self.any.prune(prune_loc).await
     }
-
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds the underlying Any database and rebuilds the Current overlay state (bitmap,
-    /// grafted tree, and canonical root) for the rewound size.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for Current, this includes the
-    ///   underlying Any inactivity-floor boundary and bitmap pruning boundary)
-    /// - `size - 1` is not a commit operation
-    /// - `size` is below the bitmap pruning boundary
-    ///
-    /// Validation errors returned before the underlying Any rewind begins (for example
-    /// `InvalidRewind` or `ItemPruned`) leave this handle usable. Once the underlying Any
-    /// database starts mutating, any later error is fatal for this handle: callers must drop it
-    /// and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
-    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
-        self.flatten();
-
-        let rewind_size = *size;
-        let current_size = *self.any.last_commit_loc + 1;
-        if rewind_size == current_size {
-            return Ok(());
-        }
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
-        }
-
-        let pruned_chunks = self.status.pruned_chunks();
-        let pruned_bits = (pruned_chunks as u64)
-            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
-            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
-        if rewind_size < pruned_bits {
-            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
-        }
-
-        // Ensure the target commit's logical range is fully representable with the current
-        // bitmap pruning boundary. Even if the ops log still retains older entries, rewinding
-        // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
-        // discarded.
-        {
-            let reader = self.any.log.reader().await;
-            let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
-            let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::<F>::UnexpectedData(rewind_last_loc));
-            };
-            if *rewind_floor < pruned_bits {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
-            }
-        }
-
-        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted tree.
-        let pinned_nodes = if pruned_chunks > 0 {
-            let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(grafted_leaves) {
-                let digest = self
-                    .grafted_tree
-                    .get_node(pos)
-                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
-                pinned_nodes.push(digest);
-            }
-            pinned_nodes
-        } else {
-            Vec::new()
-        };
-
-        // Rewind underlying ops log + Any state. If a later overlay rebuild step fails, this
-        // handle may be internally diverged and must be dropped by the caller.
-        let restored_locs = self.any.rewind(size).await?;
-
-        // Patch bitmap: truncate to rewound size, then mark restored locations as active.
-        {
-            let BitmapBatch::<N>::Base(base) = &mut self.status else {
-                unreachable!("flatten() guarantees Base");
-            };
-            let status: &mut BitMap<N> = Arc::get_mut(base).expect("flatten ensures sole owner");
-            status.truncate(rewind_size);
-            for loc in &restored_locs {
-                status.set_bit(**loc, true);
-            }
-            status.set_bit(rewind_size - 1, true);
-        }
-        let BitmapBatch::Base(status) = &self.status else {
-            unreachable!("flatten() guarantees Base");
-        };
-        let status = status.as_ref();
-
-        // Rebuild grafted tree and canonical root for the patched bitmap.
-        let hasher = StandardHasher::<H>::new();
-        let grafted_tree = build_grafted_tree::<F, H, N>(
-            &hasher,
-            status,
-            &pinned_nodes,
-            &self.any.log.merkle,
-            self.thread_pool.as_ref(),
-        )
-        .await?;
-        let storage = grafting::Storage::new(
-            &grafted_tree,
-            grafting::height::<N>(),
-            &self.any.log.merkle,
-            &self.grafted_root_witness,
-            hasher.clone(),
-        );
-        let partial_chunk = partial_chunk(status);
-        let ops_root = self.any.log.root();
-        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
-
-        self.grafted_tree = grafted_tree;
-        self.root = root;
-
-        Ok(())
-    }
-
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
         let mut metadata = self.metadata.lock().await;
@@ -953,14 +829,16 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
 
 /// Load the metadata and recover the pruning state persisted by previous runs.
 ///
-/// The metadata store holds two kinds of entries (keyed by prefix):
+/// The metadata store holds three kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
+/// - **Grafted root witness** ([GRAFTED_ROOT_WITNESS_PREFIX]): extra grafted digests retained for
+///   MMB so delayed merges can still reconstruct pruned grafted nodes after reopen.
 ///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
+/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests, grafted_root_witness)`.
 pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     context: E,
     partition: &str,

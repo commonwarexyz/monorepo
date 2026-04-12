@@ -207,7 +207,7 @@ async fn commit_pending(
         return;
     }
 
-    let writes = pending_writes.drain(..).collect::<Vec<_>>();
+    let writes = std::mem::take(pending_writes);
     apply_pending(db, &writes).await;
     apply_pending(reference_db, &writes).await;
     committed_state.extend(pending_expected.drain());

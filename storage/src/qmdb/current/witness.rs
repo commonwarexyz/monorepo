@@ -290,8 +290,7 @@ fn collect_witness_nodes_on_paths<F, D, G>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::Family as _;
-    use crate::merkle::storage::Storage as MerkleStorage;
+    use crate::merkle::{storage::Storage as MerkleStorage, Family as _};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
     use core::{marker::PhantomData, ops::Range};
@@ -577,11 +576,7 @@ mod tests {
     fn first_nested_target_pair<F: merkle::Graftable>(
         targets: &BTreeSet<u64>,
     ) -> Option<(u64, u64)> {
-        let positions: Vec<_> = targets
-            .iter()
-            .copied()
-            .map(Position::<F>::new)
-            .collect();
+        let positions: Vec<_> = targets.iter().copied().map(Position::<F>::new).collect();
         for &ancestor in &positions {
             for &descendant in &positions {
                 if ancestor == descendant {
@@ -691,7 +686,10 @@ mod tests {
         let pruned_loc = Location::<F>::new(4);
         let pinned_peaks: Vec<_> = F::nodes_to_pin(pruned_loc).collect();
         let pinned_positions: Vec<_> = pinned_peaks.iter().map(|pos| **pos).collect();
-        let pinned_heights: Vec<_> = pinned_peaks.iter().map(|&pos| F::pos_to_height(pos)).collect();
+        let pinned_heights: Vec<_> = pinned_peaks
+            .iter()
+            .map(|&pos| F::pos_to_height(pos))
+            .collect();
         let recursive = recursive_target_positions::<F, N>(4, 1200);
 
         assert_eq!(
