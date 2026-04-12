@@ -218,11 +218,16 @@ where
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
+    let (metadata, _, _, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
         context.with_label("metadata"),
         &metadata_partition,
     )
     .await?;
+    let rewind_lower_bound = if pruned_chunks > 0 {
+        Some(Location::try_from(any.log.merkle.size())?)
+    } else {
+        None
+    };
 
     // Create the db with an empty grafted root witness. Extending the sync protocol for MMB based
     // databases will require the caller provide the necessary data to compute it.
@@ -234,6 +239,7 @@ where
         thread_pool,
         root,
         grafted_root_witness: db::GraftedRootWitness::default(),
+        rewind_lower_bound,
     };
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.

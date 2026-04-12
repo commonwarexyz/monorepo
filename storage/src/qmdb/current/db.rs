@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -24,6 +24,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             witness,
         },
+        operation::Operation as _,
         Error,
     },
     Context, Persistable,
@@ -36,7 +37,7 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
     sync::AsyncMutex,
 };
-use core::{num::NonZeroU64, ops::Range};
+use core::{mem::size_of, num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
 use std::{collections::BTreeMap, sync::Arc};
@@ -56,6 +57,10 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 /// pruning and rebuilt at each prune cycle; see [`witness::rebuild_grafted_root_witness`] for
 /// the selection algorithm.
 const GRAFTED_ROOT_WITNESS_PREFIX: u8 = 2;
+
+/// Prefix used for the metadata key for the earliest rewind target supported by the persisted
+/// pruned-state metadata.
+const REWIND_LOWER_BOUND_PREFIX: u8 = 3;
 
 pub(super) use super::witness::GraftedRootWitness;
 
@@ -89,7 +94,10 @@ pub struct Db<
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
-    /// - The grafted tree pinned nodes at key [NODE_PREFIX]
+    /// - The grafted tree's pruning-boundary pinned nodes at key [NODE_PREFIX]
+    /// - The grafted root witness (extra non-pinned pruned digests for later root
+    ///   reconstruction) at key [GRAFTED_ROOT_WITNESS_PREFIX]
+    /// - The rewind lower bound at key [REWIND_LOWER_BOUND_PREFIX]
     pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
     /// Optional thread pool for parallelizing grafted leaf computation.
@@ -99,11 +107,14 @@ pub struct Db<
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
 
-    /// Grafted root witness: `(grafted_position, digest)` pairs for non-pinned interior nodes in
-    /// the pruned grafted subtree. Captured before pruning and persisted to metadata so that
-    /// `compute_grafted_root` can resolve nodes that delayed MMB merges expose after the grafted
-    /// Mem has been compacted. Empty when the grafted tree has never been pruned.
+    /// Grafted root witness: `(grafted_position, digest)` pairs for extra non-pinned interior
+    /// nodes in the pruned grafted subtree. Captured before pruning and persisted to metadata so
+    /// that `compute_grafted_root` can resolve nodes that delayed MMB merges expose after the
+    /// grafted `Mem` has been compacted. Empty when the grafted tree has never been pruned.
     pub(super) grafted_root_witness: GraftedRootWitness<H::Digest>,
+
+    /// Smallest rewind target supported by the currently persisted pruned-state metadata.
+    pub(super) rewind_lower_bound: Option<Location<F>>,
 }
 
 // Shared read-only functionality.
@@ -348,6 +359,11 @@ where
     /// prunes only to `prune_loc`, so the bitmap pruning boundary may advance past
     /// [`Db::bounds`].start.
     ///
+    /// Pruning also records the current database size as the rewind lower bound for the persisted
+    /// Current overlay metadata. After a prune, older commit points may still be retained in the
+    /// ops log, but rewinds in `current` are only supported back to that prune-time database size
+    /// (or later) until the next prune updates the bound.
+    ///
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
@@ -388,7 +404,7 @@ where
                         pos,
                         self.grafted_tree
                             .get_node(pos)
-                            .expect("pinned peak must exist"),
+                            .expect("pinned node must exist"),
                     );
                 }
                 let mut retained = Vec::with_capacity((*size - *grafted_prune_pos) as usize);
@@ -409,9 +425,133 @@ where
         // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
+        self.rewind_lower_bound = if pruned_chunks > 0 {
+            Some(Location::<F>::try_from(self.any.log.merkle.size())?)
+        } else {
+            None
+        };
         self.sync_metadata().await?;
 
         self.any.prune(prune_loc).await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// When the bitmap/grafted overlay has been pruned, rewind targets must remain at or above the
+    /// persisted rewind lower bound captured at prune time. That lower bound is the database size
+    /// when the current pruned-state metadata was recorded. As a result, the ops log may still
+    /// retain older commit points that are below `bounds().start` but no longer rewindable in the
+    /// Current overlay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid retained commit target
+    /// - the target is below the bitmap pruning boundary
+    /// - the target is below the persisted rewind lower bound for pruned state, even if it is
+    ///   still retained in the ops log
+    /// - `size - 1` is not a commit operation
+    ///
+    /// Validation errors returned before the underlying Any rewind begins leave this handle usable.
+    /// Once the underlying Any database starts mutating, any later error is fatal for this handle:
+    /// callers must drop it and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
+    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
+        self.flatten();
+
+        let rewind_size = *size;
+        let current_size = *self.any.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
+        let pruned_chunks = self.status.pruned_chunks();
+        let pruned_bits = (pruned_chunks as u64)
+            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
+        if rewind_size < pruned_bits {
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
+        }
+        if let Some(lower_bound) = self.rewind_lower_bound {
+            if size < lower_bound {
+                return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
+            }
+        }
+
+        {
+            let reader = self.any.log.reader().await;
+            let rewind_last_loc = Location::<F>::new(rewind_size - 1);
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::<F>::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < pruned_bits {
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+        }
+
+        let pinned_nodes = if pruned_chunks > 0 {
+            let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
+            let mut pinned_nodes = Vec::new();
+            for pos in F::nodes_to_pin(grafted_leaves) {
+                let digest = self
+                    .grafted_tree
+                    .get_node(pos)
+                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+                pinned_nodes.push(digest);
+            }
+            pinned_nodes
+        } else {
+            Vec::new()
+        };
+
+        let restored_locs = self.any.rewind(size).await?;
+
+        {
+            let BitmapBatch::<N>::Base(base) = &mut self.status else {
+                unreachable!("flatten() guarantees Base");
+            };
+            let status: &mut BitMap<N> = Arc::get_mut(base).expect("flatten ensures sole owner");
+            status.truncate(rewind_size);
+            for loc in &restored_locs {
+                status.set_bit(**loc, true);
+            }
+            status.set_bit(rewind_size - 1, true);
+        }
+        let BitmapBatch::Base(status) = &self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        let status = status.as_ref();
+
+        let hasher = StandardHasher::<H>::new();
+        let grafted_tree = build_grafted_tree::<F, H, N>(
+            &hasher,
+            status,
+            &pinned_nodes,
+            &self.any.log.merkle,
+            self.thread_pool.as_ref(),
+        )
+        .await?;
+        let storage = grafting::Storage::new(
+            &grafted_tree,
+            grafting::height::<N>(),
+            &self.any.log.merkle,
+            &self.grafted_root_witness,
+            hasher.clone(),
+        );
+        let partial_chunk = partial_chunk(status);
+        let ops_root = self.any.log.root();
+        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
+
+        self.grafted_tree = grafted_tree;
+        self.root = root;
+
+        Ok(())
     }
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
@@ -448,6 +588,12 @@ where
             let mut val = pos.to_be_bytes().to_vec();
             val.extend_from_slice(digest.as_ref());
             metadata.put(key, val);
+        }
+
+        // Write the earliest rewind target supported by the persisted pruned-state metadata.
+        if let Some(lower_bound) = self.rewind_lower_bound {
+            let key = U64::new(REWIND_LOWER_BOUND_PREFIX, 0);
+            metadata.put(key, (*lower_bound).to_be_bytes().to_vec());
         }
 
         metadata.sync().await?;
@@ -829,7 +975,7 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
 
 /// Load the metadata and recover the pruning state persisted by previous runs.
 ///
-/// The metadata store holds three kinds of entries (keyed by prefix):
+/// The metadata store holds four kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
@@ -837,8 +983,11 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
 ///   the pruned chunks.
 /// - **Grafted root witness** ([GRAFTED_ROOT_WITNESS_PREFIX]): extra grafted digests retained for
 ///   MMB so delayed merges can still reconstruct pruned grafted nodes after reopen.
+/// - **Rewind lower bound** ([REWIND_LOWER_BOUND_PREFIX]): the earliest rewind target supported by
+///   the persisted pruned-state metadata.
 ///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests, grafted_root_witness)`.
+/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests, grafted_root_witness,
+/// rewind_lower_bound)`.
 pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     context: E,
     partition: &str,
@@ -848,6 +997,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         usize,
         Vec<D>,
         GraftedRootWitness<D>,
+        Option<Location<F>>,
     ),
     Error<F>,
 > {
@@ -915,12 +1065,35 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         grafted_root_witness.push((pos, digest));
     }
     let grafted_root_witness = GraftedRootWitness::from_entries(grafted_root_witness);
+
+    let rewind_lower_bound = match metadata.get(&U64::new(REWIND_LOWER_BOUND_PREFIX, 0)) {
+        Some(bytes) => {
+            let loc =
+                u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
+                    Error::<F>::DataCorrupted("rewind lower bound not a valid u64")
+                })?);
+            let loc = Location::<F>::new(loc);
+            if !loc.is_valid() {
+                return Err(Error::<F>::DataCorrupted(
+                    "rewind lower bound exceeds MAX_LEAVES",
+                ));
+            }
+            Some(loc)
+        }
+        None => None,
+    };
     tracing::debug!(
-        "init_metadata: loaded {} witness entries, pruned_chunks={pruned_chunks}",
-        grafted_root_witness.len()
+        "init_metadata: loaded {} witness entries, pruned_chunks={pruned_chunks}, rewind_lower_bound={rewind_lower_bound:?}",
+        grafted_root_witness.len(),
     );
 
-    Ok((metadata, pruned_chunks, pinned_nodes, grafted_root_witness))
+    Ok((
+        metadata,
+        pruned_chunks,
+        pinned_nodes,
+        grafted_root_witness,
+        rewind_lower_bound,
+    ))
 }
 
 #[cfg(test)]

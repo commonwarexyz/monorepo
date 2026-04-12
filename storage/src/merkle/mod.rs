@@ -71,11 +71,11 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
 
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
-    /// The default implementation returns the peaks of the sub-structure at `prune_loc`,
-    /// which is sufficient for both root computation and re-merkleization of retained leaves.
-    /// Implementations may override to return a conservative superset of the minimally
-    /// required nodes. Callers must therefore treat the result as "safe to retain" rather
-    /// than assuming it is minimal or canonical.
+    /// Pinned nodes are the minimal set of pruned digests required to continue growing the
+    /// structure and recomputing its root after pruning. The default implementation returns the
+    /// peaks of the sub-structure at `prune_loc`, which is sufficient for both root computation
+    /// and re-merkleization of retained leaves. Implementations may override this if their family
+    /// requires a different canonical pinned-node set for the pruning boundary.
     ///
     /// # Panics
     ///

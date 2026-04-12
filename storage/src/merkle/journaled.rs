@@ -151,9 +151,9 @@ pub struct Journaled<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
     /// Stores all unpruned nodes.
     pub(crate) journal: Journal<E, D>,
 
-    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation), and the
-    /// corresponding pruning boundary used to generate them. The metadata remains empty until
-    /// pruning is invoked, and its contents change only when the pruning boundary moves.
+    /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
+    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and
+    /// its contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Serializes concurrent sync calls.
@@ -816,7 +816,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     ///
     /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
     /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to
-    /// O(log n) pinned peaks. A batch pop would expose new peaks that are not in memory, and
+    /// O(log n) pinned nodes. A batch pop would expose new peaks that are not in memory, and
     /// `merkleize` cannot load them because [`Readable::get_node`] is synchronous. `rewind`
     /// performs async journal I/O to rebuild state at the target position.
     pub(crate) async fn rewind(

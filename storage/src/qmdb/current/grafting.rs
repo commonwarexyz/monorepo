@@ -382,7 +382,8 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
 /// height, positions are mapped into grafted space. Plain grafted-tree lookup is not sufficient
 /// for pruned MMB state, because delayed merges can later query grafted ancestors that were
 /// compacted away. This storage fills that gap by reconstructing missing pruned grafted nodes from
-/// still-materialized grafted nodes, pinned descendants, and persisted witness digests.
+/// the compacted grafted tree's pinned boundary plus the persisted grafted root witness, using
+/// still-materialized grafted nodes, pinned descendants, and root-witness digests as needed.
 pub(super) struct Storage<
     'a,
     F: Graftable,
@@ -1044,7 +1045,7 @@ mod tests {
             .merkleize(&grafted, &grafted_hasher);
         grafted.apply_batch(&batch).unwrap();
 
-        // The pinned peak should be at grafted position 6.
+        // The pinned node should be at grafted position 6.
         assert_eq!(grafted.get_node(Position::new(6)), Some(pinned_digest));
 
         // The new leaf at chunk 4 (grafted pos 7) should be retrievable.

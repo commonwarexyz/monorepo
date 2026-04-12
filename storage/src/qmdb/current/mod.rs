@@ -3,8 +3,8 @@
 //!
 //! # Examples
 //!
-//! See [`crate::qmdb::any`] for batch API examples (forking, sequential
-//! commit, staleness). The Current layer uses the same batch API.
+//! See [`crate::qmdb::any`] for batch API examples (forking, sequential commit, staleness). The
+//! Current layer uses the same batch API.
 //!
 //! # Motivation
 //!
@@ -20,24 +20,25 @@
 //!
 //! A Current database ([db::Db]) wraps an Any database and adds:
 //!
-//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if
-//!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
-//!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
+//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
+//!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
+//!   8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted tree**: An in-memory Merkle structure of digests at and above the
-//!   _grafting height_ in the ops tree. This is the core of how bitmap and ops state are combined
-//!   into a single authenticated structure (see below).
+//! - **Grafted tree**: An in-memory Merkle structure of digests at and above the _grafting height_
+//!   in the ops tree. This is the core of how bitmap and ops state are combined into a single
+//!   authenticated structure (see below).
 //!
-//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed
-//!   to restore the grafted tree after pruning old bitmap chunks.
+//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary, the grafted tree's pinned
+//!   peaks, and any extra grafted root-witness digests needed to restore and query the grafted tree
+//!   after pruning old bitmap chunks.
 //!
 //! # Grafting: combining the activity status bitmap and the ops tree
 //!
 //! ## The problem
 //!
 //! Naively authenticating the bitmap and ops tree as two independent Merkle structures would
-//! require two separate proofs per operation -- one for the operation's value, one for its
-//! activity status. This doubles proof sizes.
+//! require two separate proofs per operation -- one for the operation's value, one for its activity
+//! status. This doubles proof sizes.
 //!
 //! ## The solution
 //!
@@ -56,14 +57,14 @@
 //! The all-zero identity means that for pruned regions (where every operation is inactive), the
 //! grafted tree is structurally identical to the ops tree at and above the grafting height.
 //!
-//! Above the grafting height, internal nodes use standard hashing over the grafted leaves.
-//! Below the grafting height, the ops tree is unchanged.
+//! Above the grafting height, internal nodes use standard hashing over the grafted leaves. Below
+//! the grafting height, the ops tree is unchanged.
 //!
 //! ## Example
 //!
-//! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate
-//! the structure more clearly, let's use a smaller example: 8 operations with chunk size 4 bits
-//! (`h = 2`), yielding 2 complete bitmap chunks:
+//! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate the
+//! structure more clearly, let's use a smaller example: 8 operations with chunk size 4 bits (`h =
+//! 2`), yielding 2 complete bitmap chunks:
 //!
 //! ```text
 //! Ops tree positions (8 leaves):
@@ -91,9 +92,8 @@
 //! Position 14 (above grafting height) is a standard internal node:
 //! - `pos 14: hash(14 || digest(pos 6) || digest(pos 13))`
 //!
-//! The grafted tree stores positions 6, 13, and 14. The ops tree stores everything below
-//! (positions 0-5 and 7-12). Together they form a single virtual Merkle structure whose root
-//! authenticates
+//! The grafted tree stores positions 6, 13, and 14. The ops tree stores everything below (positions
+//! 0-5 and 7-12). Together they form a single virtual Merkle structure whose root authenticates
 //! both the operations and their activity status.
 //!
 //! ## Proof generation and verification
@@ -104,29 +104,29 @@
 //!
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
-//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks
-//! the grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf
-//! is the ops subtree root itself (identity optimization -- see `grafting::Verifier::node`).
-//! Above the grafting height, it resumes standard hashing. If the reconstructed root
-//! matches the expected root and bit _i_ is set in the chunk, the operation is proven active.
+//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
+//! grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf is the
+//! ops subtree root itself (identity optimization -- see `grafting::Verifier::node`). Above the
+//! grafting height, it resumes standard hashing. If the reconstructed root matches the expected
+//! root and bit _i_ is set in the chunk, the operation is proven active.
 //!
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
 //!
 //! ## Partial chunks
 //!
-//! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
-//! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops tree. To still authenticate these bits, the partial
-//! chunk's digest and bit count are folded into the canonical root hash:
+//! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than `N *
+//! 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no corresponding
+//! complete subtree in the ops tree. To still authenticate these bits, the partial chunk's digest
+//! and bit count are folded into the canonical root hash:
 //!
 //! ```text
 //! root = hash(ops_root || grafted_root || next_bit || hash(partial_chunk))
 //! ```
 //!
-//! where `next_bit` is the index of the next unset position in the partial chunk and
-//! `grafted_root` is the root of the grafted tree (which covers only complete chunks).
-//! When all chunks are complete, the partial chunk components are omitted.
+//! where `next_bit` is the index of the next unset position in the partial chunk and `grafted_root`
+//! is the root of the grafted tree (which covers only complete chunks). When all chunks are
+//! complete, the partial chunk components are omitted.
 //!
 //! ## Incremental updates
 //!
@@ -137,10 +137,16 @@
 //!
 //! ## Pruning
 //!
-//! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted
-//! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
-//! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
-//! allowing the grafted tree to be rebuilt without the pruned chunks.
+//! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted digest
+//! peaks covering the pruned region are persisted to metadata as pinned nodes. These are the
+//! pruning-boundary digests needed to reopen the compacted grafted tree and keep growing it. On
+//! recovery, the pinned nodes are loaded and serve as opaque siblings during upward propagation,
+//! allowing the grafted tree to be rebuilt without the pruned chunks. For MMB, extra grafted
+//! root-witness digests may also be persisted for pruned interior nodes that are not part of the
+//! pruning boundary but may still be needed later for root reconstruction. Pruning also freezes the
+//! oldest rewindable `current` state at the database size when prune-time metadata was recorded.
+//! The ops log may still retain older commit points, but the Current overlay only supports
+//! rewinding back to that prune-time size (or later) until pruning occurs again.
 //!
 //! # Root structure
 //!
@@ -150,8 +156,8 @@
 //! root = hash(ops_root || grafted_root [|| next_bit || hash(partial_chunk)])
 //! ```
 //!
-//! where `grafted_root` is the root of the grafted tree (covering only complete
-//! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
+//! where `grafted_root` is the root of the grafted tree (covering only complete bitmap chunks),
+//! `next_bit` is the index of the next unset position in the partial chunk, and
 //! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
 //! components are only present when the last bitmap chunk is incomplete.
 //!
@@ -161,21 +167,21 @@
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
 //!   against this root using standard Merkle range proofs.
 //!
-//! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
-//!   with ops subtree roots). Used for proofs about operation values and their activity status.
-//!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks with ops subtree
+//!   roots). Used for proofs about operation values and their activity status. See
+//!   [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
 //!
 //! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
 //!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
-//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
-//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
-//! verifies batches against the ops root, not the canonical root.
+//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
+//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
+//! against the ops root, not the canonical root.
 //!
-//! For state sync, the sync engine targets the ops root and verifies each batch against it.
-//! After sync, the bitmap and grafted tree are reconstructed deterministically from the
-//! operations, and the canonical root is computed. Validating that the ops root is part of the
-//! canonical root is the caller's responsibility; the sync engine does not perform this check.
+//! For state sync, the sync engine targets the ops root and verifies each batch against it. After
+//! sync, the bitmap and grafted tree are reconstructed deterministically from the operations, and
+//! the canonical root is computed. Validating that the ops root is part of the canonical root is
+//! the caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -275,8 +281,8 @@ where
     let thread_pool = config.merkle_config.thread_pool.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes, witness) =
+    // Load persisted pruning metadata for the grafted tree and rewind safety.
+    let (metadata, pruned_chunks, pinned_nodes, witness, persisted_rewind_lower_bound) =
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
@@ -320,6 +326,11 @@ where
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
     let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
+    let rewind_lower_bound = if pruned_chunks > 0 {
+        persisted_rewind_lower_bound.or(Some(Location::<F>::try_from(any.log.merkle.size())?))
+    } else {
+        None
+    };
 
     Ok(db::Db {
         any,
@@ -329,6 +340,7 @@ where
         thread_pool,
         root,
         grafted_root_witness: witness,
+        rewind_lower_bound,
     })
 }
 
@@ -1353,11 +1365,15 @@ pub mod tests {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
-    async fn commit_writes_with_metadata(
-        db: &mut UnorderedVariableDb,
-        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
-        metadata: Option<Digest>,
-    ) -> std::ops::Range<Location<mmr::Family>> {
+    async fn commit_writes_with_metadata<F, C>(
+        db: &mut C,
+        writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)>,
+        metadata: Option<C::Value>,
+    ) -> std::ops::Range<Location<F>>
+    where
+        F: merkle::Graftable,
+        C: DbAny<F>,
+    {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -1366,6 +1382,314 @@ pub mod tests {
         let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         range
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-rewind-recovery";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+            let initial_size = db.bounds().await.end;
+            let initial_root = db.root();
+            let initial_ops_root = db.ops_root();
+            let initial_floor = db.inactivity_floor_loc();
+
+            let metadata_a = val(900);
+            let first_range = commit_writes_with_metadata(
+                &mut db,
+                [(key(0), Some(val(0))), (key(1), Some(val(1)))],
+                Some(metadata_a),
+            )
+            .await;
+            assert_eq!(first_range.start, initial_size);
+            let size_before = db.bounds().await.end;
+            let root_before = db.root();
+            let ops_root_before = db.ops_root();
+            let floor_before = db.inactivity_floor_loc();
+            assert_eq!(size_before, first_range.end);
+
+            let metadata_b = val(901);
+            let second_range = commit_writes_with_metadata(
+                &mut db,
+                [
+                    (key(0), Some(val(100))),
+                    (key(1), None),
+                    (key(2), Some(val(2))),
+                ],
+                Some(metadata_b),
+            )
+            .await;
+            assert_eq!(second_range.start, size_before);
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(val(901)));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.ops_root(), ops_root_before);
+            assert_eq!(db.inactivity_floor_loc(), floor_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), None);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await.end, size_before);
+            assert_eq!(reopened.root(), root_before);
+            assert_eq!(reopened.ops_root(), ops_root_before);
+            assert_eq!(reopened.inactivity_floor_loc(), floor_before);
+            assert_eq!(reopened.get_metadata().await.unwrap(), Some(val(900)));
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
+
+            let mut reopened = reopened;
+            reopened.rewind(initial_size).await.unwrap();
+            assert_eq!(reopened.bounds().await.end, initial_size);
+            assert_eq!(reopened.root(), initial_root);
+            assert_eq!(reopened.ops_root(), initial_ops_root);
+            assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
+
+            reopened.commit().await.unwrap();
+            drop(reopened);
+
+            let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_initial"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened_initial.bounds().await.end, initial_size);
+            assert_eq!(reopened_initial.root(), initial_root);
+            assert_eq!(reopened_initial.ops_root(), initial_ops_root);
+            assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened_initial.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(2)).await.unwrap(), None);
+
+            reopened_initial.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_mmb_rewind_recovery_pruned_repeated_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 160;
+            const POST_PRUNE_COMMITS: u64 = 4;
+
+            let partition = "current-mmb-rewind-pruned-recovery";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let key0 = key(0);
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(20_000 + round)))], None)
+                    .await;
+            }
+
+            while *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() < 383 {
+                let round = db.bounds().await.end.as_u64();
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(20_000 + round)))], None)
+                    .await;
+            }
+
+            let target_size = db.bounds().await.end;
+            let target_root = db.root();
+            let target_ops_root = db.ops_root();
+            let target_value = db.get(&key0).await.unwrap();
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            assert!(
+                db.pruned_bits() > 0,
+                "expected bitmap pruning for rewind test"
+            );
+
+            for round in 0..POST_PRUNE_COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(30_000 + round)))], None)
+                    .await;
+            }
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.get(&key0).await.unwrap(), target_value);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.with_label("reopen_pruned_recovery"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.get(&key0).await.unwrap(), target_value);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_small_delta_large_history() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 200;
+
+            let partition = "current-rewind-small-delta";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            let key1 = key(1);
+            let mut history = Vec::new();
+
+            for round in 0..COMMITS {
+                let key0_value = val(40_000 + round);
+                let key1_value = if round % 3 == 1 {
+                    None
+                } else {
+                    Some(val(50_000 + round))
+                };
+
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key0, Some(key0_value)), (key1, key1_value)],
+                    None,
+                )
+                .await;
+
+                history.push((
+                    db.bounds().await.end,
+                    db.root(),
+                    db.ops_root(),
+                    key0_value,
+                    key1_value,
+                ));
+            }
+
+            let target = *history
+                .get(history.len() - 3)
+                .expect("history should contain at least three commits");
+            let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(db.get(&key1).await.unwrap(), target_key1);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_small_delta"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(reopened.get(&key1).await.unwrap(), target_key1);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_mmb_rewind_rejects_target_below_rewind_lower_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 160;
+
+            let partition = "current-mmb-rewind-lower-bound";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let key0 = key(0);
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(70_000 + round)))], None)
+                    .await;
+                history.push(db.bounds().await.end);
+            }
+
+            while *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap() < 383 {
+                let round = db.bounds().await.end.as_u64();
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(70_000 + round)))], None)
+                    .await;
+                history.push(db.bounds().await.end);
+            }
+
+            let current_root = db.root();
+            let current_ops_root = db.ops_root();
+            let current_value = db.get(&key0).await.unwrap();
+            let previous_commit_size = *history
+                .get(history.len() - 2)
+                .expect("history should contain a previous commit");
+
+            db.prune(Location::new(1)).await.unwrap();
+            assert!(
+                db.pruned_bits() > 0,
+                "expected bitmap pruning for rewind test"
+            );
+
+            let err = db.rewind(previous_commit_size).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc))
+                    if loc + 1 == *previous_commit_size
+                ),
+                "expected rewind target below persisted lower bound to be rejected, got {err:?}"
+            );
+            assert_eq!(db.root(), current_root);
+            assert_eq!(db.ops_root(), current_ops_root);
+            assert_eq!(db.get(&key0).await.unwrap(), current_value);
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]

@@ -1,9 +1,11 @@
-//! Extra witness data for recomputing grafted roots after pruning `current` state.
+//! Extra root-witness data for recomputing grafted roots after pruning `current` state.
 //!
 //! For MMR, the pruned grafted tree's pinned nodes are enough to reopen the tree and recompute the
 //! canonical grafted root. For MMB, delayed merges can later expose pruned grafted interior nodes
 //! that are no longer individually materialized, so pinned nodes alone are not always enough. This
-//! module persists the small extra set of grafted digests needed to bridge that gap.
+//! module persists the small extra set of grafted digests needed to bridge that gap. A grafted
+//! root witness is an extra non-pinned pruned digest retained solely for later root
+//! reconstruction.
 //!
 //! `rebuild_grafted_root_witness()` works in three steps:
 //! 1. Predict which pruned grafted nodes can still become relevant as future MMB peaks.
@@ -32,7 +34,7 @@ use std::collections::BTreeSet;
 /// Ordinary pinned nodes are enough to reopen the pruned grafted `Mem`, but for MMB they are not
 /// always enough to recompute the canonical grafted root after delayed merges expose pruned
 /// interior nodes that are no longer individually materialized. This witness stores the small set
-/// of additional grafted digests needed to bridge that gap.
+/// of additional non-pinned grafted digests needed to bridge that gap.
 ///
 /// Entries are kept sorted by grafted position so they can be persisted directly and queried with
 /// binary search during root reconstruction.
