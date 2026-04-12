@@ -197,7 +197,8 @@ where
     // from the ops).
     let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
     let partial = db::partial_chunk(&status);
-    let grafted_root = db::compute_grafted_root(&hasher, &status, &storage).await?;
+    let empty_witness = db::GraftedRootWitness::default();
+    let grafted_root = db::compute_grafted_root(&hasher, &status, &storage, &empty_witness).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -211,19 +212,22 @@ where
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
+    let (metadata, _, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
         context.with_label("metadata"),
         &metadata_partition,
     )
     .await?;
 
+    // Create the db with an empty grafted root witness. Extending the sync protocol for MMB based
+    // databases will require the caller provide the necessary data to compute it.
     let current_db = db::Db {
-        any,
         status: crate::qmdb::current::batch::BitmapBatch::Base(Arc::new(status)),
+        any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
+        grafted_root_witness: db::GraftedRootWitness::default(),
     };
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.

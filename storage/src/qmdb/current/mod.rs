@@ -204,6 +204,7 @@ use std::sync::Arc;
 pub mod batch;
 pub mod db;
 mod grafting;
+mod witness;
 
 pub mod ordered;
 pub mod proof;
@@ -275,7 +276,7 @@ where
     let metadata_partition = config.grafted_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
+    let (metadata, pruned_chunks, pinned_nodes, witness) =
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
@@ -312,7 +313,15 @@ where
     let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(
+        &hasher,
+        &status,
+        &storage,
+        &witness,
+        partial_chunk,
+        &ops_root,
+    )
+    .await?;
 
     Ok(db::Db {
         any,
@@ -321,6 +330,7 @@ where
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
+        grafted_root_witness: witness,
     })
 }
 
@@ -359,7 +369,7 @@ pub mod tests {
         deterministic::{self, Context},
         BufferPooler, Metrics as _, Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{bitmap::Prunable as BitMap, NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -1472,7 +1482,7 @@ pub mod tests {
     fn test_current_rewind_recovery_pruned_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            const COMMITS: u64 = 96;
+            const COMMITS: u64 = 160;
 
             let partition = "current-rewind-pruned-recovery";
             let ctx = context.with_label("db");
@@ -1482,7 +1492,6 @@ pub mod tests {
                     .unwrap();
 
             let key0 = key(0);
-            let mut history = Vec::new();
             for round in 0..COMMITS {
                 commit_writes_with_metadata(
                     &mut db,
@@ -1490,39 +1499,37 @@ pub mod tests {
                     None,
                 )
                 .await;
-                history.push((
-                    db.bounds().await.end,
-                    db.inactivity_floor_loc(),
-                    db.root(),
-                    db.ops_root(),
-                    val(20_000 + round),
-                ));
             }
 
-            // Keep most ops-log history, but force bitmap pruning so rewind uses pinned-node
-            // reconstruction (`pruned_chunks > 0` path).
+            // A tiny requested prune still advances the bitmap/grafted overlay to the inactivity
+            // floor, which gives us pruned chunks while retaining more ops-log history for rewind
+            // testing.
+            assert!(
+                *db.inactivity_floor_loc() >= 256,
+                "expected inactivity floor past the first bitmap chunk"
+            );
             db.prune(Location::new(1)).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
             let bounds = db.bounds().await;
 
-            let (target_size, target_root, target_ops_root, target_value) = history
-                .iter()
-                .enumerate()
-                .find_map(|(idx, (size, floor, root, ops_root, value))| {
-                    let removed_commits = history.len() - idx - 1;
-                    if removed_commits >= 3 && *size > bounds.start && *floor >= pruned_bits {
-                        Some((*size, *root, *ops_root, *value))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected legal pruned rewind target with repeated updates; bounds={bounds:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
-                        db.inactivity_floor_loc()
-                    )
-                });
+            // Add several repeated updates after pruning so rewind can target retained history
+            // while still exercising the pruned-state reconstruction path.
+            let mut post_prune_history = Vec::new();
+            for round in 0..6 {
+                let value = val(30_000 + round);
+                commit_writes_with_metadata(&mut db, [(key0, Some(value))], None).await;
+                post_prune_history.push((db.bounds().await.end, db.root(), db.ops_root(), value));
+            }
+
+            let target = *post_prune_history
+                .get(post_prune_history.len() - 4)
+                .expect("post-prune history should contain a rewindable target");
+            let (target_size, target_root, target_ops_root, target_value) = target;
+            assert!(
+                target_size > bounds.start,
+                "rewind target must remain above retained floor: target={target_size:?}, bounds={bounds:?}, pruned_bits={pruned_bits}"
+            );
 
             db.rewind(target_size).await.unwrap();
             assert_eq!(db.root(), target_root);
@@ -1585,6 +1592,66 @@ pub mod tests {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_current_prune_rejects_beyond_inactivity_floor_without_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 160;
+
+            let partition = "current-prune-beyond-floor";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(40_000 + round)))], None)
+                    .await;
+            }
+
+            let expected_bounds = db.bounds().await;
+            let expected_root = db.root();
+            let expected_ops_root = db.ops_root();
+            let expected_floor = db.inactivity_floor_loc();
+            let expected_pruned_bits = db.pruned_bits();
+            let expected_value = db.get(&key0).await.unwrap();
+
+            let invalid_prune_loc = Location::new(*expected_floor + BitMap::<32>::CHUNK_SIZE_BITS);
+            let result = db.prune(invalid_prune_loc).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
+                    if loc == invalid_prune_loc && floor == expected_floor),
+                "expected prune rejection above inactivity floor, got {result:?}"
+            );
+
+            assert_eq!(db.bounds().await, expected_bounds);
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.ops_root(), expected_ops_root);
+            assert_eq!(db.inactivity_floor_loc(), expected_floor);
+            assert_eq!(db.pruned_bits(), expected_pruned_bits);
+            assert_eq!(db.get(&key0).await.unwrap(), expected_value);
+
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_invalid_prune"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await, expected_bounds);
+            assert_eq!(reopened.root(), expected_root);
+            assert_eq!(reopened.ops_root(), expected_ops_root);
+            assert_eq!(reopened.inactivity_floor_loc(), expected_floor);
+            assert_eq!(reopened.pruned_bits(), expected_pruned_bits);
+            assert_eq!(reopened.get(&key0).await.unwrap(), expected_value);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
     /// Verify that reopening and proving a pruned MMB database does not panic when the pruned
     /// prefix contains sub-grafting-height peaks that require chunk regrouping.
     ///
@@ -1624,7 +1691,7 @@ pub mod tests {
                 "expected inactivity floor past chunk 0"
             );
 
-            db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.pruned_bits(), 256);
             db.sync().await.unwrap();
             drop(db);
@@ -1643,6 +1710,78 @@ pub mod tests {
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
             let mut hasher = commonware_cryptography::Sha256::new();
             let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_current_mmb_reopen_and_prove_after_prune_delayed_merge() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+
+            // Append enough history to prune at least two full chunks, then keep appending without
+            // pruning again so delayed MMB merges occur inside the already-pruned region.
+            for round in 0..200u64 {
+                let mut batch = db.new_batch();
+                batch = batch.write(k, Some(val(60_000 + round)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.sync().await.unwrap();
+
+            for round in 200..300u64 {
+                let mut batch = db.new_batch();
+                batch = batch.write(key(1), Some(val(round)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &db.root()
+            ));
+
+            let target_root = db.root();
+            drop(db);
+
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &reopened.root()
+            ));
 
             reopened.destroy().await.unwrap();
         });
@@ -1794,51 +1933,54 @@ pub mod tests {
 
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                commit_writes_with_metadata(
-                    &mut db,
-                    [(key(0), Some(val(10_000 + round)))],
-                    None,
-                )
-                .await;
-                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+                commit_writes_with_metadata(&mut db, [(key(0), Some(val(10_000 + round)))], None)
+                    .await;
+                history.push((
+                    db.bounds().await.end,
+                    db.root(),
+                    db.ops_root(),
+                    Some(val(10_000 + round)),
+                ));
             }
             assert!(db.inactivity_floor_loc() > Location::new(64));
+            let expected_root = db.root();
+            let expected_ops_root = db.ops_root();
+            let expected_value = db.get(&key(0)).await.unwrap();
 
-            // Intentionally prune less than the inactivity floor: log retains older ops, but the
-            // bitmap still prunes to inactivity floor.
-            let prune_loc = Location::new(1);
+            // A tiny requested prune still advances the bitmap to the inactivity floor, so rewind
+            // targets that are retained in the log can still be below the bitmap floor.
+            let prune_loc = Location::new(32);
             db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
-            assert!(pruned_bits > 0);
-            let retained_start = db.bounds().await.start;
-
-            // Pick a historical commit that is still within retained log bounds but whose floor is
-            // below the bitmap pruning boundary.
-            let rewind_target = history
-                .iter()
-                .find_map(|(size, floor)| {
-                    if *size > *retained_start
-                        && *size >= pruned_bits
-                        && *floor >= *retained_start
-                        && *floor < pruned_bits
-                    {
-                        Some(*size)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected rewind target below bitmap boundary. retained_start={retained_start:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
-                        db.inactivity_floor_loc()
-                    )
-                });
-
-            let err = db.rewind(rewind_target).await.unwrap_err();
             assert!(
-                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
-                "unexpected rewind error: {err:?}"
+                pruned_bits > 0,
+                "bitmap should still prune to inactivity floor: floor={:?}",
+                db.inactivity_floor_loc()
             );
+            let retained_start = db.bounds().await.start;
+            assert!(
+                retained_start <= prune_loc,
+                "ops-log prune should still honor the requested boundary: start={retained_start:?}, prune_loc={prune_loc:?}"
+            );
+
+            let (target_size, _, _, _) = history
+                .iter()
+                .copied()
+                .find(|(size, _, _, _)| *size > retained_start && **size <= pruned_bits)
+                .expect("expected retained target below bitmap floor");
+
+            let err = db.rewind(target_size).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc))
+                    if loc + 1 == *target_size
+                ),
+                "expected rewind target below bitmap floor to be rejected: target={target_size:?}, err={err:?}"
+            );
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.ops_root(), expected_ops_root);
+            assert_eq!(db.get(&key(0)).await.unwrap(), expected_value);
 
             db.destroy().await.unwrap();
         });
@@ -2797,6 +2939,106 @@ pub mod tests {
 
             db.destroy().await.unwrap();
             ref_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_current_mmb_reopen_after_prune_two_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            // 200 commits with a single key: generates enough ops to push the inactivity floor past
+            // 2 full chunks (CHUNK_SIZE_BITS = 256 for N=32).
+            let k = key(0);
+            let mut expected = None;
+            for round in 0..200u64 {
+                expected = Some(val(60_000 + round));
+                let mut batch = db.new_batch();
+                batch = batch.write(k, expected);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+
+            assert!(
+                *db.inactivity_floor_loc() >= 512,
+                "expected inactivity floor past chunk 1, got {}",
+                *db.inactivity_floor_loc()
+            );
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            assert!(db.pruned_bits() >= 512, "expected 2+ pruned chunks");
+            db.sync().await.unwrap();
+
+            let target_root = db.root();
+
+            drop(db);
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.get(&k).await.unwrap(), expected);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_current_mmb_repeated_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..3u64 {
+                let k = key(round * 1000);
+                let mut expected = None;
+                for i in 0..90 {
+                    expected = Some(val(round * 1000 + i));
+                    let mut batch = db.new_batch();
+                    batch = batch.write(k, expected);
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
+                    db.commit().await.unwrap();
+                }
+
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.sync().await.unwrap();
+
+                let root_before = db.root();
+                db_ctx = context.with_label(&format!("db_{round}"));
+
+                // Reopen and verify root + data
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_prune", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(db.root(), root_before);
+                assert_eq!(db.get(&k).await.unwrap(), expected);
+
+                drop(prev_db);
+            }
         });
     }
 }

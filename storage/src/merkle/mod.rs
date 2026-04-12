@@ -159,6 +159,27 @@ pub trait Graftable: Family {
     /// Panics if `height` is excessively large (e.g., `>= 63`), or if an invalid combination of
     /// `pos` and `height` results in arithmetic underflow/overflow.
     fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
+
+    /// Return the leaf count at which the node at `pos` with the given `height` is first fully
+    /// formed and can appear as an independent peak.
+    ///
+    /// Families without delayed merging (such as MMR) use the default implementation: a node is
+    /// born as soon as its rightmost leaf is appended.
+    ///
+    /// Current callers use this to:
+    /// - predict which pruned MMB nodes may still become future witness targets
+    /// - detect whether the last complete grafted chunk in `current::batch` can still evolve
+    ///   after `chunk_end`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the derived birth size
+    /// overflows the bounds of the underlying numeric types.
+    fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
+        let leftmost = *Self::leftmost_leaf(pos, height);
+        let width = 1u64.checked_shl(height).expect("height excessively large");
+        leftmost.checked_add(width).expect("birth size overflow")
+    }
 }
 
 /// Errors that can occur when interacting with a Merkle-family data structure.

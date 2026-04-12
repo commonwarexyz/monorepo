@@ -22,6 +22,7 @@ use crate::{
             batch::BitmapBatch,
             grafting,
             proof::{OperationProof, RangeProof},
+            witness,
         },
         operation::Operation as _,
         Error,
@@ -47,6 +48,16 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
+
+/// Prefix used for the metadata key for grafted root witness digests.
+///
+/// These are the grafted-tree digests for every ops peak at height >= grafting_height in the
+/// complete-chunk region. They are captured before pruning (when the grafted tree is fully
+/// materialized) and consumed on reopen by `compute_grafted_root` to avoid reading pruned
+/// grafted interior nodes that may not be individually stored in the grafted Mem.
+const GRAFTED_ROOT_WITNESS_PREFIX: u8 = 2;
+
+pub(super) use super::witness::GraftedRootWitness;
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
@@ -87,6 +98,12 @@ pub struct Db<
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
+
+    /// Grafted root witness: grafted-tree digests for ops peaks at height >= grafting_height
+    /// in the complete-chunk region. Captured before pruning and persisted to metadata so that
+    /// reopen can reconstruct the canonical root without reading pruned grafted interior nodes.
+    /// Empty when the grafted tree has never been pruned.
+    pub(super) grafted_root_witness: GraftedRootWitness<H::Digest>,
 }
 
 // Shared read-only functionality.
@@ -263,6 +280,17 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
+    /// Rebuild the grafted root witness from the current grafted tree state.
+    pub(super) fn capture_grafted_root_witness(&mut self) -> Result<(), Error<F>> {
+        let ops_size = self.any.log.merkle.size();
+        witness::rebuild_grafted_root_witness::<F, H::Digest, _, N>(
+            &self.grafted_tree,
+            ops_size,
+            self.status.pruned_chunks() as u64,
+            &mut self.grafted_root_witness,
+        )
+    }
+
     /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
     ///
     /// Each [`Db::apply_batch`] pushes a new `Layer` on the bitmap. These layers are cheap
@@ -278,21 +306,35 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// The bitmap is unconditionally pruned to the inactivity floor, while the ops log still prunes
+    /// only to `prune_loc`. As a result, the bitmap pruning boundary may advance past
+    /// [`Db::bounds`].start, and some log-retained history may no longer be rewindable because the
+    /// bitmap chunks needed to reconstruct historical activity state have already been discarded.
+    ///
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` >
+    ///   [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let inactivity_floor = self.inactivity_floor_loc();
+        if prune_loc > inactivity_floor {
+            return Err(Error::PruneBeyondMinRequired(prune_loc, inactivity_floor));
+        }
+
         self.flatten();
 
-        // Prune bitmap chunks below the inactivity floor.
+        // The Current overlay can safely prune bitmap/grafted state all the way to the
+        // inactivity floor, even if the caller requests a smaller ops-log prune. Operations
+        // below that floor are known inactive, so their bitmap chunks are dead history.
         let BitmapBatch::<N>::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
-        Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
+        Arc::make_mut(base).prune_to_bit(*inactivity_floor);
 
         // Prune the grafted tree to match the bitmap's pruned chunks.
         let pruned_chunks = self.status.pruned_chunks() as u64;
+        self.capture_grafted_root_witness()?;
         if pruned_chunks > 0 {
             let prune_loc_grafted = Location::<F>::new(pruned_chunks);
             let bounds_start = self.grafted_tree.bounds().start;
@@ -348,9 +390,10 @@ where
     /// - `size - 1` is not a commit operation
     /// - `size` is below the bitmap pruning boundary
     ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate state in the
-    /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
-    /// this database handle after any `Err` from `rewind` and reopen from storage.
+    /// Validation errors returned before the underlying Any rewind begins (for example
+    /// `InvalidRewind` or `ItemPruned`) leave this handle usable. Once the underlying Any
+    /// database starts mutating, any later error is fatal for this handle: callers must drop it
+    /// and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
@@ -441,7 +484,15 @@ where
             grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &self.any.log.merkle);
         let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
-        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
+        let root = compute_db_root(
+            &hasher,
+            status,
+            &storage,
+            &self.grafted_root_witness,
+            partial_chunk,
+            &ops_root,
+        )
+        .await?;
 
         self.grafted_tree = grafted_tree;
         self.root = root;
@@ -470,6 +521,20 @@ where
                 .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
+        }
+
+        // Write the grafted root witness (captured by capture_grafted_root_witness before
+        // the grafted tree was pruned).
+        for (i, &(pos, digest)) in self
+            .grafted_root_witness
+            .persisted_entries()
+            .iter()
+            .enumerate()
+        {
+            let key = U64::new(GRAFTED_ROOT_WITNESS_PREFIX, i as u64);
+            let mut val = pos.to_be_bytes().to_vec();
+            val.extend_from_slice(digest.as_ref());
+            metadata.put(key, val);
         }
 
         metadata.sync().await?;
@@ -644,10 +709,11 @@ pub(super) async fn compute_db_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &grafting::Storage<'_, F, H::Digest, G, S>,
+    witness: &GraftedRootWitness<H::Digest>,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
-    let grafted_root = compute_grafted_root(hasher, status, storage).await?;
+    let grafted_root = compute_grafted_root(hasher, status, storage, witness).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
@@ -680,21 +746,28 @@ pub(super) async fn compute_grafted_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &grafting::Storage<'_, F, H::Digest, G, S>,
+    witness: &GraftedRootWitness<H::Digest>,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)?;
 
-    // Collect peak digests of the grafted structure.
+    // Collect peak digests of the grafted structure. For peaks at height >= grafting_height,
+    // if the grafted Mem doesn't have the node (pruned interior), look it up in the witness
+    // by grafted position.
+    let grafting_height = grafting::height::<N>();
     let mut peaks: Vec<H::Digest> = Vec::new();
     for (peak_pos, _) in F::peaks(size) {
-        let digest = storage
-            .get_node(peak_pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingNode(peak_pos))?;
+        let digest = if let Some(digest) = storage.get_node(peak_pos).await? {
+            digest
+        } else {
+            let grafted_pos = grafting::ops_to_grafted_pos::<F>(peak_pos, grafting_height);
+            witness
+                .get(*grafted_pos)
+                .copied()
+                .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?
+        };
         peaks.push(digest);
     }
-
-    let grafting_height = grafting::height::<N>();
     let complete_chunks = status.complete_chunks() as u64;
     let pruned_chunks = status.pruned_chunks() as u64;
 
@@ -863,7 +936,15 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
 pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     context: E,
     partition: &str,
-) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
+) -> Result<
+    (
+        Metadata<E, U64, Vec<u8>>,
+        usize,
+        Vec<D>,
+        GraftedRootWitness<D>,
+    ),
+    Error<F>,
+> {
     let metadata_cfg = MConfig {
         partition: partition.into(),
         codec_config: ((0..).into(), ()),
@@ -908,7 +989,29 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         Vec::new()
     };
 
-    Ok((metadata, pruned_chunks, pinned_nodes))
+    // Load the grafted root witness (may be empty for fresh databases or MMR).
+    let mut grafted_root_witness = Vec::new();
+    for idx in 0u64.. {
+        let key = U64::new(GRAFTED_ROOT_WITNESS_PREFIX, idx);
+        let Some(bytes) = metadata.get(&key) else {
+            break;
+        };
+        let pos = u64::from_be_bytes(
+            bytes[0..8]
+                .try_into()
+                .map_err(|_| Error::<F>::DataCorrupted("invalid witness pos"))?,
+        );
+        let digest = D::decode(&bytes[8..])
+            .map_err(|_| Error::<F>::DataCorrupted("invalid grafted root witness digest"))?;
+        grafted_root_witness.push((pos, digest));
+    }
+    let grafted_root_witness = GraftedRootWitness::from_entries(grafted_root_witness);
+    tracing::debug!(
+        "init_metadata: loaded {} witness entries, pruned_chunks={pruned_chunks}",
+        grafted_root_witness.len()
+    );
+
+    Ok((metadata, pruned_chunks, pinned_nodes, grafted_root_witness))
 }
 
 #[cfg(test)]

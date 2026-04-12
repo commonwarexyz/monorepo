@@ -225,6 +225,34 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
+    fn peak_birth_size(pos: Position, height: u32) -> u64 {
+        // A height-h subtree spans `2^h` leaves.
+        let width = 1u64.checked_shl(height).expect("height excessively large");
+
+        // In an MMB, a height-h node covering `[leftmost, leftmost + 2^h)` is not born as soon as
+        // its last leaf is appended. Its parent-merge is delayed by `2^(h-1) - 1` more leaf
+        // appends, so:
+        //
+        //   birth_size = last_leaf + 1 + (2^(h-1) - 1) = (leftmost + 2^h) + (2^(h-1) - 1)
+        //
+        // `base` is the `last_leaf + 1` term shared by all heights.
+        let base = <Self as Graftable>::leftmost_leaf(pos, height)
+            .checked_add(width)
+            .expect("birth size overflow");
+        if height == 0 {
+            return *base;
+        }
+
+        // For a leaf, there is no delay. For taller nodes, add the MMB-specific delayed-merge
+        // term that keeps parent births staggered at one merge per appended leaf.
+        let delay = 1u64
+            .checked_shl(height - 1)
+            .and_then(|v| v.checked_sub(1))
+            .expect("height excessively large");
+
+        *base.checked_add(delay).expect("birth size overflow")
+    }
+
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         if height == 0 {
             return Self::position_to_location(pos).expect("height-0 node must be a leaf");

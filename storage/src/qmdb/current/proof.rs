@@ -669,7 +669,12 @@ mod tests {
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
             let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
-                &hasher, &status, &storage, None, &ops_root,
+                &hasher,
+                &status,
+                &storage,
+                &db::GraftedRootWitness::default(),
+                None,
+                &ops_root,
             )
             .await
             .unwrap();
@@ -776,7 +781,12 @@ mod tests {
                 Some((*chunk, next_bit))
             };
             let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
-                &hasher, &status, &storage, partial, &ops_root,
+                &hasher,
+                &status,
+                &storage,
+                &db::GraftedRootWitness::default(),
+                partial,
+                &ops_root,
             )
             .await
             .unwrap();
@@ -883,7 +893,12 @@ mod tests {
                 Some((*chunk, next_bit))
             };
             let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
-                &hasher, &status, &storage, partial, &ops_root,
+                &hasher,
+                &status,
+                &storage,
+                &db::GraftedRootWitness::default(),
+                partial,
+                &ops_root,
             )
             .await
             .unwrap();
@@ -961,7 +976,12 @@ mod tests {
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
             let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
-                &hasher, &status, &storage, None, &ops_root,
+                &hasher,
+                &status,
+                &storage,
+                &db::GraftedRootWitness::default(),
+                None,
+                &ops_root,
             )
             .await
             .unwrap();
@@ -1061,7 +1081,12 @@ mod tests {
 
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
             let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
-                &hasher, &status, &storage, None, &ops_root,
+                &hasher,
+                &status,
+                &storage,
+                &db::GraftedRootWitness::default(),
+                None,
+                &ops_root,
             )
             .await
             .unwrap();
