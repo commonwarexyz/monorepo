@@ -199,7 +199,10 @@ pub fn replay_trace(
 }
 
 /// Replays a trace and runs invariant checks on the extracted state.
-pub fn replay_and_check(trace: &TraceData, faults_override: Option<usize>) {
+pub fn replay_and_check(
+    trace: &TraceData,
+    faults_override: Option<usize>,
+) -> Vec<ReplayedReplicaState> {
     let states = replay_trace(trace, faults_override);
     // Convert to ReplicaState tuples for invariant checking
     let replica_states: Vec<_> = states
@@ -250,4 +253,5 @@ pub fn replay_and_check(trace: &TraceData, faults_override: Option<usize>) {
         })
         .collect();
     invariants::check::<crate::SimplexEd25519>(trace.n as u32, &replica_states);
+    states
 }

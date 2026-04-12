@@ -44,7 +44,7 @@ fn main() {
         trace.required_containers
     );
 
-    let states = replayer::replay_trace(&trace, faults_override);
+    let states = replayer::replay_and_check(&trace, faults_override);
 
     println!("Extracted state for {} correct node(s):", states.len());
     for (i, state) in states.iter().enumerate() {
