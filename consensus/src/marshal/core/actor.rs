@@ -1175,25 +1175,20 @@ where
         self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
-    /// Respond to a delivery whose epocher/certificate-verifier lookup
-    /// failed.
+    /// Respond to a delivery whose verifier lookup failed.
     ///
-    /// If the request is provably at or below the floor, the response is
-    /// acknowledged (`true`) so the serving peer is not blamed for an
-    /// in-flight response we asked for but can no longer verify. Otherwise
+    /// If the request is provably at or below the floor (the last processed height),
+    /// the response is acknowledged (`true`) so the serving peer is not blamed for an
+    /// in-flight response we asked for but no longer can verify. Otherwise
     /// the response is rejected (`false`) and the peer is blocked, because
     /// the application has violated its pruning contract: epocher/provider
-    /// entries must be retained for any request marshal may still issue.
+    /// entries must be retained for any height marshal may request.
     ///
-    /// Floor-staleness by request kind:
+    /// Staleness by request kind:
     /// - [`Request::Finalized { height }`]: `height <= last_processed_height`.
     /// - [`Request::Notarized { round }`]: the epoch's last height is at or
-    ///   below the floor. If the epocher cannot resolve the epoch we
-    ///   conservatively treat the request as stale, so that aggressive
-    ///   pruning of both the epocher and the provider does not block
-    ///   honest peers.
-    /// - [`Request::Block`]: unreachable — block requests do not consult a
-    ///   verifier.
+    ///   below the last processed height.
+    /// - [`Request::Block`]: block requests do not consult a verifier (unreachable).
     fn handle_missing_verifier(
         &self,
         key: &Request<V::Commitment>,
