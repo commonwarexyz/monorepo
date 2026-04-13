@@ -557,11 +557,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -747,6 +742,13 @@ impl crate::Metrics for Context {
         }));
         Self {
             scope: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn instrumented(&self) -> Self {
+        Self {
+            instrumented: true,
             ..self.clone()
         }
     }

@@ -114,10 +114,6 @@ where
         Self::Present(self.into_present().shared(blocking))
     }
 
-    fn instrumented(self) -> Self {
-        Self::Present(self.into_present().instrumented())
-    }
-
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -163,6 +159,10 @@ where
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         Self::Present(self.as_present().with_attribute(key, value))
+    }
+
+    fn instrumented(&self) -> Self {
+        Self::Present(self.as_present().instrumented())
     }
 
     fn with_scope(&self) -> Self {

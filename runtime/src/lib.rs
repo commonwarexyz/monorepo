@@ -179,9 +179,6 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
-        /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
-        fn instrumented(self) -> Self;
-
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -302,14 +299,14 @@ stability_scope!(BETA {
     /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
     ///   dimensions on metrics you `register` on this context; also emitted
     ///   as OpenTelemetry attributes on the per-task tracing span when, and
-    ///   only when, [`Spawner::instrumented`] is set on the spawn. Runtime
+    ///   only when, [`Metrics::instrumented`] is set on the spawn. Runtime
     ///   task metrics intentionally ignore attributes to keep their
     ///   cardinality bounded.
     /// - `scope` (set by [`Metrics::with_scope`]): routes metrics you
     ///   `register` on this context into a sub-registry whose entries are
     ///   removed when the last clone of the scoped context is dropped. It
     ///   does not affect runtime task metrics and has no effect on tracing.
-    /// - `instrumented` (set by [`Spawner::instrumented`]): opt-in flag that
+    /// - `instrumented` (set by [`Metrics::instrumented`]): opt-in flag that
     ///   wraps the next spawned task in a `tracing` span populated from the
     ///   current `name` and `attributes`. It never touches metrics. The flag
     ///   is consumed by the next `spawn` and is not inherited by child
@@ -320,7 +317,7 @@ stability_scope!(BETA {
     /// | `with_label`               | prefix                 | -                        | -                  | `name`               | `name` field when instrumented |
     /// | `with_attribute`           | -                      | label dimension          | -                  | -                    | OTel attribute when instrumented |
     /// | `with_scope`               | -                      | -                        | sub-registry       | -                    | -                         |
-    /// | `Spawner::instrumented`    | -                      | -                        | -                  | -                    | enables span creation     |
+    /// | `Metrics::instrumented`    | -                      | -                        | -                  | -                    | enables span creation     |
     ///
     /// The practical consequence: `with_label` is the only builder whose
     /// effect shows up on runtime task metrics, so it is the only one that
@@ -486,6 +483,21 @@ stability_scope!(BETA {
         /// // Metrics are removed when all clones of `scoped` are dropped.
         /// ```
         fn with_scope(&self) -> Self;
+
+        /// Return a new context that instruments the next task spawned from it with a
+        /// `tracing` span whose `name` field and OpenTelemetry attributes are derived
+        /// from the context's label and attributes.
+        ///
+        /// The flag is consumed by the next [`Spawner::spawn`] call on the returned
+        /// context (and on any clone of it). It is not inherited by child contexts
+        /// produced via [`Metrics::with_label`], [`Metrics::with_attribute`],
+        /// [`Metrics::with_scope`], or any of the `Spawner` builders: each such builder
+        /// resets the flag so the caller must opt in again for the next spawn.
+        ///
+        /// Instrumentation only affects tracing; it does not change which metrics
+        /// are registered, nor does it widen the cardinality of runtime task metrics
+        /// (see the trait-level documentation for the full matrix).
+        fn instrumented(&self) -> Self;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.

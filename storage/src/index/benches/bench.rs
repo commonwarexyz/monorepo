@@ -37,6 +37,10 @@ impl Metrics for DummyMetrics {
     fn with_scope(&self) -> Self {
         Self
     }
+
+    fn instrumented(&self) -> Self {
+        Self
+    }
 }
 
 criterion_main!(
