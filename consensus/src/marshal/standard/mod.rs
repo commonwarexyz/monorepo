@@ -43,8 +43,10 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            core::{cache, Mailbox},
+            config::Config,
+            core::{cache, Actor, Mailbox},
             mocks::{
+                application::Application,
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
@@ -53,30 +55,45 @@ mod tests {
                 },
                 verifying::MockVerifyingApp,
             },
+            resolver::handler,
             Identifier,
         },
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
-        types::{Epoch, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, Heightable,
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
+    Automaton, CertifiableAutomaton, Heightable,
     };
+    use bytes::Bytes;
+    use commonware_broadcast::buffered;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+        certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+        ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
+    use commonware_p2p::simulated::{self, Network};
+    use commonware_parallel::Sequential;
+    use commonware_resolver::Resolver;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+    };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
         metadata::{self, Metadata},
-        translator::TwoCap,
+        translator::{EightCap, TwoCap},
     };
-    use commonware_utils::{channel::oneshot, NZUsize, NZU64};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        sync::Mutex,
+        vec::NonEmptyVec,
+        NZUsize, NZU16, NZU64,
+    };
     use std::{
-        num::{NonZeroU64, NonZeroUsize},
+        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+        sync::Arc,
         time::Duration,
     };
 
@@ -1487,5 +1504,254 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// A mock provider whose verifier can be dropped at runtime to model
+    /// applications that aggressively prune epoch state during block processing.
+    #[derive(Clone)]
+    struct MutableProvider {
+        scheme: Arc<Mutex<Option<Arc<S>>>>,
+    }
+
+    impl MutableProvider {
+        fn new(scheme: S) -> Self {
+            Self {
+                scheme: Arc::new(Mutex::new(Some(Arc::new(scheme)))),
+            }
+        }
+
+        fn drop_verifier(&self) {
+            *self.scheme.lock() = None;
+        }
+    }
+
+    impl Provider for MutableProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, _scope: Epoch) -> Option<Arc<S>> {
+            self.scheme.lock().clone()
+        }
+    }
+
+    /// A no-op resolver used by tests that drive the marshal actor's
+    /// resolver_rx channel directly. Outbound fetches/cancellations are dropped.
+    #[derive(Clone, Default)]
+    struct NoopResolver;
+
+    impl Resolver for NoopResolver {
+        type Key = handler::Request<D>;
+        type PublicKey = PublicKey;
+
+        async fn fetch(&mut self, _key: Self::Key) {}
+        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
+        async fn fetch_targeted(
+            &mut self,
+            _key: Self::Key,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) {
+        }
+        async fn fetch_all_targeted(
+            &mut self,
+            _requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+        ) {
+        }
+        async fn cancel(&mut self, _key: Self::Key) {}
+        async fn clear(&mut self) {}
+        async fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+        ) {
+        }
+    }
+
+    /// Regression test for `commonwarexyz/monorepo#3565`.
+    ///
+    /// When an application prunes its certificate verifier for an epoch whose
+    /// heights are at or below the marshal's floor, in-flight `Finalized`
+    /// responses for those heights must be acknowledged (so the serving peer
+    /// is not blocked) rather than rejected.
+    #[test_traced("WARN")]
+    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Bring up a simulated network so the buffered broadcast engine
+            // can register a channel; we do not exercise it from the test.
+            let me = default_leader();
+            let (network, oracle) = Network::new_with_peers(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                vec![me.clone()],
+            )
+            .await;
+            network.start();
+            let control = oracle.control(me.clone());
+            let network_channel: (
+                simulated::Sender<PublicKey, deterministic::Context>,
+                simulated::Receiver<PublicKey>,
+            ) = control
+                .register(0, Quota::per_second(NonZeroU32::MAX))
+                .await
+                .unwrap();
+
+            // Build a mutable provider so the test can drop the verifier.
+            let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let provider = MutableProvider::new(schemes[0].clone());
+
+            // Storage configuration shared with the harness for prunable validators.
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let partition_prefix = "stale-finalized-test".to_string();
+            let config = Config {
+                provider: provider.clone(),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                mailbox_size: 100,
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: partition_prefix.clone(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: page_cache.clone(),
+                strategy: Sequential,
+            };
+            let finalizations_by_height = prunable::Archive::init(
+                context.with_label("finalizations_by_height"),
+                prunable::Config {
+                    translator: EightCap,
+                    key_partition: format!("{partition_prefix}-fbh-key"),
+                    key_page_cache: page_cache.clone(),
+                    value_partition: format!("{partition_prefix}-fbh-value"),
+                    compression: None,
+                    codec_config: S::certificate_codec_config_unbounded(),
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .expect("failed to initialize finalizations archive");
+            let finalized_blocks = prunable::Archive::init(
+                context.with_label("finalized_blocks"),
+                prunable::Config {
+                    translator: EightCap,
+                    key_partition: format!("{partition_prefix}-fb-key"),
+                    key_page_cache: page_cache,
+                    value_partition: format!("{partition_prefix}-fb-value"),
+                    compression: None,
+                    codec_config: (),
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .expect("failed to initialize finalized blocks archive");
+
+            // Wire a buffered broadcast engine so the actor has a real Buffer.
+            let broadcast_config = buffered::Config {
+                public_key: me.clone(),
+                mailbox_size: 100,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+                peer_provider: oracle.manager(),
+            };
+            let (broadcast_engine, buffer) =
+                buffered::Engine::new(context.clone(), broadcast_config);
+            broadcast_engine.start(network_channel);
+
+            // Wire the resolver's mpsc directly so the test can inject Deliver
+            // messages that bypass the network/resolver engine entirely.
+            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+
+            // Init and start the actor.
+            let (actor, mailbox, _initial_height) = Actor::init(
+                context.clone(),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let application = Application::<B>::default();
+            actor.start(application, buffer, (resolver_rx, NoopResolver));
+
+            // Advance the floor past height 5. We use `set_floor` directly
+            // because we are not driving the application end-to-end.
+            let floor = Height::new(50);
+            mailbox.set_floor(floor).await;
+            // Synchronization barrier: subsequent mailbox messages are FIFO,
+            // so this round-trip guarantees `set_floor` has been processed.
+            let _ = mailbox.get_finalization(floor).await;
+
+            // Application now prunes its verifier for the old epoch.
+            provider.drop_verifier();
+
+            // Inject a stale Finalized response. The payload is intentionally
+            // garbage: with the verifier missing, the marshal must not even
+            // attempt to decode it. The fix's contract is that we acknowledge
+            // (true) rather than blame the peer (false) when the request is
+            // at or below the floor.
+            let stale_height = Height::new(5);
+            let (response, response_rx) = oneshot::channel();
+            resolver_tx
+                .send(handler::Message::Deliver {
+                    key: handler::Request::Finalized {
+                        height: stale_height,
+                    },
+                    value: Bytes::from_static(b"unverifiable"),
+                    response,
+                })
+                .await
+                .expect("failed to inject stale finalized deliver");
+            let result = response_rx
+                .await
+                .expect("stale deliver response channel closed");
+            assert!(
+                result,
+                "stale finalized delivery below floor must not block the peer"
+            );
+
+            // Same scenario for a Notarized request whose epoch lies fully
+            // below the floor (epoch 0 covers heights [0, BLOCKS_PER_EPOCH)).
+            let stale_round = Round::new(Epoch::zero(), View::new(1));
+            let (response, response_rx) = oneshot::channel();
+            resolver_tx
+                .send(handler::Message::Deliver {
+                    key: handler::Request::Notarized {
+                        round: stale_round,
+                    },
+                    value: Bytes::from_static(b"unverifiable"),
+                    response,
+                })
+                .await
+                .expect("failed to inject stale notarized deliver");
+            let result = response_rx
+                .await
+                .expect("stale notarized response channel closed");
+            assert!(
+                result,
+                "stale notarized delivery below floor must not block the peer"
+            );
+
+            // Sanity check: the epocher does cover the stale height/epoch, so
+            // the test exercises the verifier-missing branch (not the
+            // epocher-missing branch).
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            assert!(epocher.containing(stale_height).is_some());
+            assert!(epocher.last(stale_round.epoch()).is_some());
+        });
     }
 }

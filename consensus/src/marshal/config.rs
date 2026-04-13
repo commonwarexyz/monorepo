@@ -17,6 +17,21 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// that epoch, the marshal will silently drop the sync request. Callers are
 /// responsible for ensuring both are configured for the full range of heights
 /// they intend to sync.
+///
+/// # Pruning
+///
+/// It is safe for an application to prune entries from the
+/// [epocher](Self::epocher) and [provider](Self::provider) for epochs whose
+/// highest height is at or below the floor (i.e. `last_processed_height`,
+/// updated either by application acks or by an explicit
+/// `Mailbox::set_floor`). In-flight backfill responses for those epochs are
+/// silently discarded and the serving peer is not blocked.
+///
+/// Pruning entries for epochs that span heights above the floor is unsafe:
+/// in-flight responses for those heights cannot be verified and the marshal
+/// will block the serving peer (which is presumed to have sent invalid data).
+/// Applications must therefore retain epocher/provider entries for every
+/// epoch covering a height above the floor.
 pub struct Config<B, P, ES, T>
 where
     B: Block,

@@ -953,11 +953,11 @@ where
             }
             Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
-                    response.send_lossy(false);
+                    self.handle_missing_finalized_verifier(height, None, response);
                     return false;
                 };
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                    response.send_lossy(false);
+                    self.handle_missing_finalized_verifier(height, Some(bounds.epoch()), response);
                     return false;
                 };
 
@@ -991,7 +991,7 @@ where
             }
             Request::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                    response.send_lossy(false);
+                    self.handle_missing_notarized_verifier(round, response);
                     return false;
                 };
 
@@ -1173,6 +1173,77 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.provider.all().or_else(|| self.provider.scoped(epoch))
+    }
+
+    /// Respond to a [Request::Finalized] delivery whose epoch info or certificate
+    /// verifier is no longer available.
+    ///
+    /// If the requested height is at or below the floor, the response is treated as
+    /// stale: we acknowledge the delivery so the serving peer is not blocked for an
+    /// in-flight response that we asked for but can no longer verify. Otherwise we
+    /// signal failure so the serving peer is blocked, since the application has
+    /// violated its pruning contract (verifiers must be retained for any height
+    /// above the floor that the marshal may be asked to sync).
+    fn handle_missing_finalized_verifier(
+        &self,
+        height: Height,
+        epoch: Option<Epoch>,
+        response: oneshot::Sender<bool>,
+    ) {
+        if height <= self.last_processed_height {
+            debug!(
+                %height,
+                ?epoch,
+                floor = %self.last_processed_height,
+                "ignoring stale finalized delivery: verifier pruned below floor"
+            );
+            response.send_lossy(true);
+        } else {
+            warn!(
+                %height,
+                ?epoch,
+                floor = %self.last_processed_height,
+                "missing verifier for finalized height above floor; \
+                 application must keep epocher/provider entries for heights above the floor"
+            );
+            response.send_lossy(false);
+        }
+    }
+
+    /// Respond to a [Request::Notarized] delivery whose certificate verifier is no
+    /// longer available. See [Self::handle_missing_finalized_verifier] for the
+    /// peer-blocking rationale.
+    ///
+    /// A notarized round is considered stale if the entire epoch lies at or below
+    /// the floor (i.e. its last height is at or below `last_processed_height`). If
+    /// the epocher cannot resolve the epoch, we conservatively treat it as stale
+    /// so that aggressive pruning of both the epocher and the provider does not
+    /// block honest peers.
+    fn handle_missing_notarized_verifier(
+        &self,
+        round: Round,
+        response: oneshot::Sender<bool>,
+    ) {
+        let stale = self
+            .epocher
+            .last(round.epoch())
+            .is_none_or(|last| last <= self.last_processed_height);
+        if stale {
+            debug!(
+                ?round,
+                floor = %self.last_processed_height,
+                "ignoring stale notarized delivery: verifier pruned below floor"
+            );
+            response.send_lossy(true);
+        } else {
+            warn!(
+                ?round,
+                floor = %self.last_processed_height,
+                "missing verifier for notarized round above floor; \
+                 application must keep epocher/provider entries for epochs above the floor"
+            );
+            response.send_lossy(false);
+        }
     }
 
     // -------------------- Waiters --------------------
