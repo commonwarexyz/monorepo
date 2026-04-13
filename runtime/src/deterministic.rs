@@ -899,7 +899,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -917,7 +917,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -998,7 +998,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1070,7 +1070,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1154,9 +1154,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1165,7 +1165,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if is_instrumented {
+        let future = if traced {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
@@ -1314,7 +1314,7 @@ impl crate::Metrics for Context {
 
     fn with_span(&self) -> Self {
         Self {
-            instrumented: true,
+            traced: true,
             ..self.clone()
         }
     }
