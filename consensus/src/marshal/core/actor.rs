@@ -951,13 +951,13 @@ where
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote
             }
-            Request::Finalized { height } => {
+            key @ Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
-                    self.handle_missing_finalized_verifier(height, None, response);
+                    self.handle_missing_verifier(&key, response);
                     return false;
                 };
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                    self.handle_missing_finalized_verifier(height, Some(bounds.epoch()), response);
+                    self.handle_missing_verifier(&key, response);
                     return false;
                 };
 
@@ -989,9 +989,9 @@ where
                 });
                 false
             }
-            Request::Notarized { round } => {
+            key @ Request::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                    self.handle_missing_notarized_verifier(round, response);
+                    self.handle_missing_verifier(&key, response);
                     return false;
                 };
 
@@ -1175,72 +1175,51 @@ where
         self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
-    /// Respond to a [Request::Finalized] delivery whose epoch info or certificate
-    /// verifier is no longer available.
+    /// Respond to a delivery whose epocher/certificate-verifier lookup
+    /// failed.
     ///
-    /// If the requested height is at or below the floor, the response is treated as
-    /// stale: we acknowledge the delivery so the serving peer is not blocked for an
-    /// in-flight response that we asked for but can no longer verify. Otherwise we
-    /// signal failure so the serving peer is blocked, since the application has
-    /// violated its pruning contract (verifiers must be retained for any height
-    /// above the floor that the marshal may be asked to sync).
-    fn handle_missing_finalized_verifier(
+    /// If the request is provably at or below the floor, the response is
+    /// acknowledged (`true`) so the serving peer is not blamed for an
+    /// in-flight response we asked for but can no longer verify. Otherwise
+    /// the response is rejected (`false`) and the peer is blocked, because
+    /// the application has violated its pruning contract: epocher/provider
+    /// entries must be retained for any request marshal may still issue.
+    ///
+    /// Floor-staleness by request kind:
+    /// - [`Request::Finalized { height }`]: `height <= last_processed_height`.
+    /// - [`Request::Notarized { round }`]: the epoch's last height is at or
+    ///   below the floor. If the epocher cannot resolve the epoch we
+    ///   conservatively treat the request as stale, so that aggressive
+    ///   pruning of both the epocher and the provider does not block
+    ///   honest peers.
+    /// - [`Request::Block`]: unreachable — block requests do not consult a
+    ///   verifier.
+    fn handle_missing_verifier(
         &self,
-        height: Height,
-        epoch: Option<Epoch>,
+        key: &Request<V::Commitment>,
         response: oneshot::Sender<bool>,
     ) {
-        if height <= self.last_processed_height {
-            debug!(
-                %height,
-                ?epoch,
-                floor = %self.last_processed_height,
-                "ignoring stale finalized delivery: verifier pruned below floor"
-            );
-            response.send_lossy(true);
-        } else {
-            warn!(
-                %height,
-                ?epoch,
-                floor = %self.last_processed_height,
-                "missing verifier for finalized height above floor; \
-                 application must keep epocher/provider entries for heights above the floor"
-            );
-            response.send_lossy(false);
-        }
-    }
-
-    /// Respond to a [Request::Notarized] delivery whose certificate verifier is no
-    /// longer available. See [Self::handle_missing_finalized_verifier] for the
-    /// peer-blocking rationale.
-    ///
-    /// A notarized round is considered stale if the entire epoch lies at or below
-    /// the floor (i.e. its last height is at or below `last_processed_height`). If
-    /// the epocher cannot resolve the epoch, we conservatively treat it as stale
-    /// so that aggressive pruning of both the epocher and the provider does not
-    /// block honest peers.
-    fn handle_missing_notarized_verifier(
-        &self,
-        round: Round,
-        response: oneshot::Sender<bool>,
-    ) {
-        let stale = self
-            .epocher
-            .last(round.epoch())
-            .is_none_or(|last| last <= self.last_processed_height);
+        let stale = match key {
+            Request::Block(_) => unreachable!("block requests do not require a verifier"),
+            Request::Finalized { height } => *height <= self.last_processed_height,
+            Request::Notarized { round } => self
+                .epocher
+                .last(round.epoch())
+                .is_none_or(|last| last <= self.last_processed_height),
+        };
         if stale {
             debug!(
-                ?round,
+                ?key,
                 floor = %self.last_processed_height,
-                "ignoring stale notarized delivery: verifier pruned below floor"
+                "ignoring stale delivery: verifier pruned below floor"
             );
             response.send_lossy(true);
         } else {
             warn!(
-                ?round,
+                ?key,
                 floor = %self.last_processed_height,
-                "missing verifier for notarized round above floor; \
-                 application must keep epocher/provider entries for epochs above the floor"
+                "missing verifier above floor; application must keep \
+                 epocher/provider entries for any request above the floor"
             );
             response.send_lossy(false);
         }
