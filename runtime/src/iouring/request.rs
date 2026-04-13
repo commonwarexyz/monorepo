@@ -133,6 +133,8 @@ impl Request {
             Self::Send(s) => s.sender.is_closed(),
             Self::Recv(r) => r.sender.is_closed(),
             Self::ReadAt(r) => r.sender.is_closed(),
+            // Keep storage write/sync behavior aligned with `storage/tokio/unix.rs`,
+            // where spawned blocking work continues running after caller drop.
             Self::WriteAt(_) | Self::Sync(_) => false,
         }
     }
