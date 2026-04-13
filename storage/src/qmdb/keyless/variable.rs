@@ -67,7 +67,7 @@ mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),

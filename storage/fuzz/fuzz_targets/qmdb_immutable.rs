@@ -97,7 +97,7 @@ fn db_config(
     suffix: &str,
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),

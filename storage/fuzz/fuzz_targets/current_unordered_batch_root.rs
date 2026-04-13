@@ -74,7 +74,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{name}-mmr"),

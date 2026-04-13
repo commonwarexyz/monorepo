@@ -232,7 +232,11 @@ mod tests {
             activity_timeout: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
-            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
         };
         let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -375,7 +379,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -607,7 +615,11 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
@@ -1260,7 +1272,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1448,7 +1464,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1633,6 +1653,11 @@ mod tests {
 
             // Initialize voter actor
             let voter_context = context.with_label("voter");
+            let page_cache = CacheRef::from_pooler(
+                voter_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1649,7 +1674,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -1725,6 +1750,11 @@ mod tests {
 
             // Initialize voter actor
             let voter_context = context.with_label("voter_restarted");
+            let page_cache = CacheRef::from_pooler(
+                voter_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1741,7 +1771,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -1886,7 +1916,7 @@ mod tests {
 
             // First run: persist progress to a later view.
             let voter_context = context.with_label("voter_initial");
-            let cfg = make_cfg(CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::from_pooler(voter_context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(voter_context, cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
@@ -1927,7 +1957,7 @@ mod tests {
 
             // Restart and inject startup timeout hint from first update.
             let voter_context = context.with_label("voter_restarted");
-            let cfg = make_cfg(CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::from_pooler(voter_context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, _mailbox) = Actor::new(voter_context, cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
@@ -2289,7 +2319,11 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -2504,7 +2538,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -2710,7 +2748,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -2884,7 +2926,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -3241,7 +3287,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -3521,6 +3571,11 @@ mod tests {
             actor.start();
 
             let voter_context = context.with_label("voter");
+            let page_cache = CacheRef::from_pooler(
+                voter_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3537,7 +3592,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -3658,6 +3713,11 @@ mod tests {
             actor.start();
 
             let voter_context = context.with_label("voter_restarted");
+            let page_cache = CacheRef::from_pooler(
+                voter_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3674,7 +3734,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -3802,7 +3862,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -3996,7 +4060,11 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -4829,6 +4897,7 @@ mod tests {
             app_actor.start();
 
             let voter_context = context.with_label("voter_cancel");
+            let page_cache = CacheRef::from_pooler(voter_context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4845,7 +4914,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -4943,6 +5012,7 @@ mod tests {
             app_actor.start();
 
             let voter_context = context.with_label("voter_restarted");
+            let page_cache = CacheRef::from_pooler(voter_context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4959,7 +5029,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
             };
             let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 

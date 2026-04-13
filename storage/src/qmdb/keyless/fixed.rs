@@ -59,7 +59,7 @@ mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),

@@ -958,7 +958,11 @@ mod tests {
         Config {
             partition: "test-partition".into(),
             items_per_blob,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                pooler.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1975,7 +1979,11 @@ mod tests {
             let cfg = Config {
                 partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: NZUsize!(2048),
             };
 

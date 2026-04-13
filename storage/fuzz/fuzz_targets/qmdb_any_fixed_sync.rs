@@ -92,7 +92,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),

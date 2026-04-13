@@ -178,7 +178,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 }
 
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
         merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
@@ -187,7 +187,7 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 }
 
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
         merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
@@ -199,7 +199,7 @@ pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConf
 pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), ())> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
@@ -210,7 +210,7 @@ pub fn any_var_digest_cfg(
 pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
@@ -222,7 +222,7 @@ pub fn cur_var_digest_cfg(
 pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
@@ -233,7 +233,7 @@ pub fn any_var_vec_cfg(
 pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
@@ -245,7 +245,7 @@ pub fn cur_var_vec_cfg(
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
         log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),

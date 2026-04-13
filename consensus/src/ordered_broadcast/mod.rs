@@ -264,7 +264,11 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::from_pooler(
+                        context.clone(),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     strategy: Sequential,
                 },
             );
@@ -797,7 +801,7 @@ mod tests {
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                            context.clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
@@ -961,7 +965,7 @@ mod tests {
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                            context.clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
@@ -1019,7 +1023,7 @@ mod tests {
                         ),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                            context,
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),

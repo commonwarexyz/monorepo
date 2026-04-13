@@ -110,7 +110,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
         let page_cache = CacheRef::from_pooler(
-            &context,
+            context.clone(),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
         );

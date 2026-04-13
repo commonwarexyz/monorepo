@@ -179,7 +179,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 }
 
 fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
 // -- DB constructors (eliminates repeated config boilerplate in match arms) --

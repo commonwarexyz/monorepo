@@ -26,7 +26,8 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref =
+                        CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, NZUsize!(CACHE_SIZE));
 
                     // Setup: populate the blob
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;

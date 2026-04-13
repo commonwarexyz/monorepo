@@ -54,11 +54,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(
-                &pooler.with_label(label),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache: CacheRef::from_pooler(pooler.with_label(label), PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -314,7 +310,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(
-                    &context.with_label("ref_cache"),
+                    context.with_label("ref_cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),

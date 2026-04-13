@@ -84,7 +84,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = data.operations.clone();
         async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let page_cache =
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap> {
                 merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),

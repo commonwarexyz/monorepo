@@ -51,7 +51,7 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             key_partition: "test-key".into(),
             key_page_cache: CacheRef::from_pooler(
-                &context,
+                context.clone(),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),

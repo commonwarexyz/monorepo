@@ -170,7 +170,7 @@ pub(crate) mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: crate::mmr::journaled::Config {
                 journal_partition: format!("journal-{seed}"),

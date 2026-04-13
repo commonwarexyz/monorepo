@@ -96,7 +96,7 @@ fn make_config(
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ())> {
-    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
+    let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
     VariableConfig {
         merkle_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),

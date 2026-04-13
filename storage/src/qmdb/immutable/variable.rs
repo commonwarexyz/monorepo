@@ -79,7 +79,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ())> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),

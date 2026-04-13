@@ -100,7 +100,7 @@ fn merkle_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
+        page_cache: CacheRef::from_pooler(pooler.clone(), page_size, page_cache_size),
     }
 }
 

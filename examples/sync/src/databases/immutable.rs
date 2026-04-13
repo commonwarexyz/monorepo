@@ -27,7 +27,7 @@ pub type Operation = immutable::variable::Operation<Key, Value>;
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-        context,
+        context.clone(),
         NZU16!(2048),
         NZUsize!(10),
     );

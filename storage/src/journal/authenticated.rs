@@ -820,7 +820,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             thread_pool: None,
             page_cache: CacheRef::from_pooler(
-                &pooler.with_label("merkle"),
+                pooler.with_label("merkle"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),
@@ -834,7 +834,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(
-                &pooler.with_label("journal"),
+                pooler.with_label("journal"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),

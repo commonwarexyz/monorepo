@@ -401,7 +401,7 @@ where
         fetch_concurrent: 1,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
@@ -635,7 +635,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    primary_context.clone(),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };

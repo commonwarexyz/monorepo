@@ -378,7 +378,7 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -404,7 +404,7 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
