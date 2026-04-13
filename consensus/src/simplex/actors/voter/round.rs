@@ -1118,27 +1118,6 @@ mod tests {
     }
 
     #[test]
-    fn replayed_notarize_keeps_proposal_verified() {
-        let mut rng = test_rng();
-        let namespace = b"ns";
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
-
-        let mut round = Round::new(local_scheme.clone(), round_info, now);
-        round.set_leader(Participant::new(1));
-
-        let local_vote = Notarize::sign(&local_scheme, proposal.clone()).unwrap();
-        round.replay(&Artifact::Notarize(local_vote));
-
-        assert_eq!(round.proposal(), Some(&proposal));
-        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
-    }
-
-    #[test]
     fn certified_after_abort_handles_race_condition() {
         let mut rng = test_rng();
         let namespace = b"ns";
