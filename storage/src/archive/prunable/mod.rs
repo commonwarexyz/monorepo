@@ -247,11 +247,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &first_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: CacheRef::from_pooler(&first_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -283,11 +279,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &second_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: CacheRef::from_pooler(&second_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -296,12 +288,9 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                second_context,
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(second_context, cfg.clone())
+                .await
+                .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
@@ -538,11 +527,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &init1_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: CacheRef::from_pooler(&init1_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -604,11 +589,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &init2_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: CacheRef::from_pooler(&init2_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -617,12 +598,10 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
-                init2_context,
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, _, FixedBytes<1024>>::init(init2_context, cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

@@ -1078,8 +1078,9 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(&context.with_label("cfg1"), NZU64!(2));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.with_label("first");
+            let cfg = test_cfg(&first_ctx, NZU64!(2));
+            let journal = Journal::init(first_ctx, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1094,8 +1095,9 @@ mod tests {
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
-            let cfg = test_cfg(&context.with_label("cfg2"), NZU64!(2));
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let second_ctx = context.with_label("second");
+            let cfg = test_cfg(&second_ctx, NZU64!(2));
+            let journal = Journal::init(second_ctx, cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 1);
@@ -1776,8 +1778,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(&context.with_label("cfg1"), NZU64!(2));
-            let journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.with_label("first");
+            let cfg = test_cfg(&first_ctx, NZU64!(2));
+            let journal = Journal::init(first_ctx, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -1831,9 +1834,10 @@ mod tests {
             drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg(&context.with_label("cfg2"), NZU64!(3));
+            let second_ctx = context.with_label("second");
+            let mut cfg = test_cfg(&second_ctx, NZU64!(3));
             cfg.partition = "test-partition-2".into();
-            let journal = Journal::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::init(second_ctx, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {

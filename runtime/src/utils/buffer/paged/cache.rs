@@ -133,11 +133,6 @@ struct Cache {
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
     page_fetches: HashMap<(u64, u64), PageFetchEntry>,
-
-    /// Counter incremented by `cache()` whenever an existing entry is evicted. Owned here so
-    /// every eviction site is counted automatically rather than relying on each caller to
-    /// inspect a return value.
-    page_evictions: Counter,
 }
 
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
@@ -171,6 +166,9 @@ pub struct CacheRef {
     /// Number of page faults (cache misses that enter the fault handler).
     page_faults: Counter,
 
+    /// Number of page evictions (entries displaced from the cache).
+    page_evictions: Counter,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
@@ -186,6 +184,9 @@ impl CacheRef {
         page_size: NonZeroU16,
         capacity: NonZeroUsize,
     ) -> Self {
+        // Register metrics in a `cache` sub-scope so two unrelated metrics on the parent
+        // context (or a sibling component) do not collide on `page_faults`/`page_evictions`.
+        let context = context.with_label("cache");
         let page_size_u64 = page_size.get() as u64;
         let page_faults = Counter::default();
         context.register("page_faults", "Number of page faults", page_faults.clone());
@@ -199,13 +200,9 @@ impl CacheRef {
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(
-                pool.clone(),
-                page_size,
-                capacity,
-                page_evictions,
-            ))),
+            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             page_faults,
+            page_evictions,
             pool,
         }
     }
@@ -246,7 +243,7 @@ impl CacheRef {
     /// Returns the number of page evictions that have occurred.
     #[cfg(test)]
     pub fn page_evictions(&self) -> u64 {
-        self.cache.read().page_evictions.get()
+        self.page_evictions.get()
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
@@ -365,6 +362,7 @@ impl CacheRef {
                     let blob = blob.clone();
                     let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
+                    let page_evictions = self.page_evictions.clone();
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
                         if let Err(err) = &result {
@@ -378,7 +376,9 @@ impl CacheRef {
                         // guard remove the entry and let a later reader start a new generation.
                         let mut cache = cache.write();
                         if let Ok(page) = &result {
-                            cache.cache(blob_id, page.as_ref(), page_num);
+                            if cache.cache(blob_id, page.as_ref(), page_num) {
+                                page_evictions.inc();
+                            }
                         }
                         let _ = cache.page_fetches.remove(&key);
                         result
@@ -433,7 +433,9 @@ impl CacheRef {
             let page_size = self.page_size as usize;
             let mut page_cache = self.cache.write();
             while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
+                if page_cache.cache(blob_id, &buf[..page_size], page_num) {
+                    self.page_evictions.inc();
+                }
                 buf = &buf[page_size..];
                 page_num = match page_num.checked_add(1) {
                     Some(next) => next,
@@ -449,12 +451,7 @@ impl CacheRef {
 impl Cache {
     /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity
     /// of `capacity` pages, each of size `page_size` bytes.
-    pub fn new(
-        pool: BufferPool,
-        page_size: NonZeroU16,
-        capacity: NonZeroUsize,
-        page_evictions: Counter,
-    ) -> Self {
+    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();
         let mut slots = Vec::with_capacity(capacity);
@@ -470,7 +467,6 @@ impl Cache {
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
-            page_evictions,
         }
     }
 
@@ -517,9 +513,9 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache. Increments `page_evictions` if the insertion
-    /// displaced an existing entry.
-    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+    /// Put the given `page` into the page cache. Returns true if the insertion displaced an
+    /// existing entry.
+    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) -> bool {
         assert_eq!(page.len(), self.page_size);
         let key = (blob_id, page_num);
 
@@ -535,7 +531,7 @@ impl Cache {
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
             self.page_slice_mut(slot).copy_from_slice(page);
-            return;
+            return false;
         }
 
         // New entry - check if we need to evict
@@ -548,7 +544,7 @@ impl Cache {
                 referenced: AtomicBool::new(true),
             });
             self.page_slice_mut(slot).copy_from_slice(page);
-            return;
+            return false;
         }
 
         // Cache full: find slot to evict using Clock algorithm
@@ -570,7 +566,7 @@ impl Cache {
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
-        self.page_evictions.inc();
+        true
     }
 }
 
@@ -739,8 +735,7 @@ mod tests {
     fn test_cache_basic() {
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let mut cache: Cache =
-            Cache::new(pool, PAGE_SIZE, NZUsize!(10), Counter::default());
+        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
@@ -856,16 +851,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let capacity = 4;
-            let cache_ref =
-                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
             assert_eq!(cache_ref.page_evictions(), 0);
 
             let logical_data = vec![0xABu8; PAGE_SIZE.get() as usize];
 
             // Fill the cache exactly to capacity. None of these should evict.
             for i in 0..capacity as u64 {
-                let remaining =
-                    cache_ref.cache(0, logical_data.as_slice(), i * PAGE_SIZE_U64);
+                let remaining = cache_ref.cache(0, logical_data.as_slice(), i * PAGE_SIZE_U64);
                 assert_eq!(remaining, 0);
             }
             assert_eq!(cache_ref.page_evictions(), 0);

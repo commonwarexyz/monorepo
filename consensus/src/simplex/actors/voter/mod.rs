@@ -1649,11 +1649,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -1728,6 +1724,7 @@ mod tests {
             handle.abort();
 
             // Initialize voter actor
+            let voter_context = context.with_label("voter_restarted");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1744,15 +1741,10 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter_restarted"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 
-            // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -1893,12 +1885,9 @@ mod tests {
             };
 
             // First run: persist progress to a later view.
-            let cfg = make_cfg(CacheRef::from_pooler(
-                &context.with_label("voter_initial"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ));
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), cfg);
+            let voter_context = context.with_label("voter_initial");
+            let cfg = make_cfg(CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, mut mailbox) = Actor::new(voter_context, cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
@@ -1937,12 +1926,9 @@ mod tests {
             handle.abort();
 
             // Restart and inject startup timeout hint from first update.
-            let cfg = make_cfg(CacheRef::from_pooler(
-                &context.with_label("voter_restarted"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ));
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
+            let voter_context = context.with_label("voter_restarted");
+            let cfg = make_cfg(CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, _mailbox) = Actor::new(voter_context, cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
@@ -3551,11 +3537,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
@@ -3675,6 +3657,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app2"), app_cfg);
             actor.start();
 
+            let voter_context = context.with_label("voter_restarted");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3691,13 +3674,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter_restarted"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -4849,6 +4828,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app_cancel"), app_cfg);
             app_actor.start();
 
+            let voter_context = context.with_label("voter_cancel");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4865,13 +4845,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter_cancel"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter_cancel"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -4966,6 +4942,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
             app_actor.start();
 
+            let voter_context = context.with_label("voter_restarted");
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4982,13 +4959,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &context.with_label("voter_restarted"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
