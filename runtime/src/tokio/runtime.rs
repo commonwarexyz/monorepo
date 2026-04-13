@@ -478,7 +478,7 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -517,7 +517,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -534,7 +534,7 @@ impl Clone for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -557,11 +557,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -574,9 +569,9 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -585,7 +580,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = if is_instrumented {
+        let future = if traced {
             let span = info_span!("task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
@@ -676,6 +671,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Construct the full label name
         let name = {
@@ -690,37 +689,6 @@ impl crate::Metrics for Context {
             name,
             ..self.clone()
         }
-    }
-
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
-    }
-
-    fn encode(&self) -> String {
-        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -749,6 +717,40 @@ impl crate::Metrics for Context {
             scope: Some(guard),
             ..self.clone()
         }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = self.executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
+        sub_registry.register(prefixed_name, help, metric);
+    }
+
+    fn encode(&self) -> String {
+        self.executor.registry.lock().encode()
     }
 }
 
