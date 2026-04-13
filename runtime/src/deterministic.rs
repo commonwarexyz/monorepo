@@ -1246,6 +1246,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
@@ -1285,8 +1289,34 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn label(&self) -> String {
-        self.name.clone()
+    fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        let weak = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            if let Some(exec) = weak.upgrade() {
+                exec.registry.lock().remove_scope(id);
+            }
+        }));
+        Self {
+            scope: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            instrumented: true,
+            ..self.clone()
+        }
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
@@ -1339,36 +1369,6 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"encode", |_| {});
         let encoded = executor.registry.lock().encode();
         encoded
-    }
-
-    fn with_scope(&self) -> Self {
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
-
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        let weak = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Some(exec) = weak.upgrade() {
-                exec.registry.lock().remove_scope(id);
-            }
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
-    }
-
-    fn with_span(&self) -> Self {
-        Self {
-            instrumented: true,
-            ..self.clone()
-        }
     }
 }
 

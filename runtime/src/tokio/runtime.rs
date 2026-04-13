@@ -671,6 +671,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Construct the full label name
         let name = {
@@ -685,37 +689,6 @@ impl crate::Metrics for Context {
             name,
             ..self.clone()
         }
-    }
-
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
-    }
-
-    fn encode(&self) -> String {
-        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -751,6 +724,33 @@ impl crate::Metrics for Context {
             instrumented: true,
             ..self.clone()
         }
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = self.executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
+        sub_registry.register(prefixed_name, help, metric);
+    }
+
+    fn encode(&self) -> String {
+        self.executor.registry.lock().encode()
     }
 }
 

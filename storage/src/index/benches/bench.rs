@@ -24,12 +24,6 @@ impl Metrics for DummyMetrics {
         Self
     }
 
-    fn encode(&self) -> String {
-        "".into()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
-
     fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
         Self
     }
@@ -40,6 +34,12 @@ impl Metrics for DummyMetrics {
 
     fn with_span(&self) -> Self {
         Self
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn encode(&self) -> String {
+        "".into()
     }
 }
 

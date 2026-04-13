@@ -436,21 +436,6 @@ stability_scope!(BETA {
         /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
         fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
-        /// Register a metric with the runtime.
-        ///
-        /// Any registered metric will include (as a prefix) the label of the current context.
-        ///
-        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
-
-        /// Encode all metrics into a buffer.
-        ///
-        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be
-        /// avoided by using `with_label` and `with_attribute` to create new context instances
-        /// (ensures all context instances are namespaced).
-        fn encode(&self) -> String;
-
         /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
         /// consensus engines). All metrics registered through the returned context (and
         /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
@@ -497,6 +482,21 @@ stability_scope!(BETA {
         /// are registered, nor does it widen the cardinality of runtime task metrics
         /// (see the trait-level documentation for the full matrix).
         fn with_span(&self) -> Self;
+
+        /// Register a metric with the runtime.
+        ///
+        /// Any registered metric will include (as a prefix) the label of the current context.
+        ///
+        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+        /// Encode all metrics into a buffer.
+        ///
+        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+        /// (via the concatenation of nested `with_label` and `register` calls). This can be
+        /// avoided by using `with_label` and `with_attribute` to create new context instances
+        /// (ensures all context instances are namespaced).
+        fn encode(&self) -> String;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
