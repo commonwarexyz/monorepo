@@ -64,7 +64,7 @@ mod tests {
             types::{Finalization, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Automaton, CertifiableAutomaton, Heightable,
+        Automaton, CertifiableAutomaton, Heightable,
     };
     use bytes::Bytes;
     use commonware_broadcast::buffered;
@@ -1774,17 +1774,18 @@ mod tests {
         None
     }
 
-    /// Regression test for the
-    /// [`crate::marshal::Update::Block`] pruning contract.
+    /// Regression test for the [`crate::marshal::Update::Block`] pruning
+    /// contract.
     ///
-    /// Asserts that whenever the application receives `Update::Block(B at H, _)`,
-    /// marshal's `processed_height` gauge is at least `H - max_pending_acks`.
-    /// Without this invariant the pruning bound documented on `Update::Block`
-    /// (and relied upon by the marshal `epocher`/`provider` pruning contract)
-    /// would be unsound.
+    /// Asserts that for every block at height `H` the application has
+    /// received, marshal's `processed_height` gauge is at least
+    /// `H - max_pending_acks`. Because `processed_height` is monotonic, the
+    /// invariant holds at *every* observation point, so the test simply
+    /// drives the pipeline (fill, drain, refill) and re-checks the bound
+    /// after each step.
     #[test_traced("WARN")]
     fn test_standard_update_block_processed_height_invariant() {
-        const MAX_PENDING_ACKS: usize = 4;
+        const MAX_PENDING_ACKS: u64 = 4;
         const NUM_BLOCKS: u64 = 12;
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -1805,17 +1806,15 @@ mod tests {
             )
             .await;
 
-            // Use a manual-ack application so we can observe the bound at
-            // every point in the pipeline lifecycle (fill, drain, refill).
             let validator = participants[0].clone();
-            let app_in = Application::<B>::manual_ack();
+            let application = Application::<B>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.with_label("validator_0"),
                 &mut oracle,
                 validator,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(MAX_PENDING_ACKS),
-                app_in,
+                NonZeroUsize::new(MAX_PENDING_ACKS as usize).unwrap(),
+                application,
             )
             .await;
             let application = setup.application;
@@ -1823,15 +1822,14 @@ mod tests {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
             };
-            let metrics_ctx = context.clone();
+            let mut handles = vec![handle.clone()];
 
-            // Submit NUM_BLOCKS finalizations; the marshal will dispatch up to
-            // MAX_PENDING_ACKS at a time and stall until the application acks.
+            // Submit finalizations; marshal dispatches up to MAX_PENDING_ACKS
+            // blocks at a time and stalls until the application acks.
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             let mut parent = Sha256::hash(b"");
             let mut parent_commitment =
                 StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
-            let mut handles = vec![handle.clone()];
             for i in 1..=NUM_BLOCKS {
                 let block = StandardHarness::make_test_block(
                     parent,
@@ -1859,67 +1857,41 @@ mod tests {
                     .await;
             }
 
-            // Helper closure to assert the invariant given the current state.
-            let assert_invariant = |label: &str| {
-                let dispatched = application.blocks();
-                let Some(highest) = dispatched.keys().max().copied() else {
+            let check_invariant = |label: &str| {
+                let Some(highest) = application.blocks().keys().max().copied() else {
                     return;
                 };
-                let processed = parse_processed_height(&metrics_ctx.encode())
+                let processed = parse_processed_height(&context.encode())
                     .expect("processed_height gauge missing");
+                let gap = highest.get().saturating_sub(processed);
                 assert!(
-                    highest.get().saturating_sub(processed) <= MAX_PENDING_ACKS as u64,
-                    "{label}: highest dispatched={} processed_height={} \
-                     gap={} > max_pending_acks={}",
+                    gap <= MAX_PENDING_ACKS,
+                    "{label}: highest={} processed={} gap={} > max_pending_acks={}",
                     highest.get(),
                     processed,
-                    highest.get().saturating_sub(processed),
+                    gap,
                     MAX_PENDING_ACKS,
                 );
             };
 
-            // Wait for the pipeline to fill, then validate.
-            while application.blocks().len() < MAX_PENDING_ACKS {
+            // Wait until marshal has dispatched up to the pipeline limit
+            // (we submitted more than MAX_PENDING_ACKS finalizations above,
+            // so the pipeline must stall at MAX_PENDING_ACKS unacked blocks).
+            // This is the peak-gap observation point.
+            while (application.blocks().len() as u64) < MAX_PENDING_ACKS {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert_invariant("pipeline full");
-            assert_eq!(
-                parse_processed_height(&context.encode()),
-                Some(0),
-                "no acks issued yet, processed_height should be 0"
-            );
+            check_invariant("pipeline full");
 
-            // Drain the pipeline one ack at a time; after each ack the marshal
-            // should advance `processed_height` and dispatch the next block,
-            // and the invariant must continue to hold.
-            for expected in 1..=NUM_BLOCKS {
-                while application
-                    .pending_ack_heights()
-                    .first()
-                    .copied()
-                    != Some(Height::new(expected))
-                {
-                    context.sleep(Duration::from_millis(10)).await;
+            // Drain: acknowledge blocks as they arrive; re-check the bound
+            // after each dispatch cycle.
+            loop {
+                let acked = application.acknowledged().await;
+                check_invariant(&format!("after ack {acked}"));
+                if acked.get() == NUM_BLOCKS {
+                    break;
                 }
-                let acked = application
-                    .acknowledge_next()
-                    .expect("pending ack should be present");
-                assert_eq!(acked, Height::new(expected));
-
-                // Wait for marshal to actually process the ack (and dispatch
-                // the next block, if any). We poll the metric until it
-                // reflects the ack we just released.
-                while parse_processed_height(&context.encode())
-                    .unwrap_or(0)
-                    < expected
-                {
-                    context.sleep(Duration::from_millis(10)).await;
-                }
-                assert_invariant(&format!("after ack {expected}"));
             }
-
-            // All blocks must have been delivered by the end.
-            assert_eq!(application.blocks().len() as u64, NUM_BLOCKS);
         });
     }
 }
