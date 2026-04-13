@@ -1,4 +1,9 @@
-use commonware_math::algebra::{Additive, Field, Ring};
+use super::ipa;
+use crate::transcript::Transcript;
+use bytes::BufMut;
+use commonware_codec::{Encode, EncodeSize, Write};
+use commonware_math::algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
@@ -60,10 +65,41 @@ impl<F: Additive> IndexMut<(usize, usize)> for SparseMatrix<F> {
     }
 }
 
+impl<F: Write> Write for SparseMatrix<F> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.weights.write(buf);
+    }
+}
+
+impl<F: EncodeSize> EncodeSize for SparseMatrix<F> {
+    fn encode_size(&self) -> usize {
+        self.weights.encode_size()
+    }
+}
+
 pub struct Circuit<F> {
     committed_vars: usize,
     internal_vars: usize,
     weights: SparseMatrix<F>,
+}
+
+impl<F: Write> Write for Circuit<F> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.committed_vars.write(buf);
+        self.weights.write(buf);
+    }
+}
+
+impl<F: Encode> Circuit<F> {
+    fn commit(&self, transcript: &mut Transcript) {
+        transcript.commit(self.encode());
+    }
+}
+
+impl<F: EncodeSize> EncodeSize for Circuit<F> {
+    fn encode_size(&self) -> usize {
+        self.committed_vars.encode_size() + self.weights.encode_size()
+    }
 }
 
 impl<F: Ring> Circuit<F> {
@@ -116,7 +152,72 @@ impl<F: Ring> Circuit<F> {
     }
 }
 
-pub fn prove<F: Field>(_rng: &mut impl CryptoRngCore, _circuit: &Circuit<F>) {
+pub struct Setup<G> {
+    ipa: ipa::Setup<G>,
+    pedersen_value: G,
+    pedersen_blinding: G,
+}
+
+impl<G: Write> Write for Setup<G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.ipa.write(buf);
+        self.pedersen_value.write(buf);
+        self.pedersen_blinding.write(buf);
+    }
+}
+
+impl<G: EncodeSize> EncodeSize for Setup<G> {
+    fn encode_size(&self) -> usize {
+        self.ipa.encode_size()
+            + self.pedersen_value.encode_size()
+            + self.pedersen_blinding.encode_size()
+    }
+}
+
+#[allow(dead_code)]
+pub struct Witness<F> {
+    values: Vec<F>,
+    blinding: Vec<F>,
+    left: Vec<F>,
+    right: Vec<F>,
+    out: Vec<F>,
+}
+
+pub struct Claim<G> {
+    commitments: Vec<G>,
+}
+
+impl<G: Write> Write for Claim<G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.commitments.write(buf);
+    }
+}
+
+impl<G: EncodeSize> EncodeSize for Claim<G> {
+    fn encode_size(&self) -> usize {
+        self.commitments.encode_size()
+    }
+}
+
+#[allow(dead_code)]
+pub struct Proof<F, G> {
+    t_big: [G; 5],
+    s: [G; 3],
+    s_tilde: F,
+    t_x: F,
+    t_tilde_x: F,
+    ipa_proof: ipa::Proof<F, G>,
+}
+
+pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
+    rng: &mut impl CryptoRngCore,
+    transcript: &mut Transcript,
+    setup: &Setup<G>,
+    circuit: &Circuit<F>,
+    witness: &Witness<F>,
+    claim: &Claim<G>,
+    strategy: &impl Strategy,
+) -> Option<Proof<F, G>> {
     // To set the stage, we're trying to convince the verifier that:
     //
     //   - we know v_i, ~v_i, l_i, r_i, o_i such that...
@@ -239,6 +340,9 @@ pub fn prove<F: Field>(_rng: &mut impl CryptoRngCore, _circuit: &Circuit<F>) {
     //  t(x) B + ~t(x) ~B =?
     //  (-κ + δ(y, z)) x^2 B - x^2 <θ_i, V_i> + Σ_{i != 2} x^i T_i
     //
+    // for ~t(x), we use the synthetic blinding factors ~t_i for x^1, x^3, ...
+    // and for x^2, we use -<θ_i, ~v_i>, so that the equation above works.
+    //
     // The right hand side is checking the second degree in the exponent, behind
     // the Pedersen commitments, and the left hand side is our opening of the polynomial,
     // at a random point.
@@ -290,6 +394,193 @@ pub fn prove<F: Field>(_rng: &mut impl CryptoRngCore, _circuit: &Circuit<F>) {
     // P_0 on the other hand, will end up with some extra -y^i values we'll have
     // to take into account. Because this is the only changed value, we can handle
     // this one as a special case.
+    //
+    // Now, let's write some Rust.
+    //
+    // First, we want to make sure that our transcript includes all the public
+    // information:
+    circuit.commit(transcript);
+    transcript.commit(claim.encode());
+    let padded_vars = circuit.internal_vars.next_power_of_two();
+    let y = F::random(transcript.noise(b"y"));
+    let y_powers = powers(F::one(), &y).take(padded_vars).collect::<Vec<_>>();
+    let y_inv = y.inv();
+    let y_inv_powers = powers(F::one(), &y_inv)
+        .take(circuit.internal_vars)
+        .collect::<Vec<_>>();
+    let z = F::random(transcript.noise(b"z"));
+    let z_powers = powers(z.clone(), &z)
+        .take(circuit.weights.height())
+        .collect::<Vec<_>>();
+    let (kappa, theta, lambda, rho, omega) = {
+        let mut kappa = F::zero();
+        let mut theta = vec![F::zero(); circuit.committed_vars];
+        let mut lambda = vec![F::zero(); circuit.internal_vars];
+        let mut rho = vec![F::zero(); circuit.internal_vars];
+        let mut omega = vec![F::zero(); circuit.internal_vars];
+        let theta_start = 1;
+        let lambda_start = theta_start + circuit.committed_vars;
+        let rho_start = lambda_start + circuit.internal_vars;
+        let omega_start = rho_start + circuit.internal_vars;
+        for (&(i, j), w_ij) in &circuit.weights.weights {
+            let w_ij = w_ij.clone();
+            if j >= omega_start {
+                omega[j - omega_start] += &(w_ij * &z_powers[i]);
+            } else if j >= rho_start {
+                rho[j - rho_start] += &(w_ij * &z_powers[i]);
+            } else if j >= lambda_start {
+                lambda[j - lambda_start] += &(w_ij * &z_powers[i]);
+            } else if j >= theta_start {
+                theta[j - theta_start] += &(w_ij * &z_powers[i]);
+            } else {
+                kappa += &(w_ij * &z_powers[i]);
+            }
+        }
+        (kappa, theta, lambda, rho, omega)
+    };
+    let l_tilde = (0..circuit.internal_vars)
+        .map(|_| F::random(&mut *rng))
+        .collect::<Vec<_>>();
+    let r_tilde = (0..circuit.internal_vars)
+        .map(|_| F::random(&mut *rng))
+        .collect::<Vec<_>>();
+
+    // We cache a few quantities, which we'll need for MSMs later anyways.
+    let mut omega_minus_y = omega
+        .iter()
+        .cloned()
+        .zip(&y_powers)
+        .map(|(omega_i, y_i)| omega_i - y_i)
+        .collect::<Vec<_>>();
+    omega_minus_y.extend(
+        y_powers
+            .iter()
+            .skip(circuit.internal_vars)
+            .cloned()
+            .map(|y_i| -y_i),
+    );
+    let y_inv_rho = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&rho)
+        .map(|(y_inv_i, rho_i)| y_inv_i * rho_i)
+        .collect::<Vec<_>>();
+    let y_r = y_powers
+        .iter()
+        .cloned()
+        .zip(&witness.right)
+        .map(|(y_i, r_i)| y_i * r_i)
+        .collect::<Vec<_>>();
+    let y_r_tilde = y_powers
+        .iter()
+        .cloned()
+        .zip(&r_tilde)
+        .map(|(y_i, r_i)| y_i * r_i)
+        .collect::<Vec<_>>();
+
+    let delta_y_z = <F as Space<F>>::msm(&y_inv_rho, &lambda, strategy);
+
+    // t_1, t_2, t_3, t_4, t_5, t_6
+    let t = {
+        let mut t = std::array::from_fn::<_, 6, _>(|_| F::zero());
+        // t_1
+        for i in 0..circuit.internal_vars {
+            t[0] += &((witness.left[i].clone() + &y_inv_rho[i]) * &omega_minus_y[i]);
+        }
+        // t_2
+        t[1] = delta_y_z - &kappa - &<F as Space<F>>::msm(&theta, &witness.values, strategy);
+        // t_3
+        for i in 0..circuit.internal_vars {
+            t[2] += &(l_tilde[i].clone() * &omega_minus_y[i]);
+            t[2] += &(witness.out[i].clone() * &(y_r[i].clone() + &lambda[i]));
+        }
+        // t_4
+        for i in 0..circuit.internal_vars {
+            t[3] += &(l_tilde[i].clone() * &(y_r[i].clone() + &lambda[i]));
+            t[3] += &((witness.left[i].clone() + &y_inv_rho[i]) * &y_r_tilde[i]);
+        }
+        // t_5
+        t[4] = <F as Space<F>>::msm(&witness.out, &y_r_tilde, strategy);
+        // t_6
+        t[5] = <F as Space<F>>::msm(&l_tilde, &y_r_tilde, strategy);
+        t
+    };
+    let t_tilde = std::array::from_fn::<_, 6, _>(|i| {
+        if i == 1 {
+            -<F as Space<F>>::msm(&theta, &witness.blinding, strategy)
+        } else {
+            F::random(&mut *rng)
+        }
+    });
+    let t_big = std::array::from_fn::<_, 5, _>(|i| {
+        // Skip the second element
+        let i = if i >= 1 { i + 1 } else { i };
+        setup.pedersen_value.clone() * &t[i] + &(setup.pedersen_blinding.clone() * &t_tilde[i])
+    });
+
+    let s_tilde = std::array::from_fn::<_, 3, _>(|_| F::random(&mut *rng));
+    let p_0 = G::msm(&setup.ipa.h()[..padded_vars], &omega_minus_y, strategy);
+    let g_internal = &setup.ipa.g()[..circuit.internal_vars];
+    let h_internal = &setup.ipa.h()[..circuit.internal_vars];
+    let p_1 = G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &lambda, strategy);
+    let s_1 = G::msm(g_internal, &witness.left, strategy)
+        + &(G::msm(h_internal, &y_r, strategy) + &(setup.pedersen_blinding.clone() * &s_tilde[0]));
+    let s_2 = G::msm(g_internal, &witness.out, strategy)
+        + &(setup.pedersen_blinding.clone() * &s_tilde[1]);
+    let s_3 = G::msm(g_internal, &l_tilde, strategy)
+        + &(G::msm(h_internal, &y_r_tilde, strategy)
+            + &(setup.pedersen_blinding.clone() * &s_tilde[2]));
+
+    // Now, we can commit the t commitments, along with the secret commitments.
+    // The public commitments will be recomputed by the verifier.
+    for t_big_i in &t_big {
+        transcript.commit(t_big_i.encode());
+    }
+    transcript.commit(s_1.encode());
+    transcript.commit(s_2.encode());
+    transcript.commit(s_3.encode());
+    let x = F::random(transcript.noise(b"x"));
+    let x = powers(x.clone(), &x).take(6).collect::<Vec<_>>();
+    let s_tilde =
+        s_tilde[0].clone() * &x[0] + &(s_tilde[1].clone() * &x[1]) + &(s_tilde[2].clone() * &x[2]);
+    let p = setup.pedersen_blinding.clone() * &(-s_tilde.clone())
+        + &p_0
+        + &((p_1 + &s_1) * &x[0])
+        + &(s_2.clone() * &x[1])
+        + &(s_3.clone() * &x[2]);
+    let t_x = <F as Space<F>>::msm(&t, &x, strategy);
+    let t_tilde_x = <F as Space<F>>::msm(&t_tilde, &x, strategy);
+    let ipa_claim = ipa::Claim {
+        commitment: p,
+        product: t_x.clone(),
+        log_len: padded_vars.ilog2().try_into().ok()?,
+    };
+    let mut f_x = (0..circuit.internal_vars)
+        .map(|i| {
+            (witness.left[i].clone() + &y_inv_rho[i]) * &x[0]
+                + &(witness.out[i].clone() * &x[1])
+                + &(l_tilde[i].clone() * &x[2])
+        })
+        .collect::<Vec<_>>();
+    f_x.resize(padded_vars, F::zero());
+    let mut g_x = (0..circuit.internal_vars)
+        .map(|i| {
+            (y_r[i].clone() + &lambda[i]) * &x[0]
+                + &omega_minus_y[i]
+                + &(y_r_tilde[i].clone() * &x[2])
+        })
+        .collect::<Vec<_>>();
+    g_x.extend_from_slice(&omega_minus_y[circuit.internal_vars..]);
+    let witness = ipa::Witness::new(f_x.into_iter().zip(g_x.into_iter()))?;
+    let ipa_proof = ipa::prove(transcript, &setup.ipa, &ipa_claim, witness, strategy)?;
+    Some(Proof {
+        t_big,
+        s: [s_1, s_2, s_3],
+        s_tilde,
+        t_x,
+        t_tilde_x,
+        ipa_proof,
+    })
 }
 
 #[cfg(test)]
