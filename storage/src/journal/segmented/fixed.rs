@@ -181,9 +181,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
-    /// Try to read an item using only the page cache. Returns `None` on any cache miss
-    /// or if the position cannot be verified as in-bounds without blocking.
-    pub fn try_get_cached(&self, section: u64, position: u64) -> Option<A> {
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
         let blob = self.manager.get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
         let remaining = blob.try_size()?.checked_sub(offset)?;
@@ -191,7 +190,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return None;
         }
         let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        if !blob.try_read_cached(offset, &mut buf) {
+        if !blob.try_read_sync(offset, &mut buf) {
             return None;
         }
         A::decode(&buf[..]).ok()

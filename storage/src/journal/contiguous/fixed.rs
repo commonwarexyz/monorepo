@@ -156,8 +156,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             })
     }
 
-    /// Try to read an item from the page cache only. Returns `None` on cache miss.
-    fn try_read_cached(&self, pos: u64, items_per_blob: u64) -> Option<A> {
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    fn try_read_sync(&self, pos: u64, items_per_blob: u64) -> Option<A> {
         if pos >= self.size || pos < self.pruning_boundary {
             return None;
         }
@@ -165,7 +165,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let section_start = section * items_per_blob;
         let first_in_section = self.pruning_boundary.max(section_start);
         let pos_in_section = pos - first_in_section;
-        self.journal.try_get_cached(section, pos_in_section)
+        self.journal.try_get_sync(section, pos_in_section)
     }
 }
 
@@ -211,8 +211,8 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         self.guard.read(pos, self.items_per_blob).await
     }
 
-    fn try_read_cached(&self, pos: u64) -> Option<A> {
-        self.guard.try_read_cached(pos, self.items_per_blob)
+    fn try_read_sync(&self, pos: u64) -> Option<A> {
+        self.guard.try_read_sync(pos, self.items_per_blob)
     }
 
     async fn replay(

@@ -403,12 +403,11 @@ impl<B: Blob> Append<B> {
         Some(buffer.size())
     }
 
-    /// Try to read from the page cache only into the provided buffer.
+    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false` otherwise.
     ///
-    /// Returns `true` if all `buf.len()` bytes were in the cache, `false` on any
-    /// cache miss. Does not perform any async I/O. The caller must have already
-    /// validated that `offset + buf.len()` is within the blob's logical size.
-    pub fn try_read_cached(&self, offset: u64, buf: &mut [u8]) -> bool {
+    /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
+    /// already validated that `offset + buf.len()` is within the blob's logical size.
+    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
     }
 
