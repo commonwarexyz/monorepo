@@ -1185,9 +1185,12 @@ where
     /// entries must be retained for any height marshal may request.
     ///
     /// Staleness by request kind:
-    /// - [`Request::Finalized { height }`]: `height <= last_processed_height`.
-    /// - [`Request::Notarized { round }`]: the epoch's last height is at or
-    ///   below the last processed height.
+    /// - [`Request::Finalized { height }`]: either the epocher has no epoch
+    ///   containing `height` (the containing epoch has been pruned, which
+    ///   implies `height <= last_processed_height`), or `height <= last_processed_height`.
+    /// - [`Request::Notarized { round }`]: either the epocher has no entry for
+    ///   `round.epoch()` (the epoch has been pruned), or the epoch's last
+    ///   height is at or below the last processed height.
     /// - [`Request::Block`]: block requests do not consult a verifier (unreachable).
     fn handle_missing_verifier(
         &self,
