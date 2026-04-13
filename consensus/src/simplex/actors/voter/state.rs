@@ -1758,6 +1758,61 @@ mod tests {
         });
     }
 
+    /// Replaying a local notarize vote for a leader-owned proposal should
+    /// restore the proposal as verified and suppress duplicate vote construction.
+    #[test]
+    fn replayed_local_notarize_restores_verified_leader_proposal() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let epoch = Epoch::new(2);
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, view),
+                View::new(1),
+                Sha256Digest::from([42u8; 32]),
+            );
+            let local_vote = Notarize::sign(&schemes[0], proposal.clone()).expect("notarize");
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Enter the view where we are the leader.
+            assert!(state.enter_view(view));
+            state.set_leader(view, None);
+            assert_eq!(state.leader_index(view), Some(Participant::new(0)));
+
+            // Replay our own notarize vote.
+            state.replay(&Artifact::Notarize(local_vote));
+
+            // Proposal should be restored in the round.
+            let round = state.views.get(&view).expect("replayed round must exist");
+            assert_eq!(round.proposal(), Some(&proposal));
+
+            // No duplicate notarize vote should be constructed.
+            assert!(
+                state.construct_notarize(view).is_none(),
+                "replay should restore that we already emitted the local notarize vote"
+            );
+
+            // No verification request should be emitted (leader-owned).
+            assert!(state.try_verify().is_none());
+        });
+    }
+
     #[test]
     fn replay_restores_conflict_state() {
         let runtime = deterministic::Runner::default();
