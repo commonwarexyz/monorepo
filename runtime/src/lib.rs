@@ -332,6 +332,25 @@ stability_scope!(BETA {
         /// _Using attributes does not reduce cardinality (N epochs still means N time series).
         /// Attributes just make metrics easier to query, filter, and aggregate._
         ///
+        /// # Bounded Attribute Values
+        ///
+        /// Each distinct attribute-value combination passed to `register` creates its own
+        /// sub-registry that lives for the lifetime of the root registry (or of the enclosing
+        /// [`Metrics::with_scope`], if any). Only use `with_attribute` with values drawn from
+        /// a bounded set (e.g. validator index, a finite number of epochs held in a cache).
+        /// For unbounded dimensions (e.g. consensus round, request id), either:
+        ///
+        /// - register a [`Family`](prometheus_client::metrics::family::Family) once and pass
+        ///   the dynamic value at observation time, or
+        /// - pair `with_attribute` with [`Metrics::with_scope`] so the sub-registry is dropped
+        ///   when the scope ends.
+        ///
+        /// Applying `with_attribute` without subsequently calling `register` is always safe:
+        /// it only mutates a `Vec<(String, String)>` on the returned context. Task-tracking
+        /// metrics (e.g. `runtime_tasks_spawned`) are keyed by the task's label name, not by
+        /// context attributes, so spawning with a per-round attribute does not inflate their
+        /// cardinality.
+        ///
         /// # Family Label Conflicts
         ///
         /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
@@ -2431,6 +2450,100 @@ mod tests {
     fn test_tokio_metrics_attributes_isolated_between_contexts() {
         let runner = tokio::Runner::default();
         test_metrics_attributes_isolated_between_contexts(runner);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
+    ///
+    /// Marshaled consensus code spawns short-lived tasks with an unbounded
+    /// `with_attribute("round", round)` applied before each spawn. This test
+    /// verifies that doing so does not leak per-round entries into the
+    /// `runtime_tasks_spawned` / `runtime_tasks_running` metric families: the
+    /// task `Label` is keyed by the static `with_label` name (plus `kind` and
+    /// `execution`), not by attributes, so all rounds collapse into a single
+    /// time series regardless of how many distinct attribute values are used.
+    fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        runner.start(|context| async move {
+            const ROUNDS: u64 = 128;
+
+            let mut handles = Vec::with_capacity(ROUNDS as usize);
+            for round in 0..ROUNDS {
+                let handle = context
+                    .with_label("deferred_verify")
+                    .with_attribute("round", round)
+                    .spawn(move |_| async move { round });
+                handles.push(handle);
+            }
+            for (expected, handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.await.expect("task failed"), expected as u64);
+            }
+
+            let buffer = context.encode();
+
+            // Count occurrences of each runtime task metric for our label. If
+            // attributes were incorrectly folded into the task family key, we
+            // would see ROUNDS distinct time series instead of one.
+            let spawned_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            let running_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            assert_eq!(
+                spawned_lines, 1,
+                "expected exactly 1 runtime_tasks_spawned entry for deferred_verify, got {spawned_lines}: {buffer}",
+            );
+            assert_eq!(
+                running_lines, 1,
+                "expected exactly 1 runtime_tasks_running entry for deferred_verify, got {running_lines}: {buffer}",
+            );
+
+            // The single spawned-counter entry should reflect every round.
+            let spawned_value = format!(
+                "runtime_tasks_spawned_total{{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}} {ROUNDS}"
+            );
+            assert!(
+                buffer.contains(&spawned_value),
+                "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
+
+            // The per-round attribute must not surface on task metrics (the
+            // task `Label` does not include context attributes).
+            assert!(
+                !buffer
+                    .lines()
+                    .any(|line| line.starts_with("runtime_tasks_")
+                        && line.contains("round=")),
+                "task metrics must not carry `round` attribute: {buffer}",
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_spawn_attribute_cardinality() {
+        let executor = deterministic::Runner::default();
+        test_metrics_spawn_attribute_cardinality(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_spawn_attribute_cardinality() {
+        let runner = tokio::Runner::default();
+        test_metrics_spawn_attribute_cardinality(runner);
     }
 
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
