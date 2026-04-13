@@ -237,6 +237,12 @@ impl CacheRef {
         self.page_faults.get()
     }
 
+    /// Returns the number of page evictions that have occurred.
+    #[cfg(test)]
+    pub fn page_evictions(&self) -> u64 {
+        self.page_evictions.get()
+    }
+
     /// Returns a unique id for the next blob that will use this page cache.
     pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
@@ -424,7 +430,9 @@ impl CacheRef {
             let page_size = self.page_size as usize;
             let mut page_cache = self.cache.write();
             while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
+                if page_cache.cache(blob_id, &buf[..page_size], page_num) {
+                    self.page_evictions.inc();
+                }
                 buf = &buf[page_size..];
                 page_num = match page_num.checked_add(1) {
                     Some(next) => next,
@@ -826,6 +834,55 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_write_path_tracks_evictions() {
+        // Regression test: pages cached via `CacheRef::cache` (the write/append
+        // flush path) must increment the `page_evictions` metric when they
+        // displace existing entries. Previously only the read/page-fault path
+        // counted evictions, so workloads dominated by writes (steady state)
+        // showed zero evictions until a restart caused reads to fault pages
+        // back in from disk.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let capacity = 4;
+            let cache_ref =
+                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            assert_eq!(cache_ref.page_evictions(), 0);
+
+            let logical_data = vec![0xABu8; PAGE_SIZE.get() as usize];
+
+            // Fill the cache exactly to capacity. None of these should evict.
+            for i in 0..capacity as u64 {
+                let remaining =
+                    cache_ref.cache(0, logical_data.as_slice(), i * PAGE_SIZE_U64);
+                assert_eq!(remaining, 0);
+            }
+            assert_eq!(cache_ref.page_evictions(), 0);
+
+            // Re-caching the same pages updates in place; still no evictions.
+            for i in 0..capacity as u64 {
+                cache_ref.cache(0, logical_data.as_slice(), i * PAGE_SIZE_U64);
+            }
+            assert_eq!(cache_ref.page_evictions(), 0);
+
+            // Each subsequent new page must evict exactly one existing page.
+            for i in 0..6u64 {
+                let offset = (capacity as u64 + i) * PAGE_SIZE_U64;
+                cache_ref.cache(0, logical_data.as_slice(), offset);
+                assert_eq!(cache_ref.page_evictions(), i + 1);
+            }
+
+            // Caching a multi-page buffer should count one eviction per page
+            // displaced.
+            let prior = cache_ref.page_evictions();
+            let multi = vec![0xCDu8; PAGE_SIZE.get() as usize * 3];
+            let base_offset = 100 * PAGE_SIZE_U64;
+            let remaining = cache_ref.cache(0, multi.as_slice(), base_offset);
+            assert_eq!(remaining, 0);
+            assert_eq!(cache_ref.page_evictions(), prior + 3);
         });
     }
 
