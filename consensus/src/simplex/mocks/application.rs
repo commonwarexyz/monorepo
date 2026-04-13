@@ -125,6 +125,15 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+/// Observer invoked on every `Message::Propose` request. Used by tests to
+/// detect spurious propose calls.
+type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
+
+/// Observer invoked on every `Message::Verify` request. Used by tests to
+/// detect spurious verification calls.
+type VerifyObserver<H, P> =
+    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
+
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
 pub enum Certifier<D: Digest> {
@@ -190,12 +199,12 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     /// Invoked on every `Message::Propose` request received by the application.
     /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
-    propose_observer: Option<Box<dyn Fn(Context<H::Digest, P>) + Send + 'static>>,
+    propose_observer: Option<ProposeObserver<H, P>>,
 
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
-    verify_observer: Option<Box<dyn Fn(Context<H::Digest, P>, H::Digest) + Send + 'static>>,
+    verify_observer: Option<VerifyObserver<H, P>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -256,17 +265,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.drop_verifications = drop;
     }
 
-    pub fn set_propose_observer(
-        &mut self,
-        observer: Box<dyn Fn(Context<H::Digest, P>) + Send + 'static>,
-    ) {
+    pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
         self.propose_observer = Some(observer);
     }
 
-    pub fn set_verify_observer(
-        &mut self,
-        observer: Box<dyn Fn(Context<H::Digest, P>, H::Digest) + Send + 'static>,
-    ) {
+    pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
         self.verify_observer = Some(observer);
     }
 
