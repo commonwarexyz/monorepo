@@ -957,30 +957,26 @@ where
         let locations = m.gather_existing_locations(&mutations, db, true);
         let reader = db.log.reader().await;
 
-        // Read and unwrap Update operations (snapshot only references Updates).
-        let update_results: Vec<_> = m
-            .read_ops(&locations, &[], &reader)
-            .await?
-            .into_iter()
-            .map(|op| match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("snapshot should only reference Update operations"),
-            })
-            .collect();
-
         // Classify mutations into deleted, created, updated.
         let mut next_candidates: BTreeSet<K> = BTreeSet::new();
         let mut prev_candidates: BTreeMap<K, (V::Value, Location<F>)> = BTreeMap::new();
-
         let mut deleted: BTreeMap<K, Location<F>> = BTreeMap::new();
         let mut updated: BTreeMap<K, (V::Value, Location<F>)> = BTreeMap::new();
 
-        for (key_data, &old_loc) in update_results.into_iter().zip(&locations) {
+        for (op, &old_loc) in m
+            .read_ops(&locations, &[], &reader)
+            .await?
+            .into_iter()
+            .zip(&locations)
+        {
             let update::Ordered {
                 key,
                 value,
                 next_key,
-            } = key_data;
+            } = match op {
+                Operation::Update(data) => data,
+                _ => unreachable!("snapshot should only reference Update operations"),
+            };
             next_candidates.insert(next_key);
 
             let mutation = mutations.remove(&key);
