@@ -329,27 +329,22 @@ stability_scope!(BETA {
         /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
         /// names with dynamic values like `orchestrator_epoch_5_votes`.
         ///
-        /// _Using attributes does not reduce cardinality (N epochs still means N time series).
-        /// Attributes just make metrics easier to query, filter, and aggregate._
+        /// Attributes do not reduce cardinality: every distinct value is a new time series,
+        /// and each series lives as long as the registry it was registered into. Only use
+        /// `with_attribute` with values from a bounded set (e.g. a validator index, a finite
+        /// list of regions). For unbounded dimensions (e.g. consensus round, request id) do
+        /// one of the following instead:
         ///
-        /// # Bounded Attribute Values
+        /// - Register a [`Family`](prometheus_client::metrics::family::Family) once and pass
+        ///   the dynamic value at observation time.
+        /// - Call [`Metrics::with_scope`] to confine the metrics to a scope that will be
+        ///   dropped when the dimension is no longer live.
         ///
-        /// Each distinct attribute-value combination passed to `register` creates its own
-        /// sub-registry that lives for the lifetime of the root registry (or of the enclosing
-        /// [`Metrics::with_scope`], if any). Only use `with_attribute` with values drawn from
-        /// a bounded set (e.g. validator index, a finite number of epochs held in a cache).
-        /// For unbounded dimensions (e.g. consensus round, request id), either:
-        ///
-        /// - register a [`Family`](prometheus_client::metrics::family::Family) once and pass
-        ///   the dynamic value at observation time, or
-        /// - pair `with_attribute` with [`Metrics::with_scope`] so the sub-registry is dropped
-        ///   when the scope ends.
-        ///
-        /// Applying `with_attribute` without subsequently calling `register` is always safe:
-        /// it only mutates a `Vec<(String, String)>` on the returned context. Task-tracking
-        /// metrics (e.g. `runtime_tasks_spawned`) are keyed by the task's label name, not by
-        /// context attributes, so spawning with a per-round attribute does not inflate their
-        /// cardinality.
+        /// Note: runtime-internal task metrics (e.g. `runtime_tasks_spawned`,
+        /// `runtime_tasks_running`) deliberately ignore attributes so that spawning with a
+        /// per-round or per-request attribute does not inflate their cardinality. Attributes
+        /// only surface on metrics you register through the context (and on tracing spans
+        /// when [`Spawner::instrumented`] is set).
         ///
         /// # Family Label Conflicts
         ///
@@ -2454,13 +2449,10 @@ mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
     ///
-    /// Marshaled consensus code spawns short-lived tasks with an unbounded
-    /// `with_attribute("round", round)` applied before each spawn. This test
-    /// verifies that doing so does not leak per-round entries into the
-    /// `runtime_tasks_spawned` / `runtime_tasks_running` metric families: the
-    /// task `Label` is keyed by the static `with_label` name (plus `kind` and
-    /// `execution`), not by attributes, so all rounds collapse into a single
-    /// time series regardless of how many distinct attribute values are used.
+    /// Verifies the documented guarantee that runtime task metrics ignore context
+    /// attributes: spawning with a varying `with_attribute` (as the marshaled
+    /// consensus code does for each round) must not create per-value entries in
+    /// `runtime_tasks_spawned` / `runtime_tasks_running`.
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
     where
         R::Context: Spawner + Metrics,
