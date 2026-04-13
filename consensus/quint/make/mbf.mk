@@ -84,7 +84,8 @@ mbf_live_watch:
 	@bash -eu -o pipefail -c '\
 		dir="$(MUTATED_TRACES_DIR)"; \
 		seen_dir="$$dir/.seen"; \
-		mkdir -p "$$dir" "$$seen_dir"; \
+		failed_dir="$$dir/.failed"; \
+		mkdir -p "$$dir" "$$seen_dir" "$$failed_dir"; \
 		echo "watching $$dir for new traces..."; \
 		while true; do \
 			for f in "$$dir"/*.json; do \
@@ -94,10 +95,12 @@ mbf_live_watch:
 				echo "=== Replaying $$f ==="; \
 				if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 					echo "PASS"; \
+					: > "$$seen_dir/$$hash"; \
 				else \
-					echo "FAIL"; \
+					cp "$$f" "$$failed_dir/$$hash.json"; \
+					echo "FAIL: stored failed trace at $$failed_dir/$$hash.json"; \
+					exit 1; \
 				fi; \
-				: > "$$seen_dir/$$hash"; \
 			done; \
 			sleep 2; \
 		done; \
@@ -105,18 +108,37 @@ mbf_live_watch:
 
 mbf_live: clean_mutated_traces
 	@bash -eu -o pipefail -c '\
+		fuzz=""; \
 		$(MAKE) mbf_live_watch & \
 		watcher=$$!; \
 		cleanup() { \
 			kill $$watcher 2>/dev/null || true; \
 			wait $$watcher 2>/dev/null || true; \
+			if [ -n "$$fuzz" ]; then \
+				kill $$fuzz 2>/dev/null || true; \
+				wait $$fuzz 2>/dev/null || true; \
+			fi; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		$(MAKE) mbf_live_fuzz; \
+		$(MAKE) mbf_live_fuzz & \
+		fuzz=$$!; \
+		while kill -0 $$watcher 2>/dev/null && kill -0 $$fuzz 2>/dev/null; do \
+			sleep 1; \
+		done; \
+		if ! kill -0 $$watcher 2>/dev/null; then \
+			status=0; \
+			wait $$watcher || status=$$?; \
+			kill $$fuzz 2>/dev/null || true; \
+			wait $$fuzz 2>/dev/null || true; \
+			exit $$status; \
+		fi; \
+		status=0; \
+		wait $$fuzz || status=$$?; \
 		echo "fuzzer finished, draining watcher..."; \
 		sleep 5; \
 		kill $$watcher 2>/dev/null || true; \
 		wait $$watcher 2>/dev/null || true; \
+		exit $$status; \
 	'
 
 mbf_live_trace_fuzz_gen:
