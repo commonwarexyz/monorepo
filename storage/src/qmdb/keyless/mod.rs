@@ -59,6 +59,7 @@ use tracing::{debug, warn};
 pub mod batch;
 pub mod fixed;
 mod operation;
+pub mod sync;
 pub mod variable;
 pub use operation::Operation;
 
@@ -209,6 +210,23 @@ where
             .journal
             .historical_proof(op_count, start_loc, max_ops)
             .await?)
+    }
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+        if !loc.is_valid() {
+            return Err(crate::merkle::Error::LocationOverflow(loc).into());
+        }
+        let futs: Vec<_> = F::nodes_to_pin(loc)
+            .map(|p| async move {
+                self.journal
+                    .merkle
+                    .get_node(p)
+                    .await?
+                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
+            })
+            .collect();
+        futures::future::try_join_all(futs).await
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.

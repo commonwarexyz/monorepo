@@ -17,6 +17,10 @@ use crate::{
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
         },
+        keyless::{
+            fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
+            variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
+        },
         operation::Key,
     },
     translator::Translator,
@@ -333,6 +337,120 @@ impl_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 
 // Immutable Variable
 impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+
+// Keyless types have no key or translator, so they need their own macro.
+macro_rules! impl_resolver_keyless {
+    ($db:ident, $op:ident, $val_bound:ident) => {
+        impl<E, V, H> Resolver for Arc<$db<mmr::Family, E, V, H>>
+        where
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Digest = H::Digest;
+            type Op = $op<V>;
+            type Error = qmdb::Error<mmr::Family>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+                let (proof, operations) =
+                    self.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<E, V, H> Resolver for Arc<AsyncRwLock<$db<mmr::Family, E, V, H>>>
+        where
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Digest = H::Digest;
+            type Op = $op<V>;
+            type Error = qmdb::Error<mmr::Family>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+                let db = self.read().await;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+
+        impl<E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<mmr::Family, E, V, H>>>>
+        where
+            E: Context,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+        {
+            type Digest = H::Digest;
+            type Op = $op<V>;
+            type Error = qmdb::Error<mmr::Family>;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
+            }
+        }
+    };
+}
+
+// Keyless Fixed
+impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
+
+// Keyless Variable
+impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
 
 #[cfg(test)]
 pub(crate) mod tests {

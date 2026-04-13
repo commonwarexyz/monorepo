@@ -22,6 +22,14 @@ impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
         self.log.clone()
     }
 }
+
+impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
+    type JournalConfig = J;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
 pub trait Database: Sized + Send {
     type Op: Send;
     type Journal: Journal<Context = Self::Context, Op = Self::Op>;
