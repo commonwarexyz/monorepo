@@ -1064,7 +1064,10 @@ mod tests {
             bls12381_threshold_std::fixture::<MinSig, _>,
             false,
         );
-        silent_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, false);
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinPk, _>,
+            false,
+        );
         silent_leader_forwarding_respects_missing_vote(
             bls12381_multisig::fixture::<MinSig, _>,
             false,
@@ -1091,8 +1094,14 @@ mod tests {
             bls12381_threshold_std::fixture::<MinSig, _>,
             true,
         );
-        silent_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, true);
-        silent_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinSig, _>, true);
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinPk, _>,
+            true,
+        );
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinSig, _>,
+            true,
+        );
         silent_leader_forwarding_respects_missing_vote(ed25519::fixture, true);
         silent_leader_forwarding_respects_missing_vote(secp256r1::fixture, true);
     }
