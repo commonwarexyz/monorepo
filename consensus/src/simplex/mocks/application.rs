@@ -188,7 +188,14 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    verify_observer: Option<Box<dyn Fn(H::Digest) + Send + 'static>>,
+    /// Invoked on every `Message::Propose` request received by the application.
+    /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
+    propose_observer: Option<Box<dyn Fn(Context<H::Digest, P>) + Send + 'static>>,
+
+    /// Invoked on every `Message::Verify` request received by the application.
+    /// Used by tests to detect spurious verification requests (e.g. after replay
+    /// of a leader-owned proposal).
+    verify_observer: Option<Box<dyn Fn(Context<H::Digest, P>, H::Digest) + Send + 'static>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -229,6 +236,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
+                propose_observer: None,
                 verify_observer: None,
                 pending_certifications: Vec::new(),
             },
@@ -248,7 +256,17 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.drop_verifications = drop;
     }
 
-    pub fn set_verify_observer(&mut self, observer: Box<dyn Fn(H::Digest) + Send + 'static>) {
+    pub fn set_propose_observer(
+        &mut self,
+        observer: Box<dyn Fn(Context<H::Digest, P>) + Send + 'static>,
+    ) {
+        self.propose_observer = Some(observer);
+    }
+
+    pub fn set_verify_observer(
+        &mut self,
+        observer: Box<dyn Fn(Context<H::Digest, P>, H::Digest) + Send + 'static>,
+    ) {
         self.verify_observer = Some(observer);
     }
 
@@ -392,6 +410,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
+                        if let Some(observer) = &self.propose_observer {
+                            observer(context.clone());
+                        }
                         if self.drop_proposals {
                             continue;
                         }
@@ -403,11 +424,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
+                        if let Some(observer) = &self.verify_observer {
+                            observer(context.clone(), payload);
+                        }
                         if self.drop_verifications {
                             continue;
-                        }
-                        if let Some(observer) = &self.verify_observer {
-                            observer(payload);
                         }
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
