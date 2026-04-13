@@ -16,13 +16,15 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// cannot map a height to an epoch, or the provider cannot supply a scheme for
 /// that epoch, marshal will silently drop the sync request. If the height is
 /// greater than the last processed height, marshal will block the serving peer
-/// for providing invalid data. If the height is less than or equal to the last
+/// for providing invalid data (recall, marshal will only attempt to fetch heights
+/// requested by the application). If the height is less than or equal to the last
 /// processed height, marshal will silently drop the sync request as stale.
 ///
 /// Applications that wish to prune entries from the [epocher](Self::epocher) and
 /// [provider](Self::provider) can do so once an epoch is no longer needed (the
 /// last processed height is greater than the epoch boundary). Applications can compute
-/// the last processed height from an `Update::Block` message as `H - max_pending_acks`.
+/// the last processed height as an `Update::Block` message as `H - max_pending_acks` (the
+/// next height to process minus the maximum backlog of blocks the application can buffer).
 pub struct Config<B, P, ES, T>
 where
     B: Block,
