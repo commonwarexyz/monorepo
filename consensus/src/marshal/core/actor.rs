@@ -1177,53 +1177,22 @@ where
 
     /// Respond to a delivery without a verifier.
     ///
-    /// If the request is provably at or below the floor (the last processed height),
-    /// the response is acknowledged (`true`) so the serving peer is not blamed for an
-    /// in-flight response we asked for but no longer can verify. Otherwise
-    /// the response is rejected (`false`) and the peer is blocked, because
-    /// the application has violated its pruning contract: epocher/provider
-    /// entries must be retained for any height marshal may request.
-    ///
-    /// Deliveries are only produced for requests we issued, so a missing epocher
-    /// entry can only mean the epoch was pruned between fetch and deliver (pruning
-    /// is monotonic) and therefore lies at or below the floor.
-    ///
-    /// Staleness by request kind:
-    /// - [`Request::Finalized { height }`]: `height <= last_processed_height`, or
-    ///   the epocher no longer has an epoch containing `height` (pruned, which
-    ///   implies the same).
-    /// - [`Request::Notarized { round }`]: the epoch's last height is at or below
-    ///   the last processed height, or the epocher no longer has an entry for
-    ///   `round.epoch()` (pruned, which implies the same).
-    /// - [`Request::Block`]: block requests do not consult a verifier (unreachable).
+    /// Deliveries are only produced for requests we issued, and pruning of the
+    /// epocher and provider is monotonic, so a missing verifier at delivery time
+    /// can only mean the relevant entry was pruned between fetch and deliver.
+    /// The response is acknowledged (`true`) so the serving peer is not blamed
+    /// for an in-flight response we asked for but no longer can verify.
     fn handle_missing_verifier(
         &self,
         key: &Request<V::Commitment>,
         response: oneshot::Sender<bool>,
     ) {
-        let stale = match key {
-            Request::Block(_) => unreachable!("block requests do not require a verifier"),
-            Request::Finalized { height } => *height <= self.last_processed_height,
-            Request::Notarized { round } => self
-                .epocher
-                .last(round.epoch())
-                .is_none_or(|last| last <= self.last_processed_height),
-        };
-        if stale {
-            debug!(
-                ?key,
-                floor = %self.last_processed_height,
-                "ignoring stale delivery"
-            );
-            response.send_lossy(true);
-        } else {
-            warn!(
-                ?key,
-                floor = %self.last_processed_height,
-                "missing verifier above floor"
-            );
-            response.send_lossy(false);
-        }
+        debug!(
+            ?key,
+            floor = %self.last_processed_height,
+            "ignoring stale delivery"
+        );
+        response.send_lossy(true);
     }
 
     // -------------------- Waiters --------------------
