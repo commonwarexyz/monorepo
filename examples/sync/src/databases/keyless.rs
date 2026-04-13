@@ -5,7 +5,7 @@
 //! the Merkle root over all operations, and the client reconstructs the same state by replaying
 //! the fetched operations.
 
-use crate::{Hasher, Value};
+use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
@@ -114,7 +114,7 @@ where
         Ok(())
     }
 
-    fn root(&self) -> crate::Key {
+    fn root(&self) -> Key {
         self.root()
     }
 
@@ -134,7 +134,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<
-        Output = Result<(Proof<crate::Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>,
+        Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>,
     > + Send {
         self.historical_proof(op_count, start_loc, max_ops)
     }
@@ -142,7 +142,7 @@ where
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<crate::Key>, qmdb::Error<mmr::Family>>> + Send {
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
 
