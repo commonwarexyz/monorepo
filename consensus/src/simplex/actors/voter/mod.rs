@@ -4147,7 +4147,6 @@ mod tests {
         no_self_propose_or_verify_after_restart(secp256r1::fixture);
     }
 
-
     /// After restart, a proposal we already voted on must not be re-verified
     /// when it is re-delivered to the voter (e.g. via the automaton after
     /// peer vote aggregation reconstructs it).
