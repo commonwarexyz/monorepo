@@ -50,8 +50,8 @@ mod tests {
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    StandardHarness, TestHarness, ValidatorHandle, B, BLOCKS_PER_EPOCH, D,
-                    LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
+                    StandardHarness, TestHarness, ValidatorHandle, B, BLOCKS_PER_EPOCH, D, LINK,
+                    NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
                     UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
@@ -1559,15 +1559,9 @@ mod tests {
         }
         async fn cancel(&mut self, _key: Self::Key) {}
         async fn clear(&mut self) {}
-        async fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) {
-        }
+        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
     }
 
-    /// Regression test for `commonwarexyz/monorepo#3565`.
-    ///
     /// When an application prunes its certificate verifier for an epoch whose
     /// heights are at or below the marshal's floor, in-flight `Finalized`
     /// responses for those heights must be acknowledged (so the serving peer
@@ -1600,11 +1594,8 @@ mod tests {
                 .unwrap();
 
             // Build a mutable provider so the test can drop the verifier.
-            let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = MutableProvider::new(schemes[0].clone());
 
             // Storage configuration shared with the harness for prunable validators.
@@ -1731,9 +1722,7 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::Request::Notarized {
-                        round: stale_round,
-                    },
+                    key: handler::Request::Notarized { round: stale_round },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -1794,17 +1783,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let validator = participants[0].clone();
             let application = Application::<B>::manual_ack();
@@ -1842,7 +1824,10 @@ mod tests {
                 parent = StandardHarness::digest(&block);
                 parent_commitment = commitment;
                 let round = Round::new(
-                    epocher.containing(StandardHarness::height(&block)).unwrap().epoch(),
+                    epocher
+                        .containing(StandardHarness::height(&block))
+                        .unwrap()
+                        .epoch(),
                     View::new(i),
                 );
                 StandardHarness::verify(&mut handle, round, &block, &mut handles).await;
@@ -1851,10 +1836,8 @@ mod tests {
                     parent: View::new(i.saturating_sub(1)),
                     payload: commitment,
                 };
-                let finalization =
-                    StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-                StandardHarness::report_finalization(&mut handle.mailbox, finalization)
-                    .await;
+                let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+                StandardHarness::report_finalization(&mut handle.mailbox, finalization).await;
             }
 
             let check_invariant = |label: &str| {
