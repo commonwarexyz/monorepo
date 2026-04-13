@@ -396,7 +396,7 @@ where
         reader: &R,
     ) -> Option<Operation<F, U>> {
         self.try_read_op_from_uncommitted(loc, batch_ops)
-            .or_else(|| reader.try_read_cached(*loc))
+            .or_else(|| reader.try_read_sync(*loc))
     }
 
     /// Read a single operation by location.

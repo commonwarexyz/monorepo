@@ -580,9 +580,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(item)
     }
 
-    /// Try to read an item using only the page cache. Returns `None` on any cache miss
-    /// or if the position cannot be verified as in-bounds without blocking.
-    pub fn try_get_cached(&self, section: u64, offset: u64) -> Option<V> {
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
         let remaining = blob.try_size()?.checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
@@ -592,7 +591,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_cached(offset, &mut header[..header_len]) {
+        if !blob.try_read_sync(offset, &mut header[..header_len]) {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
@@ -626,7 +625,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Otherwise try reading the full item from cache.
         let mut full = vec![0u8; item_len];
-        if !blob.try_read_cached(offset, &mut full) {
+        if !blob.try_read_sync(offset, &mut full) {
             return None;
         }
         decode_item::<V>(
