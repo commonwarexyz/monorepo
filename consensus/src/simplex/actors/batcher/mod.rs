@@ -723,7 +723,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -865,7 +865,7 @@ mod tests {
         forward_emitted_on_view_advance_with_forwardable_proposal(secp256r1::fixture);
     }
 
-    /// Test that `NextLeader` forwards only to the newly entered leader, and
+    /// Test that `SilentLeader` forwards only to the newly entered leader, and
     /// only when that leader's matching vote was not observed locally.
     fn next_leader_forwarding_respects_missing_vote<S, F>(mut fixture: F, leader_voted: bool)
     where
@@ -906,7 +906,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::NextLeader,
+                forwarding: ForwardingPolicy::SilentLeader,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1012,7 +1012,7 @@ mod tests {
                 );
             }
 
-            // `NextLeader` forwarding should either target only participant 2
+            // `SilentLeader` forwarding should either target only participant 2
             // or nobody, depending on whether that vote was observed above.
             batcher_mailbox
                 .update(
@@ -1139,7 +1139,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1368,7 +1368,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1548,7 +1548,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1778,7 +1778,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 

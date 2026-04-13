@@ -22,11 +22,12 @@ use std::{num::NonZeroUsize, time::Duration};
 pub enum ForwardingPolicy {
     /// Do nothing when a certified proposal becomes eligible for forwarding.
     Disabled,
-    /// Forward the block to all participants that did not vote for the proposal.
-    Silent,
+    /// Forward the block to all participants that did not vote for the proposal
+    /// (which may include the leader of the newly entered view).
+    SilentVoters,
     /// Forward the block to the leader of the newly entered view if they did not
     /// vote for the proposal certified in the previous view.
-    NextLeader,
+    SilentLeader,
 }
 
 impl ForwardingPolicy {
