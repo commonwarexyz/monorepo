@@ -144,6 +144,9 @@ type CertifyObserver<H> = Box<dyn Fn(Round, <H as Hasher>::Digest) + Send + 'sta
 pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
+    /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
+    /// (but deterministically) 82% of the time, depending on the last byte of the payload.
+    Sometimes,
     /// A custom predicate function.
     Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
@@ -388,6 +391,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Use configured predicate to determine certification
         match &self.should_certify {
             Certifier::Always => Some(true),
+            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
             Certifier::Custom(func) => Some(func(payload)),
             Certifier::Cancel | Certifier::Pending => None,
         }
