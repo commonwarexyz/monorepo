@@ -26,7 +26,7 @@
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
-//!             page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!             page_cache: CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
 //!     };

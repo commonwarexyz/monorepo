@@ -40,7 +40,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::cache::{Cache, Config};
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!

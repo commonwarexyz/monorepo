@@ -54,14 +54,14 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::journal::segmented::variable::{Journal, Config};
 //! use commonware_utils::{NZUsize, NZU16};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a page cache
-//!     let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10));
+//!     let page_cache = CacheRef::from_pooler(context.with_label("cache"), NZU16!(1024), NZUsize!(10));
 //!
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config {
