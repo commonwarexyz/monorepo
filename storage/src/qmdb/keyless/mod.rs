@@ -59,7 +59,7 @@ use tracing::{debug, warn};
 pub mod batch;
 pub mod fixed;
 mod operation;
-pub mod sync;
+pub(crate) mod sync;
 pub mod variable;
 pub use operation::Operation;
 

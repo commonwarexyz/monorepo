@@ -11,7 +11,8 @@ use crate::{
     qmdb::{
         self,
         any::value::ValueEncoding,
-        keyless::{Keyless, Operation},
+        keyless::{operation::Codec, Keyless, Operation},
+        operation::Committable as _,
         sync,
     },
     Context, Persistable,
@@ -23,7 +24,7 @@ use std::ops::Range;
 impl<E, V, C, H> sync::Database for Keyless<mmr::Family, E, V, C, H>
 where
     E: Context,
-    V: ValueEncoding,
+    V: ValueEncoding + Codec,
     C: Mutable<Item = Operation<V>>
         + Persistable<Error = JournalError>
         + sync::Journal<Context = E, Op = Operation<V>>,
@@ -38,6 +39,21 @@ where
     type Digest = H::Digest;
     type Context = E;
 
+    /// Returns a [Keyless] db initialized from data collected in the sync process.
+    ///
+    /// # Behavior
+    ///
+    /// This method handles different initialization scenarios based on existing data:
+    /// - If the Merkle journal is empty or the last item is before the range start, it creates
+    ///   a fresh Merkle structure from the provided `pinned_nodes`
+    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
+    ///   operations from the log are applied to bring it up to the target state
+    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
+    ///   target
+    ///
+    /// # Returns
+    ///
+    /// A [Keyless] db populated with the state from the given range.
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -69,13 +85,14 @@ where
 
         let last_commit_loc = {
             let reader = journal.reader().await;
-            Location::new(
-                reader
-                    .bounds()
-                    .end
-                    .checked_sub(1)
-                    .expect("commit should exist"),
-            )
+            let loc = reader
+                .bounds()
+                .end
+                .checked_sub(1)
+                .expect("journal should not be empty");
+            let op = reader.read(loc).await?;
+            assert!(op.is_commit(), "last operation should be a commit");
+            Location::new(loc)
         };
 
         let db = Self {
@@ -102,6 +119,7 @@ mod tests {
             sync::{
                 self,
                 engine::{Config, NextStep},
+                resolver::tests::FailResolver,
                 Engine, Target,
             },
         },
@@ -121,15 +139,22 @@ mod tests {
         sync::Arc,
     };
 
+    /// Type alias for sync tests with variable-length values.
     type KeylessSyncTest = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256>;
 
+    type VariableOp = Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+
+    // Used by both `create_sync_config` and `test_sync_fixed`.
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
+    /// Create a simple config for sync tests.
     fn create_sync_config(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+        const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
+
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: crate::merkle::journaled::Config {
@@ -142,7 +167,7 @@ mod tests {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
-                items_per_section: NZU64!(5),
+                items_per_section: ITEMS_PER_SECTION,
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -151,22 +176,22 @@ mod tests {
         }
     }
 
+    /// Create a test database with unique partition names.
     async fn create_test_db(mut context: deterministic::Context) -> KeylessSyncTest {
         let seed = context.next_u64();
         let config = create_sync_config(&format!("sync-test-{seed}"), &context);
         KeylessSyncTest::init(context, config).await.unwrap()
     }
 
-    fn create_test_ops(
-        n: usize,
-    ) -> Vec<Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>> {
+    /// Create n random Append operations using the default seed (0).
+    /// create_test_ops(n) is a prefix of create_test_ops(n') for n < n'.
+    fn create_test_ops(n: usize) -> Vec<VariableOp> {
         create_test_ops_seeded(n, 0)
     }
 
-    fn create_test_ops_seeded(
-        n: usize,
-        seed: u64,
-    ) -> Vec<Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>> {
+    /// Create n random Append operations using a specific seed.
+    /// Use different seeds when you need non-overlapping values in the same test.
+    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<VariableOp> {
         let mut rng = test_rng_seeded(seed);
         let mut ops = Vec::with_capacity(n);
         for _ in 0..n {
@@ -178,11 +203,8 @@ mod tests {
         ops
     }
 
-    async fn apply_ops(
-        db: &mut KeylessSyncTest,
-        ops: Vec<Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>>,
-        metadata: Option<Vec<u8>>,
-    ) {
+    /// Applies the given operations and commits the database.
+    async fn apply_ops(db: &mut KeylessSyncTest, ops: Vec<VariableOp>, metadata: Option<Vec<u8>>) {
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -198,14 +220,44 @@ mod tests {
         db.apply_batch(merkleized).await.unwrap();
     }
 
+    /// Test that resolver failure is handled correctly.
+    #[test_traced("WARN")]
+    fn test_sync_resolver_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let resolver = FailResolver::<VariableOp, sha256::Digest>::new();
+            let db_config = create_sync_config(&context.next_u64().to_string(), &context);
+            let config = Config {
+                context: context.with_label("client"),
+                target: Target {
+                    root: sha256::Digest::from([0; 32]),
+                    range: non_empty_range!(Location::new(0), Location::new(5)),
+                },
+                resolver,
+                apply_batch_size: 2,
+                max_outstanding_requests: 2,
+                fetch_batch_size: NZU64!(2),
+                db_config,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            };
+
+            let result: Result<KeylessSyncTest, _> = sync::sync(config).await;
+            assert!(result.is_err());
+        });
+    }
+
     #[rstest]
     #[case::singleton_batch_size_one(1, NZU64!(1))]
     #[case::singleton_batch_size_gt_db_size(1, NZU64!(2))]
-    #[case::batch_size_one(100, NZU64!(1))]
-    #[case::floor_div_db_batch_size(100, NZU64!(3))]
-    #[case::div_db_batch_size(100, NZU64!(10))]
-    #[case::db_size_eq_batch_size(100, NZU64!(100))]
-    #[case::batch_size_gt_db_size(100, NZU64!(200))]
+    #[case::batch_size_one(1000, NZU64!(1))]
+    #[case::floor_div_db_batch_size(1000, NZU64!(3))]
+    #[case::floor_div_db_batch_size_2(1000, NZU64!(999))]
+    #[case::div_db_batch_size(1000, NZU64!(100))]
+    #[case::db_size_eq_batch_size(1000, NZU64!(1000))]
+    #[case::batch_size_gt_db_size(1000, NZU64!(1001))]
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -861,7 +913,8 @@ mod tests {
         });
     }
 
-    // Verify fixed-size keyless DB also syncs correctly.
+    // Extra test verifying the generic sync::Database impl works for fixed-size journals.
+    // Not present in immutable (which only tests variable).
     #[test_traced("WARN")]
     fn test_sync_fixed() {
         use crate::qmdb::keyless::fixed;
