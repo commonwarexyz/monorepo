@@ -308,11 +308,15 @@ fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
     }
 }
 
-/// Read a single operation item from the ancestor chain at the given location.
+/// Resolve `loc` to an op within the in-memory ancestor region
+/// `[db_size, ancestors[0].journal_batch.size())`, walked parent-first.
 ///
-/// `db_size` is the number of committed operations in the DB. The location must be in
-/// `[db_size, tip)` where `tip = ancestors[0].journal_batch.size()`.
-fn read_chain_item_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
+/// # Panics
+///
+/// Panics if `loc` cannot be located in the chain: either it falls outside the region (including
+/// when `ancestors` is empty), or the ancestor spans are non-contiguous (a bookkeeping invariant
+/// violation).
+fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
     ancestors: &[Arc<MerkleizedBatch<F, D, U>>],
     loc: u64,
     db_size: u64,
@@ -335,15 +339,37 @@ where
     unreachable!("location {loc} not found in ancestor chain (db_size={db_size})")
 }
 
+/// Read helpers on [`Merkleizer`].
+///
+/// # Operation-location model
+///
+/// The operation space is divided into three contiguous regions:
+///
+/// ```text
+///  [0 ........... db_size)  [db_size ..... base_size)  [base_size .. base_size+len)
+///   committed (on disk)     ancestors (in mem)          this batch (in mem)
+/// ```
+///
+/// `db_size` is the boundary between disk and in-memory ancestors. It equals the original DB size
+/// when the full ancestor chain is alive, or a higher value if ancestors were freed (see
+/// `into_parts`). For batches created directly from the DB (no uncommitted ancestors), the ancestor
+/// region is empty (`db_size == base_size`).
+///
+/// # Contract for all read methods
+///
+/// Callers must pass a `loc` that is a valid operation location: specifically `loc < base_size +
+/// batch_ops.len()` (i.e., within one of the three regions). Passing an out-of-range `loc` may
+/// panic (via `batch_ops` indexing or the ancestor-chain walk) or result in a disk-read error.
+/// In-memory locations are resolved synchronously; only disk locations await the `reader`.
 impl<F: Family, H, U> Merkleizer<F, H, U>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Sync cache check: resolve from this batch's ops or the ancestor chain.
-    /// Returns `None` for committed-journal locations that need disk I/O.
-    fn try_read_cached(
+    /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
+    /// in the committed region (`loc < db_size`).
+    fn try_read_op_from_uncommitted(
         &self,
         loc: Location<F>,
         batch_ops: &[Operation<F, U>],
@@ -355,48 +381,38 @@ where
         }
 
         if loc >= self.db_size {
-            return Some(
-                read_chain_item_from_ancestors(&self.ancestors, loc, self.db_size).clone(),
-            );
+            return Some(read_op_from_ancestors(&self.ancestors, loc, self.db_size).clone());
         }
 
         None
     }
 
+    /// Resolve an operation by its location `loc` if it can be done synchronously (e.g. without
+    /// I/O), or return `None` otherwise.
+    fn try_read_op_sync<R: Reader<Item = Operation<F, U>>>(
+        &self,
+        loc: Location<F>,
+        batch_ops: &[Operation<F, U>],
+        reader: &R,
+    ) -> Option<Operation<F, U>> {
+        self.try_read_op_from_uncommitted(loc, batch_ops)
+            .or_else(|| reader.try_read_cached(*loc))
+    }
+
     /// Read a single operation by location.
-    ///
-    /// The operation space is divided into three contiguous regions:
-    ///
-    /// ```text
-    ///  [0 ........... db_size)  [db_size ..... base_size)  [base_size .. base_size+len)
-    ///   committed (on disk)     ancestors (in mem)          this batch (in mem)
-    /// ```
-    ///
-    /// `db_size` is the boundary between disk and in-memory ancestors. It equals the
-    /// original DB size when the full ancestor chain is alive, or a higher value if
-    /// ancestors were freed (see `into_parts`).
-    ///
-    /// For batches created directly from the DB (no uncommitted ancestors),
-    /// the ancestor region is empty (`db_size == base_size`).
-    ///
-    /// In-memory locations are resolved synchronously. Only committed-journal locations
-    /// await the `reader`.
     async fn read_op<R: Reader<Item = Operation<F, U>>>(
         &self,
         loc: Location<F>,
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Operation<F, U>, crate::qmdb::Error<F>> {
-        match self.try_read_cached(loc, batch_ops) {
+        match self.try_read_op_sync(loc, batch_ops, reader) {
             Some(op) => Ok(op),
             None => Ok(reader.read(*loc).await?),
         }
     }
 
     /// Read multiple operations by location.
-    ///
-    /// In-memory locations are resolved synchronously. Remaining disk locations
-    /// are read concurrently via `try_join_all` on the provided `reader`.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
@@ -406,10 +422,7 @@ where
         // Resolve hits synchronously: batch/ancestor first, then journal page cache.
         let results: Vec<Option<Operation<F, U>>> = locations
             .iter()
-            .map(|loc| {
-                self.try_read_cached(*loc, batch_ops)
-                    .or_else(|| reader.try_read_cached(**loc))
-            })
+            .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
             .collect();
 
         // Batch-read disk misses concurrently.
@@ -587,30 +600,12 @@ where
                     break;
                 }
 
-                // Resolve cached candidates synchronously: batch/ancestor then page cache.
-                let cached: Vec<Option<Operation<F, U>>> = candidates
-                    .iter()
-                    .map(|c| {
-                        self.try_read_cached(*c, &ops)
-                            .or_else(|| reader.try_read_cached(**c))
-                    })
-                    .collect();
-
-                // Batch-read disk misses concurrently.
-                let disk_results = try_join_all(
-                    candidates
-                        .iter()
-                        .zip(cached.iter())
-                        .filter(|(_, c)| c.is_none())
-                        .map(|(loc, _)| reader.read(**loc)),
-                )
-                .await?;
+                // Batch-read candidates: cache hits resolve synchronously, disk misses
+                // are fetched concurrently.
+                let resolved = self.read_ops(&candidates, &ops, &reader).await?;
 
                 // Process results in order, moving active ops to the tip.
-                let mut disk_iter = disk_results.into_iter();
-                for (candidate, cached_op) in candidates.into_iter().zip(cached) {
-                    let op = cached_op
-                        .unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch"));
+                for (candidate, op) in candidates.into_iter().zip(resolved) {
                     floor = Location::new(*candidate + 1);
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
