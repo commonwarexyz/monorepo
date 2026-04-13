@@ -341,10 +341,11 @@ stability_scope!(BETA {
         ///   dropped when the dimension is no longer live.
         ///
         /// Note: runtime-internal task metrics (e.g. `runtime_tasks_spawned`,
-        /// `runtime_tasks_running`) deliberately ignore attributes so that spawning with a
-        /// per-round or per-request attribute does not inflate their cardinality. Attributes
-        /// only surface on metrics you register through the context (and on tracing spans
-        /// when [`Spawner::instrumented`] is set).
+        /// `runtime_tasks_running`) are keyed only by the context's label name (plus `kind`
+        /// and `execution`); they deliberately ignore both attributes and scopes so that
+        /// spawning with a per-round or per-request attribute does not inflate their
+        /// cardinality. Attributes only surface on metrics you register through the context
+        /// (and on tracing spans when [`Spawner::instrumented`] is set).
         ///
         /// # Family Label Conflicts
         ///
@@ -2536,6 +2537,87 @@ mod tests {
     fn test_tokio_metrics_spawn_attribute_cardinality() {
         let runner = tokio::Runner::default();
         test_metrics_spawn_attribute_cardinality(runner);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
+    ///
+    /// Verifies the documented guarantee that runtime task metrics ignore the
+    /// scope of the spawning context: tasks spawned from a [`Metrics::with_scope`]
+    /// context must still appear exactly once in the root-registry
+    /// `runtime_tasks_spawned` / `runtime_tasks_running` families keyed only by
+    /// `name` / `kind` / `execution`, and dropping the scope must neither remove
+    /// those entries nor create additional ones.
+    fn test_metrics_spawn_scope_cardinality<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        runner.start(|context| async move {
+            const ROUNDS: u64 = 128;
+
+            let mut handles = Vec::with_capacity(ROUNDS as usize);
+            for round in 0..ROUNDS {
+                let scoped = context
+                    .with_label("deferred_verify")
+                    .with_attribute("round", round)
+                    .with_scope();
+                let handle = scoped.spawn(move |_| async move { round });
+                handles.push(handle);
+                // `scoped` is dropped here; task metrics must persist regardless.
+            }
+            for (expected, handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.await.expect("task failed"), expected as u64);
+            }
+
+            let buffer = context.encode();
+
+            let spawned_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            let running_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            assert_eq!(
+                spawned_lines, 1,
+                "expected exactly 1 runtime_tasks_spawned entry for deferred_verify, got {spawned_lines}: {buffer}",
+            );
+            assert_eq!(
+                running_lines, 1,
+                "expected exactly 1 runtime_tasks_running entry for deferred_verify, got {running_lines}: {buffer}",
+            );
+
+            let spawned_value = format!(
+                "runtime_tasks_spawned_total{{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}} {ROUNDS}"
+            );
+            assert!(
+                buffer.contains(&spawned_value),
+                "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_spawn_scope_cardinality() {
+        let executor = deterministic::Runner::default();
+        test_metrics_spawn_scope_cardinality(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_spawn_scope_cardinality() {
+        let runner = tokio::Runner::default();
+        test_metrics_spawn_scope_cardinality(runner);
     }
 
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
