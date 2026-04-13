@@ -1175,7 +1175,7 @@ where
         self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
-    /// Respond to a delivery whose verifier lookup failed.
+    /// Respond to a delivery without a verifier.
     ///
     /// If the request is provably at or below the floor (the last processed height),
     /// the response is acknowledged (`true`) so the serving peer is not blamed for an
