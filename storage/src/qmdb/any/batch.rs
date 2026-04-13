@@ -30,6 +30,9 @@ use std::{
 };
 use tracing::debug;
 
+/// Maximum number of journal reads to issue concurrently during floor raising.
+const MAX_CONCURRENT_READS: u64 = 64;
+
 /// Strategy for finding the next active location during floor raising.
 pub(crate) trait FloorScan<F: Family> {
     /// Return the next location at or after `floor` that might be active,
@@ -305,11 +308,15 @@ fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
     }
 }
 
-/// Read a single operation item from the ancestor chain at the given location.
+/// Resolve `loc` to an op within the in-memory ancestor region
+/// `[db_size, ancestors[0].journal_batch.size())`, walked parent-first.
 ///
-/// `db_size` is the number of committed operations in the DB. The location must be in
-/// `[db_size, tip)` where `tip = ancestors[0].journal_batch.size()`.
-fn read_chain_item_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
+/// # Panics
+///
+/// Panics if `loc` cannot be located in the chain: either it falls outside the region (including
+/// when `ancestors` is empty), or the ancestor spans are non-contiguous (a bookkeeping invariant
+/// violation).
+fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
     ancestors: &[Arc<MerkleizedBatch<F, D, U>>],
     loc: u64,
     db_size: u64,
@@ -332,50 +339,108 @@ where
     unreachable!("location {loc} not found in ancestor chain (db_size={db_size})")
 }
 
+/// Read helpers on [`Merkleizer`].
+///
+/// # Operation-location model
+///
+/// The operation space is divided into three contiguous regions:
+///
+/// ```text
+///  [0 ........... db_size)  [db_size ..... base_size)  [base_size .. base_size+len)
+///   committed (on disk)     ancestors (in mem)          this batch (in mem)
+/// ```
+///
+/// `db_size` is the boundary between disk and in-memory ancestors. It equals the original DB size
+/// when the full ancestor chain is alive, or a higher value if ancestors were freed (see
+/// `into_parts`). For batches created directly from the DB (no uncommitted ancestors), the ancestor
+/// region is empty (`db_size == base_size`).
+///
+/// # Contract for all read methods
+///
+/// Callers must pass a `loc` that is a valid operation location: specifically `loc < base_size +
+/// batch_ops.len()` (i.e., within one of the three regions). Passing an out-of-range `loc` may
+/// panic (via `batch_ops` indexing or the ancestor-chain walk) or result in a disk-read error.
+/// In-memory locations are resolved synchronously; only disk locations await the `reader`.
 impl<F: Family, H, U> Merkleizer<F, H, U>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Read an operation at a given location from the correct source.
-    ///
-    /// The operation space is divided into three contiguous regions:
-    ///
-    /// ```text
-    ///  [0 ........... db_size)  [db_size ..... base_size)  [base_size .. base_size+len)
-    ///   committed (on disk)     ancestors (in mem)          this batch (in mem)
-    /// ```
-    ///
-    /// `db_size` here is the Merkleizer's effective boundary between disk and in-memory
-    /// ancestors. It equals the original DB size when the full ancestor chain is alive, or a
-    /// higher value if ancestors were freed (see `into_parts`).
-    ///
-    /// For top-level batches, the ancestor region is empty (`db_size == base_size`).
-    async fn read_op<E, C, I>(
+    /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
+    /// in the committed region (`loc < db_size`).
+    fn try_read_op_from_uncommitted(
         &self,
         loc: Location<F>,
-        current_ops: &[Operation<F, U>],
-        db: &Db<F, E, C, I, H, U>,
-    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let loc_val = *loc;
+        batch_ops: &[Operation<F, U>],
+    ) -> Option<Operation<F, U>> {
+        let loc = *loc;
 
-        if loc_val >= self.base_size {
-            // This batch's own operations (user mutations, or earlier floor-raise ops).
-            Ok(current_ops[(loc_val - self.base_size) as usize].clone())
-        } else if loc_val >= self.db_size {
-            // Parent batch chain's operations (in-memory). Walk the ancestors.
-            Ok(read_chain_item_from_ancestors(&self.ancestors, loc_val, self.db_size).clone())
-        } else {
-            // Base DB's journal (on-disk async read).
-            let reader = db.log.reader().await;
-            Ok(reader.read(loc_val).await?)
+        if loc >= self.base_size {
+            return Some(batch_ops[(loc - self.base_size) as usize].clone());
         }
+
+        if loc >= self.db_size {
+            return Some(read_op_from_ancestors(&self.ancestors, loc, self.db_size).clone());
+        }
+
+        None
+    }
+
+    /// Resolve an operation by its location `loc` if it can be done synchronously (e.g. without
+    /// I/O), or return `None` otherwise.
+    fn try_read_op_sync<R: Reader<Item = Operation<F, U>>>(
+        &self,
+        loc: Location<F>,
+        batch_ops: &[Operation<F, U>],
+        reader: &R,
+    ) -> Option<Operation<F, U>> {
+        self.try_read_op_from_uncommitted(loc, batch_ops)
+            .or_else(|| reader.try_read_sync(*loc))
+    }
+
+    /// Read a single operation by location.
+    async fn read_op<R: Reader<Item = Operation<F, U>>>(
+        &self,
+        loc: Location<F>,
+        batch_ops: &[Operation<F, U>],
+        reader: &R,
+    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>> {
+        match self.try_read_op_sync(loc, batch_ops, reader) {
+            Some(op) => Ok(op),
+            None => Ok(reader.read(*loc).await?),
+        }
+    }
+
+    /// Read multiple operations by location.
+    async fn read_ops<R: Reader<Item = Operation<F, U>>>(
+        &self,
+        locations: &[Location<F>],
+        batch_ops: &[Operation<F, U>],
+        reader: &R,
+    ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
+        // Resolve hits synchronously: batch/ancestor first, then journal page cache.
+        let results: Vec<Option<Operation<F, U>>> = locations
+            .iter()
+            .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
+            .collect();
+
+        // Batch-read disk misses concurrently.
+        let disk_results = try_join_all(
+            locations
+                .iter()
+                .zip(results.iter())
+                .filter(|(_, cached)| cached.is_none())
+                .map(|(loc, _)| reader.read(**loc)),
+        )
+        .await?;
+
+        // Merge disk results back in order.
+        let mut disk_iter = disk_results.into_iter();
+        Ok(results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch")))
+            .collect())
     }
 
     /// Gather existing-key locations for all keys in `mutations`.
@@ -484,61 +549,10 @@ where
         creates
     }
 
-    /// Scan forward from `floor` to find the next active operation, re-append it at the tip.
-    /// The `scan` parameter controls which locations are considered as potentially active,
-    /// allowing implementations to skip locations known to be inactive without reading them.
-    /// Returns `true` if an active op was found and moved, `false` if the floor reached
-    /// `fixed_tip`.
-    async fn advance_floor_once<E, C, I, S: FloorScan<F>>(
-        &self,
-        floor: &mut Location<F>,
-        fixed_tip: u64,
-        ops: &mut Vec<Operation<F, U>>,
-        diff: &mut BTreeMap<U::Key, DiffEntry<F, U::Value>>,
-        scan: &mut S,
-        db: &Db<F, E, C, I, H, U>,
-    ) -> Result<bool, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        loop {
-            let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
-                return Ok(false);
-            };
-            *floor = Location::new(*candidate + 1);
-
-            let op = self.read_op(candidate, ops, db).await?;
-            let Some(key) = op.key().cloned() else {
-                continue; // skip CommitFloor and other non-keyed ops
-            };
-
-            if self.is_active_at(&key, candidate, diff, db) {
-                let new_loc = Location::new(self.base_size + ops.len() as u64);
-                let base_old_loc = diff
-                    .get(&key)
-                    .or_else(|| resolve_in_ancestors(&self.ancestors, &key))
-                    .map_or(Some(candidate), DiffEntry::base_old_loc);
-                let value = extract_update_value(&op);
-                ops.push(op);
-                diff.insert(
-                    key,
-                    DiffEntry::Active {
-                        value,
-                        loc: new_loc,
-                        base_old_loc,
-                    },
-                );
-                return Ok(true);
-            }
-        }
-    }
-
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, S: FloorScan<F>>(
+    async fn finish<E, C, I, S, R>(
         self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: BTreeMap<U::Key, DiffEntry<F, U::Value>>,
@@ -546,12 +560,15 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut scan: S,
+        reader: R,
         db: &Db<F, E, C, I, H, U>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
+        S: FloorScan<F>,
+        R: Reader<Item = Operation<F, U>>,
     {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
@@ -560,16 +577,61 @@ where
         let mut floor = self.base_inactivity_floor_loc;
 
         if total_active_keys > 0 {
-            // Floor raise: advance the inactivity floor by `total_steps` active
-            // operations. `fixed_tip` prevents scanning into floor-raise moves
-            // just appended, matching `raise_floor_with_bitmap()` semantics.
+            // Floor raise: advance the inactivity floor by `total_steps` active operations.
+            // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let fixed_tip = self.base_size + ops.len() as u64;
-            for _ in 0..total_steps {
-                if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
-                    .await?
-                {
+            let mut moved = 0u64;
+            let mut scan_from = floor;
+
+            while moved < total_steps {
+                // Collect candidates, capped by the number of active ops still needed.
+                // `scan_from` tracks prefetch progress separately from `floor`, so
+                // early exit cannot leave `floor` past unprocessed candidates.
+                let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
+                let mut candidates = Vec::with_capacity(limit);
+                while candidates.len() < limit {
+                    let Some(candidate) = scan.next_candidate(scan_from, fixed_tip) else {
+                        break;
+                    };
+                    candidates.push(candidate);
+                    scan_from = Location::new(*candidate + 1);
+                }
+                if candidates.is_empty() {
                     break;
+                }
+
+                // Batch-read candidates: cache hits resolve synchronously, disk misses
+                // are fetched concurrently.
+                let resolved = self.read_ops(&candidates, &ops, &reader).await?;
+
+                // Process results in order, moving active ops to the tip.
+                for (candidate, op) in candidates.into_iter().zip(resolved) {
+                    floor = Location::new(*candidate + 1);
+                    let Some(key) = op.key().cloned() else {
+                        continue; // skip CommitFloor and other non-keyed ops
+                    };
+                    if !self.is_active_at(&key, candidate, &diff, db) {
+                        continue;
+                    }
+                    let new_loc = Location::new(self.base_size + ops.len() as u64);
+                    let base_old_loc = diff
+                        .get(&key)
+                        .or_else(|| resolve_in_ancestors(&self.ancestors, &key))
+                        .map_or(Some(candidate), DiffEntry::base_old_loc);
+                    let value = extract_update_value(&op);
+                    ops.push(op);
+                    diff.insert(
+                        key,
+                        DiffEntry::Active {
+                            value,
+                            loc: new_loc,
+                            base_old_loc,
+                        },
+                    );
+                    moved += 1;
+                    if moved >= total_steps {
+                        break;
+                    }
                 }
             }
         } else {
@@ -577,6 +639,10 @@ where
             floor = Location::new(self.base_size + ops.len() as u64);
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
+
+        // Release the reader guard before CPU-only work (merkleization) so
+        // concurrent writers are not blocked.
+        drop(reader);
 
         // CommitFloor operation.
         let commit_loc = Location::new(self.base_size + ops.len() as u64);
@@ -639,7 +705,7 @@ where
         // oldest alive ancestor's items don't start at db_size. Example: chain A -> B -> C,
         // A committed and dropped. ancestors() yields [B] (A's Weak is dead). B's items start
         // at A.size(), not db_size. We use the journal (strong Arcs, always intact) to compute
-        // the actual base so read_op falls through to disk for locations in the gap.
+        // the actual base so reads fall through to disk for locations in the gap.
         let db_size = self.base.db_size();
         let effective_db_size = ancestors.last().map_or(db_size, |oldest| {
             let oldest_base =
@@ -733,10 +799,10 @@ where
     {
         let (mut mutations, m) = self.into_parts();
 
-        // Resolve existing keys (async I/O, parallelized).
+        // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
-        let results = try_join_all(futures).await?;
+        let reader = db.log.reader().await;
+        let results = m.read_ops(&locations, &[], &reader).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -835,8 +901,17 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
-            .await
+        m.finish(
+            ops,
+            diff,
+            active_keys_delta,
+            user_steps,
+            metadata,
+            scan,
+            reader,
+            db,
+        )
+        .await
     }
 }
 
@@ -878,33 +953,30 @@ where
     {
         let (mut mutations, m) = self.into_parts();
 
-        // Resolve existing keys (async I/O).
+        // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
-
-        // Read and unwrap Update operations (snapshot only references Updates).
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
-        let update_results: Vec<_> = try_join_all(futures)
-            .await?
-            .into_iter()
-            .map(|op| match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("snapshot should only reference Update operations"),
-            })
-            .collect();
+        let reader = db.log.reader().await;
 
         // Classify mutations into deleted, created, updated.
         let mut next_candidates: BTreeSet<K> = BTreeSet::new();
         let mut prev_candidates: BTreeMap<K, (V::Value, Location<F>)> = BTreeMap::new();
-
         let mut deleted: BTreeMap<K, Location<F>> = BTreeMap::new();
         let mut updated: BTreeMap<K, (V::Value, Location<F>)> = BTreeMap::new();
 
-        for (key_data, &old_loc) in update_results.into_iter().zip(&locations) {
+        for (op, &old_loc) in m
+            .read_ops(&locations, &[], &reader)
+            .await?
+            .into_iter()
+            .zip(&locations)
+        {
             let update::Ordered {
                 key,
                 value,
                 next_key,
-            } = key_data;
+            } = match op {
+                Operation::Update(data) => data,
+                _ => unreachable!("snapshot should only reference Update operations"),
+            };
             next_candidates.insert(next_key);
 
             let mutation = mutations.remove(&key);
@@ -957,11 +1029,7 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = {
-            let reader = db.log.reader().await;
-            let futures = prev_locations.iter().map(|loc| reader.read(**loc));
-            try_join_all(futures).await?
-        };
+        let prev_results = m.read_ops(&prev_locations, &[], &reader).await?;
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -995,7 +1063,7 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op: Operation<F, update::Ordered<K, V>> = m.read_op(*loc, &[], db).await?;
+                let op = m.read_op(*loc, &[], &reader).await?;
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("ancestor diff Active should reference Update op"),
@@ -1121,8 +1189,17 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
-            .await
+        m.finish(
+            ops,
+            diff,
+            active_keys_delta,
+            user_steps,
+            metadata,
+            scan,
+            reader,
+            db,
+        )
+        .await
     }
 }
 
@@ -1592,6 +1669,117 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    #[test]
+    fn read_ops_resolves_committed_ancestor_and_current_sources() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let key_db = colliding_digest(0x30, 0);
+            let value_db = colliding_digest(0x30, 1);
+            let key_parent = colliding_digest(0x31, 0);
+            let value_parent = colliding_digest(0x31, 1);
+            let key_current = colliding_digest(0x32, 0);
+            let value_current = colliding_digest(0x32, 1);
+
+            // Commit one key to the DB so it's on disk.
+            let seed = db
+                .new_batch()
+                .write(key_db, Some(value_db))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+
+            // Create a parent batch with a second key (in-memory ancestor).
+            let parent = db
+                .new_batch()
+                .write(key_parent, Some(value_parent))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent_loc = parent.diff.get(&key_parent).unwrap().loc().unwrap();
+
+            // Create a child batch with a third key (current ops).
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key_current, Some(value_current));
+            let (_mutations, merkleizer) = child.into_parts();
+
+            let current_loc = Location::new(merkleizer.base_size);
+            let batch_ops = vec![Operation::Update(update::Unordered(
+                key_current,
+                value_current,
+            ))];
+
+            // read_ops should resolve all three sources correctly.
+            let reader = db.log.reader().await;
+            let ops = merkleizer
+                .read_ops(
+                    &[committed_loc, parent_loc, current_loc],
+                    &batch_ops,
+                    &reader,
+                )
+                .await
+                .unwrap();
+            drop(reader);
+
+            assert_eq!(
+                ops,
+                vec![
+                    Operation::Update(update::Unordered(key_db, value_db)),
+                    Operation::Update(update::Unordered(key_parent, value_parent)),
+                    Operation::Update(update::Unordered(key_current, value_current)),
+                ]
+            );
+
+            // read_op: single-location reads across all three sources.
+            let reader = db.log.reader().await;
+            let disk_op = merkleizer
+                .read_op(committed_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                disk_op,
+                Operation::Update(update::Unordered(key_db, value_db))
+            );
+
+            let ancestor_op = merkleizer
+                .read_op(parent_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                ancestor_op,
+                Operation::Update(update::Unordered(key_parent, value_parent))
+            );
+
+            let current_op = merkleizer
+                .read_op(current_loc, &batch_ops, &reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                current_op,
+                Operation::Update(update::Unordered(key_current, value_current))
+            );
+            drop(reader);
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test]
