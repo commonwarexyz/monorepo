@@ -153,7 +153,13 @@ impl CertItem {
             } => {
                 let mut sorted = signers.clone();
                 sorted.sort();
-                format!("N:{}:{}:{}:{}", view, parent_view, payload, sorted.join(","))
+                format!(
+                    "N:{}:{}:{}:{}",
+                    view,
+                    parent_view,
+                    payload,
+                    sorted.join(",")
+                )
             }
             CertItem::Nullification { view, signers, .. } => {
                 let mut sorted = signers.clone();
@@ -169,7 +175,13 @@ impl CertItem {
             } => {
                 let mut sorted = signers.clone();
                 sorted.sort();
-                format!("F:{}:{}:{}:{}", view, parent_view, payload, sorted.join(","))
+                format!(
+                    "F:{}:{}:{}:{}",
+                    view,
+                    parent_view,
+                    payload,
+                    sorted.join(",")
+                )
             }
         }
     }
@@ -279,7 +291,10 @@ enum VoteReplayKey {
 fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
     match vote {
         TracedVote::Notarize {
-            view, parent, block, ..
+            view,
+            parent,
+            block,
+            ..
         } => VoteReplayKey::Notarize {
             view: *view,
             parent: *parent,
@@ -288,7 +303,10 @@ fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
         },
         TracedVote::Nullify { view, .. } => VoteReplayKey::Nullify { view: *view, sig },
         TracedVote::Finalize {
-            view, parent, block, ..
+            view,
+            parent,
+            block,
+            ..
         } => VoteReplayKey::Finalize {
             view: *view,
             parent: *parent,
@@ -646,7 +664,12 @@ fn build_actions_internal(
                             }
 
                             if sender != &leader_id
-                                && leader_vote_delivered.insert((sender.clone(), *view, parent_view, bn.clone()))
+                                && leader_vote_delivered.insert((
+                                    sender.clone(),
+                                    *view,
+                                    parent_view,
+                                    bn.clone(),
+                                ))
                             {
                                 actions.push(ActionItem::OnNotarize {
                                     receiver: sender.clone(),
@@ -735,7 +758,12 @@ fn build_actions_internal(
 
                         // Correct finalize: self-delivery (node counts its own finalize)
                         if !is_byzantine_node(&sig, cfg.faults)
-                            && self_delivered.insert((sig.clone(), *view, parent_view, "finalize".into()))
+                            && self_delivered.insert((
+                                sig.clone(),
+                                *view,
+                                parent_view,
+                                "finalize".into(),
+                            ))
                         {
                             actions.push(ActionItem::OnFinalize {
                                 receiver: sig.clone(),
@@ -1075,20 +1103,32 @@ fn build_view_proposals(
             TraceEntry::Vote {
                 vote:
                     TracedVote::Notarize {
-                        view, parent, block, ..
+                        view,
+                        parent,
+                        block,
+                        ..
                     }
                     | TracedVote::Finalize {
-                        view, parent, block, ..
+                        view,
+                        parent,
+                        block,
+                        ..
                     },
                 ..
             } => (*view, *parent, block.as_str()),
             TraceEntry::Certificate {
                 cert:
                     TracedCert::Notarization {
-                        view, parent, block, ..
+                        view,
+                        parent,
+                        block,
+                        ..
                     }
                     | TracedCert::Finalization {
-                        view, parent, block, ..
+                        view,
+                        parent,
+                        block,
+                        ..
                     },
                 ..
             } => (*view, *parent, block.as_str()),

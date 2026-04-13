@@ -11,8 +11,10 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
 MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
+MBF_TRACE_STATIC_MAX_VIEWS ?= 6
+MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
 
-.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_generator
+.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
@@ -117,7 +119,7 @@ mbf_live: clean_mutated_traces
 		wait $$watcher 2>/dev/null || true; \
 	'
 
-mbf_live_trace_gen:
+mbf_live_trace_fuzz_gen:
 	@bash -eu -o pipefail -c '\
 		src="$(MBF_TRACE_GEN_SRC)"; \
 		dst="$(MUTATION_SEEDS_FOLDER)"; \
@@ -150,3 +152,14 @@ mbf_live_trace_gen:
 		done; \
 		wait $$fuzz; \
 	'
+
+mbf_live_trace_static_gen:
+	@bash -eu -o pipefail -c '\
+		dst="$(MUTATION_SEEDS_FOLDER)"; \
+		mkdir -p "$$dst"; \
+		cargo run -p commonware-consensus-fuzz --bin generate_small_honest_traces -- \
+			"$$dst" \
+			--max-views "$(MBF_TRACE_STATIC_MAX_VIEWS)" \
+			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)"; \
+	'
+	

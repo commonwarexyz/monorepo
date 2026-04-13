@@ -195,20 +195,19 @@ pub fn parse_itf_vote(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
     match tag {
         "Notarize" => {
             let proposal = inner.get("proposal");
-            let view = parse_int(
-                proposal
-                    .map(|p| &p["view"])
-                    .unwrap_or(&inner["view"]),
-            );
-            let parent = proposal
-                .map(|p| parse_int(&p["parent"]))
-                .unwrap_or(0);
+            let view = parse_int(proposal.map(|p| &p["view"]).unwrap_or(&inner["view"]));
+            let parent = proposal.map(|p| parse_int(&p["parent"])).unwrap_or(0);
             let sig = inner["sig"].as_str()?.to_string();
             let block_name = proposal
                 .and_then(|p| p["payload"].as_str())
                 .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
-            Some(TracedVote::Notarize { view, parent, sig, block })
+            Some(TracedVote::Notarize {
+                view,
+                parent,
+                sig,
+                block,
+            })
         }
         "Nullify" => {
             let view = parse_int(&inner["view"]);
@@ -217,20 +216,19 @@ pub fn parse_itf_vote(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
         }
         "Finalize" => {
             let proposal = inner.get("proposal");
-            let view = parse_int(
-                proposal
-                    .map(|p| &p["view"])
-                    .unwrap_or(&inner["view"]),
-            );
-            let parent = proposal
-                .map(|p| parse_int(&p["parent"]))
-                .unwrap_or(0);
+            let view = parse_int(proposal.map(|p| &p["view"]).unwrap_or(&inner["view"]));
+            let parent = proposal.map(|p| parse_int(&p["parent"])).unwrap_or(0);
             let sig = inner["sig"].as_str()?.to_string();
             let block_name = proposal
                 .and_then(|p| p["payload"].as_str())
                 .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
-            Some(TracedVote::Finalize { view, parent, sig, block })
+            Some(TracedVote::Finalize {
+                view,
+                parent,
+                sig,
+                block,
+            })
         }
         _ => None,
     }
@@ -243,14 +241,8 @@ pub fn parse_itf_cert(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
     match tag {
         "Notarization" => {
             let proposal = inner.get("proposal");
-            let view = parse_int(
-                proposal
-                    .map(|p| &p["view"])
-                    .unwrap_or(&inner["view"]),
-            );
-            let parent = proposal
-                .map(|p| parse_int(&p["parent"]))
-                .unwrap_or(0);
+            let view = parse_int(proposal.map(|p| &p["view"]).unwrap_or(&inner["view"]));
+            let parent = proposal.map(|p| parse_int(&p["parent"])).unwrap_or(0);
             let block_name = proposal
                 .and_then(|p| p["payload"].as_str())
                 .or_else(|| inner["block"].as_str())?;
@@ -283,14 +275,8 @@ pub fn parse_itf_cert(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
         }
         "Finalization" => {
             let proposal = inner.get("proposal");
-            let view = parse_int(
-                proposal
-                    .map(|p| &p["view"])
-                    .unwrap_or(&inner["view"]),
-            );
-            let parent = proposal
-                .map(|p| parse_int(&p["parent"]))
-                .unwrap_or(0);
+            let view = parse_int(proposal.map(|p| &p["view"]).unwrap_or(&inner["view"]));
+            let parent = proposal.map(|p| parse_int(&p["parent"])).unwrap_or(0);
             let block_name = proposal
                 .and_then(|p| p["payload"].as_str())
                 .or_else(|| inner["block"].as_str())?;

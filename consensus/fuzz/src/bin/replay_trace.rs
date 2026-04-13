@@ -28,9 +28,8 @@ fn main() {
         process::exit(1);
     });
 
-    let faults_override: Option<usize> = env::var("REPLAY_FAULTS")
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let faults_override: Option<usize> =
+        env::var("REPLAY_FAULTS").ok().and_then(|s| s.parse().ok());
     if let Some(f) = faults_override {
         trace.faults = f;
     }

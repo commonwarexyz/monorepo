@@ -52,13 +52,16 @@
 
 use crate::{
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
-    tracing::{data::TraceData, sniffer::TraceEntry},
+    tracing::{
+        data::TraceData,
+        sniffer::{TraceEntry, TracedCert, TracedVote},
+    },
 };
 use commonware_cryptography::{sha256::Sha256 as Sha256Hasher, Hasher};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use sha1::{Digest, Sha1};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
     process,
@@ -103,7 +106,10 @@ pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     for path in children {
         if path.is_dir() {
             // Skip hidden directories (e.g. .seen marker dir)
-            if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+            {
                 continue;
             }
             out.extend(find_json_files(&path));
@@ -143,6 +149,184 @@ fn entry_receiver(entry: &TraceEntry) -> &str {
     }
 }
 
+/// Returns the sender of a trace entry.
+fn entry_sender(entry: &TraceEntry) -> &str {
+    match entry {
+        TraceEntry::Vote { sender, .. } | TraceEntry::Certificate { sender, .. } => sender,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EntryChannel {
+    Vote,
+    Certificate,
+}
+
+fn entry_channel(entry: &TraceEntry) -> EntryChannel {
+    match entry {
+        TraceEntry::Vote { .. } => EntryChannel::Vote,
+        TraceEntry::Certificate { .. } => EntryChannel::Certificate,
+    }
+}
+
+fn vote_identity(vote: &TracedVote) -> String {
+    match vote {
+        TracedVote::Notarize {
+            view,
+            parent,
+            sig,
+            block,
+        } => format!("vote:notarize:{view}:{parent}:{sig}:{block}"),
+        TracedVote::Nullify { view, sig } => format!("vote:nullify:{view}:{sig}"),
+        TracedVote::Finalize {
+            view,
+            parent,
+            sig,
+            block,
+        } => format!("vote:finalize:{view}:{parent}:{sig}:{block}"),
+    }
+}
+
+fn cert_identity(cert: &TracedCert) -> String {
+    match cert {
+        TracedCert::Notarization {
+            view,
+            parent,
+            block,
+            signers,
+            ghost_sender,
+        } => format!(
+            "cert:notarization:{view}:{parent}:{block}:{}:{ghost_sender}",
+            signers.join(",")
+        ),
+        TracedCert::Nullification {
+            view,
+            signers,
+            ghost_sender,
+        } => format!(
+            "cert:nullification:{view}:{}:{ghost_sender}",
+            signers.join(",")
+        ),
+        TracedCert::Finalization {
+            view,
+            parent,
+            block,
+            signers,
+            ghost_sender,
+        } => format!(
+            "cert:finalization:{view}:{parent}:{block}:{}:{ghost_sender}",
+            signers.join(",")
+        ),
+    }
+}
+
+fn logical_cert_identity(cert: &TracedCert) -> String {
+    match cert {
+        TracedCert::Notarization {
+            view,
+            parent,
+            block,
+            signers,
+            ..
+        } => format!(
+            "logical:notarization:{view}:{parent}:{block}:{}",
+            signers.join(",")
+        ),
+        TracedCert::Nullification { view, signers, .. } => {
+            format!("logical:nullification:{view}:{}", signers.join(","))
+        }
+        TracedCert::Finalization {
+            view,
+            parent,
+            block,
+            signers,
+            ..
+        } => format!(
+            "logical:finalization:{view}:{parent}:{block}:{}",
+            signers.join(",")
+        ),
+    }
+}
+
+fn broadcast_identity(entry: &TraceEntry) -> String {
+    match entry {
+        TraceEntry::Vote { vote, .. } => vote_identity(vote),
+        TraceEntry::Certificate { cert, .. } => cert_identity(cert),
+    }
+}
+
+fn trace_leader(trace: &TraceData, view: u64) -> String {
+    format!("n{}", ((trace.epoch + view) as usize) % trace.n)
+}
+
+fn indices_form_contiguous_block(indices: &[usize]) -> bool {
+    indices
+        .windows(2)
+        .all(|pair| pair[0].checked_add(1) == Some(pair[1]))
+}
+
+fn remove_indices(entries: &mut Vec<TraceEntry>, indices: &[usize]) -> Vec<TraceEntry> {
+    let mut removed = Vec::with_capacity(indices.len());
+    for &idx in indices.iter().rev() {
+        removed.push(entries.remove(idx));
+    }
+    removed.reverse();
+    removed
+}
+
+fn insert_entries(entries: &mut Vec<TraceEntry>, insert_at: usize, batch: Vec<TraceEntry>) {
+    for (offset, entry) in batch.into_iter().enumerate() {
+        entries.insert(insert_at + offset, entry);
+    }
+}
+
+fn move_indices_later(
+    entries: &mut Vec<TraceEntry>,
+    indices: &[usize],
+    rng: &mut StdRng,
+    max_extra_gap: usize,
+) -> bool {
+    if indices.is_empty() {
+        return false;
+    }
+    let len = entries.len();
+    let max_idx = *indices.last().expect("indices not empty");
+    let contiguous = indices_form_contiguous_block(indices);
+    let min_target = max_idx + 1 + usize::from(contiguous);
+    if min_target > len {
+        return false;
+    }
+    let max_target = (min_target + max_extra_gap).min(len);
+    let target_old = rng.gen_range(min_target..=max_target);
+    let batch = remove_indices(entries, indices);
+    let removed_before_target = indices.iter().filter(|&&idx| idx < target_old).count();
+    let insert_at = target_old - removed_before_target;
+    insert_entries(entries, insert_at, batch);
+    true
+}
+
+fn move_indices_to_insert_at(
+    entries: &mut Vec<TraceEntry>,
+    indices: &[usize],
+    insert_at: usize,
+) -> bool {
+    if indices.is_empty() || insert_at > entries.len() {
+        return false;
+    }
+    let batch = remove_indices(entries, indices);
+    let removed_before_target = indices.iter().filter(|&&idx| idx < insert_at).count();
+    let adjusted_insert_at = insert_at.saturating_sub(removed_before_target);
+    insert_entries(entries, adjusted_insert_at, batch);
+    true
+}
+
+fn pick_ordered_batch(indices: &[usize], rng: &mut StdRng, max_take: usize) -> Vec<usize> {
+    let start = rng.gen_range(0..indices.len());
+    let remaining = indices.len() - start;
+    let take = rng.gen_range(1..=remaining.min(max_take));
+    indices[start..start + take].to_vec()
+}
+
 /// Mutation kinds applied to a trace.
 #[derive(Clone, Copy, Debug)]
 enum Mutation {
@@ -159,6 +343,22 @@ enum Mutation {
     /// Split a consecutive batch for one recipient by interleaving
     /// another recipient's entry between them.
     BatchSplit,
+    /// Delay a single sender->receiver link while preserving link order.
+    DelayLink,
+    /// Delay a batch of messages from one sender.
+    DelaySender,
+    /// Delay part of one sender's broadcast fanout to selected receivers.
+    FanoutSkew,
+    /// Delay one receiver's vote or certificate channel independently.
+    ChannelSkew,
+    /// Hold several messages for one receiver and release them in a burst.
+    BurstRelease,
+    /// Weave messages for two receivers while preserving order within each receiver.
+    InterleaveReceivers,
+    /// Delay the leader's messages for a chosen view to a subset of receivers.
+    TimeoutEdge,
+    /// Make a different honest relay deliver the same certificate first.
+    RelayPreference,
 }
 
 const ALL_MUTATIONS: &[Mutation] = &[
@@ -168,6 +368,14 @@ const ALL_MUTATIONS: &[Mutation] = &[
     Mutation::SwapByRecipient,
     Mutation::DelayRecipient,
     Mutation::BatchSplit,
+    Mutation::DelayLink,
+    Mutation::DelaySender,
+    Mutation::FanoutSkew,
+    Mutation::ChannelSkew,
+    Mutation::BurstRelease,
+    Mutation::InterleaveReceivers,
+    Mutation::TimeoutEdge,
+    Mutation::RelayPreference,
 ];
 
 /// Applies a single mutation to `trace.entries`. Shuffles the mutation
@@ -186,6 +394,330 @@ pub fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> bool {
         }
     }
     false
+}
+
+fn mutate_delay_link(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry((
+                entry_sender(entry).to_string(),
+                entry_receiver(entry).to_string(),
+            ))
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            indices
+                .last()
+                .is_some_and(|&idx| idx + 1 < trace.entries.len())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let selected = pick_ordered_batch(group, rng, 4);
+    move_indices_later(&mut trace.entries, &selected, rng, 8)
+}
+
+fn mutate_delay_sender(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry(entry_sender(entry).to_string())
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            indices
+                .last()
+                .is_some_and(|&idx| idx + 1 < trace.entries.len())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let selected = pick_ordered_batch(group, rng, 6);
+    move_indices_later(&mut trace.entries, &selected, rng, 10)
+}
+
+fn mutate_delay_recipient(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry(entry_receiver(entry).to_string())
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            indices.len() >= 2
+                && indices
+                    .last()
+                    .is_some_and(|&idx| idx + 1 < trace.entries.len())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let selected = pick_ordered_batch(group, rng, 6);
+    move_indices_later(&mut trace.entries, &selected, rng, 10)
+}
+
+fn mutate_fanout_skew(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry((entry_sender(entry).to_string(), broadcast_identity(entry)))
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| indices.len() >= 2)
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let take = rng.gen_range(1..group.len());
+    let mut positions: Vec<usize> = (0..group.len()).collect();
+    positions.shuffle(rng);
+    positions.truncate(take);
+    positions.sort_unstable();
+    let selected: Vec<usize> = positions.into_iter().map(|pos| group[pos]).collect();
+    move_indices_later(&mut trace.entries, &selected, rng, 4)
+}
+
+fn mutate_channel_skew(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<(String, EntryChannel), Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry((entry_receiver(entry).to_string(), entry_channel(entry)))
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            indices.len() >= 2
+                && indices
+                    .last()
+                    .is_some_and(|&idx| idx + 1 < trace.entries.len())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let selected = pick_ordered_batch(group, rng, 5);
+    move_indices_later(&mut trace.entries, &selected, rng, 8)
+}
+
+fn mutate_burst_release(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry(entry_receiver(entry).to_string())
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            indices.len() >= 2
+                && indices.windows(2).any(|w| w[1] > w[0] + 1)
+                && indices
+                    .last()
+                    .is_some_and(|&idx| idx + 1 < trace.entries.len())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let start = rng.gen_range(0..group.len() - 1);
+    let take = rng.gen_range(2..=(group.len() - start).min(4));
+    let selected = group[start..start + take].to_vec();
+    move_indices_later(&mut trace.entries, &selected, rng, 6)
+}
+
+fn mutate_interleave_receivers(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        groups
+            .entry(entry_receiver(entry).to_string())
+            .or_default()
+            .push(idx);
+    }
+    let receivers: Vec<(String, Vec<usize>)> = groups
+        .into_iter()
+        .filter(|(_, indices)| !indices.is_empty())
+        .collect();
+    if receivers.len() < 2 {
+        return false;
+    }
+    for _ in 0..16 {
+        let a_idx = rng.gen_range(0..receivers.len());
+        let mut b_idx = rng.gen_range(0..receivers.len());
+        if a_idx == b_idx {
+            b_idx = (b_idx + 1) % receivers.len();
+        }
+        let a = &receivers[a_idx].1;
+        let b = &receivers[b_idx].1;
+        let a_take = a.len().min(2);
+        let b_take = b.len().min(2);
+        if a_take == 0 || b_take == 0 {
+            continue;
+        }
+        let selected_a = a[..a_take].to_vec();
+        let selected_b = b[..b_take].to_vec();
+        let mut selected = selected_a.clone();
+        selected.extend(selected_b.clone());
+        selected.sort_unstable();
+
+        let replacement_a: Vec<_> = selected_a
+            .iter()
+            .map(|&idx| trace.entries[idx].clone())
+            .collect();
+        let replacement_b: Vec<_> = selected_b
+            .iter()
+            .map(|&idx| trace.entries[idx].clone())
+            .collect();
+        let mut replacement = Vec::with_capacity(selected.len());
+        let mut ia = 0usize;
+        let mut ib = 0usize;
+        while ia < replacement_a.len() || ib < replacement_b.len() {
+            if ia < replacement_a.len() {
+                replacement.push(replacement_a[ia].clone());
+                ia += 1;
+            }
+            if ib < replacement_b.len() {
+                replacement.push(replacement_b[ib].clone());
+                ib += 1;
+            }
+        }
+        let original: Vec<String> = selected
+            .iter()
+            .map(|&idx| serde_json::to_string(&trace.entries[idx]).expect("entry serialization"))
+            .collect();
+        let replacement_keys: Vec<String> = replacement
+            .iter()
+            .map(|entry| serde_json::to_string(entry).expect("entry serialization"))
+            .collect();
+        if original == replacement_keys {
+            continue;
+        }
+
+        let insert_at = selected[0];
+        remove_indices(&mut trace.entries, &selected);
+        insert_entries(&mut trace.entries, insert_at, replacement);
+        return true;
+    }
+    false
+}
+
+fn mutate_timeout_edge(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut by_view: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        by_view.entry(entry.view()).or_default().push(idx);
+    }
+    let mut candidates = Vec::new();
+    for (view, view_indices) in by_view {
+        let leader = trace_leader(trace, view);
+        let leader_indices: Vec<usize> = view_indices
+            .iter()
+            .copied()
+            .filter(|&idx| entry_sender(&trace.entries[idx]) == leader)
+            .collect();
+        if leader_indices.len() >= 2 {
+            candidates.push((view, leader_indices));
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+    let (view, leader_indices) = &candidates[rng.gen_range(0..candidates.len())];
+    let mut receiver_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for &idx in leader_indices {
+        receiver_groups
+            .entry(entry_receiver(&trace.entries[idx]).to_string())
+            .or_default()
+            .push(idx);
+    }
+    if receiver_groups.len() < 2 {
+        return false;
+    }
+    let mut delayed_receivers: Vec<String> = receiver_groups.keys().cloned().collect();
+    delayed_receivers.shuffle(rng);
+    delayed_receivers.truncate(rng.gen_range(1..delayed_receivers.len()));
+    let mut selected = Vec::new();
+    for receiver in delayed_receivers {
+        selected.extend(receiver_groups.get(&receiver).cloned().unwrap_or_default());
+    }
+    selected.sort_unstable();
+
+    let target_old = trace
+        .entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, entry)| entry.view() == *view)
+        .map(|(idx, _)| idx + 1)
+        .unwrap_or(trace.entries.len());
+    move_indices_to_insert_at(&mut trace.entries, &selected, target_old)
+}
+
+fn mutate_relay_preference(trace: &mut TraceData, rng: &mut StdRng) -> bool {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (idx, entry) in trace.entries.iter().enumerate() {
+        let TraceEntry::Certificate { cert, .. } = entry else {
+            continue;
+        };
+        groups
+            .entry((
+                entry_receiver(entry).to_string(),
+                logical_cert_identity(cert),
+            ))
+            .or_default()
+            .push(idx);
+    }
+    let candidates: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|indices| {
+            let senders: HashSet<String> = indices
+                .iter()
+                .map(|&idx| entry_sender(&trace.entries[idx]).to_string())
+                .collect();
+            indices.len() >= 2 && senders.len() >= 2
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let group = &candidates[rng.gen_range(0..candidates.len())];
+    let earliest = group[0];
+    let mut alternates: Vec<usize> = group
+        .iter()
+        .copied()
+        .filter(|&idx| entry_sender(&trace.entries[idx]) != entry_sender(&trace.entries[earliest]))
+        .collect();
+    if alternates.is_empty() {
+        return false;
+    }
+    alternates.shuffle(rng);
+    let chosen = alternates[0];
+    let entry = trace.entries.remove(chosen);
+    trace.entries.insert(earliest, entry);
+    true
 }
 
 /// Tries to apply a single mutation kind. Returns `true` if the trace
@@ -245,34 +777,7 @@ fn try_mutation(trace: &mut TraceData, rng: &mut StdRng, mutation: Mutation) -> 
             trace.entries.swap(i, j);
             true
         }
-        Mutation::DelayRecipient => {
-            // Find a consecutive batch for one recipient and shift it
-            // later in the trace.
-            if len < 2 {
-                return false;
-            }
-            let start = rng.gen_range(0..len);
-            let recv = entry_receiver(&trace.entries[start]).to_string();
-            // Find the end of the consecutive batch for this recipient.
-            let mut end = start;
-            while end + 1 < len && entry_receiver(&trace.entries[end + 1]) == recv {
-                end += 1;
-            }
-            let batch_len = end - start + 1;
-            // Nothing after the batch to delay into.
-            if end + 1 >= len {
-                return false;
-            }
-            let shift = rng.gen_range(1..=(len - end - 1).min(10));
-            // Remove the batch and reinsert it shifted later.
-            let batch: Vec<_> = trace.entries.drain(start..=end).collect();
-            let insert_at = (start + shift).min(trace.entries.len());
-            for (offset, entry) in batch.into_iter().enumerate() {
-                trace.entries.insert(insert_at + offset, entry);
-            }
-            // Only count as changed if we actually moved.
-            insert_at != start || batch_len == 0
-        }
+        Mutation::DelayRecipient => mutate_delay_recipient(trace, rng),
         Mutation::BatchSplit => {
             // Find a consecutive run of 2+ entries for the same recipient
             // and interleave an entry from another recipient between them.
@@ -287,7 +792,9 @@ fn try_mutation(trace: &mut TraceData, rng: &mut StdRng, mutation: Mutation) -> 
             }
             // Find an entry from a different recipient to move between them.
             let others: Vec<usize> = (0..len)
-                .filter(|&k| k != start && k != start + 1 && entry_receiver(&trace.entries[k]) != recv)
+                .filter(|&k| {
+                    k != start && k != start + 1 && entry_receiver(&trace.entries[k]) != recv
+                })
                 .collect();
             if others.is_empty() {
                 return false;
@@ -299,6 +806,14 @@ fn try_mutation(trace: &mut TraceData, rng: &mut StdRng, mutation: Mutation) -> 
             trace.entries.insert(insert_at, entry);
             true
         }
+        Mutation::DelayLink => mutate_delay_link(trace, rng),
+        Mutation::DelaySender => mutate_delay_sender(trace, rng),
+        Mutation::FanoutSkew => mutate_fanout_skew(trace, rng),
+        Mutation::ChannelSkew => mutate_channel_skew(trace, rng),
+        Mutation::BurstRelease => mutate_burst_release(trace, rng),
+        Mutation::InterleaveReceivers => mutate_interleave_receivers(trace, rng),
+        Mutation::TimeoutEdge => mutate_timeout_edge(trace, rng),
+        Mutation::RelayPreference => mutate_relay_preference(trace, rng),
     }
 }
 
@@ -325,17 +840,17 @@ fn resolve_iterations() -> usize {
 /// Otherwise generates a random seed and persists it to
 /// `MUTATION_SEEDS_FOLDER/.tlc_mutator_seed` for reproducibility.
 fn resolve_seed(seed_dir: &Path) -> u64 {
-    if let Some(seed) = env::var("MUTATOR_SEED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
+    if let Some(seed) = env::var("MUTATOR_SEED").ok().and_then(|s| s.parse().ok()) {
         return seed;
     }
     let seed: u64 = rand::random();
     let seed_file = seed_dir.join(".tlc_mutator_seed");
     fs::create_dir_all(seed_dir).ok();
     if let Err(e) = fs::write(&seed_file, seed.to_string()) {
-        eprintln!("warning: failed to write seed to {}: {e}", seed_file.display());
+        eprintln!(
+            "warning: failed to write seed to {}: {e}",
+            seed_file.display()
+        );
     }
     seed
 }
@@ -588,9 +1103,7 @@ pub fn run() {
         let response = match client.execute_full(&actions) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!(
-                    "tlc oracle error at iter {iter}: {e}",
-                );
+                eprintln!("tlc oracle error at iter {iter}: {e}",);
                 process::exit(1);
             }
         };
@@ -691,4 +1204,289 @@ pub fn run() {
         state_traces_map.len(),
         states_map.len(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{try_mutation, Mutation};
+    use crate::tracing::{
+        data::TraceData,
+        sniffer::{TraceEntry, TracedCert, TracedVote},
+    };
+    use rand::{rngs::StdRng, SeedableRng};
+    use std::collections::BTreeMap;
+
+    fn vote(sender: &str, receiver: &str, vote: TracedVote) -> TraceEntry {
+        TraceEntry::Vote {
+            sender: sender.to_string(),
+            receiver: receiver.to_string(),
+            vote,
+        }
+    }
+
+    fn cert(sender: &str, receiver: &str, cert: TracedCert) -> TraceEntry {
+        TraceEntry::Certificate {
+            sender: sender.to_string(),
+            receiver: receiver.to_string(),
+            cert,
+        }
+    }
+
+    fn sample_trace() -> TraceData {
+        TraceData {
+            n: 4,
+            faults: 0,
+            epoch: 0,
+            max_view: 2,
+            required_containers: 1,
+            reporter_states: Default::default(),
+            entries: vec![
+                vote(
+                    "n1",
+                    "n0",
+                    TracedVote::Notarize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n1".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                vote(
+                    "n2",
+                    "n0",
+                    TracedVote::Notarize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n2".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                vote(
+                    "n1",
+                    "n2",
+                    TracedVote::Notarize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n1".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                vote(
+                    "n3",
+                    "n0",
+                    TracedVote::Notarize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n3".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                vote(
+                    "n1",
+                    "n3",
+                    TracedVote::Notarize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n1".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                cert(
+                    "n1",
+                    "n0",
+                    TracedCert::Notarization {
+                        view: 1,
+                        parent: 0,
+                        block: "b1".to_string(),
+                        signers: vec!["n1".to_string(), "n2".to_string(), "n3".to_string()],
+                        ghost_sender: "n1".to_string(),
+                    },
+                ),
+                cert(
+                    "n2",
+                    "n0",
+                    TracedCert::Notarization {
+                        view: 1,
+                        parent: 0,
+                        block: "b1".to_string(),
+                        signers: vec!["n1".to_string(), "n2".to_string(), "n3".to_string()],
+                        ghost_sender: "n2".to_string(),
+                    },
+                ),
+                vote(
+                    "n0",
+                    "n2",
+                    TracedVote::Nullify {
+                        view: 1,
+                        sig: "n0".to_string(),
+                    },
+                ),
+                cert(
+                    "n1",
+                    "n2",
+                    TracedCert::Notarization {
+                        view: 1,
+                        parent: 0,
+                        block: "b1".to_string(),
+                        signers: vec!["n1".to_string(), "n2".to_string(), "n3".to_string()],
+                        ghost_sender: "n1".to_string(),
+                    },
+                ),
+                vote(
+                    "n2",
+                    "n1",
+                    TracedVote::Finalize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n2".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                vote(
+                    "n3",
+                    "n1",
+                    TracedVote::Finalize {
+                        view: 1,
+                        parent: 0,
+                        sig: "n3".to_string(),
+                        block: "b1".to_string(),
+                    },
+                ),
+                cert(
+                    "n1",
+                    "n3",
+                    TracedCert::Finalization {
+                        view: 1,
+                        parent: 0,
+                        block: "b1".to_string(),
+                        signers: vec!["n1".to_string(), "n2".to_string(), "n3".to_string()],
+                        ghost_sender: "n1".to_string(),
+                    },
+                ),
+                vote(
+                    "n2",
+                    "n3",
+                    TracedVote::Nullify {
+                        view: 2,
+                        sig: "n2".to_string(),
+                    },
+                ),
+                vote(
+                    "n1",
+                    "n0",
+                    TracedVote::Notarize {
+                        view: 2,
+                        parent: 1,
+                        sig: "n1".to_string(),
+                        block: "b2".to_string(),
+                    },
+                ),
+                vote(
+                    "n1",
+                    "n2",
+                    TracedVote::Notarize {
+                        view: 2,
+                        parent: 1,
+                        sig: "n1".to_string(),
+                        block: "b2".to_string(),
+                    },
+                ),
+                vote(
+                    "n1",
+                    "n3",
+                    TracedVote::Notarize {
+                        view: 2,
+                        parent: 1,
+                        sig: "n1".to_string(),
+                        block: "b2".to_string(),
+                    },
+                ),
+                cert(
+                    "n2",
+                    "n3",
+                    TracedCert::Nullification {
+                        view: 2,
+                        signers: vec!["n0".to_string(), "n2".to_string(), "n3".to_string()],
+                        ghost_sender: "n2".to_string(),
+                    },
+                ),
+            ],
+        }
+    }
+
+    fn multiset(trace: &TraceData) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for entry in &trace.entries {
+            let key = serde_json::to_string(entry).expect("entry serialization");
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn assert_reordering_mutation_succeeds(mutation: Mutation) {
+        let original = sample_trace();
+        let original_multiset = multiset(&original);
+        let original_json =
+            serde_json::to_string(&original.entries).expect("trace entry serialization");
+
+        for seed in 0..128u64 {
+            let mut trace = original.clone();
+            let mut rng = StdRng::seed_from_u64(seed);
+            if try_mutation(&mut trace, &mut rng, mutation)
+                && serde_json::to_string(&trace.entries).expect("trace entry serialization")
+                    != original_json
+            {
+                assert_eq!(trace.entries.len(), original.entries.len());
+                assert_eq!(multiset(&trace), original_multiset);
+                return;
+            }
+        }
+
+        panic!("mutation {mutation:?} never succeeded on sample trace");
+    }
+
+    #[test]
+    fn delay_link_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::DelayLink);
+    }
+
+    #[test]
+    fn delay_sender_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::DelaySender);
+    }
+
+    #[test]
+    fn delay_recipient_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::DelayRecipient);
+    }
+
+    #[test]
+    fn fanout_skew_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::FanoutSkew);
+    }
+
+    #[test]
+    fn channel_skew_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::ChannelSkew);
+    }
+
+    #[test]
+    fn burst_release_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::BurstRelease);
+    }
+
+    #[test]
+    fn interleave_receivers_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::InterleaveReceivers);
+    }
+
+    #[test]
+    fn timeout_edge_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::TimeoutEdge);
+    }
+
+    #[test]
+    fn relay_preference_mutation_preserves_messages() {
+        assert_reordering_mutation_succeeds(Mutation::RelayPreference);
+    }
 }

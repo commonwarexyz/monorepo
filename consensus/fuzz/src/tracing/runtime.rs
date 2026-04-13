@@ -1,4 +1,3 @@
-
 use super::{
     data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
@@ -251,7 +250,9 @@ impl TraceMetrics {
                 TraceEntry::Vote { vote, .. } => {
                     vote_entries += 1;
                     match vote {
-                        TracedVote::Notarize { view, sig, block, .. } => {
+                        TracedVote::Notarize {
+                            view, sig, block, ..
+                        } => {
                             if let Some(correct_idx) = correct_node_offset(sig, faults, n) {
                                 let key = UniqueHonestVote::Notarize {
                                     view: *view,
@@ -289,7 +290,9 @@ impl TraceMetrics {
                                 }
                             }
                         }
-                        TracedVote::Finalize { view, sig, block, .. } => {
+                        TracedVote::Finalize {
+                            view, sig, block, ..
+                        } => {
                             if let Some(correct_idx) = correct_node_offset(sig, faults, n) {
                                 let key = UniqueHonestVote::Finalize {
                                     view: *view,

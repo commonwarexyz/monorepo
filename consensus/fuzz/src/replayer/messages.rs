@@ -33,14 +33,12 @@ fn parse_node_id(id: &str) -> usize {
         .expect("invalid node id")
 }
 
-
 /// Builds a Proposal for the given view, parent, and block digest.
 fn make_proposal(epoch: u64, view: u64, parent: u64, block: &str) -> Proposal<Sha256Digest> {
     let round = Round::new(Epoch::new(epoch), View::new(view));
     let payload = digest_from_hex(block);
     Proposal::new(round, View::new(parent), payload)
 }
-
 
 /// Result of constructing a message from a trace entry.
 pub struct ConstructedMessage {
@@ -73,7 +71,10 @@ pub fn construct_vote(
 
     let encoded: IoBuf = match vote {
         TracedVote::Notarize {
-            view, parent, block, ..
+            view,
+            parent,
+            block,
+            ..
         } => {
             let proposal = make_proposal(epoch, *view, *parent, block);
             let notarize =
@@ -87,7 +88,10 @@ pub fn construct_vote(
             Vote::<S, Sha256Digest>::Nullify(nullify).encode().into()
         }
         TracedVote::Finalize {
-            view, parent, block, ..
+            view,
+            parent,
+            block,
+            ..
         } => {
             let proposal = make_proposal(epoch, *view, *parent, block);
             let finalize =
@@ -220,4 +224,3 @@ pub fn construct_message(
         }
     }
 }
-

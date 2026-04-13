@@ -173,12 +173,7 @@ pub fn replay_trace(
             // Map to correct node index (0-based in our injector arrays)
             let correct_idx = receiver_idx - faults;
 
-            let msg = messages::construct_message(
-                entry,
-                &schemes,
-                &participants,
-                epoch,
-            );
+            let msg = messages::construct_message(entry, &schemes, &participants, epoch);
 
             if msg.is_certificate {
                 cert_injectors[correct_idx].inject(msg.sender_pk, msg.payload);

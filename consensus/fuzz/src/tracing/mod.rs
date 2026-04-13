@@ -3,6 +3,7 @@ pub mod decoder;
 pub mod encoder;
 pub(crate) mod runtime;
 pub mod sniffer;
+pub mod static_honest;
 #[cfg(test)]
 mod tests;
 pub mod tlc_encoder;

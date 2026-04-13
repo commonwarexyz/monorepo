@@ -875,5 +875,4 @@ mod tests {
              broadcast -> finalize quorum -> finalization broadcast path must fire",
         );
     }
-
 }
