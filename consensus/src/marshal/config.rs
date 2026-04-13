@@ -9,32 +9,20 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
 ///
-/// # Warning
+/// # Epocher and Provider Management
 ///
 /// Any height the marshal is asked to sync must be covered by both the
 /// [epocher](Self::epocher) and the [provider](Self::provider). If the epocher
 /// cannot map a height to an epoch, or the provider cannot supply a scheme for
-/// that epoch, the marshal will silently drop the sync request. Callers are
-/// responsible for ensuring both are configured for the full range of heights
-/// they intend to sync.
+/// that epoch, marshal will silently drop the sync request. If the height is
+/// greater than the last processed height, marshal will block the serving peer
+/// for providing invalid data. If the height is less than or equal to the last
+/// processed height, marshal will silently drop the sync request as stale.
 ///
-/// # Pruning
-///
-/// The application has no synchronous signal that marshal has advanced its
-/// internal floor (no ack from `Mailbox::set_floor`/`Mailbox::prune`, no
-/// floor-advance push). The only signal is `Update::Block`: after receiving
-/// `Update::Block(B at H, _)`, marshal's floor is guaranteed to be at least
-/// `H - max_pending_acks` (see the `Update::Block` docs for the derivation).
-///
-/// It is therefore safe to prune entries from the [epocher](Self::epocher) and
-/// [provider](Self::provider) for any epoch whose highest height is at or
-/// below `H - max_pending_acks`. In-flight backfill responses for those
-/// epochs that race the prune are gracefully discarded by marshal without
-/// blocking the serving peer.
-///
-/// Pruning entries for epochs that span heights above this bound is unsafe:
-/// in-flight responses for those heights cannot be verified and marshal will
-/// block the serving peer (which is presumed to have sent invalid data).
+/// Applications that wish to prune entries from the [epocher](Self::epocher) and
+/// [provider](Self::provider) can do so once an epoch is no longer needed (the
+/// last processed height is greater than the epoch boundary). Applications can compute
+/// the last processed height from an `Update::Block` message as `H - max_pending_acks`.
 pub struct Config<B, P, ES, T>
 where
     B: Block,
