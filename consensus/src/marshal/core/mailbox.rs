@@ -315,6 +315,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
     /// The height must be at or below the current floor (last processed height),
     /// otherwise the prune request is ignored.
+    ///
+    /// Because `prune` is fire-and-forget the application has no synchronous
+    /// signal that marshal has reached `height`. Callers should derive `height`
+    /// from the same `H - max_pending_acks` bound documented on
+    /// [`crate::marshal::Update::Block`]: after receiving `Update::Block(B at H, _)`
+    /// it is safe to call `prune(height)` for any `height <= H - max_pending_acks`.
+    /// A `prune` request for a height above marshal's current floor is silently
+    /// dropped (logged as a warning) rather than applied.
     pub async fn prune(&self, height: Height) {
         self.sender.send_lossy(Message::Prune { height }).await;
     }

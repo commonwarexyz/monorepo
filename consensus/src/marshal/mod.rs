@@ -139,5 +139,27 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     ///
     /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
     /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    ///
+    /// # Pruning epoch state
+    ///
+    /// `Update::Block` is the *only* signal the application receives about marshal's
+    /// internal progress: there is no acknowledgement from `Mailbox::set_floor` /
+    /// `Mailbox::prune`, and the marshal does not push out floor-advance notifications.
+    ///
+    /// When the application receives `Update::Block(B at H, ack)`, marshal's internal floor
+    /// (`last_processed_height`) is guaranteed to be at least `H - max_pending_acks`. This
+    /// holds because marshal will not dispatch a block that would push the in-flight ack
+    /// queue above `max_pending_acks`, so by the time `H` is dispatched all blocks at
+    /// heights below `H - max_pending_acks` must have been acknowledged. (The same bound
+    /// applies after a `Mailbox::set_floor` call: the application must wait for the next
+    /// `Update::Block` to learn that the floor advance has been applied, and then use the
+    /// `H - max_pending_acks` bound from that block.)
+    ///
+    /// This bound lets the application safely prune any
+    /// [`crate::types::Epocher`]/[`commonware_cryptography::certificate::Provider`] entries
+    /// whose epoch lies entirely at or below `H - max_pending_acks`, and is also the bound
+    /// the application should use when calling `Mailbox::prune`. Any in-flight resolver
+    /// responses for heights below the floor that race a prune are tolerated by marshal
+    /// (the serving peer is not blocked, since the request is below the floor).
     Block(B, A),
 }

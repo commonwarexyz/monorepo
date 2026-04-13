@@ -50,8 +50,9 @@ mod tests {
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK, NAMESPACE,
-                    NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, S, UNRELIABLE_LINK, V,
+                    StandardHarness, TestHarness, ValidatorHandle, B, BLOCKS_PER_EPOCH, D,
+                    LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
+                    UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -1752,6 +1753,173 @@ mod tests {
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             assert!(epocher.containing(stale_height).is_some());
             assert!(epocher.last(stale_round.epoch()).is_some());
+        });
+    }
+
+    /// Parse the `processed_height` gauge value from a prometheus-encoded
+    /// metrics dump produced by `Metrics::encode`. Looks for any line of the
+    /// form `<prefix>processed_height <value>`.
+    fn parse_processed_height(metrics: &str) -> Option<u64> {
+        for line in metrics.lines() {
+            let line = line.trim();
+            if line.starts_with('#') {
+                continue;
+            }
+            let needle = "processed_height ";
+            if let Some(idx) = line.find(needle) {
+                let value = line[idx + needle.len()..].split_whitespace().next()?;
+                return value.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Regression test for the
+    /// [`crate::marshal::Update::Block`] pruning contract.
+    ///
+    /// Asserts that whenever the application receives `Update::Block(B at H, _)`,
+    /// marshal's `processed_height` gauge is at least `H - max_pending_acks`.
+    /// Without this invariant the pruning bound documented on `Update::Block`
+    /// (and relied upon by the marshal `epocher`/`provider` pruning contract)
+    /// would be unsound.
+    #[test_traced("WARN")]
+    fn test_standard_update_block_processed_height_invariant() {
+        const MAX_PENDING_ACKS: usize = 4;
+        const NUM_BLOCKS: u64 = 12;
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            // Use a manual-ack application so we can observe the bound at
+            // every point in the pipeline lifecycle (fill, drain, refill).
+            let validator = participants[0].clone();
+            let app_in = Application::<B>::manual_ack();
+            let setup = StandardHarness::setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(MAX_PENDING_ACKS),
+                app_in,
+            )
+            .await;
+            let application = setup.application;
+            let mut handle = ValidatorHandle {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            };
+            let metrics_ctx = context.clone();
+
+            // Submit NUM_BLOCKS finalizations; the marshal will dispatch up to
+            // MAX_PENDING_ACKS at a time and stall until the application acks.
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            let mut parent_commitment =
+                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut handles = vec![handle.clone()];
+            for i in 1..=NUM_BLOCKS {
+                let block = StandardHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(i),
+                    i,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = StandardHarness::commitment(&block);
+                parent = StandardHarness::digest(&block);
+                parent_commitment = commitment;
+                let round = Round::new(
+                    epocher.containing(StandardHarness::height(&block)).unwrap().epoch(),
+                    View::new(i),
+                );
+                StandardHarness::verify(&mut handle, round, &block, &mut handles).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: commitment,
+                };
+                let finalization =
+                    StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+                StandardHarness::report_finalization(&mut handle.mailbox, finalization)
+                    .await;
+            }
+
+            // Helper closure to assert the invariant given the current state.
+            let assert_invariant = |label: &str| {
+                let dispatched = application.blocks();
+                let Some(highest) = dispatched.keys().max().copied() else {
+                    return;
+                };
+                let processed = parse_processed_height(&metrics_ctx.encode())
+                    .expect("processed_height gauge missing");
+                assert!(
+                    highest.get().saturating_sub(processed) <= MAX_PENDING_ACKS as u64,
+                    "{label}: highest dispatched={} processed_height={} \
+                     gap={} > max_pending_acks={}",
+                    highest.get(),
+                    processed,
+                    highest.get().saturating_sub(processed),
+                    MAX_PENDING_ACKS,
+                );
+            };
+
+            // Wait for the pipeline to fill, then validate.
+            while application.blocks().len() < MAX_PENDING_ACKS {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_invariant("pipeline full");
+            assert_eq!(
+                parse_processed_height(&context.encode()),
+                Some(0),
+                "no acks issued yet, processed_height should be 0"
+            );
+
+            // Drain the pipeline one ack at a time; after each ack the marshal
+            // should advance `processed_height` and dispatch the next block,
+            // and the invariant must continue to hold.
+            for expected in 1..=NUM_BLOCKS {
+                while application
+                    .pending_ack_heights()
+                    .first()
+                    .copied()
+                    != Some(Height::new(expected))
+                {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                let acked = application
+                    .acknowledge_next()
+                    .expect("pending ack should be present");
+                assert_eq!(acked, Height::new(expected));
+
+                // Wait for marshal to actually process the ack (and dispatch
+                // the next block, if any). We poll the metric until it
+                // reflects the ack we just released.
+                while parse_processed_height(&context.encode())
+                    .unwrap_or(0)
+                    < expected
+                {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                assert_invariant(&format!("after ack {expected}"));
+            }
+
+            // All blocks must have been delivered by the end.
+            assert_eq!(application.blocks().len() as u64, NUM_BLOCKS);
         });
     }
 }

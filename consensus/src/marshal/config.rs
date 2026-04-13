@@ -20,18 +20,21 @@ use std::num::{NonZeroU64, NonZeroUsize};
 ///
 /// # Pruning
 ///
-/// It is safe for an application to prune entries from the
-/// [epocher](Self::epocher) and [provider](Self::provider) for epochs whose
-/// highest height is at or below the floor (i.e. `last_processed_height`,
-/// updated either by application acks or by an explicit
-/// `Mailbox::set_floor`). In-flight backfill responses for those epochs are
-/// silently discarded and the serving peer is not blocked.
+/// The application has no synchronous signal that marshal has advanced its
+/// internal floor (no ack from `Mailbox::set_floor`/`Mailbox::prune`, no
+/// floor-advance push). The only signal is `Update::Block`: after receiving
+/// `Update::Block(B at H, _)`, marshal's floor is guaranteed to be at least
+/// `H - max_pending_acks` (see the `Update::Block` docs for the derivation).
 ///
-/// Pruning entries for epochs that span heights above the floor is unsafe:
-/// in-flight responses for those heights cannot be verified and the marshal
-/// will block the serving peer (which is presumed to have sent invalid data).
-/// Applications must therefore retain epocher/provider entries for every
-/// epoch covering a height above the floor.
+/// It is therefore safe to prune entries from the [epocher](Self::epocher) and
+/// [provider](Self::provider) for any epoch whose highest height is at or
+/// below `H - max_pending_acks`. In-flight backfill responses for those
+/// epochs that race the prune are gracefully discarded by marshal without
+/// blocking the serving peer.
+///
+/// Pruning entries for epochs that span heights above this bound is unsafe:
+/// in-flight responses for those heights cannot be verified and marshal will
+/// block the serving peer (which is presumed to have sent invalid data).
 pub struct Config<B, P, ES, T>
 where
     B: Block,
