@@ -3,7 +3,7 @@
 use crate::Key;
 use commonware_codec::Encode;
 use commonware_storage::{
-    mmr::{self, Location, Proof},
+    merkle::{self, Location, Proof},
     qmdb::{self, operation::Operation},
 };
 use std::{future::Future, num::NonZeroU64};
@@ -48,8 +48,11 @@ impl DatabaseType {
 /// Helper trait for databases that can be synced.
 #[allow(clippy::type_complexity)]
 pub trait Syncable: Sized {
+    /// The merkle family used by this database.
+    type Family: merkle::Family;
+
     /// The type of operations in the database.
-    type Operation: Operation<mmr::Family> + Encode + Sync + 'static;
+    type Operation: Operation<Self::Family> + Encode + Sync + 'static;
 
     /// Create test operations with the given count and seed.
     /// The returned operations must end with a commit operation.
@@ -60,30 +63,35 @@ pub trait Syncable: Sized {
     fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), qmdb::Error<mmr::Family>>>;
+    ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;
 
     /// Get the total number of operations in the database (including pruned operations).
-    fn size(&self) -> impl Future<Output = Location> + Send;
+    fn size(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
     /// Get the inactivity floor, the location below which all operations are inactive.
-    fn inactivity_floor(&self) -> impl Future<Output = Location> + Send;
+    fn inactivity_floor(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            (Proof<Self::Family, Key>, Vec<Self::Operation>),
+            qmdb::Error<Self::Family>,
+        >,
+    > + Send;
 
-    /// Get the pinned MMR nodes for a lower operation boundary of `loc`.
+    /// Get the pinned nodes for a lower operation boundary of `loc`.
     fn pinned_nodes_at(
         &self,
-        loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send;
+        loc: Location<Self::Family>,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<Self::Family>>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;

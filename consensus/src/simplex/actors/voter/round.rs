@@ -880,6 +880,38 @@ mod tests {
         assert!(round.broadcast_finalization);
     }
 
+    /// Replaying a local notarize vote for a leader-owned proposal should
+    /// restore the proposal as already verified without requesting verification.
+    #[test]
+    fn replayed_local_notarize_restores_verified_proposal_state() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        // Create a proposal where we (participant 0) are the leader.
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(1), Sha256Digest::from([41u8; 32]));
+        let notarize_local = Notarize::sign(&local_scheme, proposal.clone()).expect("notarize");
+
+        // Replay the local notarize into a fresh round.
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+        round.replay(&Artifact::Notarize(notarize_local));
+
+        // Proposal should be restored as verified (we are the leader).
+        assert_eq!(round.proposal.proposal(), Some(&proposal));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
+        assert!(round.broadcast_notarize);
+
+        // No verification request should be emitted.
+        assert!(
+            !round.try_verify(),
+            "leader-owned replay should not request verification again"
+        );
+    }
+
     #[test]
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = test_rng();

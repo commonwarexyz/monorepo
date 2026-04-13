@@ -7,12 +7,14 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
-        self, batch, hasher::Standard as StandardHasher, journaled::Journaled, Family, Location,
-        Position, Proof, Readable,
+        self, batch,
+        hasher::{Hasher as _, Standard as StandardHasher},
+        journaled::Journaled,
+        Family, Location, Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -117,10 +119,48 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             self.items.is_empty(),
             "merkleize_with expects no items added via add"
         );
+
+        #[cfg(feature = "std")]
+        if let Some(pool) = self
+            .inner
+            .pool()
+            .filter(|_| items.len() >= batch::MIN_TO_PARALLELIZE)
+        {
+            // Parallel path: encode items and compute leaf digests on the thread pool,
+            // then feed the pre-computed digests sequentially into the MMR batch.
+            use rayon::prelude::*;
+
+            let starting_leaves = self.inner.leaves();
+            let digests: Vec<H::Digest> = pool.install(|| {
+                items
+                    .par_iter()
+                    .enumerate()
+                    .map_init(
+                        || self.hasher.clone(),
+                        |h, (i, item)| {
+                            let loc = Location::<F>::new(*starting_leaves + i as u64);
+                            let pos = Position::try_from(loc).expect("valid leaf location");
+                            h.leaf_digest(pos, &item.encode())
+                        },
+                    )
+                    .collect()
+            });
+            for digest in digests {
+                self.inner = self.inner.add_leaf_digest(digest);
+            }
+        } else {
+            for item in &*items {
+                let encoded = item.encode();
+                self.inner = self.inner.add(&self.hasher, &encoded);
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
         for item in &*items {
             let encoded = item.encode();
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
+
         let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
@@ -141,7 +181,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
     parent: Option<Weak<Self>>,
-    /// Ancestor item segments collected at merkleize time (root-to-tip order).
+    /// Ancestor item batches collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
 
@@ -435,20 +475,26 @@ where
             .into());
         };
 
-        // Apply ancestor item segments in root-to-tip order. Already-committed
-        // segments are skipped by tracking cumulative leaf count.
+        // Apply ancestor item batches in root-to-tip order. Already-committed
+        // batches are skipped by tracking cumulative leaf count.
+        // Batches are collected into a single append_many call to acquire the
+        // journal's write lock once instead of per-batch.
         let committed_leaves = self.journal.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
-        let mut seg_leaf_end = base_leaves;
-        for seg in &batch.ancestor_items {
-            seg_leaf_end += seg.len() as u64;
-            if skip_ancestors && seg_leaf_end <= committed_leaves {
+        let mut batch_leaf_end = base_leaves;
+        let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
+        for ancestor in &batch.ancestor_items {
+            batch_leaf_end += ancestor.len() as u64;
+            if skip_ancestors && batch_leaf_end <= committed_leaves {
                 continue;
             }
-            self.journal.append_many(seg).await?;
+            batches.push(ancestor);
         }
         if !batch.items.is_empty() {
-            self.journal.append_many(&batch.items).await?;
+            batches.push(&batch.items);
+        }
+        if !batches.is_empty() {
+            self.journal.append_many(Many::Nested(&batches)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
@@ -2470,7 +2516,7 @@ mod tests {
     }
 
     /// `apply_batch` works correctly across a 3-level chain.
-    async fn test_apply_batch_cross_segment_inner<F: Family + PartialEq>(context: Context) {
+    async fn test_apply_batch_cross_batch_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
@@ -2517,15 +2563,15 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_apply_batch_cross_segment_mmr() {
+    fn test_apply_batch_cross_batch_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_cross_segment_inner::<mmr::Family>);
+        executor.start(test_apply_batch_cross_batch_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_apply_batch_cross_segment_mmb() {
+    fn test_apply_batch_cross_batch_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_cross_segment_inner::<mmb::Family>);
+        executor.start(test_apply_batch_cross_batch_inner::<mmb::Family>);
     }
 
     /// merkleize_with produces the same root as add + merkleize.
@@ -2599,8 +2645,7 @@ mod tests {
         executor.start(test_merkleize_with_apply_inner::<mmb::Family>);
     }
 
-    /// merkleize_with shares the Arc: the caller's clone and the batch's
-    /// internal segment point to the same allocation.
+    /// merkleize_with stores the caller's Arc directly (no deep copy).
     async fn test_merkleize_with_shares_arc_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "mw-arc", 3).await;
 

@@ -14,7 +14,7 @@
 //! that tracks which operations are _active_ (i.e. represent the current state of their key).
 //!
 //! To make this useful, a verifier needs both the operation and its activity status authenticated
-//! under a single root. We achieve this by _grafting_ bitmap chunks onto the operations MMR.
+//! under a single root. We achieve this by _grafting_ bitmap chunks onto the operations tree.
 //!
 //! # Data structures
 //!
@@ -24,28 +24,28 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted MMR** (`Mmr<Digest>`): An in-memory MMR of digests at and above the
-//!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
+//! - **Grafted tree**: An in-memory Merkle structure of digests at and above the
+//!   _grafting height_ in the ops tree. This is the core of how bitmap and ops state are combined
 //!   into a single authenticated structure (see below).
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed
-//!   to restore the grafted MMR after pruning old bitmap chunks.
+//!   to restore the grafted tree after pruning old bitmap chunks.
 //!
-//! # Grafting: combining the activity status bitmap and the ops MMR
+//! # Grafting: combining the activity status bitmap and the ops tree
 //!
 //! ## The problem
 //!
-//! Naively authenticating the bitmap and ops MMR as two independent Merkle structures would
+//! Naively authenticating the bitmap and ops tree as two independent Merkle structures would
 //! require two separate proofs per operation -- one for the operation's value, one for its
 //! activity status. This doubles proof sizes.
 //!
 //! ## The solution
 //!
-//! We combine ("graft") the two structures at a specific height in the ops MMR called the
+//! We combine ("graft") the two structures at a specific height in the ops tree called the
 //! _grafting height_. The grafting height `h = log2(N * 8)` is chosen so that each subtree of
-//! height `h` in the ops MMR covers exactly one bitmap chunk's worth of operations.
+//! height `h` in the ops tree covers exactly one bitmap chunk's worth of operations.
 //!
-//! At the grafting height, instead of using the ops MMR's own subtree root, we replace it with a
+//! At the grafting height, instead of using the ops tree's own subtree root, we replace it with a
 //! _grafted leaf_ digest that incorporates both the bitmap chunk and the ops subtree root:
 //!
 //! ```text
@@ -54,10 +54,10 @@
 //! ```
 //!
 //! The all-zero identity means that for pruned regions (where every operation is inactive), the
-//! grafted MMR is structurally identical to the ops MMR at and above the grafting height.
+//! grafted tree is structurally identical to the ops tree at and above the grafting height.
 //!
-//! Above the grafting height, internal nodes use standard MMR hashing over the grafted leaves.
-//! Below the grafting height, the ops MMR is unchanged.
+//! Above the grafting height, internal nodes use standard hashing over the grafted leaves.
+//! Below the grafting height, the ops tree is unchanged.
 //!
 //! ## Example
 //!
@@ -66,16 +66,16 @@
 //! (`h = 2`), yielding 2 complete bitmap chunks:
 //!
 //! ```text
-//! Ops MMR positions (8 leaves):
+//! Ops tree positions (8 leaves):
 //!
 //!   Height
-//!     3              14                    <-- peak: digest commits to ops MMR and bitmap chunks
+//!     3              14                    <-- peak: digest commits to ops tree and bitmap chunks
 //!                  /    \
 //!                 /      \
 //!                /        \
 //!     2  [G]    6          13    [G]       <-- grafting height: grafted leaves
 //!             /   \      /    \
-//!     1      2     5    9     12           <-- below grafting height: pure ops MMR nodes
+//!     1      2     5    9     12           <-- below grafting height: pure ops tree nodes
 //!           / \   / \  / \   /  \
 //!     0    0   1 3   4 7  8 10  11
 //!          ^           ^
@@ -88,25 +88,26 @@
 //! - `pos 6: hash(chunk_0 || ops_subtree_root(pos 6))`
 //! - `pos 13: hash(chunk_1 || ops_subtree_root(pos 13))`
 //!
-//! Position 14 (above grafting height) is a standard MMR internal node:
+//! Position 14 (above grafting height) is a standard internal node:
 //! - `pos 14: hash(14 || digest(pos 6) || digest(pos 13))`
 //!
-//! The grafted MMR stores positions 6, 13, and 14. The ops MMR stores everything below
-//! (positions 0-5 and 7-12). Together they form a single virtual MMR whose root authenticates
+//! The grafted tree stores positions 6, 13, and 14. The ops tree stores everything below
+//! (positions 0-5 and 7-12). Together they form a single virtual Merkle structure whose root
+//! authenticates
 //! both the operations and their activity status.
 //!
 //! ## Proof generation and verification
 //!
 //! To prove that operation _i_ is active, we provide:
-//! 1. An MMR inclusion proof for the operation's leaf, using the virtual (grafted) storage.
+//! 1. An inclusion proof for the operation's leaf, using the virtual (grafted) storage.
 //! 2. The bitmap chunk containing bit _i_.
 //!
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
-//! height, it uses standard MMR hashing. At the grafting height, it detects the boundary and
+//! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks
 //! the grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf
 //! is the ops subtree root itself (identity optimization -- see `grafting::Verifier::node`).
-//! Above the grafting height, it resumes standard MMR hashing. If the reconstructed root
+//! Above the grafting height, it resumes standard hashing. If the reconstructed root
 //! matches the expected root and bit _i_ is set in the chunk, the operation is proven active.
 //!
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
@@ -116,15 +117,15 @@
 //!
 //! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
 //! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the partial
+//! corresponding complete subtree in the ops tree. To still authenticate these bits, the partial
 //! chunk's digest and bit count are folded into the canonical root hash:
 //!
 //! ```text
-//! root = hash(ops_root || grafted_mmr_root || next_bit || hash(partial_chunk))
+//! root = hash(ops_root || grafted_root || next_bit || hash(partial_chunk))
 //! ```
 //!
 //! where `next_bit` is the index of the next unset position in the partial chunk and
-//! `grafted_mmr_root` is the root of the grafted MMR (which covers only complete chunks).
+//! `grafted_root` is the root of the grafted tree (which covers only complete chunks).
 //! When all chunks are complete, the partial chunk components are omitted.
 //!
 //! ## Incremental updates
@@ -146,21 +147,21 @@
 //! The canonical root of a `current` database is:
 //!
 //! ```text
-//! root = hash(ops_root || grafted_mmr_root [|| next_bit || hash(partial_chunk)])
+//! root = hash(ops_root || grafted_root [|| next_bit || hash(partial_chunk)])
 //! ```
 //!
-//! where `grafted_mmr_root` is the root of the grafted MMR (covering only complete
+//! where `grafted_root` is the root of the grafted tree (covering only complete
 //! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
 //! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
 //! components are only present when the last bitmap chunk is incomplete.
 //!
 //! This combines two (or three) components into a single hash:
 //!
-//! - **Ops root**: The root of the raw operations MMR (the inner [crate::qmdb::any] database's
+//! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
-//!   against this root using standard MMR range proofs.
+//!   against this root using standard Merkle range proofs.
 //!
-//! - **Grafted MMR root**: The root of the grafted MMR (overlaying bitmap chunks
+//! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
 //!   with ops subtree roots). Used for proofs about operation values and their activity status.
 //!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
 //!
@@ -172,7 +173,7 @@
 //! verifies batches against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it.
-//! After sync, the bitmap and grafted MMR are reconstructed deterministically from the
+//! After sync, the bitmap and grafted tree are reconstructed deterministically from the
 //! operations, and the canonical root is computed. Validating that the ops root is part of the
 //! canonical root is the caller's responsibility; the sync engine does not perform this check.
 
@@ -182,7 +183,8 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::mmr::{self, journaled::Config as MmrConfig, Location, StandardHasher},
+    merkle::{self, Location},
+    mmr::{journaled::Config as MmrConfig, StandardHasher},
     qmdb::{
         any::{
             self,
@@ -208,19 +210,17 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
-type Error = crate::qmdb::Error<mmr::Family>;
-
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr_config: MmrConfig,
+    /// Configuration for the Merkle structure backing the authenticated journal.
+    pub merkle_config: MmrConfig,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
 
-    /// The name of the storage partition used for the grafted MMR metadata.
-    pub grafted_mmr_metadata_partition: String,
+    /// The name of the storage partition used for grafted tree metadata.
+    pub grafted_metadata_partition: String,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -229,7 +229,7 @@ pub struct Config<T: Translator, J> {
 impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
     fn from(cfg: Config<T, J>) -> Self {
         Self {
-            merkle_config: cfg.mmr_config,
+            merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
         }
@@ -243,18 +243,19 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize a `Current` authenticated db from the given config.
-pub(super) async fn init<E, U, H, T, I, J, const N: usize>(
+pub(super) async fn init<F, E, U, H, T, I, J, const N: usize>(
     context: E,
     config: Config<T, J::Config>,
-) -> Result<db::Db<E, J, I, H, U, N>, Error>
+) -> Result<db::Db<F, E, J, I, H, U, N>, crate::qmdb::Error<F>>
 where
+    F: merkle::Graftable,
     E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location>,
-    J: Inner<E, Item = Operation<mmr::Family, U>>,
-    Operation<mmr::Family, U>: Committable + CodecShared,
+    I: IndexFactory<T, Value = Location<F>>,
+    J: Inner<E, Item = Operation<F, U>>,
+    Operation<F, U>: Committable + CodecShared,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -270,16 +271,16 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.mmr_config.thread_pool.clone();
-    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
+    let thread_pool = config.merkle_config.thread_pool.clone();
+    let metadata_partition = config.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
+    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
     let (metadata, pruned_chunks, pinned_nodes) =
         db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
@@ -287,7 +288,7 @@ where
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location>| {
+        |append: bool, loc: Option<Location<F>>| {
             status.push(append);
             if let Some(loc) = loc {
                 status.set_bit(*loc, false);
@@ -296,9 +297,9 @@ where
     )
     .await?;
 
-    // Build the grafted MMR from the bitmap and ops MMR.
+    // Build the grafted tree from the bitmap and ops tree.
     let hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
+    let grafted_tree = db::build_grafted_tree::<F, H, N>(
         &hasher,
         &status,
         &pinned_nodes,
@@ -308,15 +309,15 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
         status: batch::BitmapBatch::Base(Arc::new(status)),
-        grafted_mmr,
+        grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -343,11 +344,11 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::mmr,
+        merkle::{self, mmb, mmr},
         qmdb::{
             any::{
                 test::colliding_digest,
-                traits::{DbAny, UnmerkleizedBatch as _},
+                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
         },
@@ -364,12 +365,9 @@ pub mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
 
-    type Error = crate::qmdb::Error<mmr::Family>;
-    type Location = mmr::Location;
-    type WriteVec<C> = Vec<(
-        <C as DbAny<mmr::Family>>::Key,
-        Option<<C as DbAny<mmr::Family>>::Value>,
-    )>;
+    type Error<F> = crate::qmdb::Error<F>;
+    type Location<F> = merkle::Location<F>;
+    type WriteVec<F, C> = Vec<(<C as DbAny<F>>::Key, Option<<C as DbAny<F>>::Value>)>;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
@@ -382,7 +380,7 @@ pub mod tests {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_config: MmrConfig {
+            merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -396,9 +394,7 @@ pub mod tests {
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
-            grafted_mmr_metadata_partition: format!(
-                "{partition_prefix}-grafted-mmr-metadata-partition"
-            ),
+            grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
         }
     }
@@ -410,7 +406,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_config: MmrConfig {
+            merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -426,18 +422,16 @@ pub mod tests {
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
-            grafted_mmr_metadata_partition: format!(
-                "{partition_prefix}-grafted-mmr-metadata-partition"
-            ),
+            grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
         }
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<C: DbAny<mmr::Family>>(
+    async fn commit_writes<F: merkle::Graftable, C: DbAny<F>>(
         db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<mmr::Family>>::Value>)>,
-    ) -> Result<(), Error> {
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)>,
+    ) -> Result<(), Error<F>> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -452,16 +446,17 @@ pub mod tests {
     /// `commit_changes` is true. Returns the db; callers should commit if needed.
     ///
     /// Returns a boxed future to prevent stack overflow when monomorphized across many DB variants.
-    async fn apply_random_ops_inner<C>(
+    async fn apply_random_ops_inner<F, C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
         mut db: C,
-    ) -> Result<C, Error>
+    ) -> Result<C, Error<F>>
     where
-        C: DbAny<mmr::Family>,
+        F: merkle::Graftable,
+        C: DbAny<F>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<F>>::Value: TestValue,
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -481,7 +476,7 @@ pub mod tests {
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
-        let mut pending: WriteVec<C> = Vec::new();
+        let mut pending: WriteVec<F, C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
@@ -500,18 +495,19 @@ pub mod tests {
         Ok(db)
     }
 
-    pub fn apply_random_ops<C>(
+    pub fn apply_random_ops<F, C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
         db: C,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error>>>>
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>>>>
     where
-        C: DbAny<mmr::Family> + 'static,
+        F: merkle::Graftable + 'static,
+        C: DbAny<F> + 'static,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<F>>::Value: TestValue,
     {
-        Box::pin(apply_random_ops_inner::<C>(
+        Box::pin(apply_random_ops_inner::<F, C>(
             num_elements,
             commit_changes,
             rng_seed,
@@ -523,11 +519,12 @@ pub mod tests {
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
+    pub fn test_build_random_close_reopen<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family> + 'static,
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -539,7 +536,7 @@ pub mod tests {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
             let mut db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
-            db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
+            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -564,7 +561,7 @@ pub mod tests {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
             let mut db: C = open_db(context.with_label("first"), partition.clone()).await;
-            db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
+            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -587,11 +584,12 @@ pub mod tests {
     ///
     /// This test builds a random database and simulates recovery from different types of
     /// failure scenarios.
-    pub fn test_simulate_write_failures<C, F, Fut>(mut open_db: F)
+    pub fn test_simulate_write_failures<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family> + 'static,
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -604,7 +602,7 @@ pub mod tests {
                 let partition = "build-random-fail-commit".to_string();
                 let rng_seed = context.next_u64();
                 let mut db: C = open_db(context.with_label("first"), partition.clone()).await;
-                db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
+                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                     .await
                     .unwrap();
                 commit_writes(&mut db, []).await.unwrap();
@@ -614,7 +612,7 @@ pub mod tests {
                 db.prune(committed_inactivity_floor).await.unwrap();
 
                 // Perform more random operations without committing any of them.
-                let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db)
+                let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
                     .await
                     .unwrap();
 
@@ -626,7 +624,7 @@ pub mod tests {
                 assert_eq!(db.bounds().await.end, committed_op_count);
 
                 // Re-apply the exact same operations, this time committed.
-                let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed + 1, db)
+                let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
                     .await
                     .unwrap();
 
@@ -645,11 +643,11 @@ pub mod tests {
                 // partition, but without any failures. They should have the exact same state.
                 let fresh_partition = "build-random-fail-commit-fresh".to_string();
                 let mut db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
-                db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
+                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                     .await
                     .unwrap();
                 commit_writes(&mut db, []).await.unwrap();
-                db = apply_random_ops::<C>(ELEMENTS, true, rng_seed + 1, db)
+                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
                     .await
                     .unwrap();
                 db.prune(db.inactivity_floor_loc().await).await.unwrap();
@@ -666,11 +664,12 @@ pub mod tests {
     ///
     /// This test verifies that pruning operations do not affect the root hash - two databases
     /// with identical operations but different pruning schedules should have the same root.
-    pub fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
+    pub fn test_different_pruning_delays_same_root<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family>,
+        M: merkle::Graftable,
+        C: DbAny<M>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -687,11 +686,11 @@ pub mod tests {
 
             // Apply identical operations to both databases, but only prune one.
             // Accumulate writes between commits.
-            let mut pending_no_pruning: WriteVec<C> = Vec::new();
-            let mut pending_pruning: WriteVec<C> = Vec::new();
+            let mut pending_no_pruning: WriteVec<M, C> = Vec::new();
+            let mut pending_pruning: WriteVec<M, C> = Vec::new();
             for i in 0..NUM_OPERATIONS {
                 let key: C::Key = TestKey::from_seed(i);
-                let value: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
+                let value: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
 
                 pending_no_pruning.push((key, Some(value.clone())));
                 pending_pruning.push((key, Some(value)));
@@ -740,11 +739,12 @@ pub mod tests {
     /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
     /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
+    pub fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family> + BitmapPrunedBits + 'static,
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -758,7 +758,7 @@ pub mod tests {
             let mut db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
 
             // Apply random operations with commits to advance the inactivity floor.
-            db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db).await.unwrap();
+            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
 
@@ -812,11 +812,12 @@ pub mod tests {
     /// This test builds a database with 1000 keys, updates some, deletes some, and verifies that
     /// the final state matches an independently computed HashMap. It also verifies that the state
     /// persists correctly after close and reopen.
-    pub fn test_current_db_build_big<C, F, Fut>(mut open_db: F)
+    pub fn test_current_db_build_big<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family>,
+        M: merkle::Graftable,
+        C: DbAny<M>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -827,8 +828,7 @@ pub mod tests {
         executor.start(|context| async move {
             let mut db: C = open_db_clone(context.with_label("first"), "build-big".into()).await;
 
-            let mut map =
-                std::collections::HashMap::<C::Key, <C as DbAny<mmr::Family>>::Value>::default();
+            let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
             // All creates, updates, and deletes in one batch.
             let mut batch = db.new_batch();
@@ -836,7 +836,7 @@ pub mod tests {
             // Initial creates
             for i in 0u64..ELEMENTS {
                 let k: C::Key = TestKey::from_seed(i);
-                let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
+                let v: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
                 batch = batch.write(k, Some(v.clone()));
                 map.insert(k, v);
             }
@@ -847,7 +847,7 @@ pub mod tests {
                     continue;
                 }
                 let k: C::Key = TestKey::from_seed(i);
-                let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed((i + 1) * 10000);
+                let v: <C as DbAny<M>>::Value = TestValue::from_seed((i + 1) * 10000);
                 batch = batch.write(k, Some(v.clone()));
                 map.insert(k, v);
             }
@@ -896,11 +896,12 @@ pub mod tests {
     /// Run `test_stale_batch_side_effect_free` against a database factory.
     ///
     /// The stale batch must be rejected without mutating the committed state.
-    pub fn test_stale_batch_side_effect_free<C, F, Fut>(mut open_db: F)
+    pub fn test_stale_batch_side_effect_free<M, C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family>,
+        M: merkle::Graftable,
+        C: DbAny<M>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -911,8 +912,8 @@ pub mod tests {
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
-            let value1 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(10);
-            let value2 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(20);
+            let value1 = <<C as DbAny<M>>::Value as TestValue>::from_seed(10);
+            let value2 = <<C as DbAny<M>>::Value as TestValue>::from_seed(20);
 
             let mut batch = db.new_batch();
             batch = batch.write(key1, Some(value1.clone()));
@@ -947,27 +948,183 @@ pub mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
 
-    // Type aliases for all 12 variants (all use OneCap for collision coverage).
-    type OrderedFixedDb = ordered::fixed::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
-    type OrderedVariableDb = ordered::variable::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
-    type UnorderedFixedDb = unordered::fixed::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
-    type UnorderedVariableDb = unordered::variable::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
-    type OrderedFixedP1Db =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
-    type OrderedVariableP1Db =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
-    type UnorderedFixedP1Db =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
-    type UnorderedVariableP1Db =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
-    type OrderedFixedP2Db =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
-    type OrderedVariableP2Db =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
-    type UnorderedFixedP2Db =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
-    type UnorderedVariableP2Db =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
+    type OrderedFixedDb =
+        ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedVariableDb =
+        ordered::variable::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedFixedDb =
+        unordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedVariableDb =
+        unordered::variable::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedFixedP1Db = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type OrderedVariableP1Db = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type UnorderedFixedP1Db = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type UnorderedVariableP1Db = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type OrderedFixedP2Db = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type OrderedVariableP2Db = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type UnorderedFixedP2Db = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type UnorderedVariableP2Db = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+
+    type OrderedFixedMmbDb =
+        ordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedVariableMmbDb =
+        ordered::variable::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedFixedMmbDb =
+        unordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedVariableMmbDb =
+        unordered::variable::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedFixedMmbP1Db = ordered::fixed::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type OrderedVariableMmbP1Db = ordered::variable::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type UnorderedFixedMmbP1Db = unordered::fixed::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type UnorderedVariableMmbP1Db = unordered::variable::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        32,
+    >;
+    type OrderedFixedMmbP2Db = ordered::fixed::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type OrderedVariableMmbP2Db = ordered::variable::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type UnorderedFixedMmbP2Db = unordered::fixed::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
+    type UnorderedVariableMmbP2Db = unordered::variable::partitioned::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        32,
+    >;
 
     // Helper macro to create an open_db closure for a specific variant.
     macro_rules! open_db_fn {
@@ -980,7 +1137,7 @@ pub mod tests {
         };
     }
 
-    // Defines all 12 variants. Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines all variants across both supported Merkle families.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
@@ -995,6 +1152,18 @@ pub mod tests {
             $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
             $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
             $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
@@ -1007,6 +1176,12 @@ pub mod tests {
             $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
             $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
             $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
         };
     }
 
@@ -1019,6 +1194,12 @@ pub mod tests {
             $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
             $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
             $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
@@ -1046,26 +1227,28 @@ pub mod tests {
     }
 
     // Wrapper functions for build_big tests with ordered/unordered expected values.
-    fn test_ordered_build_big<C, F, Fut>(open_db: F)
+    fn test_ordered_build_big<M, C, F, Fut>(open_db: F)
     where
-        C: DbAny<mmr::Family>,
+        M: merkle::Graftable,
+        C: DbAny<M>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<C, F, Fut>(open_db);
+        test_current_db_build_big::<M, C, F, Fut>(open_db);
     }
 
-    fn test_unordered_build_big<C, F, Fut>(open_db: F)
+    fn test_unordered_build_big<M, C, F, Fut>(open_db: F)
     where
-        C: DbAny<mmr::Family>,
+        M: merkle::Graftable,
+        C: DbAny<M>,
         C::Key: TestKey,
-        <C as DbAny<mmr::Family>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<C, F, Fut>(open_db);
+        test_current_db_build_big::<M, C, F, Fut>(open_db);
     }
 
     #[test_group("slow")]
@@ -1151,7 +1334,7 @@ pub mod tests {
     // ---- Current-level batch API tests ----
     //
     // These exercise the current wrapper's batch methods (root, ops_root,
-    // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted MMR
+    // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted tree
     // computation on top of the `any` batch.
 
     fn key(i: u64) -> Digest {
@@ -1166,7 +1349,7 @@ pub mod tests {
         db: &mut UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> std::ops::Range<Location> {
+    ) -> std::ops::Range<Location<mmr::Family>> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -1402,6 +1585,69 @@ pub mod tests {
         });
     }
 
+    /// Verify that reopening and proving a pruned MMB database does not panic when the pruned
+    /// prefix contains sub-grafting-height peaks that require chunk regrouping.
+    ///
+    /// With 100 single-key commits the MMB has 301 leaves (100 writes + 100 commit floors +
+    /// 101 internal nodes). The first 256 leaves span three sub-grafting-height ops peaks
+    /// (128 + 64 + 64), so grafted root recomposition must regroup them as chunk 0. After
+    /// pruning, chunk 0 is gone and get_chunk(0) would panic without the pruned-chunk guard.
+    #[test_traced("INFO")]
+    fn test_current_mmb_reopen_and_prove_after_prune_multi_peak_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 100;
+
+            let partition = "current-mmb-reopen-prove-after-prune";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected = None;
+            for round in 0..COMMITS {
+                expected = Some(val(50_000 + round));
+                let mut batch = db.new_batch();
+                batch = batch.write(k, expected);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+
+            let root_before = db.root();
+            assert!(
+                *db.inactivity_floor_loc() >= 256,
+                "expected inactivity floor past chunk 0"
+            );
+
+            db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
+            assert_eq!(db.pruned_bits(), 256);
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen: compute_grafted_root must handle pruned chunk 0.
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), root_before);
+            assert_eq!(reopened.get(&k).await.unwrap(), expected);
+
+            // key_value_proof: RangeProof::new must also handle pruned chunk 0.
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_current_rewind_small_delta_large_history() {
         let executor = deterministic::Runner::default();
@@ -1598,36 +1844,54 @@ pub mod tests {
         });
     }
 
-    /// MerkleizedBatch::root() returns the canonical root that matches db.root()
-    /// after apply. ops_root() differs from root() because the canonical root
-    /// includes the bitmap/grafted MMR layers.
-    #[test_traced("INFO")]
-    fn test_current_batch_speculative_root() {
+    /// Verify that the speculative canonical root from a merkleized batch matches the root
+    /// recomputed from committed state after sync + reopen.
+    ///
+    /// Uses enough operations to cross a chunk boundary (CHUNK_SIZE_BITS = N*8), which exercises
+    /// the grafted root computation for newly completed chunks.
+    pub fn test_speculative_root_matches_committed<M, C, F, Fut>(mut open_db: F)
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
+        C::Key: TestKey,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
         let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("sr", &ctx))
-                    .await
-                    .unwrap();
+            let partition = "speculative-root".to_string();
 
+            // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
+            // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
+            // next partial chunk. This ensures the grafted root computation must handle the
+            // newly completed chunk.
+            let mut db: C = open_db_clone(context.with_label("init"), partition.clone()).await;
             let mut batch = db.new_batch();
-            for i in 0..10 {
-                batch = batch.write(key(i), Some(val(i)));
+            for i in 0..260 {
+                batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            let speculative_root = merkleized.root();
-            let ops_root = merkleized.ops_root();
-
-            // Canonical root includes bitmap/grafted layers, so it differs from ops root.
-            assert_ne!(speculative_root, ops_root);
-
             db.apply_batch(merkleized).await.unwrap();
+            let speculative_root = db.root();
 
-            // Speculative canonical root matches the committed canonical root.
+            // Sync, close, and reopen to get the root recomputed from committed state.
+            db.sync().await.unwrap();
+            drop(db);
+
+            let db: C = open_db(context.with_label("reopen"), partition).await;
             assert_eq!(db.root(), speculative_root);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_all_variants_speculative_root_matches_committed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_speculative_root_matches_committed);
         });
     }
 
@@ -2451,7 +2715,7 @@ pub mod tests {
     }
 
     /// Regression: bitmap ancestor skip logic must correctly pair each ancestor's
-    /// bitmap data with its seg_end. Requires a 3-ancestor chain (A->B->C->D)
+    /// bitmap data with its batch_end. Requires a 3-ancestor chain (A->B->C->D)
     /// to expose ordering bugs.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_bitmap_ordering() {
@@ -2490,7 +2754,7 @@ pub mod tests {
                 .unwrap();
 
             // Apply A only, then apply D (B and C uncommitted).
-            // D has 3 ancestors: [C, B, A] (parent-first) with seg_ends [C.total, B.total, A.total].
+            // D has 3 ancestors: [C, B, A] (parent-first) with batch_ends [C.total, B.total, A.total].
             // Bitmap ancestors are also parent-first: [C, B, A].
             db.apply_batch(a).await.unwrap();
             db.apply_batch(d.clone()).await.unwrap();

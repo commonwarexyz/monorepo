@@ -136,16 +136,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Append pre-encoded bytes to the given section.
     ///
-    /// The buffer must contain exactly one encoded item of [Self::CHUNK_SIZE] bytes.
+    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
     ///
     /// # Panics
     ///
-    /// Panics if `buf.len() != Self::CHUNK_SIZE`.
+    /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
     pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
-        assert_eq!(buf.len(), Self::CHUNK_SIZE);
+        assert!(!buf.is_empty());
+        assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
         let blob = self.manager.get_or_create(section).await?;
         blob.append(buf).await?;
-        trace!(section, "appended item");
+        trace!(
+            section,
+            count = buf.len() / Self::CHUNK_SIZE,
+            "appended items"
+        );
         Ok(())
     }
 

@@ -388,24 +388,24 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         };
 
-        // Apply ancestor segments in root-to-tip order. Already-committed
-        // segments (whose appended nodes are already in the Mem) are skipped
+        // Apply ancestor batches in root-to-tip order. Already-committed
+        // batches (whose appended nodes are already in the Mem) are skipped
         // by tracking a running position through the ancestor chain.
-        let mut seg_pos = *batch.base_size;
+        let mut batch_pos = *batch.base_size;
         for (appended, overwrites) in batch
             .ancestor_appended
             .iter()
             .zip(&batch.ancestor_overwrites)
         {
-            seg_pos += appended.len() as u64;
-            // Overwrite-only ancestors don't advance seg_pos, so they can't be
+            batch_pos += appended.len() as u64;
+            // Overwrite-only ancestors don't advance batch_pos, so they can't be
             // distinguished from their predecessor by size. Use strict < to
             // avoid skipping them at the boundary. Re-applying committed
             // overwrites is harmless (idempotent).
             let committed = if appended.is_empty() {
-                skip_ancestors && seg_pos < *self.size()
+                skip_ancestors && batch_pos < *self.size()
             } else {
-                skip_ancestors && seg_pos <= *self.size()
+                skip_ancestors && batch_pos <= *self.size()
             };
             if committed {
                 continue;
@@ -494,6 +494,7 @@ mod tests {
     use crate::merkle::{hasher::Standard, Error, Location, Position};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
+    use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -743,9 +744,7 @@ mod tests {
         executor.start(|ctx| async move {
             let hasher: H = Standard::new();
             let mem = build::<F>(&hasher, 200);
-            let pool = ctx
-                .create_thread_pool(commonware_utils::NZUsize!(4))
-                .unwrap();
+            let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
             do_batch_update(&hasher, mem, Some(pool));
         });
     }
@@ -1085,7 +1084,7 @@ mod tests {
         let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
 
         // Apply A, then apply C directly (skipping B's apply_batch).
-        // C's ancestor segments carry [A.data, B.data]. A is already committed
+        // C's ancestor batches carry [A.data, B.data]. A is already committed
         // so only B + C should be applied.
         mem.apply_batch(&a).unwrap();
         mem.apply_batch(&c).unwrap();

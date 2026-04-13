@@ -10,7 +10,7 @@ use crate::{
     journal::{
         contiguous::{
             fixed::{Config as JConfig, Journal},
-            Reader,
+            Many, Reader,
         },
         Error as JError,
     },
@@ -639,9 +639,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        for node in missing_nodes {
-            self.journal.append(&node).await?;
-        }
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
 
         // Sync the journal while still holding the sync_lock to ensure durability before returning.
         self.journal.sync().await?;
@@ -783,7 +781,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// This is the starting point for building owned batch chains.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D>> {
         let inner = self.inner.read();
-        batch::MerkleizedBatch::from_mem(&inner.mem)
+        let mut batch = batch::MerkleizedBatch::from_mem(&inner.mem);
+        #[cfg(feature = "std")]
+        if let Some(pool) = &self.pool {
+            Arc::get_mut(&mut batch).expect("just created").pool = Some(pool.clone());
+        }
+        batch
     }
 
     /// Borrow the committed Mem through the read lock. Holds the lock for
