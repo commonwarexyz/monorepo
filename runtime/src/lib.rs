@@ -843,7 +843,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            Arc,
+            Arc, Barrier,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -939,6 +939,209 @@ mod tests {
                     reschedule().await;
                 }
             });
+        });
+    }
+
+    fn test_root_exit_waits_for_direct_child_cleanup<R>(runner: R, should_panic: bool)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        // Hold child cleanup in `Drop` so the test can observe whether root
+        // shutdown returns or unwinds before the child has fully exited.
+        struct BlockOnDrop {
+            dropped: Option<oneshot::Sender<()>>,
+            release: Arc<Barrier>,
+        }
+
+        impl Drop for BlockOnDrop {
+            fn drop(&mut self) {
+                let _ = self.dropped.take().unwrap().send(());
+                self.release.wait();
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let release = Arc::new(Barrier::new(2));
+        let release2 = release.clone();
+
+        // Run the root task on a separate thread so the test can observe
+        // shutdown progress while `runner.start(...)` is still blocked.
+        let thread = std::thread::spawn(move || {
+            runner.start(move |context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                context.dedicated().spawn(move |_| async move {
+                    let _dropped = BlockOnDrop {
+                        dropped: Some(dropped_tx),
+                        release: release2,
+                    };
+                    started_tx.send(()).unwrap();
+                    pending::<()>().await;
+                });
+
+                started_rx.await.unwrap();
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
+        });
+
+        // Once child cleanup starts, the root task must still be blocked until
+        // that cleanup is released.
+        dropped_rx
+            .blocking_recv()
+            .expect("root shutdown should start direct child cleanup");
+
+        let finished = thread.is_finished();
+        assert!(
+            !finished,
+            "root shutdown should wait for direct child cleanup",
+        );
+
+        // Let child cleanup finish and then observe whether the root returns
+        // normally or resumes unwinding.
+        release.wait();
+        let result = thread.join();
+
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn test_root_completion_waits_for_direct_child_cleanup<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, false);
+    }
+
+    fn test_root_panic_waits_for_direct_child_cleanup_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, true);
+    }
+
+    fn test_spawn_after_root_exit_returns_closed<R>(runner: R, should_panic: bool)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        // Attempt to spawn more work from child cleanup, then block shutdown
+        // until the test thread has observed whether that late spawn was
+        // rejected.
+        struct SpawnOnDrop<C: Spawner + Send + 'static> {
+            context: Option<C>,
+            result: Option<oneshot::Sender<Option<Result<(), Error>>>>,
+            release: Arc<Barrier>,
+        }
+
+        impl<C: Spawner + Send + 'static> Drop for SpawnOnDrop<C> {
+            fn drop(&mut self) {
+                let handle = self.context.take().unwrap().spawn(|_| async {});
+                let _ = self.result.take().unwrap().send(handle.now_or_never());
+                self.release.wait();
+            }
+        }
+
+        let (result_tx, result_rx) = oneshot::channel();
+        let release = Arc::new(Barrier::new(2));
+        let release2 = release.clone();
+
+        // Run the root future on another thread. The child captures its own
+        // context in the future state so the drop guard can try to spawn
+        // during shutdown cleanup.
+        let thread = std::thread::spawn(move || {
+            runner.start(move |context| async move {
+                // Keep one child alive so root shutdown has real cleanup work
+                // to perform before `runner.start(...)` can return.
+                context.dedicated().spawn(move |context| {
+                    let spawn_on_drop = SpawnOnDrop {
+                        context: Some(context),
+                        result: Some(result_tx),
+                        release: release2,
+                    };
+                    async move {
+                        let _spawn_on_drop = spawn_on_drop;
+                        pending::<()>().await;
+                    }
+                });
+
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
+        });
+
+        // Child cleanup attempts the late spawn as soon as root shutdown
+        // begins. That spawn must fail immediately with `Error::Closed`.
+        let result = result_rx
+            .blocking_recv()
+            .expect("root shutdown should trigger a late spawn attempt");
+        assert!(
+            matches!(result, Some(Err(Error::Closed))),
+            "spawning during shutdown cleanup should close immediately",
+        );
+
+        // The drop guard is still holding shutdown open until we release it,
+        // so `runner.start(...)` must not have returned yet.
+        assert!(
+            !thread.is_finished(),
+            "root shutdown should still be blocked in child cleanup",
+        );
+
+        release.wait();
+        let result = thread.join();
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn test_spawn_after_root_shutdown_returns_closed<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_spawn_after_root_exit_returns_closed(runner, false);
+    }
+
+    fn test_spawn_after_root_panic_returns_closed<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_spawn_after_root_exit_returns_closed(runner, true);
+    }
+
+    fn root_tasks_running_value(metrics: &str) -> Option<i64> {
+        metrics.lines().find_map(|line| {
+            if line.starts_with("runtime_tasks_running{") && line.contains("kind=\"Root\"") {
+                line.rsplit_once(' ')
+                    .and_then(|(_, value)| value.trim().parse::<i64>().ok())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn test_root_tasks_running_is_one_while_running<R>(runner: R)
+    where
+        R: Runner,
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let metrics = context.encode();
+            assert_eq!(
+                root_tasks_running_value(&metrics),
+                Some(1),
+                "root tasks_running gauge should be 1 while root is running: {metrics}",
+            );
         });
     }
 
@@ -3178,6 +3381,36 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_root_completion_waits_for_direct_child_cleanup() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_waits_for_direct_child_cleanup_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_after_root_shutdown_returns_closed() {
+        let executor = deterministic::Runner::default();
+        test_spawn_after_root_shutdown_returns_closed(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_after_root_panic_returns_closed() {
+        let executor = deterministic::Runner::default();
+        test_spawn_after_root_panic_returns_closed(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_tasks_running_is_one_while_running() {
+        let executor = deterministic::Runner::default();
+        test_root_tasks_running_is_one_while_running(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_after_abort() {
         let executor = deterministic::Runner::default();
         test_spawn_after_abort(executor);
@@ -3524,6 +3757,40 @@ mod tests {
     fn test_tokio_root_finishes() {
         let executor = tokio::Runner::default();
         test_root_finishes(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_waits_for_direct_child_cleanup() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_root_completion_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_waits_for_direct_child_cleanup_before_unwind() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_after_root_shutdown_returns_closed() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_spawn_after_root_shutdown_returns_closed(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_after_root_panic_returns_closed() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_spawn_after_root_panic_returns_closed(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_tasks_running_is_one_while_running() {
+        let executor = tokio::Runner::default();
+        test_root_tasks_running_is_one_while_running(executor);
     }
 
     #[test]
