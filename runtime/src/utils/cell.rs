@@ -161,8 +161,8 @@ where
         Self::Present(self.as_present().with_attribute(key, value))
     }
 
-    fn instrumented(&self) -> Self {
-        Self::Present(self.as_present().instrumented())
+    fn with_span(&self) -> Self {
+        Self::Present(self.as_present().with_span())
     }
 
     fn with_scope(&self) -> Self {

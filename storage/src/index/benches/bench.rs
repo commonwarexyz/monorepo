@@ -38,7 +38,7 @@ impl Metrics for DummyMetrics {
         Self
     }
 
-    fn instrumented(&self) -> Self {
+    fn with_span(&self) -> Self {
         Self
     }
 }

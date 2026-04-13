@@ -1364,7 +1364,7 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn instrumented(&self) -> Self {
+    fn with_span(&self) -> Self {
         Self {
             instrumented: true,
             ..self.clone()
