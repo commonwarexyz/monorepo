@@ -1211,15 +1211,14 @@ where
             debug!(
                 ?key,
                 floor = %self.last_processed_height,
-                "ignoring stale delivery: verifier pruned below floor"
+                "ignoring stale delivery"
             );
             response.send_lossy(true);
         } else {
             warn!(
                 ?key,
                 floor = %self.last_processed_height,
-                "missing verifier above floor; application must keep \
-                 epocher/provider entries for any request above the floor"
+                "missing verifier above floor"
             );
             response.send_lossy(false);
         }
