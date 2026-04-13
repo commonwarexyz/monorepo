@@ -133,9 +133,8 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<
-        Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>,
-    > + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 
