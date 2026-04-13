@@ -1184,13 +1184,17 @@ where
     /// the application has violated its pruning contract: epocher/provider
     /// entries must be retained for any height marshal may request.
     ///
+    /// Deliveries are only produced for requests we issued, so a missing epocher
+    /// entry can only mean the epoch was pruned between fetch and deliver (pruning
+    /// is monotonic) and therefore lies at or below the floor.
+    ///
     /// Staleness by request kind:
-    /// - [`Request::Finalized { height }`]: either the epocher has no epoch
-    ///   containing `height` (the containing epoch has been pruned, which
-    ///   implies `height <= last_processed_height`), or `height <= last_processed_height`.
-    /// - [`Request::Notarized { round }`]: either the epocher has no entry for
-    ///   `round.epoch()` (the epoch has been pruned), or the epoch's last
-    ///   height is at or below the last processed height.
+    /// - [`Request::Finalized { height }`]: `height <= last_processed_height`, or
+    ///   the epocher no longer has an epoch containing `height` (pruned, which
+    ///   implies the same).
+    /// - [`Request::Notarized { round }`]: the epoch's last height is at or below
+    ///   the last processed height, or the epocher no longer has an entry for
+    ///   `round.epoch()` (pruned, which implies the same).
     /// - [`Request::Block`]: block requests do not consult a verifier (unreachable).
     fn handle_missing_verifier(
         &self,
