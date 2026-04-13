@@ -3747,6 +3747,7 @@ mod tests {
         let partition = "no_self_verify_when_proposing".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Set up the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -3792,6 +3793,7 @@ mod tests {
             }));
             app_actor.start();
 
+            // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -3811,7 +3813,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -3824,7 +3825,6 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-
             voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -3867,6 +3867,8 @@ mod tests {
                 }
             }
 
+            // Assert the live invariant: propose fired (precondition proving the leader
+            // flow ran) but verify did not fire for the payload we just built.
             let proposed = propose_calls.lock();
             let verified = verify_calls.lock();
             assert!(
@@ -3898,7 +3900,8 @@ mod tests {
     /// Replay of the journaled local notarize must restore the slot's proposal,
     /// `requested_build`, and `requested_verify` flags so that:
     /// - `should_build` returns false on the next run-loop iteration (no new
-    ///   `automaton.propose` call for a payload already notarized), and
+    ///   `automaton.propose` call for a payload the voter already proposed
+    ///   and voted on pre-crash), and
     /// - subsequent delivery of the same proposal is a no-op (no
     ///   `automaton.verify` call for a payload the voter built itself).
     fn no_self_propose_or_verify_after_restart<S, F>(mut fixture: F)
@@ -3912,6 +3915,7 @@ mod tests {
         let partition = "no_self_propose_or_verify_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Set up the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -3933,6 +3937,8 @@ mod tests {
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
+            // Pre-restart: plain application (no observers) so the voter can
+            // cleanly propose and journal its own notarize vote for view 2.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -3946,6 +3952,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
             app_actor.start();
 
+            // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3965,7 +3972,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -3978,7 +3984,6 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-
             let handle = voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -4019,11 +4024,10 @@ mod tests {
                 }
             };
 
-            // Restart (same partition).
+            // Restart: abort the voter and construct a fresh application with
+            // propose + verify observers to catch any spurious work for the
+            // leader-owned view that has a journaled local notarize vote.
             handle.abort();
-
-            // Fresh Application with propose + verify observers to catch any spurious
-            // work for the leader-owned view that has already been notarized in the journal.
             let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
@@ -4048,6 +4052,7 @@ mod tests {
             }));
             app_actor.start();
 
+            // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4068,7 +4073,6 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4081,7 +4085,6 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-
             voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -4124,15 +4127,18 @@ mod tests {
                 }
             }
 
+            // Assert the restart invariant: neither propose nor verify fires post-restart
+            // for a leader-owned view whose journaled notarize replay should have
+            // restored the slot's proposal state.
             let proposed = propose_calls.lock();
             let verified = verify_calls.lock();
             assert!(
-                !verified.contains(&target_view),
-                "voter must not verify its own leader-built proposal after restart (observed: {verified:?})"
-            );
-            assert!(
                 !proposed.contains(&target_view),
                 "voter must not propose for a leader-owned view after restart (observed: {proposed:?})"
+            );
+            assert!(
+                !verified.contains(&target_view),
+                "voter must not verify its own leader-built proposal after restart (observed: {verified:?})"
             );
         });
     }
@@ -4168,6 +4174,7 @@ mod tests {
         let partition = "no_self_verify_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Set up the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -4192,6 +4199,8 @@ mod tests {
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
+            // Pre-restart: plain application (no observers) so the voter can verify
+            // the leader's proposal and journal its own notarize vote for view 3.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -4205,6 +4214,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
             app_actor.start();
 
+            // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4224,7 +4234,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4237,7 +4246,6 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-
             let handle = voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -4291,11 +4299,10 @@ mod tests {
                 }
             }
 
-            // Restart (same partition).
+            // Restart: abort the voter and construct a fresh application with
+            // propose + verify observers to catch any spurious work for the
+            // follower view that has a journaled local notarize vote.
             handle.abort();
-
-            // Fresh Application with propose + verify observers to catch any spurious
-            // work for the follower view that has already been notarized in the journal.
             let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
@@ -4320,6 +4327,7 @@ mod tests {
             }));
             app_actor.start();
 
+            // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4340,7 +4348,6 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.with_label("voter_restarted"), voter_cfg);
-
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4353,7 +4360,6 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-
             voter.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
@@ -4398,6 +4404,9 @@ mod tests {
                 }
             }
 
+            // Assert the restart invariant: verify does not fire for the previously-voted
+            // follower proposal (primary) and propose does not fire for the follower view
+            // (trivially, since we are not its leader).
             let proposed = propose_calls.lock();
             let verified = verify_calls.lock();
             assert!(
