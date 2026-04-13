@@ -288,7 +288,7 @@ stability_scope!(BETA {
     ///
     /// # Mental Model: Metrics vs Tracing
     ///
-    /// A context carries four orthogonal pieces of observability state, each
+    /// A context carries multiple pieces of observability state, each
     /// applied via a different builder. They compose freely, but they do
     /// not all feed into the same sinks:
     ///
@@ -306,10 +306,10 @@ stability_scope!(BETA {
     ///   `register` on this context into a sub-registry whose entries are
     ///   removed when the last clone of the scoped context is dropped. It
     ///   does not affect runtime task metrics and has no effect on tracing.
-    /// - `span` (set by [`Metrics::with_span`]): opt-in flag that wraps the
-    ///   next spawned task in a `tracing` span populated from the current
-    ///   `name` and `attributes`. It never touches metrics. The flag is
-    ///   consumed by the next `spawn` and is not inherited by child contexts.
+    /// - `span` (set by [`Metrics::with_span`]): wraps the next spawned task
+    ///   in a `tracing` span populated from the current `name` and `attributes`.
+    ///   It never touches metrics. The flag is consumed by the next `spawn` and
+    ///   is not inherited by child contexts.
     ///
     /// | Builder                 | Registered metric name | Registered metric labels | Registry isolation | Runtime task metrics | Tracing span                     |
     /// | ----------------------- | :--------------------: | :----------------------: | :----------------: | :------------------: | :------------------------------: |
@@ -317,13 +317,6 @@ stability_scope!(BETA {
     /// | `with_attribute`        | -                      | label dimension          | -                  | -                    | OTel attribute when `with_span`  |
     /// | `with_scope`            | -                      | -                        | sub-registry       | -                    | -                                |
     /// | `with_span`             | -                      | -                        | -                  | -                    | enables span creation            |
-    ///
-    /// The practical consequence: `with_label` is the only builder whose
-    /// effect shows up on runtime task metrics, so it is the only one that
-    /// needs to stay bounded to avoid leaking entries into those families.
-    /// `with_attribute` and `with_scope` can freely carry unbounded
-    /// dimensions through a spawn (e.g. a per-round attribute) as long as
-    /// nothing registers an unbounded series through the resulting context.
     pub trait Metrics: Clone + Send + Sync + 'static {
         /// Get the current label of the context.
         fn label(&self) -> String;
@@ -365,19 +358,8 @@ stability_scope!(BETA {
         /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
         /// names with dynamic values like `orchestrator_epoch_5_votes`.
         ///
-        /// Attributes do not reduce cardinality: every distinct value is a new time series,
-        /// and each series lives as long as the registry it was registered into. Only use
-        /// `with_attribute` with values from a bounded set (e.g. a validator index, a finite
-        /// list of regions). For unbounded dimensions (e.g. consensus round, request id) do
-        /// one of the following instead:
-        ///
-        /// - Register a [`Family`](prometheus_client::metrics::family::Family) once and pass
-        ///   the dynamic value at observation time.
-        /// - Call [`Metrics::with_scope`] to confine the metrics to a scope that will be
-        ///   dropped when the dimension is no longer live.
-        ///
-        /// See the [`Metrics`] trait-level documentation for how attributes interact
-        /// with registered metrics, runtime task metrics, and tracing spans.
+        /// _Using attributes does not reduce cardinality (N epochs still means N time series).
+        /// Attributes just make metrics easier to query, filter, and aggregate._
         ///
         /// # Family Label Conflicts
         ///
@@ -479,8 +461,7 @@ stability_scope!(BETA {
         /// resets the flag so the caller must opt in again for the next spawn.
         ///
         /// Enabling the span only affects tracing; it does not change which metrics
-        /// are registered, nor does it widen the cardinality of runtime task metrics
-        /// (see the trait-level documentation for the full matrix).
+        /// are registered, nor does it widen the cardinality of runtime task metrics.
         fn with_span(&self) -> Self;
 
         /// Register a metric with the runtime.
