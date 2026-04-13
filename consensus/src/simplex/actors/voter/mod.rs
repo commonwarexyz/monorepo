@@ -3728,6 +3728,259 @@ mod tests {
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// After restart in a leader-owned view that was already voted on, the
+    /// voter must not call `automaton.propose` to build a new payload.
+    ///
+    /// Replay of the journaled local notarize must restore the slot's proposal
+    /// (and `requested_build`) so that `should_build` returns false. Without
+    /// that restoration, the voter's main loop would treat the leader-owned
+    /// view as a fresh proposal opportunity and call `automaton.propose` for
+    /// a payload that has already been notarized.
+    fn no_self_propose_after_restart<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_self_propose_after_restart".to_vec();
+        let partition = "no_self_propose_after_restart".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
+            let target_view = View::new(2);
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for startup, then advance to the leader-owned view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { response, .. } => {
+                        response.send(None).unwrap();
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Wait for our local notarize (journaled) so replay has something to restore.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize))
+                        if notarize.view() == target_view =>
+                    {
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Restart (same partition).
+            handle.abort();
+
+            // Fresh Application with propose + verify observers to catch any spurious
+            // work for the leader-owned view that has already been notarized in the journal.
+            let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let propose_tracker = propose_calls.clone();
+            let verify_tracker = verify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) = mocks::application::Application::new(
+                context.with_label("app_restarted"),
+                app_cfg,
+            );
+            app_actor
+                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                verify_tracker.lock().push(ctx.view())
+            }));
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for replay to complete; confirm we re-entered the leader-owned view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        response,
+                        ..
+                    } => {
+                        response.send(None).unwrap();
+                        assert_eq!(current, target_view);
+                        assert_eq!(leader, Participant::new(0));
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Without the replay fix, the voter's main loop would call `automaton.propose`
+            // for the leader-owned view on its first iteration after replay. We wait for
+            // the voter to time out (leader_timeout) and construct a Nullify for the view:
+            // by that point the run loop has had ample opportunity to propose, and
+            // emitting a Nullify proves the voter reached the timeout path without ever
+            // advancing.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify))
+                        if nullify.view() == target_view =>
+                    {
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            let proposed = propose_calls.lock();
+            let verified = verify_calls.lock();
+            assert!(
+                !proposed.contains(&target_view),
+                "voter must not propose for a leader-owned view after restart (observed: {proposed:?})"
+            );
+            assert!(
+                !verified.contains(&target_view),
+                "voter must not request verification for a leader-owned view after restart (observed: {verified:?})"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_self_propose_after_restart() {
+        no_self_propose_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_self_propose_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        no_self_propose_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        no_self_propose_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_propose_after_restart(ed25519::fixture);
+        no_self_propose_after_restart(secp256r1::fixture);
+    }
+
     /// After restart, a proposal we already voted on must not be re-verified
     /// when it is re-delivered to the voter (e.g. via the automaton after
     /// peer vote aggregation reconstructs it).
@@ -4000,259 +4253,6 @@ mod tests {
         no_self_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
         no_self_verify_after_restart(ed25519::fixture);
         no_self_verify_after_restart(secp256r1::fixture);
-    }
-
-    /// After restart in a leader-owned view that was already voted on, the
-    /// voter must not call `automaton.propose` to build a new payload.
-    ///
-    /// Replay of the journaled local notarize must restore the slot's proposal
-    /// (and `requested_build`) so that `should_build` returns false. Without
-    /// that restoration, the voter's main loop would treat the leader-owned
-    /// view as a fresh proposal opportunity and call `automaton.propose` for
-    /// a payload that has already been notarized.
-    fn no_self_propose_after_restart<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-    {
-        let n = 5;
-        let quorum = quorum(n);
-        let namespace = b"no_self_propose_after_restart".to_vec();
-        let partition = "no_self_propose_after_restart".to_string();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
-
-            // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
-            let target_view = View::new(2);
-            let me = participants[0].clone();
-            let elector = RoundRobin::<Sha256>::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: me.clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
-            };
-            let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
-            app_actor.start();
-
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-                blocker: oracle.control(me.clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: partition.clone(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                certification_timeout: Duration::from_secs(1),
-                timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
-
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let (vote_sender, _) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (cert_sender, _) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            let handle = voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
-
-            // Wait for startup, then advance to the leader-owned view.
-            loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update { response, .. } => {
-                        response.send(None).unwrap();
-                        break;
-                    }
-                    batcher::Message::Constructed(_) => {}
-                }
-            }
-            advance_to_view(
-                &mut mailbox,
-                &mut batcher_receiver,
-                &schemes,
-                quorum,
-                target_view,
-            )
-            .await;
-
-            // Wait for our local notarize (journaled) so replay has something to restore.
-            loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Notarize(notarize))
-                        if notarize.view() == target_view =>
-                    {
-                        break;
-                    }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
-                    batcher::Message::Constructed(_) => {}
-                }
-            }
-
-            // Restart (same partition).
-            handle.abort();
-
-            // Fresh Application with propose + verify observers to catch any spurious
-            // work for the leader-owned view that has already been notarized in the journal.
-            let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
-            let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
-            let propose_tracker = propose_calls.clone();
-            let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: me.clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
-            };
-            let (mut app_actor, application) = mocks::application::Application::new(
-                context.with_label("app_restarted"),
-                app_cfg,
-            );
-            app_actor
-                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
-            app_actor.set_verify_observer(Box::new(move |ctx, _| {
-                verify_tracker.lock().push(ctx.view())
-            }));
-            app_actor.start();
-
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(me.clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter,
-                partition,
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                certification_timeout: Duration::from_secs(1),
-                timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
-
-            let (resolver_sender, _) = mpsc::channel(8);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let (vote_sender, _) = oracle
-                .control(me.clone())
-                .register(2, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (cert_sender, _) = oracle
-                .control(me.clone())
-                .register(3, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
-
-            // Wait for replay to complete; confirm we re-entered the leader-owned view.
-            loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Update {
-                        current,
-                        leader,
-                        response,
-                        ..
-                    } => {
-                        response.send(None).unwrap();
-                        assert_eq!(current, target_view);
-                        assert_eq!(leader, Participant::new(0));
-                        break;
-                    }
-                    batcher::Message::Constructed(_) => {}
-                }
-            }
-
-            // Without the replay fix, the voter's main loop would call `automaton.propose`
-            // for the leader-owned view on its first iteration after replay. We wait for
-            // the voter to time out (leader_timeout) and construct a Nullify for the view:
-            // by that point the run loop has had ample opportunity to propose, and
-            // emitting a Nullify proves the voter reached the timeout path without ever
-            // advancing.
-            loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Nullify(nullify))
-                        if nullify.view() == target_view =>
-                    {
-                        break;
-                    }
-                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
-                    batcher::Message::Constructed(_) => {}
-                }
-            }
-
-            let proposed = propose_calls.lock();
-            let verified = verify_calls.lock();
-            assert!(
-                !proposed.contains(&target_view),
-                "voter must not propose for a leader-owned view after restart (observed: {proposed:?})"
-            );
-            assert!(
-                !verified.contains(&target_view),
-                "voter must not request verification for a leader-owned view after restart (observed: {verified:?})"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_no_self_propose_after_restart() {
-        no_self_propose_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_propose_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_propose_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_propose_after_restart(bls12381_multisig::fixture::<MinSig, _>);
-        no_self_propose_after_restart(ed25519::fixture);
-        no_self_propose_after_restart(secp256r1::fixture);
     }
 
     /// Test that in-flight certification requests are cancelled when finalization occurs.
