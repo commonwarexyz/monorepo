@@ -288,6 +288,46 @@ stability_scope!(BETA {
     }
 
     /// Interface to register and encode metrics.
+    ///
+    /// # Mental Model: Metrics vs Tracing
+    ///
+    /// A context carries four orthogonal pieces of observability state, each
+    /// applied via a different builder. They compose freely, but they do
+    /// not all feed into the same sinks:
+    ///
+    /// - `name` (set by [`Metrics::with_label`]): prefix applied to metrics
+    ///   you [`register`](Metrics::register) on this context; also populates
+    ///   the `name` field of runtime-internal task metrics
+    ///   (`runtime_tasks_spawned`, `runtime_tasks_running`).
+    /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
+    ///   dimensions on metrics you `register` on this context; also emitted
+    ///   as OpenTelemetry attributes on the per-task tracing span when, and
+    ///   only when, [`Spawner::instrumented`] is set on the spawn. Runtime
+    ///   task metrics intentionally ignore attributes to keep their
+    ///   cardinality bounded.
+    /// - `scope` (set by [`Metrics::with_scope`]): routes metrics you
+    ///   `register` on this context into a sub-registry whose entries are
+    ///   removed when the last clone of the scoped context is dropped. It
+    ///   does not affect runtime task metrics and has no effect on tracing.
+    /// - `instrumented` (set by [`Spawner::instrumented`]): opt-in flag that
+    ///   wraps the next spawned task in a `tracing` span populated from the
+    ///   current `name` and `attributes`. It never touches metrics. The flag
+    ///   is consumed by the next `spawn` and is not inherited by child
+    ///   contexts.
+    ///
+    /// | Builder                    | Registered metric name | Registered metric labels | Registry isolation | Runtime task metrics | Tracing span              |
+    /// | -------------------------- | :--------------------: | :----------------------: | :----------------: | :------------------: | :-----------------------: |
+    /// | `with_label`               | prefix                 | -                        | -                  | `name`               | `name` field when instrumented |
+    /// | `with_attribute`           | -                      | label dimension          | -                  | -                    | OTel attribute when instrumented |
+    /// | `with_scope`               | -                      | -                        | sub-registry       | -                    | -                         |
+    /// | `Spawner::instrumented`    | -                      | -                        | -                  | -                    | enables span creation     |
+    ///
+    /// The practical consequence: `with_label` is the only builder whose
+    /// effect shows up on runtime task metrics, so it is the only one that
+    /// needs to stay bounded to avoid leaking entries into those families.
+    /// `with_attribute` and `with_scope` can freely carry unbounded
+    /// dimensions through a spawn (e.g. a per-round attribute) as long as
+    /// nothing registers an unbounded series through the resulting context.
     pub trait Metrics: Clone + Send + Sync + 'static {
         /// Get the current label of the context.
         fn label(&self) -> String;
@@ -340,12 +380,8 @@ stability_scope!(BETA {
         /// - Call [`Metrics::with_scope`] to confine the metrics to a scope that will be
         ///   dropped when the dimension is no longer live.
         ///
-        /// Note: runtime-internal task metrics (e.g. `runtime_tasks_spawned`,
-        /// `runtime_tasks_running`) are keyed only by the context's label name (plus `kind`
-        /// and `execution`); they deliberately ignore both attributes and scopes so that
-        /// spawning with a per-round or per-request attribute does not inflate their
-        /// cardinality. Attributes only surface on metrics you register through the context
-        /// (and on tracing spans when [`Spawner::instrumented`] is set).
+        /// See the [`Metrics`] trait-level documentation for how attributes interact
+        /// with registered metrics, runtime task metrics, and tracing spans.
         ///
         /// # Family Label Conflicts
         ///
