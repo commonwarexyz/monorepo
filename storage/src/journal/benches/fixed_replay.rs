@@ -38,19 +38,8 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: us
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
     for items in [1_000, 10_000, 100_000, 500_000] {
-        // Create a config we can use across all benchmarks (with a fixed `storage_directory`),
-        // allowing the same test file to be re-used.
         let cfg = Config::default();
-
-        // Generate a large temp journal with random data.
-        let runner = Runner::new(cfg.clone());
-        runner.start(|ctx| async move {
-            let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-            j.sync().await.unwrap();
-        });
-
-        // Run the benchmarks.
+        let mut initialized = false;
         let runner = tokio::Runner::new(cfg.clone());
         for buffer in [16_384, 65_536, 1_048_576] {
             c.bench_function(
@@ -62,6 +51,17 @@ fn bench_fixed_replay(c: &mut Criterion) {
                     ITEM_SIZE
                 ),
                 |b| {
+                    // Setup: populate journal (once, on first sample).
+                    if !initialized {
+                        Runner::new(Config::default()).start(|ctx| async move {
+                            let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
+                            j.sync().await.unwrap();
+                        });
+                        initialized = true;
+                    }
+
+                    // Benchmark: measure replay time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let j = get_fixed_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
@@ -71,19 +71,19 @@ fn bench_fixed_replay(c: &mut Criterion) {
                             bench_run(&j, buffer).await;
                             duration += start.elapsed();
                         }
-
                         duration
                     });
                 },
             );
         }
 
-        // Clean up the temp journal.
-        let runner = Runner::new(cfg);
-        runner.start(|context| async move {
-            let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
-            j.destroy().await.unwrap();
-        });
+        // Cleanup: destroy journal.
+        if initialized {
+            Runner::new(cfg).start(|context| async move {
+                let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+                j.destroy().await.unwrap();
+            });
+        }
     }
 }
 

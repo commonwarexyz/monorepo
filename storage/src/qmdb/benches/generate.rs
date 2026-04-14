@@ -120,7 +120,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
         c.bench_function(
-            &format!("{}/operations={operations}", module_path!()),
+            &format!("{}/variant=keyless operations={operations}", module_path!()),
             |b| {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     let ctx = context::get::<Context>();
