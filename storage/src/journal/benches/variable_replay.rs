@@ -53,7 +53,7 @@ fn bench_variable_replay(c: &mut Criterion) {
                 |b| {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
-                        Runner::new(Config::default()).start(|ctx| async move {
+                        Runner::new(cfg.clone()).start(|ctx| async move {
                             let mut j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
                             append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
                             j.sync().await.unwrap();
