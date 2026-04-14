@@ -953,11 +953,21 @@ where
             }
             Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
-                    response.send_lossy(false);
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                    response.send_lossy(false);
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
 
@@ -991,7 +1001,12 @@ where
             }
             Request::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                    response.send_lossy(false);
+                    debug!(
+                        ?round,
+                        floor = %self.last_processed_height,
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
 
