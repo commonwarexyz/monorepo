@@ -17,7 +17,6 @@ mod workloads;
 use crate::{
     config::{Config, OutputFormat},
     filesystem::{cleanup_root, prepare_root},
-    report::{print_human_report, print_json_report},
     workers::ResultExt,
     workloads::run_benchmark,
 };
@@ -42,9 +41,10 @@ fn main() -> Result<(), String> {
 
     cleanup_root(&root);
 
+    let report = report?;
     match cfg.output {
-        OutputFormat::Human => print_human_report(&cfg, &report?),
-        OutputFormat::Json => print_json_report(&cfg, &report?),
+        OutputFormat::Human => report.print_human(&cfg),
+        OutputFormat::Json => report.print_json(&cfg),
     }
     Ok(())
 }
