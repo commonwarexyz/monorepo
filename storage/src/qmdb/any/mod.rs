@@ -1756,7 +1756,7 @@ pub(crate) mod test {
                 ctx_a.clone(),
                 variable_db_config::<OneCap>(
                     "cms-a",
-                    CacheRef::from_pooler(ctx_a.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx_a.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1768,7 +1768,7 @@ pub(crate) mod test {
                 ctx_b.clone(),
                 variable_db_config::<OneCap>(
                     "cms-b",
-                    CacheRef::from_pooler(ctx_b.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx_b.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
