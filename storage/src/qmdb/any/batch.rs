@@ -1504,13 +1504,13 @@ mod tests {
         mmr,
         qmdb::any::{
             ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config, test_page_cache},
+            test::{colliding_digest, fixed_db_config, PAGE_CACHE_SIZE, PAGE_SIZE},
             unordered::fixed::Db as UnorderedFixedDb,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
 
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
@@ -1607,8 +1607,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config =
-                fixed_db_config::<OneCap>("batch-collision-regression", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "batch-collision-regression",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -1689,7 +1691,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE));
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -1767,7 +1769,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-basic", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "seq-commit-basic",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key.
@@ -1835,8 +1840,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config =
-                fixed_db_config::<OneCap>("seq-commit-base-old-loc", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "seq-commit-base-old-loc",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
@@ -1909,7 +1916,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("fork-after-commit", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "fork-after-commit",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed.
@@ -1989,7 +1999,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("ff-cross", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "ff-cross",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Grandparent: 2 keys.
@@ -2057,8 +2070,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config =
-                fixed_db_config::<OneCap>("recreate-deleted-collision", test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                "recreate-deleted-collision",
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).

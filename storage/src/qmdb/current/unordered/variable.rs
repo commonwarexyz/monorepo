@@ -110,21 +110,24 @@ mod test {
     use crate::{
         mmr,
         qmdb::current::{
-            tests::{test_page_cache, variable_config},
+            tests::{variable_config, PAGE_CACHE_SIZE, PAGE_SIZE},
             unordered::tests as shared,
         },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, test_page_cache(&context));
+        let cfg = variable_config::<TwoCap>(
+            &partition_prefix,
+            CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+        );
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

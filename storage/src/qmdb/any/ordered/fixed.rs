@@ -153,7 +153,7 @@ pub(crate) mod test {
                     },
                     Update,
                 },
-                test::{fixed_db_config, test_page_cache},
+                test::{fixed_db_config, PAGE_CACHE_SIZE, PAGE_SIZE},
             },
             verify_proof,
         },
@@ -188,8 +188,6 @@ pub(crate) mod test {
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
-
-    use crate::qmdb::any::test::{PAGE_CACHE_SIZE, PAGE_SIZE};
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: crate::merkle::Family>(
@@ -283,7 +281,10 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let seed = context.next_u64();
-            let config = fixed_db_config::<OneCap>(&seed.to_string(), test_page_cache(&context));
+            let config = fixed_db_config::<OneCap>(
+                &seed.to_string(),
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap>::init(
                 context, config,
             )
@@ -926,7 +927,7 @@ pub(crate) mod test {
             // Use a OneCap to ensure many collisions.
             let config = fixed_db_config::<OneCap>(
                 &seed.to_string(),
-                test_page_cache(&context.with_label("one_cap")),
+                CacheRef::from_pooler(context.with_label("one_cap"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap>::init(
                 context.with_label("first"),
@@ -940,7 +941,7 @@ pub(crate) mod test {
             // Repeat test with TwoCap to test low/no collisions.
             let config = fixed_db_config::<TwoCap>(
                 &seed.to_string(),
-                test_page_cache(&context.with_label("two_cap")),
+                CacheRef::from_pooler(context.with_label("two_cap"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap>::init(
                 context.with_label("second"),

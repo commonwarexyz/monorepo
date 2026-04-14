@@ -357,7 +357,7 @@ pub mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -372,10 +372,6 @@ pub mod tests {
     // Janky page & cache sizes to exercise boundary conditions.
     pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
-
-    pub(crate) fn test_page_cache(ctx: &(impl BufferPooler + Metrics)) -> CacheRef {
-        CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)
-    }
 
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
@@ -1371,7 +1367,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>(partition, test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1429,7 +1428,11 @@ pub mod tests {
                 context.with_label("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    test_page_cache(&context.with_label("reopen_cfg")),
+                    CacheRef::from_pooler(
+                        context.with_label("reopen_cfg"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 ),
             )
             .await
@@ -1461,7 +1464,11 @@ pub mod tests {
                 context.with_label("reopen_initial"),
                 variable_config::<OneCap>(
                     partition,
-                    test_page_cache(&context.with_label("reopen_initial_cfg")),
+                    CacheRef::from_pooler(
+                        context.with_label("reopen_initial_cfg"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 ),
             )
             .await
@@ -1488,7 +1495,7 @@ pub mod tests {
             let partition = "current-rewind-pruned-recovery";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, test_page_cache(&ctx)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1548,7 +1555,7 @@ pub mod tests {
                 context.with_label("reopen_pruned_recovery"),
                 variable_config::<OneCap>(
                     partition,
-                    test_page_cache(&context.with_label("reopen_pruned_cfg")),
+                    CacheRef::from_pooler(context.with_label("reopen_pruned_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1580,7 +1587,7 @@ pub mod tests {
                 context.with_label("reopen_pruned_after_new_write"),
                 variable_config::<OneCap>(
                     partition,
-                    test_page_cache(&context.with_label("reopen_after_write_cfg")),
+                    CacheRef::from_pooler(context.with_label("reopen_after_write_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1619,7 +1626,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>(partition, test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1649,7 +1659,10 @@ pub mod tests {
             // Reopen: compute_grafted_root must handle pruned chunk 0.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.with_label("reopen"),
-                variable_config::<OneCap>(partition, test_page_cache(&context)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1675,7 +1688,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>(partition, test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1725,7 +1741,10 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen_small_delta"),
-                variable_config::<OneCap>(partition, test_page_cache(&context)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1748,7 +1767,7 @@ pub mod tests {
             let partition = "current-rewind-pruned";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, test_page_cache(&ctx)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1807,7 +1826,7 @@ pub mod tests {
             let partition = "current-rewind-bitmap-floor";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, test_page_cache(&ctx)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1922,7 +1941,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("mg", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "mg",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1964,7 +1986,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("ch", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "ch",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2011,7 +2036,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.clone(),
-                fixed_config::<OneCap>("ucr", test_page_cache(&ctx)),
+                fixed_config::<OneCap>(
+                    "ucr",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2085,7 +2113,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.clone(),
-                fixed_config::<OneCap>("ocr", test_page_cache(&ctx)),
+                fixed_config::<OneCap>(
+                    "ocr",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2158,7 +2189,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>(partition, test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2179,7 +2213,10 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen"),
-                variable_config::<OneCap>(partition, test_page_cache(&context)),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2198,7 +2235,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("pipe", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "pipe",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2238,7 +2278,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("ff", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "ff",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2271,7 +2314,10 @@ pub mod tests {
             let ctx2 = context.with_label("db2");
             let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.clone(),
-                variable_config::<OneCap>("ff2", test_page_cache(&ctx2)),
+                variable_config::<OneCap>(
+                    "ff2",
+                    CacheRef::from_pooler(ctx2.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2306,7 +2352,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("tb", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "tb",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2352,7 +2401,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("fl-noop", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "fl-noop",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2373,7 +2425,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("fl-root", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "fl-root",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2410,7 +2465,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("fl-idem", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "fl-idem",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2441,7 +2499,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("fl-then", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "fl-then",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2481,7 +2542,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("adrop", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "adrop",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2542,7 +2606,10 @@ pub mod tests {
             let ctx1 = context.with_label("db1");
             let mut db1: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx1.clone(),
-                variable_config::<OneCap>("ord1", test_page_cache(&ctx1)),
+                variable_config::<OneCap>(
+                    "ord1",
+                    CacheRef::from_pooler(ctx1.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2600,7 +2667,10 @@ pub mod tests {
             let ctx2 = context.with_label("db2");
             let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.clone(),
-                variable_config::<OneCap>("ord2", test_page_cache(&ctx2)),
+                variable_config::<OneCap>(
+                    "ord2",
+                    CacheRef::from_pooler(ctx2.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2675,7 +2745,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("stale-clears", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "stale-clears",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2729,7 +2802,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("pac", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "pac",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2777,7 +2853,10 @@ pub mod tests {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_config::<OneCap>("bmo", test_page_cache(&ctx)),
+                variable_config::<OneCap>(
+                    "bmo",
+                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -2830,7 +2909,10 @@ pub mod tests {
             let ref_ctx = context.with_label("ref");
             let mut ref_db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ref_ctx.clone(),
-                variable_config::<OneCap>("bmo_ref", test_page_cache(&ref_ctx)),
+                variable_config::<OneCap>(
+                    "bmo_ref",
+                    CacheRef::from_pooler(ref_ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
