@@ -180,11 +180,19 @@ pub struct Config {
 
 impl Config {
     /// Parse CLI arguments and validate cross-field constraints.
-    pub fn parse() -> Result<Self, clap::Error> {
-        let cfg = <Self as Parser>::try_parse_from(std::env::args_os())?;
-        cfg.validate()
-            .map_err(|msg| Self::command().error(ErrorKind::ValueValidation, msg))?;
-        Ok(cfg)
+    ///
+    /// On parse or validation failure the error is printed directly (with
+    /// proper formatting and color) and the process exits, matching clap's
+    /// default behavior.
+    pub fn parse() -> Self {
+        let cfg =
+            <Self as Parser>::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
+        if let Err(msg) = cfg.validate() {
+            Self::command()
+                .error(ErrorKind::ValueValidation, msg)
+                .exit();
+        }
+        cfg
     }
 
     /// Timed run duration.

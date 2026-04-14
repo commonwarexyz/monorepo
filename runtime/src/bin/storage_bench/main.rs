@@ -24,7 +24,7 @@ use crate::{
 use commonware_runtime::{tokio, Runner as _};
 
 fn main() -> Result<(), String> {
-    let cfg = Config::parse().str_err()?;
+    let cfg = Config::parse();
     let scenario = cfg.scenario.to_string();
 
     let root = prepare_root(&cfg.root, &scenario).str_err()?;
