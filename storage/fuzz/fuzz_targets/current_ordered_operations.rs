@@ -5,7 +5,8 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{self, journaled::Config as MmrConfig, Location},
+    merkle::{mmb, mmr, Graftable, Location},
+    mmr::journaled::Config as MerkleConfig,
     qmdb::current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -20,7 +21,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
-type Db = CurrentDb<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -78,12 +79,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MMR_ITEMS_PER_BLOB: u64 = 11;
+const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
-async fn commit_pending(
-    db: &mut Db,
+async fn commit_pending<F: Graftable>(
+    db: &mut Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, RawValue>,
     pending_inserts: &mut HashMap<RawKey, RawValue>,
@@ -104,38 +105,40 @@ async fn commit_pending(
     committed_state.extend(pending_inserts.drain());
 }
 
-fn fuzz(data: FuzzInput) {
+fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
-    runner.start(|context| async move {
-        let mut hasher = Sha256::new();
-        let page_cache = CacheRef::from_pooler(
-            &context,
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        );
-        let cfg = Config {
-            merkle_config: MmrConfig {
-                journal_partition: "fuzz-current-mmr-journal".into(),
-                metadata_partition: "fuzz-current-mmr-metadata".into(),
-                items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
-                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-                thread_pool: None,
-                page_cache: page_cache.clone(),
-            },
-            journal_config: FConfig {
-                partition: "fuzz-current-log-journal".into(),
-                items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
-                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-                page_cache,
-            },
-            grafted_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
-            translator: TwoCap,
-        };
+    runner.start(|context| {
+        let operations = data.operations.clone();
+        async move {
+            let mut hasher = Sha256::new();
+            let page_cache = CacheRef::from_pooler(
+                &context,
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            );
+            let cfg = Config {
+                merkle_config: MerkleConfig {
+                    journal_partition: format!("fuzz-current-merkle-journal-{suffix}"),
+                    metadata_partition: format!("fuzz-current-merkle-metadata-{suffix}"),
+                    items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
+                    write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                    thread_pool: None,
+                    page_cache: page_cache.clone(),
+                },
+                journal_config: FConfig {
+                    partition: format!("fuzz-current-log-journal-{suffix}"),
+                    items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
+                    write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                    page_cache,
+                },
+                grafted_metadata_partition: format!("fuzz-current-grafted-metadata-{suffix}"),
+                translator: TwoCap,
+            };
 
-        let mut db = Db::init(context.clone(), cfg)
-            .await
-            .expect("Failed to initialize Current database");
+            let mut db = Db::<F>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize Current database");
 
         // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
         // track uncommitted mutations.
@@ -146,7 +149,7 @@ fn fuzz(data: FuzzInput) {
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut committed_op_count = Location::new(1);
 
-        for op in &data.operations {
+        for op in &operations {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
@@ -241,7 +244,7 @@ fn fuzz(data: FuzzInput) {
                     let current_root = db.root();
 
                     let current_op_count = db.bounds().await.end;
-                    let start_loc = Location::new(start_loc % *current_op_count);
+                    let start_loc = Location::<F>::new(start_loc % *current_op_count);
 
                     let oldest_loc = db.inactivity_floor_loc();
                     if start_loc >= oldest_loc {
@@ -251,7 +254,7 @@ fn fuzz(data: FuzzInput) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Db::verify_range_proof(
+                            Db::<F>::verify_range_proof(
                                 &mut hasher,
                                 &proof,
                                 start_loc,
@@ -276,7 +279,7 @@ fn fuzz(data: FuzzInput) {
                     committed_op_count = db.bounds().await.end;
 
                     let current_op_count = db.bounds().await.end;
-                    let start_loc = Location::new(start_loc % current_op_count.as_u64());
+                    let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
                     let root = db.root();
 
                     if let Ok((range_proof, ops, chunks)) = db
@@ -287,7 +290,7 @@ fn fuzz(data: FuzzInput) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
-                            assert!(!Db::verify_range_proof(
+                            assert!(!Db::<F>::verify_range_proof(
                                 &mut hasher,
                                 &bad_proof,
                                 start_loc,
@@ -299,7 +302,7 @@ fn fuzz(data: FuzzInput) {
 
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
-                            assert!(!Db::verify_range_proof(
+                            assert!(!Db::<F>::verify_range_proof(
                                 &mut hasher,
                                 &range_proof,
                                 start_loc,
@@ -324,7 +327,7 @@ fn fuzz(data: FuzzInput) {
                     match db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
-                            let verification_result = Db::verify_key_value_proof(
+                            let verification_result = Db::<F>::verify_key_value_proof(
                                 &mut hasher,
                                 k,
                                 value,
@@ -354,7 +357,7 @@ fn fuzz(data: FuzzInput) {
 
                     match db.exclusion_proof(&mut hasher, &k).await {
                         Ok(proof) => {
-                            let verification_result = Db::verify_exclusion_proof(
+                            let verification_result = Db::<F>::verify_exclusion_proof(
                                 &mut hasher,
                                 &k,
                                 &proof,
@@ -400,9 +403,11 @@ fn fuzz(data: FuzzInput) {
         }
 
         db.destroy().await.expect("Destroy should not fail");
+    }
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "fuzz-mmr");
+    fuzz_family::<mmb::Family>(&input, "fuzz-mmb");
 });

@@ -33,12 +33,13 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<K, V>>,
+        + sync::Journal<mmr::Family, Context = E, Op = Operation<K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
+    type Family = mmr::Family;
     type Op = Operation<K, V>;
     type Journal = C;
     type Hasher = H;

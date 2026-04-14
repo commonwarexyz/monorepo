@@ -29,6 +29,54 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_proof_and_pinned_nodes_boundary_stable_cases() {
+        let hasher = H::new();
+
+        // Case 1: the pinned boundary node is used as a left sibling in the proof.
+        let (_, mmb) = make_mmb(3);
+        let elements: Vec<_> = (0u64..3).map(|i| i.to_be_bytes()).collect();
+        let start_loc = Location::new(1);
+        let proof = mmb
+            .range_proof(&hasher, start_loc..Location::new(3))
+            .unwrap();
+        let pinned_map = mmb.nodes_to_pin(start_loc);
+        let pinned: Vec<_> =
+            <crate::merkle::mmb::Family as crate::merkle::Family>::nodes_to_pin(start_loc)
+                .map(|pos| pinned_map[&pos])
+                .collect();
+        assert_eq!(pinned.len(), 1);
+        assert!(proof.verify_proof_and_pinned_nodes(
+            &hasher,
+            &elements[1..],
+            start_loc,
+            &pinned,
+            mmb.root(),
+        ));
+
+        // Case 2: the current proof folds a later parent peak, but the pinned boundary still
+        // stores the older 4-leaf decomposition.
+        let (_, mmb) = make_mmb(5);
+        let elements: Vec<_> = (0u64..5).map(|i| i.to_be_bytes()).collect();
+        let start_loc = Location::new(4);
+        let proof = mmb
+            .range_proof(&hasher, start_loc..Location::new(5))
+            .unwrap();
+        let pinned_map = mmb.nodes_to_pin(start_loc);
+        let pinned: Vec<_> =
+            <crate::merkle::mmb::Family as crate::merkle::Family>::nodes_to_pin(start_loc)
+                .map(|pos| pinned_map[&pos])
+                .collect();
+        assert_eq!(pinned.len(), 2);
+        assert!(proof.verify_proof_and_pinned_nodes(
+            &hasher,
+            &elements[4..],
+            start_loc,
+            &pinned,
+            mmb.root(),
+        ));
+    }
+
+    #[test]
     fn test_last_element_proof_size_is_two() {
         // An MMB property is that the most recent item always has a small proof
         // (at most 2 digests). Verify this holds as the tree grows.

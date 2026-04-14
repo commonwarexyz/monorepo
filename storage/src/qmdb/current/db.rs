@@ -9,8 +9,12 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch::MIN_TO_PARALLELIZE, hasher::Standard as StandardHasher, mem::Mem,
-        storage::Storage as MerkleStorage, Location, Position, Readable,
+        self,
+        batch::MIN_TO_PARALLELIZE,
+        hasher::{Hasher as _, Standard as StandardHasher},
+        mem::Mem,
+        storage::Storage as MerkleStorage,
+        Location, Position, Readable,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -685,8 +689,13 @@ pub(super) async fn compute_grafted_root<
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
-    let mut peaks: Vec<H::Digest> = Vec::new();
-    for (peak_pos, _) in F::peaks(size) {
+    // Collect into Vec first because F::peaks() may return a non-Send iterator,
+    // and holding it across .await points would make the future non-Send.
+    let peak_positions = F::peaks(size)
+        .map(|(peak_pos, _)| peak_pos)
+        .collect::<Vec<_>>();
+    let mut peaks: Vec<H::Digest> = Vec::with_capacity(peak_positions.len());
+    for peak_pos in peak_positions {
         let digest = storage
             .get_node(peak_pos)
             .await?
@@ -791,6 +800,97 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
             })
             .collect(),
     })
+}
+
+/// Compute the grafted tree's pinned node digests for a pruned prefix of `pruned_chunks`
+/// all-zero bitmap chunks, using the ops tree to derive each chunk's grafted leaf digest.
+///
+/// This is used during sync, when the ops tree retains the exact boundary-stable pinned nodes for
+/// the pruned prefix. Unlike normal init, we can reconstruct each pruned chunk's ops digest from
+/// those pins and then rebuild the grafted pin set.
+pub(super) async fn compute_grafted_pinned_nodes<
+    F: merkle::Graftable,
+    H: Hasher,
+    const N: usize,
+>(
+    hasher: &StandardHasher<H>,
+    ops_tree: &(impl MerkleStorage<F, Digest = H::Digest>
+          + Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>),
+    pruned_chunks: usize,
+    pool: Option<&ThreadPool>,
+) -> Result<Vec<H::Digest>, Error<F>> {
+    if pruned_chunks == 0 {
+        return Ok(Vec::new());
+    }
+
+    fn reconstruct_pruned_subtree<F: merkle::Family, H: Hasher>(
+        hasher: &StandardHasher<H>,
+        pins: &BTreeMap<Position<F>, H::Digest>,
+        pos: Position<F>,
+        height: u32,
+    ) -> Result<H::Digest, Error<F>> {
+        if let Some(digest) = pins.get(&pos) {
+            return Ok(*digest);
+        }
+        if height == 0 {
+            return Err(Error::<F>::DataCorrupted(
+                "missing ops pinned node for pruned chunk reconstruction",
+            ));
+        }
+
+        let (left, right) = F::children(pos, height);
+        let child_height = height - 1;
+        let left_digest = reconstruct_pruned_subtree(hasher, pins, left, child_height)?;
+        let right_digest = reconstruct_pruned_subtree(hasher, pins, right, child_height)?;
+        Ok(hasher.node_digest(pos, &left_digest, &right_digest))
+    }
+
+    // Build a map of the exact pinned nodes available at the ops pruning boundary. During sync the
+    // ops tree may not retain arbitrary internal nodes from the pruned prefix, so pruned chunk
+    // digests must be reconstructed from these boundary-stable pins.
+    let pruning_boundary = Readable::pruning_boundary(ops_tree);
+    let mut pins = BTreeMap::new();
+    for pos in F::nodes_to_pin(pruning_boundary) {
+        let digest = Readable::get_node(ops_tree, pos)
+            .ok_or(Error::<F>::DataCorrupted("missing ops pinned node"))?;
+        pins.insert(pos, digest);
+    }
+
+    let grafting_height = grafting::height::<N>();
+    let ops_size = MerkleStorage::size(ops_tree).await;
+    let leaves = (0..pruned_chunks)
+        .map(|chunk_idx| {
+            let mut chunk_ops_digest: Option<H::Digest> = None;
+            for (pos, height) in F::chunk_peaks(ops_size, chunk_idx as u64, grafting_height) {
+                let digest = reconstruct_pruned_subtree(hasher, &pins, pos, height)?;
+                chunk_ops_digest = Some(
+                    chunk_ops_digest
+                        .map_or(digest, |acc| hasher.hash([acc.as_ref(), digest.as_ref()])),
+                );
+            }
+            let chunk_ops_digest =
+                chunk_ops_digest.expect("chunk must have at least one covering peak");
+            Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Build a temporary grafted tree over those leaves and extract the pinned node digests.
+    let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+    let mut temp = Mem::new(&grafted_hasher);
+    let batch = {
+        let mut b = temp.new_batch().with_pool(pool.cloned());
+        for &(_, digest) in &leaves {
+            b = b.add_leaf_digest(digest);
+        }
+        b.merkleize(&temp, &grafted_hasher)
+    };
+    temp.apply_batch(&batch)?;
+
+    let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
+    let pinned_map = temp.nodes_to_pin(grafted_pruning_boundary);
+    Ok(F::nodes_to_pin(grafted_pruning_boundary)
+        .map(|pos| pinned_map[&pos])
+        .collect())
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.

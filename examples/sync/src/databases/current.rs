@@ -60,7 +60,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
             write_buffer: NZUsize!(4096),
             page_cache,
         },
-        grafted_metadata_partition: "grafted-mmr-metadata".into(),
+        grafted_metadata_partition: "grafted-metadata".into(),
         translator: Translator::default(),
     }
 }

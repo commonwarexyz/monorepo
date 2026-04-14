@@ -1,8 +1,8 @@
-use crate::{journal::contiguous::Contiguous, mmr::Location};
+use crate::{journal::contiguous::Contiguous, merkle};
 use std::{future::Future, ops::Range};
 
 /// Journal of operations used by a [super::Database]
-pub trait Journal: Sized + Send {
+pub trait Journal<F: merkle::Family>: Sized + Send {
     /// The context of the journal
     type Context;
 
@@ -13,10 +13,7 @@ pub trait Journal: Sized + Send {
     type Op: Send;
 
     /// The error type returned by the journal
-    type Error: std::error::Error
-        + Send
-        + 'static
-        + Into<crate::qmdb::Error<crate::merkle::mmr::Family>>;
+    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
 
     /// Create/open a journal for syncing the given range.
     ///
@@ -27,14 +24,17 @@ pub trait Journal: Sized + Send {
     fn new(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
+        range: Range<merkle::Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 
     /// Discard all operations before the given location.
     ///
     /// If current `size() <= start`, initialize as empty at the given location.
     /// Otherwise prune data before the given location.
-    fn resize(&mut self, start: Location) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn resize(
+        &mut self,
+        start: merkle::Location<F>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Persist the journal.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -46,7 +46,7 @@ pub trait Journal: Sized + Send {
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
+impl<F: merkle::Family, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
 where
     E: crate::Context,
     V: commonware_codec::CodecShared,
@@ -59,12 +59,12 @@ where
     async fn new(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
+        range: Range<merkle::Location<F>>,
     ) -> Result<Self, Self::Error> {
         Self::init_sync(context, config.clone(), *range.start..*range.end).await
     }
 
-    async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
+    async fn resize(&mut self, start: merkle::Location<F>) -> Result<(), Self::Error> {
         if Contiguous::size(self).await <= start {
             self.clear_to_size(*start).await
         } else {
@@ -85,7 +85,7 @@ where
     }
 }
 
-impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
+impl<F: merkle::Family, E, A> Journal<F> for crate::journal::contiguous::fixed::Journal<E, A>
 where
     E: crate::Context,
     A: commonware_codec::CodecFixedShared,
@@ -98,7 +98,7 @@ where
     async fn new(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
+        range: Range<merkle::Location<F>>,
     ) -> Result<Self, Self::Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
@@ -119,7 +119,7 @@ where
         Ok(journal)
     }
 
-    async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
+    async fn resize(&mut self, start: merkle::Location<F>) -> Result<(), Self::Error> {
         if Contiguous::size(self).await <= start {
             self.clear_to_size(*start).await
         } else {

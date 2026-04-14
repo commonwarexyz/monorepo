@@ -5,7 +5,8 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::mmr::{journaled::Config as MmrConfig, Family},
+    merkle::mmr::{self, journaled::Config as MerkleConfig},
+    mmb,
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -39,36 +40,53 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
-pub type AnyUFixDb = UFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOFixDb = OFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUFixDb = UCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOFixDb = OCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUFixDb = UFixed<mmr::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOFixDb = OFixed<mmr::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type CurUFixDb = UCFixed<mmr::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOFixDb = OCFixed<mmr::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+
+pub type AnyMmbUFixDb = UFixed<mmb::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyMmbOFixDb = OFixed<mmb::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type CurMmbUFixDb = UCFixed<mmb::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurMmbOFixDb = OCFixed<mmb::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Fixed value (Digest), variable storage layout --
 // Measures overhead of variable-capable storage when values are fixed-size.
 
-pub type AnyUVarDigestDb = UVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOVarDigestDb = OVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyUVarDigestDb = UVariable<mmr::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOVarDigestDb = OVariable<mmr::Family, Context, Digest, Digest, Sha256, EightCap>;
 pub type CurUVarDigestDb =
-    UCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+    UCVariable<mmr::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 pub type CurOVarDigestDb =
-    OCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+    OCVariable<mmr::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+
+pub type AnyMmbUVarDigestDb = UVariable<mmb::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyMmbOVarDigestDb = OVariable<mmb::Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type CurMmbUVarDigestDb =
+    UCVariable<mmb::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurMmbOVarDigestDb =
+    OCVariable<mmb::Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Variable value (Vec<u8>), variable storage layout --
 
-pub type AnyUVarVecDb = UVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type AnyOVarVecDb = OVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type CurUVarVecDb = UCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarVecDb = OCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarVecDb = UVariable<mmr::Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyOVarVecDb = OVariable<mmr::Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type CurUVarVecDb =
+    UCVariable<mmr::Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarVecDb =
+    OCVariable<mmr::Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+
+pub type AnyMmbUVarVecDb = UVariable<mmb::Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyMmbOVarVecDb = OVariable<mmb::Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type CurMmbUVarVecDb =
+    UCVariable<mmb::Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurMmbOVarVecDb =
+    OCVariable<mmb::Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Keyless --
 
-pub type KeylessDb = Keyless<Family, Context, Vec<u8>, Sha256>;
-
-pub async fn open_keyless_db(ctx: Context) -> KeylessDb {
-    let cfg = keyless_cfg(&ctx);
-    KeylessDb::init(ctx, cfg).await.unwrap()
-}
+pub type KeylessMmrDb = Keyless<mmr::Family, Context, Vec<u8>, Sha256>;
+pub type KeylessMmbDb = Keyless<mmb::Family, Context, Vec<u8>, Sha256>;
 
 // -- Variant enums --
 
@@ -82,24 +100,40 @@ pub enum FixedValueVariant {
     CurrentOrderedFixed,
     CurrentUnorderedVariable,
     CurrentOrderedVariable,
+    AnyMmbUnorderedFixed,
+    AnyMmbOrderedFixed,
+    AnyMmbUnorderedVariable,
+    AnyMmbOrderedVariable,
+    CurrentMmbUnorderedFixed,
+    CurrentMmbOrderedFixed,
+    CurrentMmbUnorderedVariable,
+    CurrentMmbOrderedVariable,
 }
 
 impl FixedValueVariant {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::AnyUnorderedFixed => "any::unordered::fixed",
-            Self::AnyOrderedFixed => "any::ordered::fixed",
-            Self::AnyUnorderedVariable => "any::unordered::variable",
-            Self::AnyOrderedVariable => "any::ordered::variable",
-            Self::CurrentUnorderedFixed => "current::unordered::fixed",
-            Self::CurrentOrderedFixed => "current::ordered::fixed",
-            Self::CurrentUnorderedVariable => "current::unordered::variable",
-            Self::CurrentOrderedVariable => "current::ordered::variable",
+            Self::AnyUnorderedFixed => "any::mmr::unordered::fixed",
+            Self::AnyOrderedFixed => "any::mmr::ordered::fixed",
+            Self::AnyUnorderedVariable => "any::mmr::unordered::variable",
+            Self::AnyOrderedVariable => "any::mmr::ordered::variable",
+            Self::CurrentUnorderedFixed => "current::mmr::unordered::fixed",
+            Self::CurrentOrderedFixed => "current::mmr::ordered::fixed",
+            Self::CurrentUnorderedVariable => "current::mmr::unordered::variable",
+            Self::CurrentOrderedVariable => "current::mmr::ordered::variable",
+            Self::AnyMmbUnorderedFixed => "any::mmb::unordered::fixed",
+            Self::AnyMmbOrderedFixed => "any::mmb::ordered::fixed",
+            Self::AnyMmbUnorderedVariable => "any::mmb::unordered::variable",
+            Self::AnyMmbOrderedVariable => "any::mmb::ordered::variable",
+            Self::CurrentMmbUnorderedFixed => "current::mmb::unordered::fixed",
+            Self::CurrentMmbOrderedFixed => "current::mmb::ordered::fixed",
+            Self::CurrentMmbUnorderedVariable => "current::mmb::unordered::variable",
+            Self::CurrentMmbOrderedVariable => "current::mmb::ordered::variable",
         }
     }
 }
 
-pub const FIXED_VALUE_VARIANTS: [FixedValueVariant; 8] = [
+pub const FIXED_VALUE_VARIANTS: [FixedValueVariant; 16] = [
     FixedValueVariant::AnyUnorderedFixed,
     FixedValueVariant::AnyOrderedFixed,
     FixedValueVariant::AnyUnorderedVariable,
@@ -108,6 +142,14 @@ pub const FIXED_VALUE_VARIANTS: [FixedValueVariant; 8] = [
     FixedValueVariant::CurrentOrderedFixed,
     FixedValueVariant::CurrentUnorderedVariable,
     FixedValueVariant::CurrentOrderedVariable,
+    FixedValueVariant::AnyMmbUnorderedFixed,
+    FixedValueVariant::AnyMmbOrderedFixed,
+    FixedValueVariant::AnyMmbUnorderedVariable,
+    FixedValueVariant::AnyMmbOrderedVariable,
+    FixedValueVariant::CurrentMmbUnorderedFixed,
+    FixedValueVariant::CurrentMmbOrderedFixed,
+    FixedValueVariant::CurrentMmbUnorderedVariable,
+    FixedValueVariant::CurrentMmbOrderedVariable,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -116,24 +158,36 @@ pub enum VarValueVariant {
     AnyOrdered,
     CurrentUnordered,
     CurrentOrdered,
+    AnyMmbUnordered,
+    AnyMmbOrdered,
+    CurrentMmbUnordered,
+    CurrentMmbOrdered,
 }
 
 impl VarValueVariant {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::AnyUnordered => "any::unordered",
-            Self::AnyOrdered => "any::ordered",
-            Self::CurrentUnordered => "current::unordered",
-            Self::CurrentOrdered => "current::ordered",
+            Self::AnyUnordered => "any::mmr::unordered",
+            Self::AnyOrdered => "any::mmr::ordered",
+            Self::CurrentUnordered => "current::mmr::unordered",
+            Self::CurrentOrdered => "current::mmr::ordered",
+            Self::AnyMmbUnordered => "any::mmb::unordered",
+            Self::AnyMmbOrdered => "any::mmb::ordered",
+            Self::CurrentMmbUnordered => "current::mmb::unordered",
+            Self::CurrentMmbOrdered => "current::mmb::ordered",
         }
     }
 }
 
-pub const VAR_VALUE_VARIANTS: [VarValueVariant; 4] = [
+pub const VAR_VALUE_VARIANTS: [VarValueVariant; 8] = [
     VarValueVariant::AnyUnordered,
     VarValueVariant::AnyOrdered,
     VarValueVariant::CurrentUnordered,
     VarValueVariant::CurrentOrdered,
+    VarValueVariant::AnyMmbUnordered,
+    VarValueVariant::AnyMmbOrdered,
+    VarValueVariant::CurrentMmbUnordered,
+    VarValueVariant::CurrentMmbOrdered,
 ];
 
 // -- Config builders --
@@ -142,12 +196,12 @@ const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 
-fn mmr_cfg(
+fn merkle_cfg(
     suffix: &str,
     ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
-) -> MmrConfig {
-    MmrConfig {
+) -> MerkleConfig {
+    MerkleConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob: ITEMS_PER_BLOB,
@@ -180,7 +234,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
@@ -189,9 +243,9 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
 }
@@ -201,7 +255,7 @@ pub fn any_var_digest_cfg(
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
@@ -212,9 +266,9 @@ pub fn cur_var_digest_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -224,7 +278,7 @@ pub fn any_var_vec_cfg(
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }
@@ -235,9 +289,9 @@ pub fn cur_var_vec_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -247,7 +301,7 @@ pub fn keyless_cfg(
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
+        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
         log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
@@ -326,6 +380,62 @@ macro_rules! with_fixed_value_db {
                 $crate::common::CurOVarDigestDb,
                 cur_var_digest_cfg
             ),
+            AnyMmbUnorderedFixed => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUFixDb,
+                any_fix_cfg
+            ),
+            AnyMmbOrderedFixed => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOFixDb,
+                any_fix_cfg
+            ),
+            AnyMmbUnorderedVariable => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUVarDigestDb,
+                any_var_digest_cfg
+            ),
+            AnyMmbOrderedVariable => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOVarDigestDb,
+                any_var_digest_cfg
+            ),
+            CurrentMmbUnorderedFixed => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUFixDb,
+                cur_fix_cfg
+            ),
+            CurrentMmbOrderedFixed => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOFixDb,
+                cur_fix_cfg
+            ),
+            CurrentMmbUnorderedVariable => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUVarDigestDb,
+                cur_var_digest_cfg
+            ),
+            CurrentMmbOrderedVariable => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOVarDigestDb,
+                cur_var_digest_cfg
+            ),
         }
     }};
 }
@@ -362,6 +472,34 @@ macro_rules! with_var_value_db {
                 $db,
                 $body,
                 $crate::common::CurOVarVecDb,
+                cur_var_vec_cfg
+            ),
+            AnyMmbUnordered => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUVarVecDb,
+                any_var_vec_cfg
+            ),
+            AnyMmbOrdered => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOVarVecDb,
+                any_var_vec_cfg
+            ),
+            CurrentMmbUnordered => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUVarVecDb,
+                cur_var_vec_cfg
+            ),
+            CurrentMmbOrdered => $crate::common::dispatch_arm!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOVarVecDb,
                 cur_var_vec_cfg
             ),
         }
@@ -443,6 +581,62 @@ macro_rules! with_fixed_value_db_cfg {
                 $crate::common::CurOVarDigestDb,
                 $current_var
             ),
+            AnyMmbUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUFixDb,
+                $any_fixed
+            ),
+            AnyMmbOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOFixDb,
+                $any_fixed
+            ),
+            AnyMmbUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUVarDigestDb,
+                $any_var
+            ),
+            AnyMmbOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOVarDigestDb,
+                $any_var
+            ),
+            CurrentMmbUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUFixDb,
+                $current_fixed
+            ),
+            CurrentMmbOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOFixDb,
+                $current_fixed
+            ),
+            CurrentMmbUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUVarDigestDb,
+                $current_var
+            ),
+            CurrentMmbOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOVarDigestDb,
+                $current_var
+            ),
         }
     }};
 }
@@ -481,6 +675,34 @@ macro_rules! with_var_value_db_cfg {
                 $crate::common::CurOVarVecDb,
                 $current_var
             ),
+            AnyMmbUnordered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbUVarVecDb,
+                $any_var
+            ),
+            AnyMmbOrdered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::AnyMmbOVarVecDb,
+                $any_var
+            ),
+            CurrentMmbUnordered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbUVarVecDb,
+                $current_var
+            ),
+            CurrentMmbOrdered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::CurMmbOVarVecDb,
+                $current_var
+            ),
         }
     }};
 }
@@ -493,14 +715,15 @@ pub(crate) use with_var_value_db_cfg;
 
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
 /// updates/deletes. Commits periodically when `commit_frequency` is `Some`.
-pub async fn gen_random_kv<M>(
+pub async fn gen_random_kv<F, M>(
     db: &mut M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
     make_value: impl Fn(&mut StdRng) -> M::Value,
 ) where
-    M: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>,
+    F: commonware_storage::merkle::Family,
+    M: DbAny<F, Key = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 

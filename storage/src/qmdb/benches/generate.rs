@@ -4,8 +4,9 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    gen_random_kv, make_fixed_value, make_var_value, open_keyless_db, with_fixed_value_db,
-    with_var_value_db, Digest, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
+    gen_random_kv, keyless_cfg, make_fixed_value, make_var_value, with_fixed_value_db,
+    with_var_value_db, Digest, KeylessMmbDb, KeylessMmrDb, FIXED_VALUE_VARIANTS,
+    VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -22,7 +23,7 @@ const COMMITS_PER_ITERATION: u64 = 100;
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
-async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>>(
+async fn bench_db<F: commonware_storage::merkle::Family, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,
     operations: u64,
@@ -116,41 +117,53 @@ fn bench_var_value_generate(c: &mut Criterion) {
 const KEYLESS_OPS: u64 = 10_000;
 const KEYLESS_COMMIT_FREQ: u32 = 25;
 
+macro_rules! bench_keyless_one {
+    ($ctx:expr, $operations:expr, $DbType:ty) => {{
+        let start = Instant::now();
+        let cfg = keyless_cfg(&$ctx);
+        let mut db = <$DbType>::init($ctx.clone(), cfg).await.unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut batch = db.new_batch();
+        for _ in 0u64..$operations {
+            let v = make_var_value(&mut rng);
+            batch = batch.append(v);
+            if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
+                let merkleized = batch.merkleize(&db, None);
+                db.apply_batch(merkleized).await.unwrap();
+                batch = db.new_batch();
+            }
+        }
+        let merkleized = batch.merkleize(&db, None);
+        db.apply_batch(merkleized).await.unwrap();
+        db.sync().await.unwrap();
+        let elapsed = start.elapsed();
+        db.destroy().await.unwrap();
+        elapsed
+    }};
+}
+
 fn bench_keyless_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
-        c.bench_function(
-            &format!("{}/operations={operations}", module_path!()),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let start = Instant::now();
-
-                        let mut db = open_keyless_db(ctx.clone()).await;
-                        let mut rng = StdRng::seed_from_u64(42);
-                        let mut batch = db.new_batch();
-                        for _ in 0u64..operations {
-                            let v = make_var_value(&mut rng);
-                            batch = batch.append(v);
-                            if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                                let merkleized = batch.merkleize(&db, None);
-                                db.apply_batch(merkleized).await.unwrap();
-                                batch = db.new_batch();
-                            }
+        for (name, is_mmb) in [("mmr", false), ("mmb", true)] {
+            c.bench_function(
+                &format!("{}/family={name} operations={operations}", module_path!()),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            total += if is_mmb {
+                                bench_keyless_one!(ctx, operations, KeylessMmbDb)
+                            } else {
+                                bench_keyless_one!(ctx, operations, KeylessMmrDb)
+                            };
                         }
-                        let merkleized = batch.merkleize(&db, None);
-                        db.apply_batch(merkleized).await.unwrap();
-                        db.sync().await.unwrap();
-
-                        total += start.elapsed();
-                        db.destroy().await.unwrap();
-                    }
-                    total
-                });
-            },
-        );
+                        total
+                    });
+                },
+            );
+        }
     }
 }
 

@@ -1,9 +1,5 @@
-#[cfg(feature = "arbitrary")]
-use crate::merkle::mmr::Family;
-#[cfg(feature = "arbitrary")]
-use crate::merkle::Family as _;
 use crate::{
-    merkle::mmr::Location,
+    merkle,
     qmdb::sync::{self, error::EngineError},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -12,33 +8,41 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_utils::range::NonEmptyRange;
 
 /// Target state to sync to
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target<D: Digest> {
+#[derive(Debug, Clone)]
+pub struct Target<F: merkle::Family, D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
     /// Range of operations to sync
-    pub range: NonEmptyRange<Location>,
+    pub range: NonEmptyRange<merkle::Location<F>>,
 }
 
-impl<D: Digest> Write for Target<D> {
+impl<F: merkle::Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.range == other.range
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Eq for Target<F, D> {}
+
+impl<F: merkle::Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
         self.range.write(buf);
     }
 }
 
-impl<D: Digest> EncodeSize for Target<D> {
+impl<F: merkle::Family, D: Digest> EncodeSize for Target<F, D> {
     fn encode_size(&self) -> usize {
         self.root.encode_size() + self.range.encode_size()
     }
 }
 
-impl<D: Digest> Read for Target<D> {
+impl<F: merkle::Family, D: Digest> Read for Target<F, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let range = NonEmptyRange::<Location>::read(buf)?;
+        let range = NonEmptyRange::<merkle::Location<F>>::read(buf)?;
         if !range.start().is_valid() || !range.end().is_valid() {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
@@ -50,28 +54,32 @@ impl<D: Digest> Read for Target<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Target<D>
+impl<F: merkle::Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let root = u.arbitrary()?;
-        let max_loc = Family::MAX_LEAVES;
+        let max_loc = F::MAX_LEAVES;
         let lower = u.int_in_range(0..=*max_loc - 1)?;
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
-            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+            range: commonware_utils::non_empty_range!(
+                merkle::Location::<F>::new(lower),
+                merkle::Location::<F>::new(upper)
+            ),
         })
     }
 }
 
 /// Validate a target update against the current target
-pub fn validate_update<U, D>(
-    old_target: &Target<D>,
-    new_target: &Target<D>,
-) -> Result<(), sync::Error<U, D>>
+pub fn validate_update<F, U, D>(
+    old_target: &Target<F, D>,
+    new_target: &Target<F, D>,
+) -> Result<(), sync::Error<F, U, D>>
 where
+    F: merkle::Family,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
@@ -83,7 +91,7 @@ where
     }
 
     // Start must not decrease; end must strictly increase. Same end
-    // implies same tree size implies same root (the MMR is append-only),
+    // implies same tree size implies same root (the tree is append-only),
     // so retaining the old root under the old tree size in
     // `retained_roots` requires a distinct end.
     if new_target.range.start() < old_target.range.start()
@@ -110,10 +118,17 @@ mod tests {
     use rstest::rstest;
     use std::io::Cursor;
 
-    fn target(root: sha256::Digest, start: u64, end: u64) -> Target<sha256::Digest> {
+    fn target(
+        root: sha256::Digest,
+        start: u64,
+        end: u64,
+    ) -> Target<merkle::mmr::Family, sha256::Digest> {
         Target {
             root,
-            range: non_empty_range!(Location::new(start), Location::new(end)),
+            range: non_empty_range!(
+                merkle::Location::<merkle::mmr::Family>::new(start),
+                merkle::Location::<merkle::mmr::Family>::new(end)
+            ),
         }
     }
 
@@ -143,12 +158,12 @@ mod tests {
         // Manually encode root + two Locations to bypass the Range write panic
         let mut buffer = Vec::new();
         sha256::Digest::from([42; 32]).write(&mut buffer);
-        Location::new(100).write(&mut buffer); // start
-        Location::new(50).write(&mut buffer); // end (< start = invalid)
+        merkle::Location::<merkle::mmr::Family>::new(100).write(&mut buffer); // start
+        merkle::Location::<merkle::mmr::Family>::new(50).write(&mut buffer); // end (< start = invalid)
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
-            Target::<sha256::Digest>::read(&mut cursor),
+            Target::<merkle::mmr::Family, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("Range", "start must be <= end"))
         ));
 
@@ -156,16 +171,18 @@ mod tests {
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
         root.write(&mut buffer);
-        (Location::new(100)..Location::new(100)).write(&mut buffer);
+        (merkle::Location::<merkle::mmr::Family>::new(100)
+            ..merkle::Location::<merkle::mmr::Family>::new(100))
+            .write(&mut buffer);
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
-            Target::<sha256::Digest>::read(&mut cursor),
+            Target::<merkle::mmr::Family, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
         ));
     }
 
-    type TestError = sync::Error<std::io::Error, sha256::Digest>;
+    type TestError = sync::Error<merkle::mmr::Family, std::io::Error, sha256::Digest>;
 
     #[rstest]
     #[case::valid_update(
@@ -200,8 +217,8 @@ mod tests {
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged))
     )]
     fn test_validate_update(
-        #[case] old_target: Target<sha256::Digest>,
-        #[case] new_target: Target<sha256::Digest>,
+        #[case] old_target: Target<merkle::mmr::Family, sha256::Digest>,
+        #[case] new_target: Target<merkle::mmr::Family, sha256::Digest>,
         #[case] expected: Result<(), TestError>,
     ) {
         let result = validate_update(&old_target, &new_target);
@@ -246,7 +263,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Target<sha256::Digest>>,
+            CodecConformance<Target<merkle::mmr::Family, sha256::Digest>>,
         }
     }
 }

@@ -273,16 +273,16 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
     ///
-    /// The `pinned_nodes` are the peak digests of the sub-structure at `start_loc`, in the order
-    /// returned by `Family::nodes_to_pin`. Each pinned node is either:
+    /// The `pinned_nodes` are the digests of the boundary-stable pinned nodes for the pruned prefix
+    /// `[0, start_loc)`, in the order returned by `Family::nodes_to_pin`.
     ///
-    /// - A peak that precedes the proven range (fold-prefix peak). These are verified by
-    ///   refolding them and comparing against the proof's fold-prefix accumulator.
-    /// - A sibling node within a range peak's reconstruction. These are verified against the
-    ///   digests extracted during proof verification.
+    /// Proof verification may require a different set of left-of-range subtrees than the persisted
+    /// pinned set. The verifier therefore reconstructs every proof-required left subtree from the
+    /// pinned nodes and checks that the resulting digests match the proof.
     ///
-    /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
-    /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
+    /// Returns `true` only if the proof reconstructs to `root`, every pinned node is used during
+    /// reconstruction, and the pinned set is exactly the set returned by `Family::nodes_to_pin`.
+    /// When `start_loc` is 0, `pinned_nodes` must be empty.
     pub fn verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
@@ -315,27 +315,41 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return false;
         }
 
-        let Ok(fold_prefix) = Blueprint::fold_prefix(self.leaves, start_loc) else {
+        let Some(range_end) = start_loc.checked_add(elements.len() as u64) else {
+            return false;
+        };
+        let Ok(bp) = Blueprint::new(self.leaves, start_loc..range_end) else {
             return false;
         };
 
-        let mut pinned_map: alloc::collections::BTreeMap<Position<F>, D> = pinned_positions
+        let pinned_map: alloc::collections::BTreeMap<Position<F>, D> = pinned_positions
             .into_iter()
             .zip(pinned_nodes.iter().copied())
             .collect();
+        let mut used_pins = alloc::collections::BTreeSet::new();
 
-        // Verify fold-prefix pinned nodes by recomputing the accumulator (without the leaf
-        // count, which is hashed into the final root independently).
-        if !fold_prefix.is_empty() {
+        // Verify the proof's fold-prefix accumulator by rebuilding its current subtrees from the
+        // persisted boundary pins.
+        if !bp.fold_prefix.is_empty() {
             if self.digests.is_empty() {
                 return false;
             }
-            let Some(first) = pinned_map.remove(&fold_prefix[0]) else {
+
+            let Ok(fold_prefix) = Blueprint::fold_prefix_subtrees(self.leaves, start_loc) else {
                 return false;
             };
-            let mut acc = first;
-            for pos in &fold_prefix[1..] {
-                let Some(digest) = pinned_map.remove(pos) else {
+            let Some((first, rest)) = fold_prefix.split_first() else {
+                return false;
+            };
+            let Some(mut acc) =
+                reconstruct_from_pinned(hasher, *first, &pinned_map, &mut used_pins)
+            else {
+                return false;
+            };
+            for subtree in rest {
+                let Some(digest) =
+                    reconstruct_from_pinned(hasher, *subtree, &pinned_map, &mut used_pins)
+                else {
                     return false;
                 };
                 acc = hasher.fold(&acc, &digest);
@@ -345,16 +359,23 @@ impl<F: Family, D: Digest> Proof<F, D> {
             }
         }
 
-        // Verify remaining pinned nodes (siblings) against the extracted digests.
+        // Verify the proof's left-of-range sibling subtrees by rebuilding them from the same
+        // boundary pins and comparing against the digests extracted during proof verification.
         let extracted: alloc::collections::BTreeMap<Position<F>, D> =
             collected.into_iter().collect();
-        for (pos, digest) in pinned_map {
-            if extracted.get(&pos) != Some(&digest) {
+        for subtree in bp.left_sibling_subtrees() {
+            let Some(digest) =
+                reconstruct_from_pinned(hasher, subtree, &pinned_map, &mut used_pins)
+            else {
+                return false;
+            };
+            if extracted.get(&subtree.pos) != Some(&digest) {
                 return false;
             }
         }
 
-        true
+        // nodes_to_pin returns the exact set, so every pin must have been used.
+        used_pins.len() == pinned_map.len()
     }
 
     /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`, every
@@ -505,19 +526,24 @@ pub(crate) struct Blueprint<F: Family> {
 }
 
 impl<F: Family> Blueprint<F> {
-    /// Efficiently compute just the fold prefix for a given starting location.
-    pub(crate) fn fold_prefix(
+    /// Efficiently compute the fold-prefix peaks as subtrees for a given starting location.
+    pub(crate) fn fold_prefix_subtrees(
         leaves: Location<F>,
         start_loc: Location<F>,
-    ) -> Result<Vec<Position<F>>, super::Error<F>> {
+    ) -> Result<Vec<Subtree<F>>, super::Error<F>> {
         let size = Position::<F>::try_from(leaves)?;
         let mut fold_prefix = Vec::new();
         let mut leaf_cursor = Location::new(0);
 
         for (peak_pos, height) in F::peaks(size) {
-            let leaf_end = leaf_cursor + (1u64 << height);
+            let leaf_start = leaf_cursor;
+            let leaf_end = leaf_start + (1u64 << height);
             if leaf_end <= start_loc {
-                fold_prefix.push(peak_pos);
+                fold_prefix.push(Subtree {
+                    pos: peak_pos,
+                    height,
+                    leaf_start,
+                });
             } else {
                 break;
             }
@@ -525,6 +551,18 @@ impl<F: Family> Blueprint<F> {
         }
 
         Ok(fold_prefix)
+    }
+
+    /// Efficiently compute just the fold prefix for a given starting location.
+    #[cfg(feature = "std")]
+    pub(crate) fn fold_prefix(
+        leaves: Location<F>,
+        start_loc: Location<F>,
+    ) -> Result<Vec<Position<F>>, super::Error<F>> {
+        Ok(Self::fold_prefix_subtrees(leaves, start_loc)?
+            .into_iter()
+            .map(|subtree| subtree.pos)
+            .collect())
     }
 
     /// Return a blueprint for building a range proof over the given leaf `range` in a
@@ -587,6 +625,14 @@ impl<F: Family> Blueprint<F> {
             range_peaks,
             fetch_nodes,
         })
+    }
+
+    fn left_sibling_subtrees(&self) -> Vec<Subtree<F>> {
+        let mut out = Vec::new();
+        for &peak in &self.range_peaks {
+            collect_left_siblings_dfs(peak, &self.range, &mut out);
+        }
+        out
     }
 
     /// Build a range proof from this blueprint and a node-fetching closure.
@@ -699,6 +745,52 @@ pub(crate) fn collect_siblings_dfs<F: Family>(
         collect_siblings_dfs::<F>(left, range, out);
         collect_siblings_dfs::<F>(right, range, out);
     }
+}
+
+fn collect_left_siblings_dfs<F: Family>(
+    node: Subtree<F>,
+    range: &Range<Location<F>>,
+    out: &mut Vec<Subtree<F>>,
+) {
+    if node.leaf_end() <= range.start {
+        out.push(node);
+        return;
+    }
+
+    if node.leaf_start >= range.end {
+        return;
+    }
+
+    if node.height > 0 {
+        let (left, right) = node.children();
+        collect_left_siblings_dfs::<F>(left, range, out);
+        collect_left_siblings_dfs::<F>(right, range, out);
+    }
+}
+
+fn reconstruct_from_pinned<F, D, H>(
+    hasher: &H,
+    node: Subtree<F>,
+    pinned: &alloc::collections::BTreeMap<Position<F>, D>,
+    used: &mut alloc::collections::BTreeSet<Position<F>>,
+) -> Option<D>
+where
+    F: Family,
+    D: Digest,
+    H: Hasher<F, Digest = D>,
+{
+    if let Some(digest) = pinned.get(&node.pos).copied() {
+        return used.insert(node.pos).then_some(digest);
+    }
+
+    if node.height == 0 {
+        return None;
+    }
+
+    let (left, right) = node.children();
+    let left = reconstruct_from_pinned(hasher, left, pinned, used)?;
+    let right = reconstruct_from_pinned(hasher, right, pinned, used)?;
+    Some(hasher.node_digest(node.pos, &left, &right))
 }
 
 /// Reconstruct the digest of a peak subtree from a range of elements and sibling digests, consuming

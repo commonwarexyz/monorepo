@@ -69,13 +69,12 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
 
-    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
+    /// Compute the exact set of node positions that must be pinned when pruning to `prune_loc`.
     ///
     /// The default implementation returns the peaks of the sub-structure at `prune_loc`,
     /// which is sufficient for both root computation and re-merkleization of retained leaves.
-    /// Implementations may override to return a conservative superset of the minimally
-    /// required nodes. Callers must therefore treat the result as "safe to retain" rather
-    /// than assuming it is minimal or canonical.
+    /// The returned set must be exact: callers rely on a 1:1 correspondence between
+    /// the positions returned here and the pinned node digests they store or provide.
     ///
     /// # Panics
     ///
