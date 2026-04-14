@@ -1,10 +1,13 @@
 //! Filesystem helpers for `storage_bench`.
 //!
-//! The benchmark intentionally uses the runtime's normal storage selection
-//! path. The active backend is therefore detected from compile-time feature
-//! selection and reported at runtime so results cannot be mixed up.
+//! The benchmark uses the runtime's normal storage selection path. The active
+//! backend is detected from compile-time feature selection and reported at
+//! runtime so results cannot be mixed up.
 
-use crate::config::{WriteShape, DEFAULT_IO_SIZE};
+use crate::{
+    config::{WriteShape, DEFAULT_IO_SIZE},
+    workers::ResultExt,
+};
 use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use commonware_utils::hex;
@@ -18,14 +21,13 @@ use std::{
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 
 pub(crate) const PARTITION: &str = "storage-bench";
+pub(crate) const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Create a fresh root directory for one benchmark run.
 ///
-/// The benchmark process creates only one root, so a stable operation-scoped
-/// directory is enough here. Any leftover directory from a previous interrupted
-/// run is removed before the new benchmark starts.
+/// Any leftover directory from a previous interrupted run is removed first.
 pub(crate) fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathBuf> {
     fs::create_dir_all(root)?;
     let root = root.join(format!("commonware_storage_bench_{scenario}"));
@@ -33,15 +35,14 @@ pub(crate) fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathB
     Ok(root)
 }
 
-/// Remove a benchmark root after the runtime has dropped its storage state.
+/// Remove the benchmark root after the runtime has dropped its storage state.
 pub(crate) fn cleanup_root(root: &Path) {
-    // The io_uring storage path owns a dedicated worker thread. Give it a
-    // brief chance to observe dropped handles before removing the directory.
+    // The io_uring backend owns a dedicated worker thread; give it a brief
+    // chance to observe dropped handles before removing the directory.
     std::thread::sleep(Duration::from_millis(10));
     let _ = fs::remove_dir_all(root);
 }
 
-#[inline(always)]
 pub(crate) const fn backend_name() -> &'static str {
     #[cfg(feature = "iouring-storage")]
     {
@@ -54,16 +55,16 @@ pub(crate) const fn backend_name() -> &'static str {
     }
 }
 
-pub(crate) fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
+fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
     root.join(partition).join(hex(name))
 }
 
 /// Force physical allocation for a blob that already has the desired size.
 ///
-/// The benchmark uses this for overwrite workloads so they focus on the
-/// steady-state write path rather than on first-write allocation behavior.
+/// Overwrite workloads call this so they measure the steady-state write path
+/// rather than first-write allocation behavior.
 #[cfg(unix)]
-pub(crate) fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
+fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let path = blob_path(root, partition, name);
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     let length = file.metadata()?.len();
@@ -86,26 +87,16 @@ pub(crate) fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io:
     Ok(())
 }
 
-/// No-op fallback when physical preallocation is unavailable.
 #[cfg(not(unix))]
-pub(crate) fn preallocate_blob(
-    _root: &Path,
-    _partition: &str,
-    _name: &[u8],
-) -> std::io::Result<()> {
+fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
 /// Best-effort eviction of a blob from the OS page cache.
 ///
-/// This is intentionally file-scoped rather than global. It avoids privileged
-/// operations such as writing `/proc/sys/vm/drop_caches`.
-///
 /// On Linux, `POSIX_FADV_DONTNEED` asks the kernel to discard cached pages
-/// associated with the file region rather than attaching some sticky state to
-/// this particular file descriptor. Reopening the file later does not undo the
-/// eviction; it simply creates a fresh handle that will fault data back into
-/// the page cache as reads occur.
+/// for the file. The effect is per-inode, not per-fd, so reopening the file
+/// later does not undo it.
 #[cfg(unix)]
 pub(crate) fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let path = blob_path(root, partition, name);
@@ -120,7 +111,6 @@ pub(crate) fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io:
     Ok(())
 }
 
-/// No-op fallback when file-scoped cache eviction is unavailable.
 #[cfg(not(unix))]
 pub(crate) fn evict_blob_cache(
     _root: &Path,
@@ -130,70 +120,49 @@ pub(crate) fn evict_blob_cache(
     Ok(())
 }
 
-/// Create and fully populate a fixed-size blob for read-heavy scenarios.
-pub(crate) async fn prepare_prefilled_blob<S>(
+/// Create a fixed-size, preallocated blob. Returns the open blob handle.
+pub(crate) async fn prepare_blob<S>(
+    storage: &S,
+    root: &Path,
+    name: &[u8],
+    file_size: u64,
+) -> Result<S::Blob, String>
+where
+    S: Storage,
+{
+    let (blob, _) = storage.open(PARTITION, name).await.str_err()?;
+    blob.resize(file_size).await.str_err()?;
+    blob.sync().await.str_err()?;
+    preallocate_blob(root, PARTITION, name)
+        .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
+    Ok(blob)
+}
+
+/// Create a fixed-size blob and fill it with deterministic data.
+///
+/// Returns the open blob handle so the caller can reuse it for the timed phase.
+pub(crate) async fn prepare_filled_blob<S>(
     storage: &S,
     root: &Path,
     name: &[u8],
     file_size: u64,
     seed: u64,
-) -> Result<(), String>
+) -> Result<S::Blob, String>
 where
     S: Storage,
 {
-    let (blob, _) = storage
-        .open(PARTITION, name)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.resize(file_size)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.sync().await.map_err(|err| err.to_string())?;
-    preallocate_blob(root, PARTITION, name)
-        .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
+    let blob = prepare_blob(storage, root, name, file_size).await?;
 
-    let fill_chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);
+    let chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);
     let mut offset = 0u64;
     while offset < file_size {
-        let remaining = (file_size - offset) as usize;
-        let len = remaining.min(fill_chunk_size);
+        let len = ((file_size - offset) as usize).min(chunk_size);
         let payload = deterministic_bytes(len, seed ^ offset);
-        blob.write_at(offset, payload)
-            .await
-            .map_err(|err| err.to_string())?;
+        blob.write_at(offset, payload).await.str_err()?;
         offset += len as u64;
     }
-    blob.sync().await.map_err(|err| err.to_string())?;
-    Ok(())
-}
-
-/// Create a fixed-size preallocated blob for overwrite workloads.
-pub(crate) async fn prepare_preallocated_blob<S>(
-    storage: &S,
-    root: &Path,
-    name: &[u8],
-    file_size: u64,
-) -> Result<(), String>
-where
-    S: Storage,
-{
-    let (blob, _) = storage
-        .open(PARTITION, name)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.resize(file_size)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.sync().await.map_err(|err| err.to_string())?;
-    preallocate_blob(root, PARTITION, name)
-        .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
-    Ok(())
-}
-
-pub(crate) fn prepare_cold_read_cache(root: &Path, name: &[u8]) -> Result<(), String> {
-    evict_blob_cache(root, PARTITION, name)
-        .map_err(|err| format!("failed to evict file cache: {err}"))?;
-    Ok(())
+    blob.sync().await.str_err()?;
+    Ok(blob)
 }
 
 pub(crate) fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {

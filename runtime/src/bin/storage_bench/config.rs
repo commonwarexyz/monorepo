@@ -75,8 +75,6 @@ pub(crate) enum SyncMode {
     Every(u64),
 }
 
-impl SyncMode {}
-
 /// Output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum OutputFormat {
@@ -88,18 +86,44 @@ pub(crate) enum OutputFormat {
     Json,
 }
 
+macro_rules! display_value_enum {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    self.to_possible_value()
+                        .expect("all variants have clap names")
+                        .get_name(),
+                )
+            }
+        }
+    )+};
+}
+
+display_value_enum!(Scenario, CacheMode, WriteShape, OutputFormat);
+
+impl fmt::Display for SyncMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::End => f.write_str("end"),
+            Self::Every(count) => write!(f, "{count}"),
+        }
+    }
+}
+
+/// Parsed and validated benchmark configuration.
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "storage_bench",
     about = "Benchmark the runtime storage backend",
     after_help = "The storage backend is selected at build time.\n\
                   Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",
-    styles = clap_styles()
+    styles = Styles::styled(),
 )]
-struct Cli {
+pub(crate) struct Config {
     /// Scenario to execute.
     #[arg(long, value_enum)]
-    scenario: Scenario,
+    pub(crate) scenario: Scenario,
 
     /// Timed run duration in seconds.
     #[arg(long, default_value_t = 30, value_parser = value_parser!(u64))]
@@ -107,113 +131,71 @@ struct Cli {
 
     /// Read or write size in bytes. Accepts suffixes like 64K, 4M, or 1G.
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
-    io_size: usize,
+    pub(crate) io_size: usize,
 
     /// Parallel worker count for steady-state scenarios.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
-    inflight: usize,
+    pub(crate) inflight: usize,
 
     /// Tokio worker thread count for the benchmark runtime.
     #[arg(
         long,
-        default_value_t = default_runtime_worker_threads(),
+        default_value_t = default_worker_threads(),
         value_parser = value_parser!(usize)
     )]
-    worker_threads: usize,
+    pub(crate) worker_threads: usize,
 
     /// Tokio scheduler ticks between global queue polls.
     #[arg(long, value_parser = value_parser!(u32))]
-    global_queue_interval: Option<u32>,
+    pub(crate) global_queue_interval: Option<u32>,
 
     /// Initial fixed-size file length. Accepts suffixes like 64K, 4M, or 1G.
-    #[arg(long, value_parser = parse_byte_size_u64)]
-    file_size: Option<u64>,
+    #[arg(long, value_parser = parse_byte_size)]
+    pub(crate) file_size: Option<u64>,
 
     /// Parent directory under which a unique benchmark directory is created.
     #[arg(long, default_value = "/tmp")]
-    root: PathBuf,
+    pub(crate) root: PathBuf,
 
     /// Best-effort cache preparation for read-heavy scenarios.
     #[arg(long, value_enum)]
-    cache: Option<CacheMode>,
+    pub(crate) cache: Option<CacheMode>,
 
     /// Write payload layout for write-heavy scenarios.
     #[arg(long, value_enum, default_value = "contiguous")]
-    write_shape: WriteShape,
+    pub(crate) write_shape: WriteShape,
 
     /// Durability cadence: `end` or a positive integer per writer stream.
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
-    sync_mode: SyncMode,
+    pub(crate) sync_mode: SyncMode,
 
     /// Deterministic seed for payloads and random offsets.
     #[arg(long, default_value_t = 0)]
-    seed: u64,
+    pub(crate) seed: u64,
 
     /// Report format.
     #[arg(long, value_enum, default_value = "human")]
-    output: OutputFormat,
-}
-
-/// Parsed and validated benchmark configuration.
-#[derive(Clone, Debug)]
-pub(crate) struct Config {
-    /// Scenario to run.
-    pub(crate) scenario: Scenario,
-    /// Time budget for the workload phase.
-    pub(crate) duration: Duration,
-    /// Per-operation read or write size.
-    pub(crate) io_size: usize,
-    /// Number of concurrent workers for steady-state scenarios.
-    pub(crate) inflight: usize,
-    /// Tokio worker thread count used by the benchmark runtime.
-    pub(crate) worker_threads: usize,
-    /// Tokio global queue polling interval, when overridden.
-    pub(crate) global_queue_interval: Option<u32>,
-    /// Initial fixed-size file length, when the scenario needs one.
-    pub(crate) file_size: Option<u64>,
-    /// Parent directory used for creating a unique benchmark directory.
-    pub(crate) root: PathBuf,
-    /// Best-effort cache preparation for read-heavy scenarios.
-    pub(crate) cache: Option<CacheMode>,
-    /// Shape of writes issued by write-capable scenarios.
-    pub(crate) write_shape: WriteShape,
-    /// Durability policy for write-capable scenarios.
-    pub(crate) sync_mode: SyncMode,
-    /// Deterministic seed for payloads and random offsets.
-    pub(crate) seed: u64,
-    /// Final report format.
     pub(crate) output: OutputFormat,
 }
 
 impl Config {
     pub(crate) fn parse_or_exit() -> Self {
-        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit())
+        Self::try_parse_validated(std::env::args_os()).unwrap_or_else(|err| err.exit())
     }
 
-    pub(crate) fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    pub(crate) fn try_parse_validated<I, T>(args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let cli = Cli::try_parse_from(args)?;
-        let cfg = Self {
-            scenario: cli.scenario,
-            duration: Duration::from_secs(cli.duration),
-            io_size: cli.io_size,
-            inflight: cli.inflight,
-            worker_threads: cli.worker_threads,
-            global_queue_interval: cli.global_queue_interval,
-            file_size: cli.file_size,
-            root: cli.root,
-            cache: cli.cache,
-            write_shape: cli.write_shape,
-            sync_mode: cli.sync_mode,
-            seed: cli.seed,
-            output: cli.output,
-        };
+        let cfg = <Self as Parser>::try_parse_from(args)?;
         cfg.validate()
-            .map_err(|message| Cli::command().error(ErrorKind::ValueValidation, message))?;
+            .map_err(|msg| Self::command().error(ErrorKind::ValueValidation, msg))?;
         Ok(cfg)
+    }
+
+    pub(crate) const fn duration(&self) -> Duration {
+        Duration::from_secs(self.duration)
     }
 
     pub(crate) const fn file_size(&self) -> u64 {
@@ -222,7 +204,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.duration.is_zero() {
+        if self.duration == 0 {
             return Err("--duration must be greater than zero".into());
         }
         if self.io_size == 0 {
@@ -250,11 +232,7 @@ impl Config {
                     return Err("--cache is only valid for read-heavy scenarios".into());
                 }
             }
-            Scenario::ReadSeq
-            | Scenario::ReadRand
-            | Scenario::WriteSeq
-            | Scenario::WriteRand
-            | Scenario::ReadWriteAppend => {
+            _ => {
                 let file_size = self
                     .file_size
                     .ok_or_else(|| "--file-size is required for this scenario".to_string())?;
@@ -265,21 +243,16 @@ impl Config {
                 if !file_size.is_multiple_of(io_size) {
                     return Err("--file-size must be a multiple of --io-size".into());
                 }
-            }
-        }
-
-        match self.scenario {
-            Scenario::WriteSeq | Scenario::WriteRand => {
-                let total_blocks = self.file_size() / self.io_size as u64;
-                if total_blocks < self.inflight as u64 {
-                    return Err(
-                        "write_seq and write_rand require at least one non-overlapping block per worker"
-                            .into(),
-                    );
+                if matches!(self.scenario, Scenario::WriteSeq | Scenario::WriteRand) {
+                    let total_blocks = file_size / io_size;
+                    if total_blocks < self.inflight as u64 {
+                        return Err(
+                            "write_seq and write_rand require at least one non-overlapping block per worker"
+                                .into(),
+                        );
+                    }
                 }
             }
-            Scenario::ReadWriteAppend => {}
-            _ => {}
         }
 
         if self.scenario.has_reads() {
@@ -303,51 +276,7 @@ impl Config {
     }
 }
 
-impl fmt::Display for Scenario {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_value_enum(self, f)
-    }
-}
-
-impl fmt::Display for CacheMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_value_enum(self, f)
-    }
-}
-
-impl fmt::Display for WriteShape {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_value_enum(self, f)
-    }
-}
-
-impl fmt::Display for SyncMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::End => f.write_str("end"),
-            Self::Every(count) => write!(f, "{count}"),
-        }
-    }
-}
-
-impl fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_value_enum(self, f)
-    }
-}
-
-const fn clap_styles() -> Styles {
-    Styles::styled()
-}
-
-fn fmt_value_enum<T: ValueEnum>(value: &T, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let possible = value
-        .to_possible_value()
-        .expect("storage_bench value enums always have a canonical clap name");
-    f.write_str(possible.get_name())
-}
-
-fn default_runtime_worker_threads() -> usize {
+fn default_worker_threads() -> usize {
     commonware_runtime::tokio::Config::default().worker_threads()
 }
 
@@ -363,10 +292,6 @@ fn parse_sync_mode(value: &str) -> Result<SyncMode, String> {
         return Err("--sync-every must be `end` or a positive integer".into());
     }
     Ok(SyncMode::Every(count))
-}
-
-fn parse_byte_size_u64(value: &str) -> Result<u64, String> {
-    parse_byte_size(value)
 }
 
 fn parse_byte_size_usize(value: &str) -> Result<usize, String> {
