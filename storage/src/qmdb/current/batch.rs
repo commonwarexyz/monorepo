@@ -543,7 +543,7 @@ where
         let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
         let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
         if stable_after > chunk_end
-            && last_complete_chunk >= pruned_chunks
+            && last_complete_chunk >= pruned_chunks // skip already-pruned chunks
             && base_ops_leaves < stable_after
         {
             chunk_indices_to_update.insert(last_complete_chunk);

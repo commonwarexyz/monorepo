@@ -296,44 +296,40 @@ where
             .ok_or(Error::DataCorrupted("ops size overflow"))?;
         let grafting_height = grafting::height::<N>();
 
-        // Fast path for families without delayed merges: the youngest chunk's subtree root
-        // is born as soon as its leaves are appended, so no settlement wait is needed.
-        let youngest = pruned_chunks - 1;
-        let youngest_start = youngest
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-        let youngest_end = (youngest + 1)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
-        let youngest_pos =
-            F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
-        if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
-            let settled_bits = pruned_chunks
-                .checked_mul(chunk_bits)
-                .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
-            return Ok(Location::new(settled_bits));
-        }
-
-        // Delayed-merge path: walk backward until both conditions hold.
         loop {
             if pruned_chunks == 0 {
                 return Ok(Location::new(0));
             }
 
-            // Condition 1: youngest chunk's height-gh subtree root is born.
             let youngest = pruned_chunks - 1;
             let chunk_start = youngest
                 .checked_shl(grafting_height)
                 .ok_or(Error::DataCorrupted("chunk start overflow"))?;
+            let chunk_end = (youngest + 1)
+                .checked_shl(grafting_height)
+                .ok_or(Error::DataCorrupted("chunk end overflow"))?;
             let chunk_pos =
                 F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
+
+            // Condition 1: youngest chunk's height-gh subtree root is born.
+            // For families without delayed merges, birth_size == chunk_end so this always
+            // holds and the function returns the inactivity floor unchanged.
             let settled_after = F::peak_birth_size(chunk_pos, grafting_height);
             if ops_leaves < settled_after {
                 pruned_chunks -= 1;
                 continue;
             }
 
-            // Condition 2: youngest chunk-pair's height-(gh+1) parent is born.
+            // For families without delayed merges, condition 1 is sufficient.
+            if settled_after <= chunk_end {
+                let settled_bits = pruned_chunks
+                    .checked_mul(chunk_bits)
+                    .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
+                return Ok(Location::new(settled_bits));
+            }
+
+            // Condition 2 (delayed-merge only): youngest chunk-pair's height-(gh+1)
+            // parent is born.
             let pair_chunk = youngest & !1;
             let pair_start = pair_chunk
                 .checked_shl(grafting_height)
@@ -380,7 +376,8 @@ where
         let youngest_pos =
             F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
 
-        // Families without delayed merges do not need an additional rewind floor.
+        // Families without delayed merges: birth_size == chunk_end, so no additional
+        // rewind floor is needed (same detection as in `settled_bitmap_prune_loc`).
         if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
             return Ok(None);
         }
@@ -408,6 +405,9 @@ where
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
+    ///
+    /// `prune_loc` controls ops-log pruning only. Bitmap pruning always advances to the
+    /// settled inactivity floor regardless of `prune_loc`.
     ///
     /// # Errors
     ///
