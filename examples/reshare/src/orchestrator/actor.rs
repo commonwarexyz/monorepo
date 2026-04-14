@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -38,7 +38,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -66,7 +66,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -98,7 +98,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,
@@ -329,6 +329,7 @@ where
                 fetch_concurrent: 32,
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 

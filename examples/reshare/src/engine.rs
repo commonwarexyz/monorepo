@@ -23,7 +23,8 @@ use commonware_cryptography::{
         dkg::Output,
         primitives::{group, variant::Variant},
     },
-    Hasher, Signer,
+    ed25519::Batch,
+    BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -134,6 +135,7 @@ where
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {

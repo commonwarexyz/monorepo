@@ -17,13 +17,13 @@ use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
-    PublicKey, Signer,
+    BatchVerifier, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -35,6 +35,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -631,13 +632,14 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Finalize the player's participation in the DKG round.
-    pub fn finalize<M: Faults>(
+    pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
+        rng: &mut impl CryptoRngCore,
+        logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize::<M>(logs, strategy)
+        self.player.finalize::<M, B>(rng, logs, strategy)
     }
 }
 

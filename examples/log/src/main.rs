@@ -53,7 +53,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager};
+use commonware_p2p::{authenticated::discovery, Manager as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics, Quota, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -226,6 +226,7 @@ fn main() {
             fetch_concurrent: 32,
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
+            forwarding: simplex::ForwardingPolicy::Disabled,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

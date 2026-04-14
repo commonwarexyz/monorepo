@@ -152,6 +152,7 @@ mod tests {
             op_count: Location::new(100),
             start_loc: Location::new(10),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(request.validate().is_ok());
 
@@ -161,6 +162,7 @@ mod tests {
             op_count: Location::new(100),
             start_loc: Location::new(100),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),
@@ -173,6 +175,7 @@ mod tests {
             op_count: Location::new(100),
             start_loc: Location::new(150),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),

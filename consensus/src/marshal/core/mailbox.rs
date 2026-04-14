@@ -92,6 +92,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The block to broadcast.
         block: V::Block,
     },
+    /// A request to forward a block to a set of peers.
+    Forward {
+        /// The round in which the block was proposed.
+        round: Round,
+        /// The commitment of the block to forward.
+        commitment: V::Commitment,
+        /// The peers to forward the block to.
+        peers: Vec<S::PublicKey>,
+    },
     /// A notification that a block has been verified by the application.
     Verified {
         /// The round in which the block was verified.
@@ -306,8 +315,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
     /// The height must be at or below the current floor (last processed height),
     /// otherwise the prune request is ignored.
+    ///
+    /// A `prune` request for a height above marshal's current floor is dropped.
     pub async fn prune(&self, height: Height) {
         self.sender.send_lossy(Message::Prune { height }).await;
+    }
+
+    /// Forward a block to a set of peers.
+    pub async fn forward(&self, round: Round, commitment: V::Commitment, peers: Vec<S::PublicKey>) {
+        self.sender
+            .send_lossy(Message::Forward {
+                round,
+                commitment,
+                peers,
+            })
+            .await;
     }
 }
 

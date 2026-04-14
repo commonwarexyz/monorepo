@@ -303,6 +303,18 @@ impl SmallScalar {
     }
 }
 
+impl From<SmallScalar> for Scalar {
+    fn from(small: SmallScalar) -> Self {
+        let mut fr = blst_fr::default();
+        // SAFETY: small.inner is a valid blst_scalar with only the lower 128 bits set,
+        // which is well within the field modulus.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &small.inner);
+        }
+        Self(fr)
+    }
+}
+
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
 /// correct modulo.
@@ -2287,6 +2299,14 @@ mod tests {
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }
+    }
+
+    #[test]
+    fn test_small_scalar_to_scalar_preserves_bytes() {
+        let small = SmallScalar::random(test_rng());
+        let scalar = Scalar::from(small.clone());
+        let round_tripped = scalar.as_blst_scalar();
+        assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
     }
 
     #[test]

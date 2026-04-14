@@ -85,6 +85,9 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
+
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
@@ -177,6 +180,12 @@ pub trait Blocks: Send + Sync + 'static {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+
+    /// Retrieve the last (highest) index in the store.
+    ///
+    /// # Returns
+    /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.
+    fn last_index(&self) -> Option<Height>;
 }
 
 impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
@@ -219,6 +228,11 @@ where
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
     }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
@@ -259,6 +273,10 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }
 
@@ -302,6 +320,11 @@ where
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
     }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
@@ -342,5 +365,9 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }

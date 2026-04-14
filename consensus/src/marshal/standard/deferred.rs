@@ -86,7 +86,7 @@ use crate::{
         },
         Update,
     },
-    simplex::types::Context,
+    simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     VerifyingApplication,
@@ -605,34 +605,37 @@ where
     ES: Epocher,
 {
     type Digest = B::Digest;
+    type PublicKey = S::PublicKey;
+    type Plan = Plan<S::PublicKey>;
 
-    /// Broadcasts a previously built block to the network.
-    ///
-    /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the digest does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, digest: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().take() else {
-            warn!("missing block to broadcast");
-            return;
-        };
-
-        if block.digest() != digest {
-            warn!(
-                round = %round,
-                digest = %block.digest(),
-                height = %block.height(),
-                "skipping requested broadcast of block with mismatched digest"
-            );
-            return;
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+        match plan {
+            Plan::Propose => {
+                let Some((round, block)) = self.last_built.lock().take() else {
+                    warn!("missing block to broadcast");
+                    return;
+                };
+                if block.digest() != digest {
+                    warn!(
+                        round = %round,
+                        digest = %block.digest(),
+                        height = %block.height(),
+                        "skipping requested broadcast of block with mismatched digest"
+                    );
+                    return;
+                }
+                debug!(
+                    round = %round,
+                    digest = %block.digest(),
+                    height = %block.height(),
+                    "requested broadcast of built block"
+                );
+                self.marshal.proposed(round, block).await;
+            }
+            Plan::Forward { round, peers } => {
+                self.marshal.forward(round, digest, peers).await;
+            }
         }
-
-        debug!(
-            round = %round,
-            digest = %block.digest(),
-            height = %block.height(),
-            "requested broadcast of built block"
-        );
-        self.marshal.proposed(round, block).await;
     }
 }
 
@@ -663,8 +666,8 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
-                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                default_leader, make_raw_block, setup_network_with_participants, Ctx,
+                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::MockVerifyingApp,
         },
@@ -679,18 +682,21 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZUsize;
     use std::time::Duration;
 
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
 
@@ -809,12 +815,14 @@ mod tests {
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
 
@@ -897,12 +905,14 @@ mod tests {
     fn test_marshaled_rejects_mismatched_context() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
 

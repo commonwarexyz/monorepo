@@ -1,15 +1,15 @@
 //! Current database types and helpers for the sync example.
 //!
 //! A `current` database extends an `any` database with an activity bitmap that tracks which
-//! operations are active (i.e. represent the current state of their key) vs inactive
-//! (superseded or deleted). Its canonical root folds the ops root, a grafted MMR root
-//! (combining bitmap chunks with ops subtree roots), and an optional partial-chunk digest.
-//! See [current] module documentation for more details.
+//! operations are active (i.e. represent the current state of their key) vs inactive (superseded or
+//! deleted). Its canonical root folds the ops root, a grafted merkle root (combining bitmap chunks
+//! with ops subtree roots), and an optional partial-chunk digest. See [current] module
+//! documentation for more details.
 //!
-//! For sync, the engine targets the **ops root** (not the canonical root). The operations and
-//! proof format are identical to `any` -- the bitmap is reconstructed deterministically from
-//! the operations after sync completes. See the
-//! [Root structure](commonware_storage::qmdb::current) module documentation for details.
+//! For sync, the engine targets the **ops root** (not the canonical root). The operations and proof
+//! format are identical to `any` -- the bitmap is reconstructed deterministically from the
+//! operations after sync completes. See the [Root structure](commonware_storage::qmdb::current)
+//! module documentation for details.
 //!
 //! This module re-uses the same [`Operation`] type as [`super::any`] since the underlying
 //! operations log is the same.
@@ -19,7 +19,8 @@ use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::unordered::{fixed::Operation as FixedOperation, Update},
@@ -35,25 +36,32 @@ use tracing::error;
 const CHUNK_SIZE: usize = sha256::Digest::SIZE;
 
 /// Database type alias.
-pub type Database<E> = current::unordered::fixed::Db<E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
+pub type Database<E> =
+    current::unordered::fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
 
 /// Operation type alias. Same as the `any` operation type.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
+    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(4096),
-        log_journal_partition: "log-journal".into(),
-        log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(4096),
-        grafted_mmr_metadata_partition: "grafted-mmr-metadata".into(),
+        merkle_config: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FConfig {
+            partition: "log-journal".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
+        grafted_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
-        thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 
@@ -61,6 +69,7 @@ impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
@@ -94,7 +103,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error> {
+    ) -> Result<(), qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             error!("operations must end with a commit");
             return Ok(());
@@ -110,8 +119,8 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let finalized = batch.merkleize(metadata).await?.finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(self, metadata).await?;
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -139,9 +148,17 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         // Return ops-level proofs (not grafted proofs) for the sync engine.
         self.ops_historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {

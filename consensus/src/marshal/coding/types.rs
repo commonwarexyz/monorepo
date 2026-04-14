@@ -4,103 +4,12 @@ use crate::{
     types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
-use std::{marker::PhantomData, ops::Deref};
-
-const STRONG_SHARD_TAG: u8 = 0;
-const WEAK_SHARD_TAG: u8 = 1;
-
-/// A shard of erasure coded data, either a strong shard (from the proposer) or a weak shard
-/// (from a non-proposer).
-///
-/// A weak shard cannot be checked for validity on its own.
-#[derive(Clone)]
-pub enum DistributionShard<C: Scheme> {
-    /// A shard that is broadcasted by the proposer, containing extra information for generating
-    /// checking data.
-    Strong(C::StrongShard),
-    /// A shard that is broadcasted by a non-proposer, containing only the shard data.
-    Weak(C::WeakShard),
-}
-
-impl<C: Scheme> Write for DistributionShard<C> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Strong(shard) => {
-                buf.put_u8(STRONG_SHARD_TAG);
-                shard.write(buf);
-            }
-            Self::Weak(weak_shard) => {
-                buf.put_u8(WEAK_SHARD_TAG);
-                weak_shard.write(buf);
-            }
-        }
-    }
-}
-
-impl<C: Scheme> EncodeSize for DistributionShard<C> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Strong(shard) => shard.encode_size(),
-            Self::Weak(weak_shard) => weak_shard.encode_size(),
-        }
-    }
-}
-
-impl<C: Scheme> Read for DistributionShard<C> {
-    type Cfg = commonware_coding::CodecConfig;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        shard_cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        match u8::read(buf)? {
-            STRONG_SHARD_TAG => {
-                let shard = C::StrongShard::read_cfg(buf, shard_cfg)?;
-                Ok(Self::Strong(shard))
-            }
-            WEAK_SHARD_TAG => {
-                let weak_shard = C::WeakShard::read_cfg(buf, shard_cfg)?;
-                Ok(Self::Weak(weak_shard))
-            }
-            _ => Err(commonware_codec::Error::Invalid(
-                "DistributionShard",
-                "invalid tag",
-            )),
-        }
-    }
-}
-
-impl<C: Scheme> PartialEq for DistributionShard<C> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Strong(a), Self::Strong(b)) => a == b,
-            (Self::Weak(a), Self::Weak(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl<C: Scheme> Eq for DistributionShard<C> {}
-
-#[cfg(feature = "arbitrary")]
-impl<C: Scheme> arbitrary::Arbitrary<'_> for DistributionShard<C>
-where
-    C::StrongShard: for<'a> arbitrary::Arbitrary<'a>,
-    C::WeakShard: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        if u.arbitrary::<bool>()? {
-            Ok(Self::Strong(u.arbitrary()?))
-        } else {
-            Ok(Self::Weak(u.arbitrary()?))
-        }
-    }
-}
+use std::marker::PhantomData;
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -110,13 +19,13 @@ pub struct Shard<C: Scheme, H: Hasher> {
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
-    pub(crate) inner: DistributionShard<C>,
+    pub(crate) inner: C::Shard,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
 
 impl<C: Scheme, H: Hasher> Shard<C, H> {
-    pub const fn new(commitment: Commitment, index: u16, inner: DistributionShard<C>) -> Self {
+    pub const fn new(commitment: Commitment, index: u16, inner: C::Shard) -> Self {
         Self {
             commitment,
             index,
@@ -135,44 +44,9 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         self.commitment
     }
 
-    /// Returns true if the inner shard is strong.
-    pub const fn is_strong(&self) -> bool {
-        matches!(self.inner, DistributionShard::Strong(_))
-    }
-
-    /// Returns true if the inner shard is weak.
-    pub const fn is_weak(&self) -> bool {
-        matches!(self.inner, DistributionShard::Weak(_))
-    }
-
-    /// Takes the inner [`DistributionShard`].
-    pub fn into_inner(self) -> DistributionShard<C> {
+    /// Takes the inner shard.
+    pub fn into_inner(self) -> C::Shard {
         self.inner
-    }
-
-    /// Verifies the shard and returns the weak shard for broadcasting if valid.
-    ///
-    /// Returns `Some(weak_shard)` if the shard is valid and can be rebroadcast,
-    /// or `None` if the shard is invalid or already weak.
-    pub fn verify_into_weak(self) -> Option<Self> {
-        let DistributionShard::Strong(shard) = self.inner else {
-            return None;
-        };
-
-        let weak_shard = C::weaken(
-            &self.commitment.config(),
-            &self.commitment.root(),
-            self.index,
-            shard,
-        )
-        .ok()
-        .map(|(_, _, weak_shard)| weak_shard)?;
-
-        Some(Self::new(
-            self.commitment,
-            self.index,
-            DistributionShard::Weak(weak_shard),
-        ))
     }
 }
 
@@ -184,14 +58,6 @@ impl<C: Scheme, H: Hasher> Clone for Shard<C, H> {
             inner: self.inner.clone(),
             _hasher: PhantomData,
         }
-    }
-}
-
-impl<C: Scheme, H: Hasher> Deref for Shard<C, H> {
-    type Target = DistributionShard<C>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
     }
 }
 
@@ -209,11 +75,21 @@ impl<C: Scheme, H: Hasher> Write for Shard<C, H> {
         self.index.write(buf);
         self.inner.write(buf);
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.commitment.write(buf);
+        self.index.write(buf);
+        self.inner.write_bufs(buf);
+    }
 }
 
 impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
     fn encode_size(&self) -> usize {
         self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_inline_size()
     }
 }
 
@@ -226,7 +102,7 @@ impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = Commitment::read(buf)?;
         let index = u16::read(buf)?;
-        let inner = DistributionShard::read_cfg(buf, cfg)?;
+        let inner = C::Shard::read_cfg(buf, cfg)?;
 
         Ok(Self {
             commitment,
@@ -250,7 +126,7 @@ impl<C: Scheme, H: Hasher> Eq for Shard<C, H> {}
 #[cfg(feature = "arbitrary")]
 impl<C: Scheme, H: Hasher> arbitrary::Arbitrary<'_> for Shard<C, H>
 where
-    DistributionShard<C>: for<'a> arbitrary::Arbitrary<'a>,
+    C::Shard: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -276,7 +152,7 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     /// These shards are optional to enable lazy construction. If the block is
     /// constructed with [`Self::new_trusted`], the shards are computed lazily
     /// via [`Self::shards`].
-    shards: Option<Vec<C::StrongShard>>,
+    shards: Option<Vec<C::Shard>>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
@@ -287,7 +163,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         inner: &B,
         config: CodingConfig,
         strategy: &impl Strategy,
-    ) -> (C::Commitment, Vec<C::StrongShard>) {
+    ) -> (C::Commitment, Vec<C::Shard>) {
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
@@ -326,7 +202,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns a reference to the shards in this coded block.
     ///
     /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
-    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::StrongShard] {
+    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::Shard] {
         match self.shards {
             Some(ref shards) => shards,
             None => {
@@ -351,7 +227,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         Some(Shard::new(
             self.commitment(),
             index,
-            DistributionShard::Strong(self.shards.as_ref()?.get(usize::from(index))?.clone()),
+            self.shards.as_ref()?.get(usize::from(index))?.clone(),
         ))
     }
 
@@ -653,9 +529,11 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 mod test {
     use super::*;
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
+    use bytes::Buf;
     use commonware_codec::{Decode, Encode};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB
@@ -667,34 +545,29 @@ mod test {
     type Block = MockBlock<<H as Hasher>::Digest, ()>;
 
     #[test]
-    fn test_distribution_shard_codec_roundtrip() {
+    fn test_shard_wrapper_codec_roundtrip() {
         const MOCK_BLOCK_DATA: &[u8] = b"commonware shape rotator club";
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
         };
 
-        let (_, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, &Sequential).unwrap();
+        let (commitment, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, &Sequential).unwrap();
         let raw_shard = shards.first().cloned().unwrap();
 
-        let strong_shard = DistributionShard::<RS>::Strong(raw_shard.clone());
-        let encoded = strong_shard.encode();
-        let decoded =
-            DistributionShard::<RS>::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
-        assert!(strong_shard == decoded);
-
-        let weak_shard = DistributionShard::<RS>::Weak(raw_shard);
-        let encoded = weak_shard.encode();
-        let decoded =
-            DistributionShard::<RS>::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
-        assert!(weak_shard == decoded);
+        let commitment =
+            Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
+        let shard = RShard::new(commitment, 0, raw_shard);
+        let encoded = shard.encode();
+        let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
+        assert!(shard == decoded);
     }
 
     #[test]
-    fn test_distribution_shard_decode_truncated_returns_error() {
+    fn test_shard_decode_truncated_returns_error() {
         let decode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut buf = &[][..];
-            DistributionShard::<RS>::decode_cfg(&mut buf, &MAX_SHARD_SIZE)
+            RShard::decode_cfg(&mut buf, &MAX_SHARD_SIZE)
         }));
         assert!(decode.is_ok(), "decode must not panic on truncated input");
         assert!(decode.unwrap().is_err());
@@ -726,12 +599,7 @@ mod test {
 
         let commitment =
             Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
-        let shard = RShard::new(commitment, 0, DistributionShard::Strong(raw_shard.clone()));
-        let encoded = shard.encode();
-        let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
-        assert!(shard == decoded);
-
-        let shard = RShard::new(commitment, 0, DistributionShard::Weak(raw_shard));
+        let shard = RShard::new(commitment, 0, raw_shard);
         let encoded = shard.encode();
         let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
         assert!(shard == decoded);
@@ -820,13 +688,37 @@ mod test {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_shard_encode_with_pool_matches_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            const CONFIG: CodingConfig = CodingConfig {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(2),
+            };
+
+            let (commitment, shards) =
+                RS::encode(&CONFIG, b"pool encoding test".as_slice(), &Sequential).unwrap();
+            let commitment =
+                Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
+            let shard = RShard::new(commitment, 0, shards.into_iter().next().unwrap());
+
+            let encoded = shard.encode();
+            let mut encoded_pool = shard.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<DistributionShard<ReedSolomon<Sha256>>>,
             CodecConformance<Shard<ReedSolomon<Sha256>, Sha256>>,
         }
     }

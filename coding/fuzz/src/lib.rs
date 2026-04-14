@@ -1,5 +1,5 @@
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_coding::{Config, Scheme};
+use commonware_coding::{Config, PhasedScheme, Scheme};
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
 use std::iter;
@@ -74,16 +74,45 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     };
     let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
-    // We don't use enumerate to get u16s.
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
     shuffle.shuffle(&mut shards);
+
+    // Check and collect `to_use` shards.
+    let checked_shards = shards
+        .into_iter()
+        .take(to_use as usize)
+        .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
+        .collect::<Vec<_>>();
+
+    let decoded = S::decode(&config, &commitment, checked_shards.iter(), &STRATEGY).unwrap();
+    assert_eq!(&decoded, &data);
+}
+
+pub fn fuzz_phased<S: PhasedScheme>(input: FuzzInput) {
+    let FuzzInput {
+        recovery,
+        min,
+        to_use,
+        data,
+        shuffle,
+    } = input;
+
+    let config = Config {
+        minimum_shards: NZU16!(min),
+        extra_shards: NZU16!(recovery),
+    };
+    let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+    assert_eq!(shards.len(), (recovery + min) as usize);
+    let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
+    shuffle.shuffle(&mut shards);
+
     // From here on, we take the point of view of the last participant.
-    // (This is so that we can move their shard out of the vector easily).
+    // This lets us move our strong shard out directly while keeping the rest for forwarding.
     let (my_i, my_shard) = shards.pop().unwrap();
     let (my_checking_data, my_checked_shard, _) =
         S::weaken(&config, &commitment, my_i, my_shard).unwrap();
 
-    // Check to_use - 1 shards, then include our own checked shards.
+    // Check `to_use - 1` forwarded shards, then include our own checked shard.
     let checked_shards = shards
         .into_iter()
         .take((to_use - 1) as usize)
@@ -98,7 +127,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         &config,
         &commitment,
         my_checking_data,
-        &checked_shards,
+        checked_shards.iter(),
         &STRATEGY,
     )
     .unwrap();

@@ -134,6 +134,26 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(position)
     }
 
+    /// Append pre-encoded bytes to the given section.
+    ///
+    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
+        assert!(!buf.is_empty());
+        assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
+        let blob = self.manager.get_or_create(section).await?;
+        blob.append(buf).await?;
+        trace!(
+            section,
+            count = buf.len() / Self::CHUNK_SIZE,
+            "appended items"
+        );
+        Ok(())
+    }
+
     /// Read the item at the given section and position.
     ///
     /// # Errors
@@ -159,6 +179,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
+        let remaining = blob.try_size()?.checked_sub(offset)?;
+        if remaining < Self::CHUNK_SIZE_U64 {
+            return None;
+        }
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync(offset, &mut buf) {
+            return None;
+        }
+        A::decode(&buf[..]).ok()
     }
 
     /// Read the last item in a section, if any.

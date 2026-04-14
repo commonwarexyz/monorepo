@@ -1,6 +1,7 @@
 use super::Reservation;
 use crate::{
     authenticated::{
+        dialing::Dialable,
         discovery::{
             actors::{peer, tracker::Metadata},
             types,
@@ -8,28 +9,25 @@ use crate::{
         mailbox::UnboundedMailbox,
         Mailbox,
     },
-    PeerSetSubscription,
+    PeerSetSubscription, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::{
-    channel::{fallible::FallibleExt, mpsc, oneshot},
-    ordered::Set,
-};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register { index: u64, peers: Set<C> },
+    Register { index: u64, peers: TrackedPeers<C> },
 
     // ---------- Used by peer set provider ----------
-    /// Fetch the peer set at a given index.
+    /// Fetch primary and secondary peers for a given ID.
     PeerSet {
         /// The index of the peer set to fetch.
         index: u64,
-        /// One-shot channel to send the peer set.
-        responder: oneshot::Sender<Option<Set<C>>>,
+        /// One-shot channel to send the tracked peers.
+        responder: oneshot::Sender<Option<TrackedPeers<C>>>,
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
@@ -91,8 +89,8 @@ pub enum Message<C: PublicKey> {
     // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
     Dialable {
-        /// One-shot channel to send the list of dialable peers.
-        responder: oneshot::Sender<Vec<C>>,
+        /// One-shot channel to send the dialable peers and next query deadline.
+        responder: oneshot::Sender<Dialable<C>>,
     },
 
     /// Request a reservation for a particular peer to dial.
@@ -169,10 +167,10 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
         self.0.send_lossy(Message::Peers { peers });
     }
 
-    /// Request a list of dialable peers from the tracker.
+    /// Request dialable peers from the tracker.
     ///
-    /// Returns an empty list if the tracker is shut down.
-    pub async fn dialable(&mut self) -> Vec<C> {
+    /// Returns an empty response if the tracker is shut down.
+    pub async fn dialable(&mut self) -> Dialable<C> {
         self.0
             .request_or_default(|responder| Message::Dialable { responder })
             .await
@@ -256,7 +254,7 @@ impl<C: PublicKey> Oracle<C> {
 impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         self.sender
             .0
             .request(|responder| Message::PeerSet {
@@ -280,8 +278,14 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    async fn track(&mut self, index: u64, peers: Set<Self::PublicKey>) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
+    async fn track<R>(&mut self, index: u64, peers: R)
+    where
+        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.sender.0.send_lossy(Message::Register {
+            index,
+            peers: peers.into(),
+        });
     }
 }
 

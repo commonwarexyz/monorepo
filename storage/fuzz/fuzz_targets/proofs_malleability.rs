@@ -123,48 +123,45 @@ fn fuzz(input: FuzzInput) {
 
     match input.proof {
         ProofType::Mmr => {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&mut hasher);
-            let changeset = {
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::new(&hasher);
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&mut hasher, digest);
+                    batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mmr, &hasher)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             for (leaf, element) in digests.iter().enumerate() {
                 let loc = Location::new(leaf as u64);
-                let original_proof = mmr.proof(loc).unwrap();
-                assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, root));
+                let original_proof = mmr.proof(&hasher, loc).unwrap();
+                assert!(original_proof.verify_element_inclusion(&hasher, element, loc, root));
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
                     mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                     if mutated_proof != original_proof {
-                        assert!(!mutated_proof.verify_element_inclusion(
-                            &mut hasher,
-                            element,
-                            loc,
-                            root
-                        ));
+                        assert!(
+                            !mutated_proof.verify_element_inclusion(&hasher, element, loc, root)
+                        );
                     }
                 }
             }
         }
         ProofType::MmrMulti => {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&mut hasher);
-            let changeset = {
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::new(&hasher);
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&mut hasher, digest);
+                    batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mmr, &hasher)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
@@ -178,13 +175,14 @@ fn fuzz(input: FuzzInput) {
                 (i1.min(i2), i1.abs_diff(i2) + 1)
             };
             let start_loc = Location::new(start_idx as u64);
-            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
+            let Ok(original_proof) =
+                mmr.range_proof(&hasher, start_loc..start_loc + range_len as u64)
             else {
                 return;
             };
             let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
             assert!(original_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &range_elements,
                 start_loc,
                 root
@@ -195,7 +193,7 @@ fn fuzz(input: FuzzInput) {
                 mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                 if mutated_proof != original_proof {
                     assert!(!mutated_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &range_elements,
                         start_loc,
                         root

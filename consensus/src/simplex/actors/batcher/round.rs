@@ -41,7 +41,7 @@ pub struct Round<
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
 
-    /// Whether we've already received and forwarded the leader's proposal.
+    /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
 
     /// Cached certificates for this view.
@@ -353,19 +353,47 @@ impl<
         self.pending_votes.has_nullify(signer)
     }
 
-    /// Returns true if the leader was active in this round.
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
     ///
-    /// We use pending votes to determine activeness because we only verify the first
-    /// `2f+1` votes. If we used verified, we would always consider the slowest `f` peers offline.
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
     ///
-    /// This approach does mean, however, that we may consider a peer active that has sent an invalid
-    /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
-    /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
-    /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
-    pub fn is_active(&self, leader: Participant) -> bool {
-        self.pending_votes.has_notarize(leader)
-            || self.pending_votes.has_nullify(leader)
-            || self.pending_votes.has_finalize(leader)
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
+        if self
+            .pending_votes
+            .notarize(participant)
+            .is_some_and(|vote| &vote.proposal == proposal)
+        {
+            return false;
+        }
+
+        self.pending_votes
+            .finalize(participant)
+            .is_none_or(|vote| &vote.proposal != proposal)
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
+        (0..self.participants.len())
+            .map(Participant::from_usize)
+            .filter(|&p| self.is_missing_voter(proposal, p))
+            .collect()
     }
 
     /// Stores a verified vote for certificate construction.

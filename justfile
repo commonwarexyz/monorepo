@@ -45,8 +45,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, publish order, benchmark names, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-benchmark-names check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, publish order, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -54,6 +54,7 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 # Tests benchmarks in a given crate
 test-benches crate *args='':
     cargo test --benches -p {{ crate }} {{ args }} -- --verbose
+    cargo test --benches -p {{ crate }} {{ args }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
 
 # Run tests
 test *args='':
@@ -66,10 +67,6 @@ test-docs *args='--all':
 # Lint the Rust documentation
 check-docs *args='':
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items $@
-
-# Lint benchmark naming conventions
-check-benchmark-names:
-    python3 .github/scripts/lint_benchmark_names.py
 
 # Check publish workflow ordering against workspace dependencies
 check-publish-order:
@@ -163,15 +160,18 @@ check-stability *args='':
     for name in "${LEVEL_NAMES[@]:1}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
+    # Save and clear RUSTC_WRAPPER so Cargo doesn't nest it outside the workspace
+    # wrapper (which breaks sccache). The wrapper script invokes it internally.
+    export COMMONWARE_RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."
-            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
         done
         echo "All stability levels pass!"
         echo "Checking for unmarked public items..."
         ./scripts/find_unstable_public.sh $extra_args
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
     fi

@@ -57,15 +57,15 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::Mutable,
+        contiguous::{Many, Mutable},
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -97,7 +97,7 @@ pub struct Config {
 }
 
 /// Inner state protected by a single RwLock.
-struct Inner<E: Clock + Storage + Metrics, A: CodecFixedShared> {
+struct Inner<E: Context, A: CodecFixedShared> {
     /// The underlying segmented journal.
     journal: SegmentedJournal<E, A>,
 
@@ -117,7 +117,7 @@ struct Inner<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     pruning_boundary: u64,
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
+impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Read the item at position `pos` in the journal.
     ///
     /// # Errors
@@ -155,6 +155,18 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 }
             })
     }
+
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    fn try_read_sync(&self, pos: u64, items_per_blob: u64) -> Option<A> {
+        if pos >= self.size || pos < self.pruning_boundary {
+            return None;
+        }
+        let section = pos / items_per_blob;
+        let section_start = section * items_per_blob;
+        let first_in_section = self.pruning_boundary.max(section_start);
+        let pos_in_section = pos - first_in_section;
+        self.journal.try_get_sync(section, pos_in_section)
+    }
 }
 
 /// Implementation of `Journal` storage.
@@ -171,7 +183,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying blob will be truncated to the last valid item). Repair is performed
 /// by the underlying [SegmentedJournal] during init.
-pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
+pub struct Journal<E: Context, A: CodecFixedShared> {
     /// Inner state with segmented journal and size.
     ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
@@ -183,12 +195,12 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
 }
 
 /// A reader guard that holds a consistent snapshot of the journal's bounds.
-pub struct Reader<'a, E: Clock + Storage + Metrics, A: CodecFixedShared> {
+pub struct Reader<'a, E: Context, A: CodecFixedShared> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
     items_per_blob: u64,
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
+impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> std::ops::Range<u64> {
@@ -197,6 +209,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
         self.guard.read(pos, self.items_per_blob).await
+    }
+
+    fn try_read_sync(&self, pos: u64) -> Option<A> {
+        self.guard.try_read_sync(pos, self.items_per_blob)
     }
 
     async fn replay(
@@ -254,7 +270,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = SegmentedJournal::<E, A>::CHUNK_SIZE;
 
@@ -648,32 +664,70 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
-        // Mutating operations are serialized by taking the write guard.
-        let mut inner = self.inner.write().await;
+        self.append_many(Many::Flat(std::slice::from_ref(item)))
+            .await
+    }
 
-        // Append the item to the journal.
-        let position = inner.size;
-        let (section, _pos_in_section) = self.position_to_section(position);
-        inner.journal.append(section, item).await?;
-        inner.size += 1;
-
-        // Return early if no sync is needed (section not full).
-        if !inner.size.is_multiple_of(self.items_per_blob) {
-            return Ok(position);
+    /// Append items to the journal, returning the position of the last item appended.
+    ///
+    /// Acquires the write lock once for all items instead of per-item.
+    /// Returns [Error::EmptyAppend] if items is empty.
+    pub async fn append_many<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
+        if items.is_empty() {
+            return Err(Error::EmptyAppend);
         }
 
-        // The section was filled and must be synced. Downgrade so readers can continue during the
-        // sync, but keep mutators blocked. After sync, upgrade again to create the next tail
-        // section before any append can proceed.
-        let inner = inner.downgrade_to_upgradable();
-        inner.journal.sync(section).await?;
+        // Encode all items into a single contiguous buffer before taking the write guard.
+        // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
+        let items_count = match &items {
+            Many::Flat(items) => items.len(),
+            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
+        };
+        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
+        match &items {
+            Many::Flat(items) => {
+                for item in *items {
+                    item.write(&mut items_buf);
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in *nested_items {
+                    for item in *items {
+                        item.write(&mut items_buf);
+                    }
+                }
+            }
+        }
 
-        // Ensure the new tail section exists, as required to maintain the invariant. This must
-        // happen after the previous section is synced.
-        let mut inner = inner.upgrade().await;
-        inner.journal.ensure_section_exists(section + 1).await?;
+        // Mutating operations are serialized by taking the write guard.
+        let mut inner = self.inner.write().await;
+        let mut written = 0;
+        while written < items_count {
+            let (section, pos_in_section) = self.position_to_section(inner.size);
+            let remaining_space = (self.items_per_blob - pos_in_section) as usize;
+            let batch_count = remaining_space.min(items_count - written);
+            let start = written * A::SIZE;
+            let end = start + batch_count * A::SIZE;
 
-        Ok(position)
+            inner
+                .journal
+                .append_raw(section, &items_buf[start..end])
+                .await?;
+            inner.size += batch_count as u64;
+            written += batch_count;
+
+            if inner.size.is_multiple_of(self.items_per_blob) {
+                // The section was filled and must be synced. Downgrade so readers can continue
+                // during the sync, but keep mutators blocked. After sync, upgrade again to
+                // create the next tail section before any append can proceed.
+                let inner_ref = inner.downgrade_to_upgradable();
+                inner_ref.journal.sync(section).await?;
+                inner = inner_ref.upgrade().await;
+                inner.journal.ensure_section_exists(section + 1).await?;
+            }
+        }
+
+        Ok(inner.size - 1)
     }
 
     /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
@@ -826,7 +880,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     async fn reader(&self) -> impl super::Reader<Item = A> + '_ {
@@ -838,9 +892,13 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
+    }
+
+    async fn append_many<'a>(&'a mut self, items: Many<'a, Self::Item>) -> Result<u64, Error> {
+        Self::append_many(self, items).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
@@ -852,7 +910,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
@@ -865,6 +923,29 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
 
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
+    type Config = Config;
+
+    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
+        context: E,
+        merkle_cfg: crate::merkle::journaled::Config,
+        journal_cfg: Self::Config,
+        rewind_predicate: fn(&A) -> bool,
+    ) -> Result<
+        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Error<F>,
+    > {
+        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
+            context,
+            merkle_cfg,
+            journal_cfg,
+            rewind_predicate,
+        )
+        .await
     }
 }
 

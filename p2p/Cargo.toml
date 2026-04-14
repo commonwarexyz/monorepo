@@ -42,7 +42,7 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 tracing-subscriber.workspace = true
 
 [features]
-mocks = []
+mocks = [ "commonware-cryptography/mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",

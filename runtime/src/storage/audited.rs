@@ -105,14 +105,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = bufs.into().coalesce();
+        let bufs = bufs.into();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
-            hasher.update(buf.as_ref());
+            bufs.for_each_chunk(|chunk| hasher.update(chunk));
         });
-        self.inner.write_at(offset, buf).await
+        self.inner.write_at(offset, bufs).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -140,8 +140,9 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
     };
+    use commonware_utils::sync::Mutex;
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
@@ -265,5 +266,69 @@ mod tests {
             auditor2.state(),
             "Hashes do not match after scan"
         );
+    }
+
+    #[derive(Clone)]
+    struct RecordingBlob {
+        chunk_counts: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl crate::Blob for RecordingBlob {
+        async fn read_at(&self, _offset: u64, _len: usize) -> Result<IoBufsMut, Error> {
+            unreachable!("not used in test");
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            unreachable!("not used in test");
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.chunk_counts.lock().push(bufs.into().chunk_count());
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audited_blob_write_preserves_chunking() {
+        let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+        let blob = super::Blob {
+            auditor: Arc::new(crate::deterministic::Auditor::default()),
+            partition: "partition".into(),
+            name: b"blob".to_vec(),
+            inner: RecordingBlob {
+                chunk_counts: chunk_counts.clone(),
+            },
+        };
+
+        blob.write_at(
+            0,
+            IoBufs::from(vec![
+                IoBuf::from(b"a".to_vec()),
+                IoBuf::from(b"b".to_vec()),
+                IoBuf::from(b"c".to_vec()),
+                IoBuf::from(b"d".to_vec()),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*chunk_counts.lock(), vec![4]);
     }
 }

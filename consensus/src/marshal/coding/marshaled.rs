@@ -18,9 +18,14 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and subscribes to shard validity
-//! for the shard received by the proposer. If the shard is valid, the local shard is relayed to all
-//! other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and waits for validation of
+//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
+//! relayed to all other participants to aid in block reconstruction.
+//!
+//! A participant may still reconstruct the full block from gossiped shards before its designated
+//! leader-delivered shard arrives. That is sufficient for later certification and repair flows, but it
+//! is not treated as notarization readiness: a participant only helps form a notarization once it has
+//! validated the shard it is supposed to echo.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
@@ -90,7 +95,7 @@ use crate::{
         },
         core, Update,
     },
-    simplex::{scheme::Scheme, types::Context},
+    simplex::{scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
@@ -501,6 +506,10 @@ where
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping propose"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
@@ -643,6 +652,10 @@ where
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping verify"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
@@ -771,8 +784,12 @@ where
 
         match scheme.me() {
             Some(_) => {
-                // Subscribe to shard validity. The subscription completes when a valid shard arrives.
-                let validity_rx = self.shards.subscribe_shard(payload).await;
+                // Subscribe to assigned shard verification. For participants, this
+                // only completes once the leader-delivered shard for our
+                // assigned index has been verified. Reconstructing the block
+                // from peer gossip is useful for certification later, but is
+                // not enough to emit a notarize vote.
+                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context
                     .with_label("shard_validity_wait")
@@ -922,35 +939,40 @@ where
     ES: Epocher,
 {
     type Digest = Commitment;
+    type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
+    type Plan = Plan<Self::PublicKey>;
 
-    /// Broadcasts a previously built block to the network.
-    ///
-    /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the digest does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, commitment: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().take() else {
-            warn!("missing block to broadcast");
-            return;
-        };
-
-        if block.commitment() != commitment {
-            warn!(
-                round = %round,
-                commitment = %block.commitment(),
-                height = %block.height(),
-                "skipping requested broadcast of block with mismatched commitment"
-            );
-            return;
+    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+        match plan {
+            Plan::Propose => {
+                let Some((round, block)) = self.last_built.lock().take() else {
+                    warn!("missing block to broadcast");
+                    return;
+                };
+                if block.commitment() != commitment {
+                    warn!(
+                        round = %round,
+                        commitment = %block.commitment(),
+                        height = %block.height(),
+                        "skipping requested broadcast of block with mismatched commitment"
+                    );
+                    return;
+                }
+                debug!(
+                    round = %round,
+                    commitment = %block.commitment(),
+                    height = %block.height(),
+                    "requested broadcast of built block"
+                );
+                self.shards.proposed(round, block).await;
+            }
+            Plan::Forward { .. } => {
+                // Coding variant does not support targeted forwarding;
+                // peers reconstruct blocks from erasure-coded shards.
+                //
+                // TODO(#3389): Support checked data forwarding for PhasedScheme.
+            }
         }
-
-        debug!(
-            round = %round,
-            commitment = %block.commitment(),
-            height = %block.height(),
-            "requested broadcast of built block"
-        );
-
-        self.shards.proposed(round, block).await;
     }
 }
 

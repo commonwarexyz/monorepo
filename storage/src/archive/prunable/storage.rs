@@ -467,6 +467,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
     }

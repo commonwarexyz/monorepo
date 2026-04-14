@@ -30,12 +30,12 @@ fn fuzz(input: FuzzInput) {
 
     let config = Config {
         nodes,
-        pruned_to: Location::new(input.pruned_to),
+        pruning_boundary: Location::new(input.pruned_to),
         pinned_nodes,
     };
 
-    let mut hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = Mmr::init(config, &mut hasher) else {
+    let hasher = StandardHasher::<Sha256>::new();
+    let Ok(mmr) = Mmr::init(config, &hasher) else {
         return;
     };
 
@@ -45,7 +45,7 @@ fn fuzz(input: FuzzInput) {
 
     let leaves = mmr.leaves();
     if leaves > 0 {
-        let _ = mmr.range_proof(Location::new(0)..leaves);
+        let _ = mmr.range_proof(&hasher, Location::new(0)..leaves);
     }
 }
 

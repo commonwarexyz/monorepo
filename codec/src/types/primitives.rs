@@ -19,7 +19,8 @@
 //!   endian ambiguity.
 
 use crate::{
-    util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    util::at_least, varint::UInt, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt,
+    Write,
 };
 use bytes::{Buf, BufMut};
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
@@ -196,12 +197,26 @@ impl<T: Write> Write for Option<T> {
             inner.write(buf);
         }
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.is_some().write(buf);
+        if let Some(inner) = self {
+            inner.write_bufs(buf);
+        }
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for Option<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.as_ref().map_or(1, |inner| 1 + inner.encode_size())
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.as_ref()
+            .map_or(1, |inner| 1 + inner.encode_inline_size())
     }
 }
 

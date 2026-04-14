@@ -1,13 +1,17 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::NZU32;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use commonware_utils::{NZUsize, NZU32};
+use std::{
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `allow_private_ips`, and `mailbox_size`).
+/// exception of `crypto`, `listen`, `allow_private_ips`, `mailbox_size`, and `send_batch_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
@@ -46,6 +50,11 @@ pub struct Config<C: Signer> {
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
 
+    /// Maximum number of already-queued outbound messages to combine into one connection write.
+    ///
+    /// Set this to `1` to disable batching.
+    pub send_batch_size: NonZeroUsize,
+
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
 
@@ -58,8 +67,8 @@ pub struct Config<C: Signer> {
     /// unauthenticated peers from holding open connection.
     pub handshake_timeout: Duration,
 
-    /// Quota for connection attempts per peer (incoming or outgoing).
-    pub allowed_connection_rate_per_peer: Quota,
+    /// Minimum time between connection reservations for a single peer.
+    pub peer_connection_cooldown: Duration,
 
     /// Maximum number of concurrent handshake attempts allowed.
     pub max_concurrent_handshakes: NonZeroU32,
@@ -82,11 +91,6 @@ pub struct Config<C: Signer> {
     /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
 
-    /// Average frequency at which we will fetch a new list of dialable peers.
-    ///
-    /// This value also limits the rate at which we attempt to re-dial any single peer.
-    pub query_frequency: Duration,
-
     /// Number of peer sets to track.
     ///
     /// We will attempt to maintain connections to peers stored
@@ -95,7 +99,7 @@ pub struct Config<C: Signer> {
     /// been evicted and/or to communicate with peers in a future
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
-    pub tracked_peer_sets: usize,
+    pub tracked_peer_sets: NonZeroUsize,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -119,17 +123,17 @@ impl<C: Signer> Config<C> {
             bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
+            peer_connection_cooldown: Duration::from_secs(60),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
             dial_frequency: Duration::from_secs(1),
-            query_frequency: Duration::from_secs(60),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_hours(4),
         }
     }
@@ -151,17 +155,17 @@ impl<C: Signer> Config<C> {
             bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
+            peer_connection_cooldown: Duration::from_secs(1),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             dial_frequency: Duration::from_millis(500),
-            query_frequency: Duration::from_secs(30),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_hours(1),
         }
     }
@@ -178,17 +182,17 @@ impl<C: Signer> Config<C> {
             bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
+            peer_connection_cooldown: Duration::from_millis(250),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
             dial_frequency: Duration::from_millis(200),
-            query_frequency: Duration::from_secs(5),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_mins(1),
         }
     }

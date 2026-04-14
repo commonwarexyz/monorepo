@@ -8,7 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
     Spawner, Storage, StreamOf,
 };
-use commonware_storage::qmdb::sync::Target;
+use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
@@ -19,6 +19,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc,
+    non_empty_range,
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
@@ -105,7 +106,7 @@ async fn maybe_add_operations<DB, E>(
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: Storage + Clock + Metrics + RngCore,
 {
     let now = context.current();
@@ -154,7 +155,7 @@ async fn handle_get_sync_target<DB>(
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
 
@@ -171,7 +172,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: inactivity_floor..size,
+            range: non_empty_range!(inactivity_floor, size),
         },
     };
 
@@ -185,7 +186,7 @@ async fn handle_get_operations<DB>(
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -220,12 +221,26 @@ where
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
-    drop(database);
-
     let (proof, operations) = result.map_err(|err| {
         warn!(?err, "failed to generate historical proof");
         Error::Database(err)
     })?;
+
+    // Optionally fetch pinned nodes
+    let pinned_nodes = if request.include_pinned_nodes {
+        let nodes = database
+            .pinned_nodes_at(request.start_loc)
+            .await
+            .map_err(|err| {
+                warn!(?err, "failed to get pinned nodes");
+                Error::Database(err)
+            })?;
+        Some(nodes)
+    } else {
+        None
+    };
+
+    drop(database);
 
     debug!(
         request_id = request.request_id,
@@ -238,6 +253,7 @@ where
         request_id: request.request_id,
         proof,
         operations,
+        pinned_nodes,
     })
 }
 
@@ -247,7 +263,7 @@ async fn handle_message<DB>(
     message: wire::Message<DB::Operation, Key>,
 ) -> wire::Message<DB::Operation, Key>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     let request_id = message.request_id();
     match message {
@@ -301,8 +317,9 @@ async fn recv_loop<DB, E>(
     response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
     client_addr: SocketAddr,
 ) where
-    DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Metrics + Network + Spawner,
 {
     loop {
@@ -350,8 +367,9 @@ async fn handle_client<DB, E>(
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
@@ -390,7 +408,7 @@ async fn initialize_database<DB, E>(
     context: &mut E,
 ) -> Result<DB, Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: RngCore,
 {
     info!("starting {} database", DB::name());
@@ -428,8 +446,9 @@ async fn run_helper<DB, E>(
     database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());

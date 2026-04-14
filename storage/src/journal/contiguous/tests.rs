@@ -1,6 +1,6 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Reader as _};
+use super::{Contiguous, Many, Reader as _};
 use crate::{
     journal::{contiguous::Mutable, Error},
     Persistable,
@@ -80,6 +80,11 @@ where
     test_rewind_after_prune(&indexed_factory).await;
     test_section_boundary_behavior(&indexed_factory).await;
     test_destroy_and_reinit(&indexed_factory).await;
+    test_append_many_empty(&indexed_factory).await;
+    test_append_many_basic(&indexed_factory).await;
+    test_append_many_across_sections(&indexed_factory).await;
+    test_append_many_then_append(&indexed_factory).await;
+    test_append_many_single_item(&indexed_factory).await;
 }
 
 /// Test that an empty journal has empty bounds (start == end == 0).
@@ -1103,4 +1108,107 @@ where
 
         journal.destroy().await.unwrap();
     }
+}
+
+/// Test append_many with empty slice returns an error.
+async fn test_append_many_empty<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-empty".into()).await.unwrap();
+
+    // Append some items first.
+    journal.append(&10).await.unwrap();
+    journal.append(&20).await.unwrap();
+
+    // append_many with empty slice should return an error.
+    assert!(matches!(
+        journal.append_many(Many::Flat(&[])).await,
+        Err(Error::EmptyAppend)
+    ));
+    assert_eq!(get_bounds(&journal).await.end, 2);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many with multiple items.
+async fn test_append_many_basic<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-basic".into()).await.unwrap();
+
+    let pos = journal
+        .append_many(Many::Flat(&[100, 200, 300]))
+        .await
+        .unwrap();
+    assert_eq!(pos, 2);
+    assert_eq!(get_bounds(&journal).await.end, 3);
+
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 100);
+    assert_eq!(read_item(&journal, 1).await.unwrap(), 200);
+    assert_eq!(read_item(&journal, 2).await.unwrap(), 300);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many across section boundaries (items_per_section = 10).
+async fn test_append_many_across_sections<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-sections".into()).await.unwrap();
+
+    // Append 25 items in one call, crossing section boundaries at 10 and 20.
+    let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
+    let pos = journal.append_many(Many::Flat(&items)).await.unwrap();
+    assert_eq!(pos, 24);
+    assert_eq!(get_bounds(&journal).await.end, 25);
+
+    for i in 0..25u64 {
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 10);
+    }
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many followed by single appends.
+async fn test_append_many_then_append<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-then-single".into()).await.unwrap();
+
+    journal
+        .append_many(Many::Flat(&[10, 20, 30]))
+        .await
+        .unwrap();
+    let pos = journal.append(&40).await.unwrap();
+    assert_eq!(pos, 3);
+
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 10);
+    assert_eq!(read_item(&journal, 1).await.unwrap(), 20);
+    assert_eq!(read_item(&journal, 2).await.unwrap(), 30);
+    assert_eq!(read_item(&journal, 3).await.unwrap(), 40);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many with a single item behaves like append.
+async fn test_append_many_single_item<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-single".into()).await.unwrap();
+
+    let pos = journal.append_many(Many::Flat(&[42])).await.unwrap();
+    assert_eq!(pos, 0);
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 42);
+
+    journal.destroy().await.unwrap();
 }

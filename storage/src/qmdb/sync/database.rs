@@ -7,46 +7,19 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator> Config for crate::qmdb::any::FixedConfig<T> {
-    type JournalConfig = crate::journal::contiguous::fixed::Config;
+impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
+    type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        crate::journal::contiguous::fixed::Config {
-            partition: self.log_journal_partition.clone(),
-            items_per_blob: self.log_items_per_blob,
-            write_buffer: self.log_write_buffer,
-            page_cache: self.page_cache.clone(),
-        }
-    }
-}
-
-impl<T: Translator, C: Clone> Config for crate::qmdb::any::VariableConfig<T, C> {
-    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
-
-    fn journal_config(&self) -> Self::JournalConfig {
-        crate::journal::contiguous::variable::Config {
-            items_per_section: self.log_items_per_blob,
-            partition: self.log_partition.clone(),
-            compression: self.log_compression,
-            codec_config: self.log_codec_config.clone(),
-            page_cache: self.page_cache.clone(),
-            write_buffer: self.log_write_buffer,
-        }
+        self.journal_config.clone()
     }
 }
 
 impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
-    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
+    type JournalConfig = C;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        crate::journal::contiguous::variable::Config {
-            items_per_section: self.log_items_per_section,
-            partition: self.log_partition.clone(),
-            compression: self.log_compression,
-            codec_config: self.log_codec_config.clone(),
-            page_cache: self.page_cache.clone(),
-            write_buffer: self.log_write_buffer,
-        }
+        self.log.clone()
     }
 }
 pub trait Database: Sized + Send {
@@ -67,7 +40,7 @@ pub trait Database: Sized + Send {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;

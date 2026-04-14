@@ -357,7 +357,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
-                debug!(?proposal, "setting verified proposal from certificate");
+                debug!(?proposal, "setting proposal from certificate");
                 self.leader_deadline = None;
                 None
             }
@@ -478,8 +478,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
-        // Even if we've already seen a notarization, we still broadcast our notarize vote
-        // in case it is useful (in the worst case it lets others observe we are alive).
+        // Even if we've already seen a notarization, we are still willing to broadcast
+        // our notarize vote in case someone is recording our activity.
 
         // If we don't have a verified proposal, return None.
         //
@@ -502,15 +502,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
-        // Even if we've already seen a finalization, we still broadcast our finalize vote
-        // in case it is useful (in the worst case it lets others observe we are alive).
+        // Even if we've already seen a finalization, we are still willing to broadcast
+        // our finalize vote in case someone is recording our activity.
 
-        // If we don't have a verified proposal, return None.
-        //
-        // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
-        // completed yet.
-        if self.proposal.status() != ProposalStatus::Verified {
+        // If we have a proposal and we have not yet detected equivocation, we are willing
+        // to consider constructing a finalize vote.
+        if !self.proposal.has_unequivocated_proposal() {
             return None;
         }
 
@@ -518,6 +515,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.notarization.as_ref()?;
 
         // If we haven't certified the proposal, return None.
+        //
+        // Note, this does not require verification.
         if !self.is_certified() {
             return None;
         }
@@ -741,6 +740,78 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_notarization_without_local_notarize() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
+
+        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Recover a certificate built entirely from remote votes.
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let certificate =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (accepted, equivocator) = round.add_notarization(certificate.clone());
+        assert!(accepted);
+        assert!(equivocator.is_none());
+
+        // Recovered certificates must not imply that we cast a local notarize vote.
+        assert!(!round.broadcast_notarize);
+        assert_eq!(round.construct_notarize(), None);
+
+        // But we should still broadcast the recovered certificate.
+        assert_eq!(round.broadcast_notarization(), Some(certificate));
+        assert!(!round.broadcast_notarize);
+        assert_eq!(round.broadcast_notarization(), None);
+    }
+
+    #[test]
+    fn broadcast_finalization_without_local_finalize() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([10u8; 32]));
+
+        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Recover a certificate built entirely from remote votes.
+        let finalization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let certificate =
+            Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                .unwrap();
+        let (accepted, equivocator) = round.add_finalization(certificate.clone());
+        assert!(accepted);
+        assert!(equivocator.is_none());
+
+        // Recovered certificates must not imply that we cast a local finalize vote.
+        assert!(!round.broadcast_finalize);
+        assert_eq!(round.construct_finalize(), None);
+
+        // But we should still broadcast the recovered certificate.
+        assert_eq!(round.broadcast_finalization(), Some(certificate));
+        assert!(!round.broadcast_finalize);
+        assert_eq!(round.broadcast_finalization(), None);
+    }
+
+    #[test]
     fn replay_message_sets_broadcast_flags() {
         let mut rng = test_rng();
         let namespace = b"ns";
@@ -807,6 +878,38 @@ mod tests {
         assert!(round.broadcast_nullification);
         round.replay(&Artifact::Finalization(finalization));
         assert!(round.broadcast_finalization);
+    }
+
+    /// Replaying a local notarize vote for a leader-owned proposal should
+    /// restore the proposal as already verified without requesting verification.
+    #[test]
+    fn replayed_local_notarize_restores_verified_proposal_state() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        // Create a proposal where we (participant 0) are the leader.
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(1), Sha256Digest::from([41u8; 32]));
+        let notarize_local = Notarize::sign(&local_scheme, proposal.clone()).expect("notarize");
+
+        // Replay the local notarize into a fresh round.
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+        round.replay(&Artifact::Notarize(notarize_local));
+
+        // Proposal should be restored as verified (we are the leader).
+        assert_eq!(round.proposal.proposal(), Some(&proposal));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
+        assert!(round.broadcast_notarize);
+
+        // No verification request should be emitted.
+        assert!(
+            !round.try_verify(),
+            "leader-owned replay should not request verification again"
+        );
     }
 
     #[test]
@@ -1096,6 +1199,42 @@ mod tests {
         assert!(added);
 
         // Now construct finalize succeeds
+        assert!(round.construct_finalize().is_some());
+    }
+
+    #[test]
+    fn construct_finalize_allows_certified_recovered_proposal() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([3u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+
+        // Recover the proposal and notarization without running local verify.
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (added, equivocator) = round.add_notarization(notarization);
+        assert!(added);
+        assert!(equivocator.is_none());
+
+        // Recovered proposals should not emit a late notarize vote.
+        assert!(round.construct_notarize().is_none());
+
+        // But a successful certification still allows us to help finalize.
+        round.certified(true);
         assert!(round.construct_finalize().is_some());
     }
 }

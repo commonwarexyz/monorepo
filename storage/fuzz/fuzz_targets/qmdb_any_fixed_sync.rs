@@ -4,6 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
+    journal::contiguous::fixed::Config as FConfig,
+    merkle::mmr::Family,
+    mmr::journaled::Config as MmrConfig,
     qmdb::{
         any::{
             unordered::fixed::{Db, Operation as FixedOperation},
@@ -13,13 +16,13 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type FixedDb = Db<deterministic::Context, Key, Value, Sha256, TwoCap>;
+type FixedDb = Db<Family, deterministic::Context, Key, Value, Sha256, TwoCap>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -89,24 +92,30 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}-log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
+        merkle_config: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FConfig {
+            partition: format!("{test_name}-log"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
 async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
-        Op = FixedOperation<Key, Value>,
+        Op = FixedOperation<Family, Key, Value>,
     >,
 >(
     context: deterministic::Context,
@@ -122,12 +131,15 @@ async fn test_sync<
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
         context: context.with_label("sync").with_attribute("id", sync_id),
         update_rx: None,
+        finish_rx: None,
+        reached_target_tx: None,
         db_config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
         resolver,
         apply_batch_size: 100,
         max_outstanding_requests: 10,
+        max_retained_roots: 8,
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
@@ -182,18 +194,15 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)))
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -212,24 +221,21 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)))
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
-                        range: db.inactivity_floor_loc()..db.bounds().await.end,
+                        range: non_empty_range!(db.inactivity_floor_loc(), db.bounds().await.end),
                     };
 
                     let wrapped_src = Arc::new(db);
@@ -266,14 +272,12 @@ fn fuzz(mut input: FuzzInput) {
             }
         }
 
-        let finalized = {
-            let mut batch = db.new_batch();
-            for (k, v) in pending_writes.drain(..) {
-                batch = batch.write(k, v);
-            }
-            batch.merkleize(None).await.unwrap().finalize()
-        };
-        db.apply_batch(finalized)
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");

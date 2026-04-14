@@ -4,7 +4,7 @@
 //! the size of the map must fit within a [u32].
 
 use crate::{
-    codec::{EncodeSize, Read, Write},
+    codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
     RangeCfg,
@@ -28,6 +28,18 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
             v.write(buf);
         }
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+
+        // Sort the keys to ensure deterministic encoding
+        let mut entries: Vec<_> = self.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in entries {
+            k.write_bufs(buf);
+            v.write_bufs(buf);
+        }
+    }
 }
 
 impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V> {
@@ -40,6 +52,19 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
         for (k, v) in self {
             size += k.encode_size();
             size += v.encode_size();
+        }
+        size
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        // Start with the size of the length prefix
+        let mut size = self.len().encode_size();
+
+        // Add the encoded size of each key and value
+        // Note: Iteration order doesn't matter for size calculation.
+        for (k, v) in self {
+            size += k.encode_inline_size();
+            size += v.encode_inline_size();
         }
         size
     }

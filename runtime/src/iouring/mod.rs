@@ -1,10 +1,10 @@
 //! io_uring event loop implementation.
 //!
-//! This module provides a high-level interface for submitting operations to Linux's io_uring
+//! This module provides a high-level interface for submitting logical requests to Linux's io_uring
 //! subsystem and receiving their results. The design centers around a single event loop that
 //! manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
 //!
-//! Work is submitted via [Submitter], which pushes operations into an MPSC queue and signals
+//! Work is submitted via [Handle], which pushes [Request]s into an MPSC queue and signals
 //! an internal `eventfd` wake source. The event loop blocks in `io_uring_enter` and is woken by:
 //! - normal CQE progress in the ring
 //! - `eventfd` readiness when new work is queued or all submitters are dropped
@@ -24,72 +24,90 @@
 //!
 //! The core of this implementation is [IoUringLoop::run], which blocks its calling thread while
 //! operating an event loop that:
-//! 1. Drains operation requests from a bounded MPSC channel fed by [Submitter]
-//! 2. Assigns unique IDs to each operation and submits them to io_uring's submission queue (SQE)
+//! 1. Drains logical requests from a bounded MPSC channel fed by [Handle]
+//! 2. Admits requests into the waiter table and submits their first SQE
 //! 3. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
-//! 4. Routes completion results back to the original requesters via oneshot channels
+//! 4. Handles partial progress and retryable errors by requeuing requests
+//! 5. Routes typed completion results back to the original requesters via oneshot channels
 //!
-//! ## Operation Flow
+//! ## Request Flow
 //!
 //! ```text
 //! Data path:
-//!   Client task -> Submitter -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
-//!   Client task <- oneshot <- IoUringLoop <- CQE <- io_uring
+//!   Client task -> Handle -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
+//!   Client task <- typed oneshot <- IoUringLoop <- CQE <- io_uring
 //!
 //! Wake path:
-//!   Submitter --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
+//!   Handle --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
 //!
 //! Loop behavior:
 //!   1) Drain CQEs.
-//!   2) Drain MPSC and stage SQEs.
-//!   3) Submit and block in io_uring_enter until a CQE (data or wake) arrives.
+//!   2) Advance timeouts.
+//!   3) Rarely rearm wake polling, then stage cancels, ready-queue requests,
+//!      and new inbound requests into SQ.
+//!   4) Submit and block in io_uring_enter until a CQE (data or wake) arrives.
 //! ```
 //!
 //! ## Work Tracking
 //!
-//! Each submitted operation is assigned a waiter slot index that serves as the
-//! `user_data` field in the SQE. The event loop maintains a flat `Waiters` store where
-//! each slot maps to:
-//! - A oneshot sender for returning results to the caller
-//! - An optional buffer that must be kept alive for the duration of the operation
-//! - An optional FD handle to prevent descriptor reuse while the operation is in flight
-//! - An optional timespec, if operation timeouts are enabled, that must be kept
-//!   alive for the duration of the operation
+//! Each admitted request is assigned a waiter id that serves as the `user_data` field in its
+//! SQEs. The event loop maintains a flat `Waiters` store where each slot maps to an
+//! [Request] that owns all resources (buffers, FDs, progress state, completion sender)
+//! needed for the request's lifetime.
 //!
 //! ## Timeout Handling
 //!
-//! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
-//! - Each operation is linked to a timeout using io_uring's `IOSQE_IO_LINK` flag
-//! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
-//! - Reserved `user_data` values distinguish internal timeout/wake completions from
-//!   regular operations
+//! Requests can optionally carry an absolute deadline. When present:
+//! - The loop tracks deadline ticks in a userspace timing wheel
+//! - Already-expired requests complete immediately with timeout before SQE submission
+//! - Requests that still have an SQE in flight submit an async-cancel SQE on expiry
+//! - Requests parked only in the ready queue time out locally without staging cancel SQEs
+//! - Timeouts apply to the whole logical request, not individual SQEs
+//! - If the original op CQE completes the whole request, the caller sees success
+//! - If the original op CQE only makes partial/retryable progress after timeout, the caller
+//!   sees timeout and no follow-up SQE is issued
+//!
+//! ## Submission Policy
+//!
+//! A logical request may need multiple SQEs before it completes. The loop keeps
+//! such requests on a FIFO ready queue and stages work in this order:
+//! 1. Rarely, a wake poll rearm SQE when a prior multishot wake CQE ended the
+//!    existing poll registration.
+//! 2. Cancellation SQEs for timed-out requests.
+//! 3. Ready-queue requests that were already admitted and need another SQE.
+//! 4. Fresh requests drained from the channel, until waiter or SQ capacity is hit.
+//!
+//! During shutdown, there is no new channel work, so the drain phase continues
+//! servicing cancellations and the ready queue until requests complete, time
+//! out, or are abandoned by `shutdown_timeout`.
 //!
 //! ## Wake Handling
 //!
 //! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
 //! a multishot `PollAdd` on an internal `eventfd`.
-//! - [Submitter::send] increments an atomic submission sequence
+//! - [Handle::enqueue] increments an atomic submission sequence
 //! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE` is not set
 //! - The loop uses an arm-and-recheck sleep handshake (`submitted_seq` vs `processed_seq`)
 //! - Submitters ring `eventfd` only while sleep intent is armed
 //!
 //! ## Shutdown Process
 //!
-//! When the operation channel closes, the event loop enters a drain phase:
-//! 1. Stops accepting new operations
-//! 2. Waits for all in-flight operations to complete
-//! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
+//! When the request channel closes, the event loop enters a drain phase:
+//! 1. Stops accepting new requests
+//! 2. Waits for all in-flight requests to complete or be cancelled
+//! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
 //! 4. Cleans up and exits. Dropping the last submitter signals `eventfd` so shutdown is observed
 //!    promptly even if the loop is blocked.
 //!
 //! ## Liveness Model
 //!
-//! This loop enforces a configured upper bound on in-flight operations, and submissions are staged
-//! from a FIFO MPSC queue.
+//! This loop enforces a configured upper bound on in-flight requests. New submissions arrive
+//! through a FIFO MPSC queue, but already-admitted requests may be restaged ahead of that queue
+//! according to the submission policy above.
 //!
-//! This implies a bounded-liveness caveat: if all in-flight operations are waiting on operations
+//! This implies a bounded-liveness caveat: if all in-flight requests are waiting on operations
 //! that are still queued behind the capacity limit, the loop cannot make progress until some
-//! in-flight operation completes or is canceled.
+//! in-flight request completes or is canceled.
 //!
 //! Concrete example with `cfg.size = 2`:
 //!
@@ -101,144 +119,60 @@
 //!    cannot free capacity on its own.
 //!
 //! The runtime cannot infer dependency relationships between arbitrary queued and in-flight
-//! operations, so it cannot implement dependency-aware admission (and doing so generically would
+//! requests, so it cannot implement dependency-aware admission (and doing so generically would
 //! add substantial overhead).
 //!
-//! The practical way to recover from this condition is cancellation via per-op timeouts. When
-//! timed-out in-flight operations are canceled, waiter capacity is eventually released and queued
-//! operations can be staged. Without cancellation, liveness depends on workload structure: callers
-//! must avoid submission patterns where in-flight operations require later queued operations to
-//! run.
+//! The practical way to recover from this condition is cancellation via per-request timeouts.
+//! When timed-out in-flight requests are canceled, waiter capacity is eventually released and
+//! queued requests can be staged. Without cancellation, liveness depends on workload structure:
+//! callers must avoid submission patterns where in-flight requests require later queued requests
+//! to run.
 //!
 //! Operational guidance:
-//! - Workloads that may create causal dependencies across queued and in-flight operations must use
-//!   per-op timeouts.
-//! - If cancellation is disabled, callers must guarantee that in-flight operations never depend on
-//!   later queued operations, otherwise the loop can deadlock.
+//! - Workloads that may create causal dependencies across queued and in-flight requests must use
+//!   per-request timeouts.
+//! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
+//!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{IoBuf, IoBufMut, IoBufs};
+use crate::{Error, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
-    opcode::{LinkTimeout, PollAdd},
-    squeue::{Entry as SqueueEntry, SubmissionQueue},
-    types::{Fd, SubmitArgs, Timespec},
+    opcode::AsyncCancel,
+    squeue::SubmissionQueue,
+    types::{SubmitArgs, Timespec},
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
+use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
+    collections::VecDeque,
     fs::File,
-    mem::size_of,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    os::fd::OwnedFd,
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::warn;
 
-/// Reserved `user_data` value for a CQE that indicates an operation timed out.
-const TIMEOUT_USER_DATA: u64 = u64::MAX;
-/// Reserved `user_data` value for internal wake poll completions.
-const WAKE_USER_DATA: u64 = u64::MAX - 1;
+mod request;
+mod timeout;
+use timeout::{Tick, TimeoutWheel};
+mod waiter;
+use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
+mod waker;
+use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
-/// Bit used to mark that the loop is armed for sleep.
-const SLEEP_INTENT_BIT: u64 = 1;
-/// Packed-state increment for one submitted operation (bit 0 is reserved).
-const SUBMISSION_INCREMENT: u64 = 2;
-/// Sequence domain used by the packed submission counter (state >> 1).
-const SUBMISSION_SEQ_MASK: u64 = u64::MAX >> 1;
+/// Packed `io_uring` `user_data` value.
+type UserData = u64;
 
-/// Buffer for io_uring operations.
-///
-/// The variant must match the operation type:
-/// - `Read`: For operations where the kernel writes INTO the buffer (e.g., recv, read)
-/// - `Write`: For operations where the kernel reads FROM a single contiguous buffer (e.g., send, write)
-/// - `WriteVectored`: For operations where the kernel reads FROM multiple buffers (e.g., writev)
-#[derive(Debug)]
-pub enum OpBuffer {
-    /// Buffer for read operations - kernel writes into this.
-    Read(IoBufMut),
-    /// Buffer for write operations - kernel reads from this.
-    Write(IoBuf),
-    /// Buffers for vectored write operations - kernel reads from these.
-    WriteVectored(IoBufs),
-}
-
-impl From<IoBufMut> for OpBuffer {
-    fn from(buf: IoBufMut) -> Self {
-        Self::Read(buf)
-    }
-}
-
-impl From<IoBuf> for OpBuffer {
-    fn from(buf: IoBuf) -> Self {
-        Self::Write(buf)
-    }
-}
-
-impl From<IoBufs> for OpBuffer {
-    fn from(bufs: IoBufs) -> Self {
-        Self::WriteVectored(bufs)
-    }
-}
-
-/// File descriptor for io_uring operations.
-///
-/// The variant must match the descriptor type:
-/// - `Fd`: For network sockets and other OS file descriptors
-/// - `File`: For file-backed descriptors
-pub enum OpFd {
-    /// A socket or other OS file descriptor.
-    ///
-    /// NOTE: this is only used by the network backend, hence the allow dead
-    /// code. The field itself is never read regardless, since this only exists
-    /// to keep the FD alive until operation completion.
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
-    Fd(#[allow(dead_code)] Arc<OwnedFd>),
-    /// A file-backed descriptor.
-    ///
-    /// NOTE: this is only used by the storage backend, hence the allow dead
-    /// code. The field itself is never read regardless, since this only exists
-    /// to keep the FD alive until operation completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    File(#[allow(dead_code)] Arc<File>),
-}
-
-/// Owned iovecs that back a vectored io_uring operation.
-///
-/// This wrapper allows transferring iovec arrays through channels while keeping
-/// the pointed-to buffer memory alive through [`OpBuffer`].
-///
-/// The field is never read directly, since this only exists to keep the iovecs
-/// alive until operation completion.
-pub struct OpIovecs(#[allow(dead_code)] Box<[libc::iovec]>);
-
-impl OpIovecs {
-    pub const fn new(iovecs: Box<[libc::iovec]>) -> Self {
-        Self(iovecs)
-    }
-
-    pub fn as_ptr(&self) -> *const libc::iovec {
-        self.0.as_ptr()
-    }
-}
-
-// SAFETY: `OpIovecs` only carries raw iovec descriptors. The pointed-to memory
-// is owned by `OpBuffer` and retained for the operation lifetime by the
-// io_uring waiter map.
-unsafe impl Send for OpIovecs {}
-
-#[derive(Debug)]
 /// Tracks io_uring metrics.
+#[derive(Debug)]
 pub struct Metrics {
-    /// Number of operations submitted to the io_uring whose CQEs haven't
-    /// yet been processed. Note this metric doesn't include timeouts,
-    /// which are generated internally by the io_uring event loop.
+    /// Number of active logical requests whose CQEs haven't yet been fully
+    /// processed. Note this metric doesn't include timeouts, which are
+    /// generated internally by the io_uring event loop.
     /// This is updated in the main loop and at shutdown drain exit, so it may
     /// temporarily vary from the exact in-flight count between update points.
     pending_operations: Gauge,
@@ -251,16 +185,16 @@ impl Metrics {
         };
         registry.register(
             "pending_operations",
-            "Number of operations submitted to the io_uring whose CQEs haven't yet been processed",
+            "Number of active logical requests in the io_uring loop",
             metrics.pending_operations.clone(),
         );
         metrics
     }
 }
 
-#[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
 /// See `man io_uring`.
+#[derive(Clone, Debug)]
 pub struct Config {
     /// Requested size of the ring.
     ///
@@ -279,18 +213,22 @@ pub struct Config {
     /// `single_issuer` when `run` is executed on a dedicated thread.
     /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
-    /// If None, operations submitted to the io_uring will not time out.
-    /// In this case, the caller should be careful to ensure that the
-    /// operations submitted to the io_uring will eventually complete.
-    /// If Some, each submitted operation will time out after this duration.
-    /// If an operation times out, its result will be -[libc::ETIMEDOUT].
-    pub op_timeout: Option<Duration>,
-    /// The maximum time the io_uring event loop will wait for in-flight operations
+    /// Maximum request timeout supported by the userspace timeout wheel.
+    ///
+    /// Deadlines are clamped to this horizon. This value should be set to the
+    /// largest expected per-request deadline budget.
+    pub max_request_timeout: Duration,
+    /// The maximum time the io_uring event loop will wait for in-flight requests
     /// to complete before abandoning them during shutdown.
-    /// If None, the event loop will wait indefinitely for in-flight operations
+    /// If None, the event loop will wait indefinitely for in-flight requests
     /// to complete before shutting down. In this case, the caller should be careful
-    /// to ensure that the operations submitted to the io_uring will eventually complete.
+    /// to ensure that the requests submitted to the io_uring will eventually complete.
     pub shutdown_timeout: Option<Duration>,
+    /// Tick granularity used by the userspace timeout wheel.
+    ///
+    /// Smaller values increase timing precision but increase wakeup and wheel
+    /// processing frequency.
+    pub timeout_wheel_tick: Duration,
 }
 
 impl Default for Config {
@@ -299,261 +237,19 @@ impl Default for Config {
             size: 128,
             io_poll: false,
             single_issuer: false,
-            op_timeout: None,
+            max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
+            timeout_wheel_tick: Duration::from_millis(5),
         }
     }
 }
 
-/// An operation submitted to [IoUringLoop], processed by [IoUringLoop::run].
-pub struct Op {
-    /// The submission queue entry to be submitted to the ring.
-    /// Its user data field will be overwritten. Users shouldn't rely on it.
-    pub work: SqueueEntry,
-    /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// The buffer used for the operation, if any.
-    /// - For reads: `OpBuffer::Read(IoBufMut)` - kernel writes into this
-    /// - For writes: `OpBuffer::Write(IoBuf)` - kernel reads from this
-    /// - For vectored writes: `OpBuffer::WriteVectored(IoBufs)` - kernel reads from these
-    /// - None for operations that don't use a buffer (e.g. sync, timeout)
-    ///
-    /// We hold the buffer(s) here so it's guaranteed to live until the operation
-    /// completes, preventing use-after-free issues.
-    pub buffer: Option<OpBuffer>,
-    /// The file descriptor used for the operation, if any.
-    ///
-    /// We hold the descriptor here so the OS cannot reuse the FD number
-    /// while the operation is queued or in-flight.
-    pub fd: Option<OpFd>,
-    /// Owned iovecs used by vectored operations, if any.
-    ///
-    /// We hold these iovecs here so they're guaranteed to live until the operation
-    /// completes, preventing use-after-free issues.
-    pub iovecs: Option<OpIovecs>,
-}
-
-/// Shared wake state used by submitters and the io_uring loop.
-///
-/// `state` packs two values:
-/// - bit 0: sleep intent flag (`1` means the loop may block in `submit_and_wait`)
-/// - bits 1..: submitted sequence (`submitted_seq`)
-///
-/// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
-/// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
-/// stored in loop-local state). The loop may block only when:
-/// - sleep intent is armed, and
-/// - `submitted_seq == processed_seq`.
-///
-/// Blocking follows an arm-and-recheck protocol:
-/// - The loop first verifies `submitted_seq == processed_seq`, then arms sleep intent.
-/// - `arm()` returns a submission-sequence snapshot from the same atomic state transition.
-/// - The loop blocks only if that post-arm snapshot still equals `processed_seq`.
-/// - Submitters ring `eventfd` only when they observe sleep intent armed.
-///
-/// This makes submissions racing with the sleep transition observable either by
-/// sequence mismatch in the loop or by an eventfd wakeup.
-struct WakerInner {
-    wake_fd: OwnedFd,
-    state: AtomicU64,
-}
-
-/// Internal eventfd-backed wake source for the io_uring loop.
-///
-/// - Publish submissions from producers via [`Waker::publish`]
-/// - Expose submitted sequence snapshots via [`Waker::submitted`]
-/// - Coordinate sleep intent transitions via [`Waker::arm`] and [`Waker::disarm`]
-/// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
-/// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
-///
-/// This type intentionally separates:
-/// - sequence publication (`state` high bits)
-/// - sleep gating (`state` bit 0)
-/// - kernel readiness consumption (`eventfd` read path)
-///
-/// Keeping these concerns separate makes the wake protocol explicit and avoids
-/// coupling correctness to exact eventfd coalescing behavior.
-#[derive(Clone)]
-struct Waker {
-    inner: Arc<WakerInner>,
-}
-
-impl Waker {
-    /// Create a non-blocking eventfd wake source.
-    fn new() -> Result<Self, std::io::Error> {
-        // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `eventfd` returned a new owned descriptor.
-        let wake_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-        Ok(Self {
-            inner: Arc::new(WakerInner {
-                wake_fd,
-                state: AtomicU64::new(0),
-            }),
-        })
-    }
-
-    /// Ring the eventfd doorbell.
-    fn ring(&self) {
-        let value: u64 = 1;
-        loop {
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to an initialized 8-byte integer for the duration of the call.
-            let ret = unsafe {
-                libc::write(
-                    self.inner.wake_fd.as_raw_fd(),
-                    &value as *const u64 as *const libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                return;
-            }
-            if ret == -1 {
-                match std::io::Error::last_os_error().raw_os_error() {
-                    // Retry if interrupted by a signal before completion.
-                    Some(libc::EINTR) => continue,
-                    // Non-blocking write would block because the eventfd
-                    // counter is saturated. A wake is already queued, so no
-                    // retry is needed.
-                    Some(libc::EAGAIN) => return,
-                    _ => {
-                        warn!("eventfd write failed");
-                        return;
-                    }
-                }
-            }
-            return;
-        }
-    }
-
-    /// Publish one submitted operation and optionally ring `eventfd`.
-    ///
-    /// Callers must invoke this only after successfully enqueueing work into
-    /// the MPSC channel. That ordering guarantees that when the loop observes
-    /// an updated sequence, there is corresponding work to drain.
-    ///
-    /// We ring `eventfd` only when sleep intent was armed in the previous
-    /// state. This ensures submissions that race with the sleep transition
-    /// are visible to the loop without requiring submitters to ring on every
-    /// enqueue.
-    fn publish(&self) {
-        let prev = self
-            .inner
-            .state
-            .fetch_add(SUBMISSION_INCREMENT, Ordering::Release);
-
-        if (prev & SLEEP_INTENT_BIT) != 0 {
-            self.ring();
-        }
-    }
-
-    /// Return the current submitted sequence.
-    ///
-    /// The sequence domain is masked to 63 bits and compared against the
-    /// loop-local `processed_seq` in the same domain.
-    fn submitted(&self) -> u64 {
-        (self.inner.state.load(Ordering::Acquire) >> 1) & SUBMISSION_SEQ_MASK
-    }
-
-    /// Arm sleep intent before attempting to block.
-    ///
-    /// After this point, any successful submission that races with sleep will
-    /// observe sleep intent and ring eventfd.
-    ///
-    /// Returns the current submitted sequence snapshot from the same atomic
-    /// operation that arms sleep intent. If this differs from loop-local
-    /// `processed_seq`, the loop skips blocking and disarms immediately.
-    fn arm(&self) -> u64 {
-        let prev = self
-            .inner
-            .state
-            .fetch_or(SLEEP_INTENT_BIT, Ordering::Acquire);
-        (prev >> 1) & SUBMISSION_SEQ_MASK
-    }
-
-    /// Disarm sleep intent after we resume running.
-    ///
-    /// Keeping sleep intent clear while actively running avoids redundant
-    /// eventfd writes during bursts. This is done both after a real wake and
-    /// after a post-arm recheck decides not to block.
-    fn disarm(&self) {
-        self.inner
-            .state
-            .fetch_and(!SLEEP_INTENT_BIT, Ordering::Release);
-    }
-
-    /// Drain eventfd readiness acknowledged by a wake CQE.
-    ///
-    /// This acknowledges kernel-visible wake readiness. Sleep gating is tracked
-    /// separately in the packed `state` atomic and is managed by
-    /// [`Waker::arm`] / [`Waker::disarm`].
-    ///
-    /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
-    /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
-    fn acknowledge(&self) {
-        let mut value: u64 = 0;
-        loop {
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to writable 8-byte storage for the duration of the call.
-            let ret = unsafe {
-                libc::read(
-                    self.inner.wake_fd.as_raw_fd(),
-                    &mut value as *mut u64 as *mut libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                // eventfd (without EFD_SEMAPHORE) returns the full counter and
-                // resets it to zero in one read.
-                return;
-            }
-            if ret == -1 {
-                match std::io::Error::last_os_error().raw_os_error() {
-                    // Retry if interrupted by a signal before completion.
-                    Some(libc::EINTR) => continue,
-                    // Non-blocking read would block because the counter is zero,
-                    // there is nothing left to drain right now.
-                    Some(libc::EAGAIN) => return,
-                    _ => {
-                        tracing::warn!("eventfd read failed");
-                        return;
-                    }
-                }
-            }
-            return;
-        }
-    }
-
-    /// Install the wake poll request into the SQ.
-    ///
-    /// This uses multishot poll and is called on startup and whenever a wake
-    /// CQE indicates the previous multishot request is no longer active.
-    fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) {
-        let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
-            .multi(true)
-            .build()
-            .user_data(WAKE_USER_DATA);
-
-        // SAFETY: The poll SQE owns no user pointers and references a valid FD.
-        unsafe {
-            submission_queue
-                .push(&wake_poll)
-                .expect("wake poll SQE should always fit in the ring");
-        }
-    }
-}
-
-struct SubmitterInner {
-    sender: Option<mpsc::Sender<Op>>,
+struct HandleInner {
+    sender: Option<mpsc::Sender<Request>>,
     waker: Waker,
 }
 
-impl Drop for SubmitterInner {
+impl Drop for HandleInner {
     fn drop(&mut self) {
         // Disconnect first, then wake. This avoids a race where the loop
         // handles a wake CQE before channel closure becomes observable.
@@ -566,23 +262,23 @@ impl Drop for SubmitterInner {
     }
 }
 
-/// Handle for submitting operations to an [IoUringLoop].
+/// Handle for submitting requests to an [IoUringLoop].
 #[derive(Clone)]
-pub struct Submitter {
-    inner: Arc<SubmitterInner>,
+pub struct Handle {
+    inner: Arc<HandleInner>,
 }
 
-impl Submitter {
-    /// Submit an operation to the io_uring loop.
+impl Handle {
+    /// Enqueue a request for the io_uring loop.
     ///
     /// On success, this publishes one submission and conditionally rings the loop's
     /// `eventfd` wake source if sleep intent is armed.
-    pub async fn send(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
+    async fn enqueue(&self, request: Request) -> Result<(), mpsc::error::SendError<Request>> {
         self.inner
             .sender
             .as_ref()
-            .expect("submitter sender is only taken on drop")
-            .send(op)
+            .expect("handle sender is only taken on drop")
+            .send(request)
             .await?;
 
         // Publish submission and ring eventfd only if loop sleep intent is armed.
@@ -590,109 +286,134 @@ impl Submitter {
 
         Ok(())
     }
-}
 
-/// State for one in-flight operation.
-///
-/// Holds the sender used for completion delivery and resources that must remain alive
-/// until CQE delivery.
-struct Waiter {
-    /// The oneshot sender used to deliver the operation result and buffer back to the
-    /// caller.
-    sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// The buffer associated with this operation, if any.
-    buffer: Option<OpBuffer>,
-    /// The file descriptor associated with this operation, if any. Used to keep the file
-    /// descriptor alive and prevent reuse while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep the FD alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    fd: Option<OpFd>,
-    /// The iovec array associated with this operation, if any. Used to keep iovec
-    /// storage alive and prevent use-after-free while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep iovecs alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    iovecs: Option<OpIovecs>,
-    /// The linked timeout timespec associated with this operation, if any. Used to keep
-    /// the timespec alive and prevent use-after-free while the operation is in-flight.
-    timespec: Option<Timespec>,
-}
+    /// Submit a logical send request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    pub async fn send(
+        &self,
+        fd: Arc<OwnedFd>,
+        bufs: IoBufs,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::Send(SendRequest {
+            fd,
+            write: bufs.into(),
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::SendFailed)?;
+        rx.await.map_err(|_| Error::SendFailed)?
+    }
 
-/// Tracks in-flight operations and the state needed to complete them.
-struct Waiters {
-    /// Waiters indexed by slot index.
-    ///
-    /// Free slots have no waiter (`None`).
-    entries: Vec<Option<Waiter>>,
-    /// Stack of reusable free slot indices.
-    free: Vec<usize>,
-    /// Number of active waiters currently stored in `entries`.
-    len: usize,
-}
-
-impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` in-flight operations
-    /// at once.
-    fn new(capacity: usize) -> Self {
-        let mut entries = Vec::with_capacity(capacity);
-        entries.resize_with(capacity, || None);
-
-        let mut free = Vec::with_capacity(capacity);
-        free.extend((0..capacity).rev());
-
-        Self {
-            entries,
-            free,
-            len: 0,
+    /// Submit a logical recv request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    pub async fn recv(
+        &self,
+        fd: Arc<OwnedFd>,
+        buf: IoBufMut,
+        offset: usize,
+        len: usize,
+        exact: bool,
+        deadline: Instant,
+    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
+        assert!(
+            offset <= len && len <= buf.capacity(),
+            "recv invariant violated: need offset <= len <= capacity"
+        );
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Recv(RecvRequest {
+            fd,
+            buf,
+            offset,
+            len,
+            exact,
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::Recv(request) = err.0 else {
+                unreachable!("recv enqueue returned wrong request variant");
+            };
+            return Err((request.buf, Error::RecvFailed));
         }
+
+        rx.await.unwrap_or_else(|_| {
+            // Once the request is admitted, ownership of `buf` moves into the
+            // loop. If the loop dies before replying, there is no owned buffer
+            // left to recover here, so return an empty placeholder.
+            Err((IoBufMut::default(), Error::RecvFailed))
+        })
     }
 
-    /// Return the number of currently in-flight waiters.
-    const fn len(&self) -> usize {
-        self.len
+    /// Submit a logical positioned read request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn read_at(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        len: usize,
+        buf: IoBufMut,
+    ) -> Result<IoBufMut, (IoBufMut, Error)> {
+        assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
+        let (tx, rx) = oneshot::channel();
+        let request = Request::ReadAt(ReadAtRequest {
+            file,
+            offset,
+            len,
+            read: 0,
+            buf,
+            result: None,
+            sender: tx,
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::ReadAt(request) = err.0 else {
+                unreachable!("read_at enqueue returned wrong request variant");
+            };
+            return Err((request.buf, Error::ReadFailed));
+        }
+
+        rx.await.unwrap_or_else(|_| {
+            // Once the request is admitted, ownership of `buf` moves into the
+            // loop. If the loop dies before replying, there is no owned buffer
+            // left to recover here, so return an empty placeholder.
+            Err((IoBufMut::default(), Error::ReadFailed))
+        })
     }
 
-    /// Return whether there are no in-flight waiters.
-    const fn is_empty(&self) -> bool {
-        self.len == 0
+    /// Submit a logical positioned write request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn write_at(&self, file: Arc<File>, offset: u64, bufs: IoBufs) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::WriteAt(WriteAtRequest {
+            file,
+            offset,
+            written: 0,
+            write: bufs.into(),
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::WriteFailed)?;
+        rx.await.map_err(|_| Error::WriteFailed)?
     }
 
-    /// Return the waiter for `slot_index`.
-    ///
-    /// Panics if `slot_index` is out of range or not currently in use.
-    fn get(&self, slot_index: u64) -> &Waiter {
-        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
-        let slot = self.entries.get(index).expect("missing waiter");
-        slot.as_ref().expect("missing waiter")
-    }
-
-    /// Store a waiter and return its slot index.
-    ///
-    /// Panics if no free slot is available.
-    fn insert(&mut self, waiter: Waiter) -> u64 {
-        let index = self
-            .free
-            .pop()
-            .expect("waiters should not exceed configured capacity");
-        let replaced = self.entries[index].replace(waiter);
-        assert!(replaced.is_none(), "free slot should not contain waiter");
-        self.len += 1;
-        index as u64
-    }
-
-    /// Remove and return the waiter for `slot_index`.
-    ///
-    /// Panics if `slot_index` is out of range or not currently in use.
-    fn remove(&mut self, slot_index: u64) -> Waiter {
-        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
-        let slot = self.entries.get_mut(index).expect("missing waiter");
-        let waiter = slot.take().expect("missing waiter");
-        self.free.push(index);
-        self.len -= 1;
-        waiter
+    /// Submit a logical fsync request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn sync(&self, file: Arc<File>) -> std::io::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::Sync(SyncRequest {
+            file,
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| std::io::Error::other("failed to send work"))?;
+        rx.await
+            .map_err(|_| std::io::Error::other("failed to read result"))?
     }
 }
 
@@ -700,8 +421,11 @@ impl Waiters {
 pub(crate) struct IoUringLoop {
     cfg: Config,
     metrics: Arc<Metrics>,
-    receiver: mpsc::Receiver<Op>,
+    receiver: mpsc::Receiver<Request>,
     waiters: Waiters,
+    ready_queue: VecDeque<WaiterId>,
+    pending_cancels: VecDeque<WaiterId>,
+    timeout_wheel: TimeoutWheel,
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u64,
@@ -710,8 +434,16 @@ pub(crate) struct IoUringLoop {
 impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
-    /// The loop allocates its own metrics, operation channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+    /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
+    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Handle, Self) {
+        assert!(
+            !cfg.max_request_timeout.is_zero(),
+            "max_request_timeout must be non-zero for timeout wheel"
+        );
+        assert!(
+            !cfg.timeout_wheel_tick.is_zero(),
+            "timeout_wheel_tick must be non-zero for timeout wheel"
+        );
         cfg.size = cfg
             .size
             .checked_next_power_of_two()
@@ -720,21 +452,30 @@ impl IoUringLoop {
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
         let waker = Waker::new().expect("unable to create wake eventfd");
+        let timeout_wheel = TimeoutWheel::new(
+            cfg.max_request_timeout,
+            cfg.timeout_wheel_tick,
+            Instant::now(),
+        );
+        let waiters = Waiters::new(size);
 
-        let submitter = Submitter {
-            inner: Arc::new(SubmitterInner {
+        let handle = Handle {
+            inner: Arc::new(HandleInner {
                 sender: Some(sender),
                 waker: waker.clone(),
             }),
         };
 
         (
-            submitter,
+            handle,
             Self {
                 cfg,
                 metrics,
                 receiver,
-                waiters: Waiters::new(size),
+                waiters,
+                ready_queue: VecDeque::with_capacity(size),
+                pending_cancels: VecDeque::with_capacity(size),
+                timeout_wheel,
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
@@ -753,9 +494,13 @@ impl IoUringLoop {
                 self.handle_cqe(cqe);
             }
 
+            // Process due deadlines before staging new submissions so timed-out
+            // requests move to cancellation promptly and free capacity sooner.
+            self.advance_timeouts();
+
             // Stage as much inbound work as capacity allows.
             let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
-                // Producer side disconnected. Drain in-flight operations and exit.
+                // Producer side disconnected. Drain in-flight requests and exit.
                 self.drain(&mut ring);
                 return;
             };
@@ -775,21 +520,25 @@ impl IoUringLoop {
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
                     // least one completion so capacity can open up.
-                    self.submit_and_wait(&mut ring, 1, None)
+                    self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                         .expect("unable to submit to ring");
                 }
 
                 continue;
             }
 
-            // Idle path. No pending submissions are visible.
+            // No pending submissions are currently visible.
             //
-            // Arm sleep intent and capture a post-arm sequence snapshot from the
-            // same atomic operation. Block only if still idle. Any submission that
-            // arrives after `arm()` observes sleep intent and rings eventfd, so the
-            // loop is woken instead of sleeping through newly published work.
-            if self.waker.arm() == self.processed_seq {
-                self.submit_and_wait(&mut ring, 1, None)
+            // If staging hit capacity, force a submit and wait cycle to open
+            // space, even though the sequence snapshot looks idle here.
+            //
+            // Otherwise, arm sleep intent and capture a post-arm sequence
+            // snapshot from the same atomic operation. Block only if still idle.
+            // Any submission that arrives after `arm()` observes sleep intent
+            // and rings eventfd, so the loop is woken instead of sleeping
+            // through newly published work.
+            if at_capacity || self.waker.arm() == self.processed_seq {
+                self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
             // Disarm sleep intent as soon as we resume running. While disarmed,
@@ -798,16 +547,93 @@ impl IoUringLoop {
         }
     }
 
-    /// Stage inbound work into the SQ, reinstalling wake poll if needed.
+    /// Admit a request into the waiter table and schedule its timeout.
+    ///
+    /// Returns the waiter id if the request was admitted, or `None` if the
+    /// deadline already expired (in which case the request is completed
+    /// immediately with a timeout error).
+    fn admit_request(&mut self, request: Request) -> Option<WaiterId> {
+        let deadline = request.deadline();
+        let target_tick = match deadline {
+            Some(deadline) => match self.timeout_wheel.target_tick(deadline) {
+                Some(target_tick) => Some(target_tick),
+                None => {
+                    request.timeout();
+                    return None;
+                }
+            },
+            None => None,
+        };
+
+        let waiter_id = self.waiters.insert(request, target_tick);
+        if let Some(target_tick) = target_tick {
+            self.timeout_wheel.schedule(waiter_id, target_tick);
+        }
+
+        Some(waiter_id)
+    }
+
+    /// Build and push the SQE for a request in the waiter table.
+    ///
+    /// If the request was marked for cancellation while sitting in the ready
+    /// queue (timeout fired between requeue and staging), it is completed with
+    /// a timeout error instead of issuing a follow-up SQE. If the original
+    /// caller dropped its wait handle before staging, the request is retired
+    /// locally without issuing another SQE.
+    fn stage_request(&mut self, waiter_id: WaiterId, submission_queue: &mut SubmissionQueue<'_>) {
+        match self.waiters.stage(waiter_id) {
+            StageOutcome::Timeout(request) => request.timeout(),
+            StageOutcome::Orphaned { target_tick } => {
+                // The caller disappeared before another SQE was issued, so all that
+                // remains is to release deadline tracking (the waiter, and associated
+                // resources, were already dropped inside `Waiters`).
+                if let Some(tick) = target_tick {
+                    self.timeout_wheel.remove(tick);
+                }
+            }
+            StageOutcome::Submit(sqe) => {
+                // SAFETY:
+                // - All resources are stored in `self.waiters` until CQE processing, so
+                //   SQE pointers remain valid and FD numbers cannot be reused early.
+                // - SQ capacity was checked by caller.
+                unsafe {
+                    submission_queue
+                        .push(&sqe)
+                        .expect("unable to push to queue");
+                }
+            }
+        }
+    }
+
+    /// Stage requeued requests from `ready_queue` in FIFO order.
+    ///
+    /// Stops when all queued requests are staged or the SQ reaches capacity.
+    /// Returns `true` when SQ capacity is hit and at least one ready request
+    /// remains queued.
+    fn stage_ready_requests(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        while !submission_queue.is_full() {
+            let Some(waiter_id) = self.ready_queue.pop_front() else {
+                return false;
+            };
+            self.stage_request(waiter_id, submission_queue);
+        }
+
+        !self.ready_queue.is_empty()
+    }
+
+    /// Stage pending submission work into the SQ.
+    ///
+    /// In one pass, this may rearm wake polling, stage cancellations, restage
+    /// ready-queue requests, and admit new requests.
     ///
     /// Advances `processed_seq` by exactly the number of drained submissions.
     ///
-    /// Returns whether staging ended at waiter or SQ capacity, or `None` if
+    /// Returns whether staging ended at waiter or SQ capacity, or `None` if the
     /// producer channel disconnected.
     fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
-        let mut at_sq_capacity = false;
+        let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
@@ -815,24 +641,25 @@ impl IoUringLoop {
             self.waker.reinstall(&mut submission_queue);
         }
 
-        // Stage until we either run out of channel work or hit waiter capacity.
-        //
-        // Capacity is bounded by `cfg.size` active waiters. This remains correct
-        // when `op_timeout` is enabled because each operation consumes 2 SQEs
-        // (`op + linked timeout`) and staging is budgeted by SQ entries.
-        while self.waiters.len() < self.cfg.size as usize {
-            // Check SQ capacity before staging each operation.
-            let available = submission_queue.capacity() - submission_queue.len();
-            let needed = if self.cfg.op_timeout.is_some() { 2 } else { 1 };
-            if available < needed {
-                at_sq_capacity = true;
-                break;
-            }
+        // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
+        if self.stage_cancellations(&mut submission_queue) {
+            // If cancels alone filled the SQ, submit them first.
+            return Some(true);
+        }
 
+        // Requeued work already owns waiter capacity, so restage it before
+        // admitting fresh channel requests.
+        if self.stage_ready_requests(&mut submission_queue) {
+            return Some(true);
+        }
+
+        // Stage operations until the channel is empty, waiter capacity is hit,
+        // or the SQ is full. Waiter capacity is bounded by `cfg.size`.
+        while self.waiters.len() < self.cfg.size as usize && !submission_queue.is_full() {
             // Try to drain one operation from the channel. If the channel is empty, we're
             // done for now.
-            let op = match self.receiver.try_recv() {
-                Ok(work) => work,
+            let request = match self.receiver.try_recv() {
+                Ok(request) => request,
                 Err(TryRecvError::Disconnected) => return None,
                 Err(TryRecvError::Empty) => break,
             };
@@ -841,162 +668,200 @@ impl IoUringLoop {
             // `processed_seq` stays in sync with the published sequence domain.
             drained += 1;
 
-            let Op {
-                mut work,
-                sender,
-                buffer,
-                fd,
-                iovecs,
-            } = op;
-
-            // Prepare op timeout timespec. We build the linked timeout SQE later, after
-            // waiter insertion, so its pointer comes from stable waiter-backed storage.
-            let timespec = self.cfg.op_timeout.map(|timeout| {
-                Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos())
-            });
-
-            // Store in-flight operation state before submission.
-            let slot_index = self.waiters.insert(Waiter {
-                sender,
-                buffer,
-                fd,
-                iovecs,
-                timespec,
-            });
-
-            // Tag SQE with waiter slot index for completion matching.
-            work = work.user_data(slot_index);
-
-            if self.cfg.op_timeout.is_some() {
-                // Link this operation to the timeout SQE that will be pushed afterwards.
-                work = work.flags(io_uring::squeue::Flags::IO_LINK);
+            // Avoid per-loop clock reads when no deadlines are active. When the
+            // first deadline arrives after an idle period, align wheel time once
+            // before converting deadlines to ticks.
+            if !wheel_aligned && request.has_deadline() {
+                assert!(self.timeout_wheel.advance(Instant::now()).is_none());
+                wheel_aligned = true;
             }
 
-            // Submit the operation.
-            //
-            // SAFETY:
-            // - `buffer`, `fd` and `iovecs` are stored in `self.waiters` until CQE
-            //   processing, so SQE pointers remain valid and FD numbers cannot be reused
-            //   early.
-            // - `IO_LINK` is set on `work` before pushing it, so the following timeout
-            //   SQE applies to this operation.
-            // - `available >= needed` was checked above, so this push fits.
-            unsafe {
-                submission_queue
-                    .push(&work)
-                    .expect("unable to push to queue");
-            }
-
-            if self.cfg.op_timeout.is_some() {
-                // Build linked timeout op from waiter-owned timespec storage.
-                let timeout = LinkTimeout::new(
-                    self.waiters
-                        .get(slot_index)
-                        .timespec
-                        .as_ref()
-                        .expect("missing timespec"),
-                )
-                .build()
-                .user_data(TIMEOUT_USER_DATA);
-
-                // SAFETY:
-                // - `timeout` was built from the waiter's stored `timespec`, and that
-                //   waiter entry stays alive until CQE handling, so the kernel `Timespec`
-                //   pointer remains valid.
-                // - `available >= needed` was checked above, so this push fits.
-                unsafe {
-                    submission_queue
-                        .push(&timeout)
-                        .expect("unable to push timeout to queue");
-                }
+            if let Some(waiter_id) = self.admit_request(request) {
+                self.stage_request(waiter_id, &mut submission_queue);
             }
         }
 
         // Track which submitted sequence has been consumed.
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
+        let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-        Some(at_waiter_capacity || at_sq_capacity)
+        Some(at_sq_capacity || at_waiter_capacity)
+    }
+
+    /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
+    ///
+    /// Stops when all queued cancellations are staged or the SQ reaches
+    /// capacity. Returns `true` when SQ capacity is hit and at least one
+    /// cancellation remains queued.
+    fn stage_cancellations(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        while !submission_queue.is_full() {
+            let Some(waiter_id) = self.pending_cancels.pop_front() else {
+                return false;
+            };
+
+            // This waiter timed out earlier, but its queued cancel may have
+            // gone stale before we got around to staging it. If the original
+            // op CQE already retired the outstanding SQE, there is nothing
+            // left for the kernel to cancel.
+            if !self.waiters.is_in_flight(waiter_id) {
+                continue;
+            }
+
+            let cancel = AsyncCancel::new(waiter_id.user_data())
+                .build()
+                .user_data(waiter_id.cancel_user_data());
+
+            // SAFETY: AsyncCancel SQE uses stable user_data only.
+            unsafe {
+                submission_queue
+                    .push(&cancel)
+                    .expect("unable to push cancel to queue");
+            }
+        }
+
+        !self.pending_cancels.is_empty()
     }
 
     /// Handle a single CQE from the ring.
     ///
-    /// Internal wake and timeout CQEs are handled in-place, normal operation
-    /// CQEs are matched to `waiters` and forwarded to the original requester.
+    /// Internal wake CQEs are handled in-place. All other CQEs are forwarded to
+    /// the request state machine for progress evaluation.
     fn handle_cqe(&mut self, cqe: CqueueEntry) {
         let user_data = cqe.user_data();
-        match user_data {
-            WAKE_USER_DATA => {
-                assert!(
-                    cqe.result() >= 0,
-                    "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
-                );
+        if user_data == WAKE_USER_DATA {
+            assert!(
+                cqe.result() >= 0,
+                "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
+            );
 
-                // Drain wake readiness from eventfd for this wake CQE.
-                self.waker.acknowledge();
+            // Drain wake readiness from eventfd for this wake CQE.
+            self.waker.acknowledge();
 
-                // Multishot can terminate, so we must re-arm to keep the wake
-                // path live.
-                if !io_uring::cqueue::more(cqe.flags()) {
-                    self.wake_rearm_needed = true;
+            // Multishot can terminate, so we must re-arm to keep the wake
+            // path live.
+            if !io_uring::cqueue::more(cqe.flags()) {
+                self.wake_rearm_needed = true;
+            }
+            return;
+        }
+
+        match self.waiters.on_completion(user_data, cqe.result()) {
+            CompletionOutcome::Cancel => {
+                // Async-cancel CQEs are handled entirely inside `Waiters` they do
+                // not directly complete or requeue a logical request here.
+            }
+            CompletionOutcome::Requeue(waiter_id) => {
+                // Request needs another SQE. Add it to the ready queue.
+                self.ready_queue.push_back(waiter_id);
+            }
+            CompletionOutcome::Complete {
+                request,
+                target_tick,
+            } => {
+                if let Some(tick) = target_tick {
+                    self.timeout_wheel.remove(tick);
                 }
-            }
-            TIMEOUT_USER_DATA => {
-                assert!(
-                    self.cfg.op_timeout.is_some(),
-                    "received TIMEOUT_USER_DATA with op_timeout disabled"
-                );
-            }
-            _ => {
-                let result = cqe.result();
-                let result = if result == -libc::ECANCELED && self.cfg.op_timeout.is_some() {
-                    // This operation timed out.
-                    -libc::ETIMEDOUT
-                } else {
-                    result
-                };
-
-                let Waiter {
-                    sender: result_sender,
-                    buffer,
-                    ..
-                } = self.waiters.remove(user_data);
-                let _ = result_sender.send((result, buffer));
+                request.complete();
             }
         }
     }
 
-    /// Drain in-flight operations during shutdown.
+    /// Advance the timeout wheel and enqueue cancellations for newly expired requests.
     ///
-    /// - If `shutdown_timeout` is `None`, this waits until all waiters complete.
-    /// - If `shutdown_timeout` is `Some`, this waits until all waiters complete
-    ///   or the timeout elapses, then abandons any remaining waiters.
+    /// This is a no-op when no active deadlines exist. Expired stale wheel
+    /// entries are ignored when waiter generation no longer matches.
+    fn advance_timeouts(&mut self) {
+        // Fast path: no active deadlines means no clock read and no wheel scan.
+        if self.timeout_wheel.next_deadline().is_none() {
+            return;
+        }
+
+        // No newly expired entries at this tick.
+        let Some(expired) = self.timeout_wheel.advance(Instant::now()) else {
+            return;
+        };
+
+        // Mark expired waiters as cancel-requested and queue their IDs for
+        // later cancel SQE staging.
+        for entry in expired {
+            // `false` means stale timeout entry (slot reused) or waiter already
+            // transitioned to cancel-requested/completed.
+            if self.waiters.cancel(entry.waiter_id) {
+                // Once cancel is requested, this waiter is no longer deadline-active.
+                self.timeout_wheel.remove(entry.target_tick);
+                // Only timed-out waiters with an outstanding op SQE need
+                // AsyncCancel. Waiters parked in the ready queue have no
+                // kernel op to cancel and will time out locally when restaged.
+                if self.waiters.is_in_flight(entry.waiter_id) {
+                    self.pending_cancels.push_back(entry.waiter_id);
+                }
+            }
+        }
+    }
+
+    /// Drain in-flight requests during shutdown.
+    ///
+    /// Keeps draining CQEs until all waiters complete or shutdown budget is
+    /// exhausted.
+    ///
+    /// If `shutdown_timeout` is `None`, this waits until all waiters complete or are cancelled.
+    /// If `shutdown_timeout` is `Some`, this waits until completion or timeout,
+    /// then abandons any remaining waiters.
     fn drain(&mut self, ring: &mut IoUring) {
         let mut remaining = self.cfg.shutdown_timeout;
 
-        while !self.waiters.is_empty() {
-            if remaining.is_some_and(|t| t.is_zero()) {
-                break;
-            }
-
-            let start = Instant::now();
-            let got_completion = self
-                .submit_and_wait(ring, 1, remaining)
-                .expect("unable to submit to ring");
-
-            // Always drain CQEs, even after timeout: completions can race with
-            // timeout expiry and still be pending in the queue
+        // Keep driving completions until all in-flight waiters finish or the
+        // shutdown budget is exhausted.
+        loop {
+            // Always drain CQEs first, even after a timed wait: completions can
+            // race with timeout expiry and still be pending in the queue.
             for cqe in ring.completion() {
                 self.handle_cqe(cqe);
             }
 
-            if !got_completion {
-                // Shutdown timeout elapsed before all in-flight work completed.
+            // CQE draining can finish the last waiter, so stop before another
+            // submit-and-wait cycle.
+            if self.waiters.is_empty() {
                 break;
             }
 
+            // Once shutdown budget is exhausted, abandon any remaining waiters
+            // immediately instead of advancing more deadlines or staging new cancels.
+            if remaining.is_some_and(|t| t.is_zero()) {
+                break;
+            }
+
+            // Keep userspace deadline processing alive during shutdown so
+            // in-flight timed operations preserve their ETIMEDOUT semantics,
+            // and continue staging requeued requests so partially-complete or
+            // retrying requests can keep making progress.
+            self.advance_timeouts();
+            {
+                let mut submission_queue = ring.submission();
+                self.stage_cancellations(&mut submission_queue);
+                self.stage_ready_requests(&mut submission_queue);
+            }
+
+            // Staging can directly complete the last waiter (for example, when a
+            // timed-out requeued request is removed instead of reissued).
+            if self.waiters.is_empty() {
+                break;
+            }
+
+            let timeout = match (remaining, self.timeout_wheel.next_deadline()) {
+                (Some(remaining), Some(deadline)) => Some(remaining.min(deadline)),
+                (Some(remaining), None) => Some(remaining),
+                (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
+
+            // Wait for at least one completion or timeout.
+            let start = Instant::now();
+            self.submit_and_wait(ring, 1, timeout)
+                .expect("unable to submit to ring");
+
+            // Charge elapsed wall time against the shutdown budget.
             if let Some(remaining) = remaining.as_mut() {
                 *remaining = remaining.saturating_sub(start.elapsed());
             }
@@ -1082,262 +947,731 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
         builder = builder.setup_defer_taskrun();
     }
 
-    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
-    // timeout). We double the ring size to ensure users get the number of
-    // concurrent operations they configured.
-    let ring_size = if cfg.op_timeout.is_some() {
-        cfg.size.checked_mul(2).expect("ring size overflow")
-    } else {
-        cfg.size
-    };
-
-    builder.build(ring_size)
-}
-
-/// Returns whether some result should be retried due to a transient error.
-///
-/// Errors considered transient:
-/// * EAGAIN: There is no data ready. Try again later.
-/// * EWOULDBLOCK: Operation would block.
-/// * EINTR: A signal interrupted the operation before any data was transferred.
-pub const fn should_retry(return_value: i32) -> bool {
-    return_value == -libc::EAGAIN
-        || return_value == -libc::EWOULDBLOCK
-        || return_value == -libc::EINTR
+    builder.build(cfg.size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
-    use io_uring::{
-        opcode,
-        types::{Fd, Timespec},
-    };
+    use futures::future::{join, join_all};
     use prometheus_client::registry::Registry;
+    use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
-        os::{fd::AsRawFd, unix::net::UnixStream},
+        io::Write,
+        os::{
+            fd::{AsRawFd, FromRawFd, IntoRawFd},
+            unix::net::UnixStream,
+        },
         time::Duration,
     };
 
     #[test]
     fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
+        // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
         let cfg = Config {
             size: 1_000,
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-
         assert_eq!(iouring.cfg.size, 1_024);
-        assert_eq!(iouring.waiters.entries.len(), 1_024);
 
+        // Already-power-of-two size is preserved.
         let cfg = Config {
             size: 1_024,
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-
         assert_eq!(iouring.cfg.size, 1_024);
-        assert_eq!(iouring.waiters.entries.len(), 1_024);
     }
 
     #[test]
-    fn test_waiters() {
-        // Start empty
-        let mut waiters = Waiters::new(3);
-        assert_eq!(waiters.len(), 0);
-        assert!(waiters.is_empty());
-
-        // Insert two waiters.
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let index0 = waiters.insert(Waiter {
-            sender: tx0,
-            buffer: Some(IoBuf::from(b"hello").into()),
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        let index1 = waiters.insert(Waiter {
-            sender: tx1,
-            buffer: Some(IoBuf::from(b"world").into()),
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        assert_eq!((index0, index1), (0, 1));
-        assert_eq!(waiters.len(), 2);
-        assert!(!waiters.is_empty());
-
-        // `get` returns the expected waiter state for an occupied slot.
-        match waiters.get(index0).buffer.as_ref() {
-            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"hello"),
-            _ => panic!("expected write buffer"),
-        }
-
-        // Remove the most recently inserted slot and verify we get that waiter back.
-        let waiter = waiters.remove(index1);
-        match waiter.buffer {
-            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"world"),
-            _ => panic!("expected write buffer"),
-        }
-        assert_eq!(waiters.len(), 1);
-
-        // Next allocation reuses that free slot (LIFO).
-        let (tx2, _rx2) = oneshot::channel();
-        let index2 = waiters.insert(Waiter {
-            sender: tx2,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        assert_eq!(index2, index1);
-
-        // Remove remaining waiters and return to empty state.
-        waiters.remove(index0);
-        waiters.remove(index2);
-        assert!(waiters.is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "missing waiter")]
-    fn test_waiters_remove_missing_slot_panics() {
-        let mut waiters = Waiters::new(1);
-        let _ = waiters.remove(0u64);
-    }
-
-    #[test]
-    #[should_panic(expected = "waiters should not exceed configured capacity")]
-    fn test_waiters_insert_full_panics() {
-        let mut waiters = Waiters::new(1);
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-
-        let _ = waiters.insert(Waiter {
-            sender: tx0,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        let _ = waiters.insert(Waiter {
-            sender: tx1,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-    }
-
-    async fn recv_then_send(cfg: Config, should_succeed: bool) {
-        // Create a new io_uring instance
+    fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
+        // Verify `submit_and_wait` only treats `ETIME` as the bounded-wait timeout case.
+        let cfg = Config::default();
         let mut registry = Registry::default();
-        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
-        let handle = std::thread::spawn(move || iouring.run());
+        let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
-        let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
+        // Force a deterministic kernel error path by closing the ring FD first.
+        // SAFETY: `ring.as_raw_fd()` is a valid owned fd at this point.
+        let close_result = unsafe { libc::close(ring.as_raw_fd()) };
+        assert_eq!(close_result, 0, "failed to close ring fd in test");
+        let err = iouring
+            .submit_and_wait(&mut ring, 1, Some(Duration::from_millis(1)))
+            .expect_err("submit_and_wait should fail on closed ring fd");
+        assert_ne!(err.raw_os_error(), Some(libc::ETIME));
 
-        // Submit a read
-        let msg = IoBuf::from(b"hello");
-        let mut buf = IoBufMut::with_capacity(msg.len());
-        let recv =
-            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), msg.len() as _).build();
-        let (recv_tx, recv_rx) = oneshot::channel();
-        submitter
-            .send(Op {
-                work: recv,
-                sender: recv_tx,
-                buffer: Some(buf.into()),
-                fd: None,
-                iovecs: None,
-            })
-            .await
-            .expect("failed to send work");
-
-        // Submit a write that satisfies the read.
-        let write =
-            opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
-        let (write_tx, write_rx) = oneshot::channel();
-        submitter
-            .send(Op {
-                work: write,
-                sender: write_tx,
-                buffer: Some(msg.into()),
-                fd: None,
-                iovecs: None,
-            })
-            .await
-            .expect("failed to send work");
-
-        // Wait for the read and write operations to complete.
-        if should_succeed {
-            let (result, _) = recv_rx.await.expect("failed to receive result");
-            assert!(result > 0, "recv failed: {result}");
-            let (result, _) = write_rx.await.expect("failed to receive result");
-            assert!(result > 0, "write failed: {result}");
-        } else {
-            let _ = recv_rx.await;
-            let _ = write_rx.await;
-        }
-        drop(submitter);
-        handle.join().unwrap();
+        // Ring fd is already closed above; avoid running Drop cleanup on invalid fd.
+        std::mem::forget(ring);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_wake_path_makes_progress() {
-        let timeout = tokio::time::timeout(
-            Duration::from_secs(2),
-            recv_then_send(Default::default(), true),
-        );
-        assert!(
-            timeout.await.is_ok(),
-            "recv_then_send timed out unexpectedly"
-        );
+    #[test]
+    fn test_new_ring_iopoll_builder_path_is_exercised() {
+        // Verify the optional IOPOLL builder branch is reachable even on hosts
+        // where the kernel rejects the resulting configuration.
+        let cfg = Config {
+            io_poll: true,
+            ..Default::default()
+        };
+
+        match new_ring(&cfg) {
+            Ok(_ring) => {}
+            Err(err) => assert!(err.raw_os_error().is_some()),
+        }
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_true_when_cancel_staging_fills_sq() {
+        // Verify cancel staging reports SQ saturation so the loop drains completions
+        // before trying to enqueue more work.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Queue enough in-flight cancellations to overflow one staging pass once
+        // wake poll rearm also consumes an SQE.
+        for _ in 0..cfg.size as usize {
+            let (sock_left, _sock_right) =
+                UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, _rx) = oneshot::channel();
+            let request = Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
+                sender: tx,
+            });
+            let waiter_id = iouring.waiters.insert(request, None);
+            assert!(matches!(
+                iouring.waiters.stage(waiter_id),
+                StageOutcome::Submit(_)
+            ));
+            assert!(
+                iouring.waiters.cancel(waiter_id),
+                "cancel should transition waiter to cancel-requested"
+            );
+            iouring.pending_cancels.push_back(waiter_id);
+        }
+
+        // Staging should stop at SQ capacity and leave some cancels queued.
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+        assert!(at_capacity);
+        assert!(!iouring.pending_cancels.is_empty());
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_true_when_ready_staging_fills_sq() {
+        // Verify requeued work can also saturate the SQ and force the loop to
+        // return early with ready-queue work still pending.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Leave wake rearm enabled so the wake poll consumes one SQE and the
+        // ready queue cannot fully drain in a single staging pass.
+        for _ in 0..cfg.size as usize {
+            let (sock_left, _sock_right) =
+                UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, _rx) = oneshot::channel();
+            let request = Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
+                sender: tx,
+            });
+            let waiter_id = iouring.waiters.insert(request, None);
+            iouring.ready_queue.push_back(waiter_id);
+        }
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        assert!(at_capacity);
+        assert!(!iouring.ready_queue.is_empty());
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_true_when_fresh_staging_fills_sq() {
+        // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Leave wake rearm enabled so it consumes one SQE up front. The fresh
+        // request staging loop should then stop because the SQ fills first,
+        // while waiter capacity still has room left.
+        futures::executor::block_on(async {
+            for _ in 0..cfg.size as usize {
+                let (sock_left, _sock_right) =
+                    UnixStream::pair().expect("failed to create unix socket pair");
+                // SAFETY: sock_left is a valid fd that we own.
+                let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                let (tx, _rx) = oneshot::channel();
+                submitter
+                    .enqueue(Request::Sync(SyncRequest {
+                        file: Arc::new(file),
+                        result: None,
+                        sender: tx,
+                    }))
+                    .await
+                    .expect("failed to enqueue request");
+            }
+        });
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        assert!(at_capacity);
+        assert!(ring.submission().is_full());
+        assert!(iouring.waiters.len() < cfg.size as usize);
+    }
+
+    #[test]
+    fn test_fill_submission_queue_skips_cancel_for_ready_queue_timeout() {
+        // Verify pending cancel entries are discarded once the waiter no longer
+        // has an operation SQE in flight.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on cancel staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        // Insert a waiter that is already marked cancel-requested but was never
+        // staged, matching the "timed out while parked in ready_queue" shape.
+        let (sock_left, _sock_right) =
+            UnixStream::pair().expect("failed to create unix socket pair");
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, _rx) = oneshot::channel();
+        let request = Request::Sync(SyncRequest {
+            file: Arc::new(file),
+            result: None,
+            sender: tx,
+        });
+        let waiter_id = iouring.waiters.insert(request, None);
+        assert!(iouring.waiters.cancel(waiter_id));
+        iouring.pending_cancels.push_back(waiter_id);
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // No cancel SQE should be staged because there is no in-flight op left to cancel.
+        assert!(!at_capacity);
+        assert!(iouring.pending_cancels.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert!(matches!(
+            iouring.waiters.stage(waiter_id),
+            StageOutcome::Timeout(_)
+        ));
     }
 
     #[tokio::test]
-    async fn test_timeout() {
-        // Create an io_uring instance
+    async fn test_fill_submission_queue_expired_deadline_completes_immediately() {
+        // Verify already-expired requests are completed locally instead of being staged.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep this test focused on request staging, not wake rearm behavior.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        let past_deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+
+        submitter
+            .enqueue(Request::Send(SendRequest {
+                // SAFETY: pair() returns valid fds; we own the left end.
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(past_deadline),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .expect("failed to enqueue request");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        assert!(!at_capacity);
+        assert!(iouring.pending_cancels.is_empty());
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+
+        let result = rx.await.expect("missing timeout completion");
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+    }
+
+    #[test]
+    fn test_handle_recv_panics_on_invalid_buffer_bounds() {
+        // Verify the public recv helper rejects impossible offset/len shapes
+        // before it can enqueue a malformed request.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (handle, io_loop) = IoUringLoop::new(cfg, &mut registry);
+        drop(io_loop);
+
+        let offset_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (left, _right) = UnixStream::pair().unwrap();
+            let _ = futures::executor::block_on(handle.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(4),
+                5,
+                4,
+                true,
+                Instant::now() + Duration::from_secs(1),
+            ));
+        }));
+        assert!(offset_panic.is_err());
+
+        let capacity_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (left, _right) = UnixStream::pair().unwrap();
+            let _ = futures::executor::block_on(handle.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(4),
+                0,
+                5,
+                true,
+                Instant::now() + Duration::from_secs(1),
+            ));
+        }));
+        assert!(capacity_panic.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_timeout_slot_reuse_does_not_cancel_new_waiter_early() {
+        // Verify stale timeout-wheel entries from an earlier generation do not
+        // cancel a newly inserted waiter that reused the same slot.
         let cfg = Config {
-            op_timeout: Some(std::time::Duration::from_secs(1)),
+            // Keep ring size realistic; size=1 can deadlock progress in some setups.
+            // Waiter slot reuse is still exercised because we complete op1 before op2.
+            size: 8,
+            max_request_timeout: Duration::from_millis(200),
+            timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         };
         let mut registry = Registry::default();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
-        // Submit a work item that will time out (because we don't write to the pipe)
-        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let mut buf = IoBufMut::with_capacity(8);
-        let work = opcode::Recv::new(
-            Fd(pipe_left.as_raw_fd()),
-            buf.as_mut_ptr(),
-            buf.capacity() as _,
-        )
-        .build();
-        let (tx, rx) = oneshot::channel();
-        submitter
-            .send(Op {
-                work,
-                sender: tx,
-                buffer: Some(buf.into()),
-                fd: None,
-                iovecs: None,
-            })
+        // First operation completes quickly but still carries a generous deadline,
+        // leaving a stale timeout entry that should be ignored later after slot reuse.
+        let (left1, right1) = UnixStream::pair().unwrap();
+        // Write a byte so the recv completes immediately.
+        (&right1).write_all(&[42]).unwrap();
+
+        let (_buf1, read1) = submitter
+            .recv(
+                Arc::new(left1.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_millis(200),
+            )
             .await
-            .expect("failed to send work");
-        // Wait for the timeout
-        let (result, _) = rx.await.expect("failed to receive result");
-        assert_eq!(result, -libc::ETIMEDOUT);
+            .expect("first recv should succeed");
+        assert!(read1 > 0);
+
+        // Second request reuses the slot and blocks until timeout.
+        let (left2, _right2) = UnixStream::pair().expect("failed to create unix stream pair");
+        let start = Instant::now();
+        let result2 = submitter
+            .recv(
+                Arc::new(left2.into()),
+                IoBufMut::with_capacity(8),
+                0,
+                8,
+                false,
+                Instant::now() + Duration::from_millis(80),
+            )
+            .await;
+        let elapsed = start.elapsed();
+        assert!(matches!(result2, Err((_, crate::Error::Timeout))));
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "timeout fired too early after slot reuse: {elapsed:?}"
+        );
+
+        drop(submitter);
+        handle.join().expect("io_uring loop thread panicked");
+    }
+
+    #[test]
+    fn test_stage_request_panics_on_stale_ready_queue_entry() {
+        // A stale ready-queue id should be treated as an internal logic error:
+        // once a waiter is queued for restaging, no production path should
+        // remove and reuse that slot before the queue entry is revisited.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Create and complete one waiter so the ready queue can later point at
+        // a stale generation.
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, _rx) = oneshot::channel();
+        let stale = iouring.waiters.insert(
+            Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
+                sender: tx,
+            }),
+            None,
+        );
+        assert!(matches!(
+            iouring.waiters.stage(stale),
+            StageOutcome::Submit(_)
+        ));
+        match iouring.waiters.on_completion(stale.user_data(), 0) {
+            CompletionOutcome::Complete { request, .. } => request.complete(),
+            _ => panic!("sync waiter should complete immediately"),
+        }
+
+        // Reuse the same slot with a new generation to prove `stage_request`
+        // matches on the full waiter id, not just the slot index.
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, _rx) = oneshot::channel();
+        let reused = iouring.waiters.insert(
+            Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
+                sender: tx,
+            }),
+            None,
+        );
+        assert_eq!(reused.index(), stale.index());
+        assert_ne!(reused, stale);
+
+        let stale_ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut sq = ring.submission();
+            iouring.stage_request(stale, &mut sq);
+        }));
+        assert!(stale_ready.is_err());
+        assert!(!iouring.waiters.is_in_flight(reused));
+    }
+
+    #[test]
+    fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
+        // Verify timeout-wheel advancement ignores stale entries from a reused waiter slot.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        // Schedule an old waiter at tick 1, then complete it early so the wheel
+        // retains a stale entry for this slot/tick pair.
+        let (sock_left, _) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (old_tx, _old_rx) = oneshot::channel();
+        let old_req = Request::Sync(SyncRequest {
+            file: Arc::new(file),
+            result: None,
+            sender: old_tx,
+        });
+        let old_slot = iouring.waiters.insert(old_req, Some(1));
+        iouring.timeout_wheel.schedule(old_slot, 1);
+        // Simulate completion after the waiter had an op staged.
+        assert!(matches!(
+            iouring.waiters.stage(old_slot),
+            StageOutcome::Submit(_)
+        ));
+        if let CompletionOutcome::Complete {
+            request,
+            target_tick: Some(tick),
+        } = iouring.waiters.on_completion(old_slot.user_data(), 0)
+        {
+            iouring.timeout_wheel.remove(tick);
+            request.complete();
+        }
+
+        // Reuse the same slot for a new waiter with a later timeout.
+        let (sock_left2, _) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left2 is a valid fd that we own.
+        let file2 = unsafe { std::fs::File::from_raw_fd(sock_left2.into_raw_fd()) };
+        let (tx, _rx) = oneshot::channel();
+        let req = Request::Sync(SyncRequest {
+            file: Arc::new(file2),
+            result: None,
+            sender: tx,
+        });
+        let slot_index = iouring.waiters.insert(req, Some(3));
+        assert_eq!(slot_index.index(), old_slot.index());
+        assert!(matches!(
+            iouring.waiters.stage(slot_index),
+            StageOutcome::Submit(_)
+        ));
+        iouring.timeout_wheel.schedule(slot_index, 3);
+
+        // At tick 1, only the stale old entry should expire. The new waiter must
+        // stay active and no cancel should be queued.
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        iouring.advance_timeouts();
+        assert!(iouring.pending_cancels.is_empty());
+
+        // At tick 3, the real timeout should queue cancellation.
+        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
+        iouring.advance_timeouts();
+        assert_eq!(iouring.pending_cancels.len(), 1);
+    }
+
+    #[test]
+    fn test_cancel_completion_returns_saved_op_result() {
+        // Verify a successful operation CQE still wins if it races with a timeout cancel.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        let (left, right) = UnixStream::pair().unwrap();
+        // Write data so a recv would succeed.
+        (&right).write_all(b"hello").unwrap();
+
+        let (tx, rx) = oneshot::channel();
+        let req = Request::Recv(RecvRequest {
+            fd: Arc::new(left.into()),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: false,
+            deadline: Some(Instant::now() + Duration::from_secs(1)),
+            result: None,
+            sender: tx,
+        });
+        let slot_index = iouring.waiters.insert(req, Some(2));
+        assert!(matches!(
+            iouring.waiters.stage(slot_index),
+            StageOutcome::Submit(_)
+        ));
+        assert!(
+            iouring.waiters.cancel(slot_index),
+            "cancel should transition active waiter"
+        );
+        iouring.timeout_wheel.schedule(slot_index, 2);
+        iouring.timeout_wheel.remove(2);
+
+        // Simulate op CQE arriving with positive result (5 bytes read).
+        // Even though cancel was requested, a complete positive result wins.
+        if let CompletionOutcome::Complete { request, .. } =
+            iouring.waiters.on_completion(slot_index.user_data(), 5)
+        {
+            request.complete();
+        }
+
+        // Late cancel CQE should be ignored.
+        assert!(matches!(
+            iouring
+                .waiters
+                .on_completion(slot_index.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Cancel
+        ));
+
+        let (_, result) = futures::executor::block_on(rx)
+            .expect("missing completion")
+            .expect("recv should succeed");
+        // exact=false recv with 5 bytes should succeed.
+        assert_eq!(result, 5);
+        assert_eq!(iouring.waiters.len(), 0);
+    }
+
+    #[test]
+    fn test_staged_cancel_cqe_is_ignored_after_timeout_completion() {
+        // Drive the "cancel SQE already staged" race explicitly:
+        //
+        // 1. Stage an exact recv with a deadline and register it with the wheel.
+        // 2. Advance time so the waiter becomes cancel-requested and queues an
+        //    AsyncCancel.
+        // 3. Stage that cancel SQE into the ring, but do not complete it yet.
+        // 4. Deliver a partial op CQE after cancellation was requested. For an
+        //    exact recv, that must complete locally as Timeout instead of
+        //    requeueing.
+        // 5. Finally, deliver the late cancel CQE and confirm it is ignored
+        //    because the waiter was already removed by step 4.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(100),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        let (left, _right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        let req = Request::Recv(RecvRequest {
+            fd: Arc::new(left.into()),
+            buf: IoBufMut::with_capacity(8),
+            offset: 0,
+            len: 8,
+            exact: true,
+            deadline: Some(Instant::now() + Duration::from_millis(25)),
+            result: None,
+            sender: tx,
+        });
+        let waiter_id = iouring.waiters.insert(req, Some(1));
+        assert!(matches!(
+            iouring.waiters.stage(waiter_id),
+            StageOutcome::Submit(_)
+        ));
+        iouring.timeout_wheel.schedule(waiter_id, 1);
+
+        // Expire the deadline so the waiter transitions to cancel-requested and
+        // the loop queues an AsyncCancel for the in-flight recv SQE.
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        iouring.advance_timeouts();
+        assert_eq!(iouring.pending_cancels.len(), 1);
+
+        // Stage the queued AsyncCancel. It is now in the SQ, but there is still
+        // no cancel CQE, so the operation CQE can still win the race.
+        {
+            let mut submission_queue = ring.submission();
+            assert!(!iouring.stage_cancellations(&mut submission_queue));
+            assert_eq!(submission_queue.len(), 1);
+        }
+        assert!(iouring.pending_cancels.is_empty());
+
+        // A partial result after cancellation was requested must complete this
+        // exact recv as Timeout rather than parking it back in the ready queue.
+        match iouring.waiters.on_completion(waiter_id.user_data(), 4) {
+            CompletionOutcome::Complete {
+                request,
+                target_tick: None,
+            } => request.complete(),
+            _ => panic!("missing timeout completion from op CQE"),
+        }
+
+        // The cancel CQE arrives after the waiter was already removed, so it
+        // should be treated as stale and ignored.
+        assert!(matches!(
+            iouring
+                .waiters
+                .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Cancel
+        ));
+
+        assert!(matches!(
+            futures::executor::block_on(rx).expect("missing completion"),
+            Err((_, crate::Error::Timeout))
+        ));
+        assert_eq!(iouring.waiters.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wake_path_progress_scenarios() {
+        // Run both wake-path variants: one with strict success assertions and
+        // one that only checks for forward progress without inspecting results.
+        for should_succeed in [true, false] {
+            let cfg = Config::default();
+            let mut registry = Registry::default();
+            let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+            let handle = std::thread::spawn(move || iouring.run());
+
+            let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
+
+            // Submit a recv.
+            let recv = submitter.recv(
+                Arc::new(left_pipe.into()),
+                IoBufMut::with_capacity(5),
+                0,
+                5,
+                false,
+                Instant::now() + Duration::from_secs(5),
+            );
+            let send = submitter.send(
+                Arc::new(right_pipe.into()),
+                IoBufs::from(IoBuf::from(b"hello")),
+                Instant::now() + Duration::from_secs(5),
+            );
+
+            let timeout = tokio::time::timeout(Duration::from_secs(2), async {
+                let (recv_result, send_result) = join(recv, send).await;
+                if should_succeed {
+                    let (_, read) = recv_result.expect("recv should succeed");
+                    assert!(read > 0);
+                    send_result.expect("send should succeed");
+                } else {
+                    let _ = recv_result;
+                    let _ = send_result;
+                }
+            });
+            assert!(
+                timeout.await.is_ok(),
+                "wake path test timed out (should_succeed={should_succeed})"
+            );
+
+            drop(submitter);
+            handle.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeout() {
+        // Verify a timed recv completes with timeout once its deadline expires.
+        let cfg = Config {
+            max_request_timeout: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Submit a recv that will time out (because we don't write to the pipe).
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
+
+        assert!(matches!(
+            submitter
+                .recv(
+                    Arc::new(pipe_left.into()),
+                    IoBufMut::with_capacity(8),
+                    0,
+                    8,
+                    false,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err((_, crate::Error::Timeout))
+        ));
+
         drop(submitter);
         handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_no_timeout() {
-        // Create an io_uring instance with shutdown timeout disabled
+        // Verify shutdown waits for the last in-flight request when no cutoff is configured.
         let cfg = Config {
             shutdown_timeout: None,
             ..Default::default()
@@ -1346,34 +1680,73 @@ mod tests {
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
-        // Submit an operation that will complete after shutdown
-        let timeout = Timespec::new().sec(3);
-        let timeout = opcode::Timeout::new(&timeout).build();
+        // Submit a low-level nop-equivalent: a sync on a real fd.
+        let (sock_left, _) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Op {
-                work: timeout,
+            .enqueue(Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
                 sender: tx,
-                buffer: None,
-                fd: None,
-                iovecs: None,
-            })
+            }))
             .await
             .unwrap();
 
-        // Drop submission channel to trigger io_uring shutdown
+        // With `shutdown_timeout = None`, shutdown waits until all in-flight
+        // requests complete. Fsync on a socket should complete quickly.
+        drop(submitter);
+        let result = rx.await.unwrap();
+        // Socket fsync may succeed or fail, either is fine for this test.
+        let _ = result;
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_no_timeout_continues_deadline_processing() {
+        // Verify shutdown-without-cutoff still advances deadlines until timed requests resolve.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(250),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 0,
+                len: 8,
+                exact: false,
+                deadline: Some(Instant::now() + Duration::from_millis(50)),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
         drop(submitter);
 
-        // With `shutdown_timeout = None`, shutdown waits until all in-flight
-        // operations complete.
-        let (result, _) = rx.await.unwrap();
-        assert_eq!(result, -libc::ETIME);
+        let result = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("deadline completion timed out");
+        assert!(matches!(
+            result.expect("missing deadline completion"),
+            Err((_, crate::Error::Timeout))
+        ));
         handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
-        // Create an io_uring instance with shutdown timeout enabled
+        // Verify a bounded shutdown abandons requests that never complete.
         let cfg = Config {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
@@ -1382,28 +1755,30 @@ mod tests {
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
-        // Submit an operation that will complete long after shutdown starts
-        let timeout = Timespec::new().sec(5_000);
-        let timeout = opcode::Timeout::new(&timeout).build();
+        // Submit a recv that will never complete (nobody writes to the pipe).
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Op {
-                work: timeout,
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 0,
+                len: 8,
+                exact: false,
+                deadline: None,
+                result: None,
                 sender: tx,
-                buffer: None,
-                fd: None,
-                iovecs: None,
-            })
+            }))
             .await
             .unwrap();
 
-        // Give the event loop a chance to enter the blocking submit and wait before shutdown
+        // Give the event loop a chance to enter the blocking submit and wait.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Drop submission channel to trigger io_uring shutdown
+        // Drop submission channel to trigger shutdown.
         drop(submitter);
 
-        // The event loop should shut down before the `timeout` fires,
+        // The event loop should shut down before the recv completes,
         // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
         assert!(matches!(err, RecvError { .. }));
@@ -1411,53 +1786,532 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_linked_timeout_ensure_enough_capacity() {
-        // This is a regression test for a bug where we don't reserve enough SQ
-        // space for operations with linked timeouts. Each op needs 2 SQEs (op +
-        // timeout) but the code only ensured 1 slot is available before pushing
-        // both.
+    async fn test_shutdown_timeout_preserves_deadline_result() {
+        // Verify a bounded shutdown still lets an already-expiring request report timeout
+        // when the deadline wins the race against the shutdown cutoff.
         let cfg = Config {
-            size: 8,
-            op_timeout: Some(Duration::from_millis(5)),
+            max_request_timeout: Duration::from_millis(250),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: Some(Duration::from_millis(500)),
             ..Default::default()
         };
         let mut registry = Registry::default();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
-        // Submit more operations than the SQ size to force batching.
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 0,
+                len: 8,
+                exact: false,
+                deadline: Some(Instant::now() + Duration::from_millis(50)),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
+        drop(submitter);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("deadline completion timed out");
+        assert!(matches!(
+            result.expect("missing deadline completion"),
+            Err((_, crate::Error::Timeout))
+        ));
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_timeout_abandons_timed_op_after_cutoff() {
+        // Verify a bounded shutdown abandons even deadline-bearing requests
+        // once the shutdown cutoff expires before the request deadline.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(750),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: Some(Duration::from_millis(50)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 0,
+                len: 8,
+                exact: false,
+                deadline: Some(Instant::now() + Duration::from_millis(500)),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
+        // Trigger shutdown well before the request deadline so shutdown, not
+        // deadline processing, is responsible for completing the test.
+        // Give the loop a chance to submit the long-running op before shutdown.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(submitter);
+
+        // The request should be abandoned once shutdown times out, which drops
+        // the oneshot sender instead of returning a logical timeout result.
+        let err = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("shutdown abandonment timed out")
+            .unwrap_err();
+        assert!(matches!(err, RecvError { .. }));
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_deadline_timeout_ensure_enough_capacity() {
+        // Verify timed requests are still drained correctly when timeout-driven
+        // cancel traffic exceeds the ring's SQ capacity in a single pass.
+        let cfg = Config {
+            size: 8,
+            max_request_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Submit more timed requests than the SQ size to force batching.
         let total = 64usize;
-        let mut rxs = Vec::with_capacity(total);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut peers = Vec::with_capacity(total);
+        let mut recvs = Vec::with_capacity(total);
         for _ in 0..total {
-            let nop = opcode::Nop::new().build();
-            let (tx, rx) = oneshot::channel();
-            submitter
-                .send(Op {
-                    work: nop,
-                    sender: tx,
-                    buffer: None,
-                    fd: None,
-                    iovecs: None,
-                })
-                .await
-                .unwrap();
-            rxs.push(rx);
+            let (left, right) = UnixStream::pair().unwrap();
+            peers.push(right);
+            recvs.push({
+                let submitter = submitter.clone();
+                async move {
+                    submitter
+                        .recv(
+                            Arc::new(left.into()),
+                            IoBufMut::with_capacity(8),
+                            0,
+                            8,
+                            false,
+                            deadline,
+                        )
+                        .await
+                }
+            });
         }
 
-        // All NOPs should complete successfully
-        for rx in rxs {
-            let (res, _) = rx.await.unwrap();
-            assert_eq!(res, 0, "NOP op failed: {res}");
+        // All requests should complete with timeout rather than getting stuck
+        // behind waiter capacity.
+        for result in tokio::time::timeout(Duration::from_secs(2), join_all(recvs))
+            .await
+            .expect("deadline completion timed out")
+        {
+            assert!(matches!(result, Err((_, crate::Error::Timeout))));
         }
 
+        drop(peers);
         drop(submitter);
         handle.join().unwrap();
     }
 
     #[tokio::test]
+    async fn test_exact_recv_partial_progress() {
+        // Exercise the exact=true recv path where the kernel returns partial
+        // data and the loop must requeue for a follow-up SQE.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (left, right) = UnixStream::pair().unwrap();
+        // Set the socket to non-blocking so partial writes are possible.
+        left.set_nonblocking(true).unwrap();
+        right.set_nonblocking(true).unwrap();
+
+        let total = 100;
+        let recv = submitter.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(total),
+            0,
+            total,
+            true,
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        // Write data in two chunks so the recv must make partial progress.
+        let writer = async {
+            (&right).write_all(&[1u8; 40]).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            (&right).write_all(&[2u8; 60]).unwrap();
+        };
+
+        let (recv_result, ()) = tokio::time::timeout(Duration::from_secs(5), join(recv, writer))
+            .await
+            .expect("recv timed out");
+        let (_, result) = recv_result.expect("recv should succeed");
+        assert_eq!(result, total);
+
+        drop(submitter);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_no_timeout_processes_ready_queue() {
+        // Verify shutdown draining continues staging ready-queue work until a partially
+        // completed logical request reaches its terminal result.
+        let cfg = Config {
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Use a socket pair so we can feed the recv in two phases and control
+        // exactly when the request is requeued.
+        let (left, right) = UnixStream::pair().unwrap();
+        left.set_nonblocking(true).unwrap();
+        right.set_nonblocking(true).unwrap();
+
+        let total = 100usize;
+        let (tx, rx) = oneshot::channel();
+
+        // Submit an exact recv large enough that the first short write cannot
+        // complete it. After the first CQE, the request must requeue itself.
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(left.into()),
+                buf: IoBufMut::with_capacity(total),
+                offset: 0,
+                len: total,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
+        // Deliver only part of the payload so the recv makes progress and lands
+        // in the ready queue awaiting a follow-up SQE.
+        (&right).write_all(&[1u8; 10]).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Trigger shutdown after the request has been requeued but before it
+        // has necessarily been restaged. Drain must continue servicing the
+        // ready queue from this point onward.
+        drop(submitter);
+
+        // Finish the request after shutdown has started. Drain must continue
+        // staging ready-queue work or this recv will hang forever.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (&right).write_all(&[2u8; 90]).unwrap();
+
+        // The recv should still complete successfully even though shutdown was
+        // initiated between the first and second stages of the logical request.
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("shutdown recv timed out")
+            .expect("missing shutdown recv completion")
+            .expect("recv should succeed during shutdown");
+        assert_eq!(result, total);
+
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timeout_fires_while_request_in_ready_queue() {
+        // Regression test: a request that made partial progress and was
+        // requeued must be completed with timeout if the deadline expires
+        // before the ready queue entry is staged. Without this fix, the
+        // request would leak in the waiter table forever.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(200),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (left, right) = UnixStream::pair().unwrap();
+
+        // Submit an exact recv for 100 bytes with a short deadline.
+        let recv = submitter.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(100),
+            0,
+            100,
+            true,
+            Instant::now() + Duration::from_millis(80),
+        );
+
+        // Write partial data so the recv makes progress and gets requeued,
+        // then let the deadline expire before sending the rest.
+        let writer = async {
+            (&right).write_all(&[1u8; 10]).unwrap();
+        };
+
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), join(recv, writer))
+            .await
+            .expect("recv should not hang");
+        assert!(
+            matches!(result, Err((_, crate::Error::Timeout))),
+            "expected timeout, got {result:?}"
+        );
+
+        drop(submitter);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_ready_queue_timeout_skips_cancel_staging() {
+        // Verify timeout processing does not enqueue AsyncCancel for requests
+        // that already retired their last SQE and are only waiting in ready_queue.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(100),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        let (left, _right) = UnixStream::pair().unwrap();
+        let (tx, _rx) = oneshot::channel();
+        let request = Request::Recv(RecvRequest {
+            fd: Arc::new(left.into()),
+            buf: IoBufMut::with_capacity(8),
+            offset: 0,
+            len: 8,
+            exact: true,
+            deadline: Some(Instant::now() + Duration::from_millis(25)),
+            result: None,
+            sender: tx,
+        });
+        let waiter_id = iouring.waiters.insert(request, Some(1));
+        assert!(matches!(
+            iouring.waiters.stage(waiter_id),
+            StageOutcome::Submit(_)
+        ));
+        iouring.timeout_wheel.schedule(waiter_id, 1);
+
+        // Simulate a short recv CQE so the logical request requeues itself but
+        // no longer has a kernel op outstanding.
+        let waiter_id = match iouring.waiters.on_completion(waiter_id.user_data(), 4) {
+            CompletionOutcome::Requeue(waiter_id) => waiter_id,
+            _ => panic!("missing partial recv completion"),
+        };
+        iouring.ready_queue.push_back(waiter_id);
+
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        iouring.advance_timeouts();
+
+        // Timeout should mark the waiter canceled locally without staging `AsyncCancel`.
+        assert!(iouring.pending_cancels.is_empty());
+        assert!(matches!(
+            iouring.waiters.stage(waiter_id),
+            StageOutcome::Timeout(_)
+        ));
+    }
+
+    #[test]
+    fn test_drain_breaks_after_local_ready_queue_timeout_finishes_last_waiter() {
+        // Verify shutdown drain exits immediately once ready-queue staging
+        // finishes the final waiter locally instead of restaging another SQE.
+        let cfg = Config {
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+        iouring.wake_rearm_needed = false;
+
+        // Seed drain with exactly one waiter that is already canceled and only
+        // remains in the ready queue.
+        let (tx, rx) = oneshot::channel();
+        let waiter_id = iouring.waiters.insert(
+            Request::Send(SendRequest {
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: None,
+                sender: tx,
+            }),
+            Some(1),
+        );
+        assert!(iouring.waiters.cancel(waiter_id));
+        iouring.ready_queue.push_back(waiter_id);
+
+        iouring.drain(&mut ring);
+
+        // Drain should finish the waiter locally and exit without staging more SQEs.
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        let result = futures::executor::block_on(rx).expect("missing timeout completion");
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn test_fill_submission_queue_completes_cancelled_ready_queue_entry_locally() {
+        // Verify a cancel-requested waiter parked in the ready queue completes
+        // immediately with timeout instead of restaging another SQE.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on ready-queue staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        // Insert a canceled waiter whose next transition should be a local timeout completion.
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Send(SendRequest {
+            fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: Some(Instant::now() + Duration::from_secs(1)),
+            result: None,
+            sender: tx,
+        });
+        let waiter_id = iouring.waiters.insert(request, Some(1));
+        assert!(iouring.waiters.cancel(waiter_id));
+        iouring.ready_queue.push_back(waiter_id);
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // Ready-queue staging should retire the waiter locally and leave the SQ untouched.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        let result = rx.await.expect("missing timeout completion");
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn test_fill_submission_queue_orphans_closed_request_before_first_submit() {
+        // Verify dropping the caller before the loop stages the first SQE
+        // retires both send and read-at requests locally instead of issuing
+        // any I/O.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on request staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        handle
+            .enqueue(Request::Send(SendRequest {
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .expect("request should enqueue");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // The request should retire locally without consuming waiter or SQ
+        // capacity, and its scheduled deadline should disappear as well.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own. This request is
+        // orphaned before staging, so the file descriptor is never submitted.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        handle
+            .enqueue(Request::ReadAt(ReadAtRequest {
+                file: Arc::new(file),
+                offset: 0,
+                len: 8,
+                read: 0,
+                buf: IoBufMut::with_capacity(8),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .expect("request should enqueue");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // The read request should take the same orphan path as send.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn test_fill_submission_queue_orphans_closed_ready_queue_entry_locally() {
+        // Verify an orphaned waiter parked in the ready queue retires
+        // locally instead of staging another SQE.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on ready-queue staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        let waiter_id = iouring.waiters.insert(
+            Request::Recv(RecvRequest {
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 4,
+                len: 8,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx,
+            }),
+            Some(1),
+        );
+        iouring.timeout_wheel.schedule(waiter_id, 1);
+        iouring.ready_queue.push_back(waiter_id);
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // Restaging should notice the closed caller, drop the request locally,
+        // and clean up its deadline tracking without touching the SQ.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
     async fn test_single_issuer() {
-        // Test that SINGLE_ISSUER with DEFER_TASKRUN works correctly.
-        // The simplest test: just submit a no-op and verify it completes.
+        // Verify SINGLE_ISSUER still allows normal request submission and completion.
         let cfg = Config {
             single_issuer: true,
             ..Default::default()
@@ -1465,28 +2319,40 @@ mod tests {
 
         let mut registry = Registry::default();
         let (sender, iouring) = IoUringLoop::new(cfg, &mut registry);
-
-        // Run io_uring in a dedicated thread
         let uring_thread = std::thread::spawn(move || iouring.run());
 
-        // Submit a no-op
-        let (tx, rx) = oneshot::channel();
-        sender
-            .send(Op {
-                work: opcode::Nop::new().build(),
-                sender: tx,
-                buffer: None,
-                fd: None,
-                iovecs: None,
-            })
-            .await
-            .unwrap();
+        // Use a real request/response pair instead of a nop-style operation so
+        // the test proves that submissions and completions still work with the
+        // SINGLE_ISSUER ring configuration enabled.
+        let (sock_left, sock_right) = UnixStream::pair().unwrap();
+        // Queue the recv first so the send has a real consumer and we exercise
+        // the normal cross-request wake/completion path.
+        let recv = sender.recv(
+            Arc::new(sock_left.into()),
+            IoBufMut::with_capacity(5),
+            0,
+            5,
+            true,
+            Instant::now() + Duration::from_secs(5),
+        );
+        let send = sender.send(
+            Arc::new(sock_right.into()),
+            IoBufs::from(IoBuf::from(b"hello")),
+            Instant::now() + Duration::from_secs(5),
+        );
 
-        // Verify it completes successfully
-        let (result, _) = rx.await.unwrap();
-        assert_eq!(result, 0);
+        // The recv must observe the full payload, which shows that the request
+        // made it through submission, wakeup, and completion successfully.
+        let (recv_result, send_result) =
+            tokio::time::timeout(Duration::from_secs(2), join(recv, send))
+                .await
+                .expect("recv/send timed out");
+        let (_, read) = recv_result.expect("recv should succeed");
+        assert_eq!(read, 5);
 
-        // Clean shutdown
+        // The paired send must also complete cleanly.
+        send_result.expect("send should succeed");
+
         drop(sender);
         uring_thread.join().unwrap();
     }

@@ -18,7 +18,7 @@ use commonware_consensus::{
         config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
-        Engine,
+        Engine, ForwardingPolicy,
     },
     types::{Delta, Epoch, View},
     Monitor, Viewable,
@@ -196,22 +196,23 @@ async fn setup_network<P: simplex::Simplex>(
     Vec<P::Scheme>,
     HashMap<Ed25519PublicKey, NetworkChannels>,
 ) {
-    let (network, mut oracle) = Network::new(
-        context.with_label("network"),
-        NetworkConfig {
-            max_size: 1024 * 1024,
-            disconnect_on_block: false,
-            tracked_peer_sets: None,
-        },
-    );
-    network.start();
-
     let Fixture {
         participants,
         schemes,
         verifier: _,
         ..
     } = P::fixture(context, NAMESPACE, N4F1C3.n);
+    let (network, mut oracle) = Network::new_with_peers(
+        context.with_label("network"),
+        NetworkConfig {
+            max_size: 1024 * 1024,
+            disconnect_on_block: false,
+            tracked_peer_sets: NZUsize!(1),
+        },
+        participants.clone(),
+    )
+    .await;
+    network.start();
 
     let registrations = register(&mut oracle, &participants).await;
 
@@ -382,6 +383,7 @@ where
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
+        forwarding: ForwardingPolicy::Disabled,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
@@ -610,6 +612,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
             engine.start(
