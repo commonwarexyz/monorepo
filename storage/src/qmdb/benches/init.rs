@@ -13,7 +13,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    Metrics, Runner as _,
+    Metrics, Runner as _, ThreadPooler,
 };
 use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
@@ -80,15 +80,16 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let pc = CacheRef::from_pooler(
+                            let page_cache = CacheRef::from_pooler(
                                 ctx.with_label("cache"),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );
-                            let af = any_fix_cfg(&ctx, pc.clone());
-                            let cf = cur_fix_cfg(&ctx, pc.clone());
-                            let av = any_var_digest_cfg(&ctx, pc.clone());
-                            let cv = cur_var_digest_cfg(&ctx, pc);
+                            let thread_pool = ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let af = any_fix_cfg(thread_pool.clone(), page_cache.clone());
+                            let cf = cur_fix_cfg(thread_pool.clone(), page_cache.clone());
+                            let av = any_var_digest_cfg(thread_pool.clone(), page_cache.clone());
+                            let cv = cur_var_digest_cfg(thread_pool, page_cache);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 with_fixed_value_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
@@ -148,13 +149,14 @@ fn bench_var_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let pc = CacheRef::from_pooler(
+                            let page_cache = CacheRef::from_pooler(
                                 ctx.with_label("cache"),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );
-                            let av = any_var_vec_cfg(&ctx, pc.clone());
-                            let cv = cur_var_vec_cfg(&ctx, pc);
+                            let thread_pool = ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let av = any_var_vec_cfg(thread_pool.clone(), page_cache.clone());
+                            let cv = cur_var_vec_cfg(thread_pool, page_cache);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 with_var_value_db_cfg!(ctx, variant, av, cv, |mut db| {

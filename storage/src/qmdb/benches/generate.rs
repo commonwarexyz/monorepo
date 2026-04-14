@@ -131,12 +131,12 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     for _ in 0..iters {
                         let start = Instant::now();
 
-                        let pc = CacheRef::from_pooler(
+                        let page_cache = CacheRef::from_pooler(
                             ctx.with_label("cache"),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         );
-                        let mut db = open_keyless_db(ctx.clone(), pc).await;
+                        let mut db = open_keyless_db(ctx.clone(), page_cache).await;
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {
