@@ -9,26 +9,20 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
 ///
-/// # Epocher and Provider Management
+/// # Epocher and Provider Coverage
 ///
-/// Any height the marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If the epocher
-/// cannot map a height to an epoch, or the provider cannot supply a scheme for
-/// that epoch, marshal will drop the sync request. If the height is greater than
-/// the last processed height, marshal will block the serving peer for providing
-/// invalid data (recall, marshal will only attempt to fetch heights requested by
-/// the application). If the height is less than or equal to the last
-/// processed height, marshal will drop the sync request as stale.
+/// Any height marshal is asked to sync must be covered by both the
+/// [epocher](Self::epocher) and the [provider](Self::provider). If
+/// either returns `None` for a requested height, resolved requests will
+/// be acknowledged and then dropped. This can lead marshal to halt (a request
+/// needed to continue processing the canonical chain may never be resolved).
 ///
-/// Applications that wish to prune entries from the [epocher](Self::epocher) and
-/// [provider](Self::provider) can do so once an epoch is no longer needed (the
-/// last processed height is greater than the epoch boundary). Applications can compute
-/// the last processed height from an `Update::Block` message as `H - max_pending_acks`
-/// (the dispatched height minus the maximum backlog of blocks the application can buffer).
+/// ## Pruning
 ///
-/// If the [epocher](Self::epocher) or [provider](Self::provider) is not populated for a height
-/// that marshal may request, marshal may halt indefinitely or block peers for serving data that
-/// cannot be verified.
+/// Applications may prune epocher/provider entries once the last processed
+/// height passes the epoch boundary. The last processed height can be
+/// derived from an `Update::Block` at height `H` as
+/// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
 pub struct Config<B, P, ES, T>
 where
     B: Block,
