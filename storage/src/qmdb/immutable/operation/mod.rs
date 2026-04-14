@@ -29,30 +29,31 @@ pub(crate) const COMMIT_CONTEXT: u8 = 1;
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Key, V: ValueEncoding> {
+pub enum Operation<F: Family, K: Key, V: ValueEncoding> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V::Value),
 
-    /// Commit with optional metadata.
-    Commit(Option<V::Value>),
+    /// Commit with optional metadata and the inactivity floor location.
+    /// Operations before the floor are declared inactive by the application.
+    Commit(Option<V::Value>, Location<F>),
 }
 
-impl<K: Key, V: ValueEncoding> Operation<K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
             Self::Set(key, _) => Some(key),
-            Self::Commit(_) => None,
+            Self::Commit(_, _) => None,
         }
     }
 
     /// Returns true if this is a commit operation.
     pub const fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_))
+        matches!(self, Self::Commit(_, _))
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, V> {
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {
@@ -69,12 +70,14 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<K, V> 
     }
 
     fn has_floor(&self) -> Option<Location<F>> {
-        // Immutable databases don't have inactivity floors
-        None
+        match self {
+            Self::Commit(_, loc) => Some(*loc),
+            _ => None,
+        }
     }
 }
 
-impl<K: Key, V: ValueEncoding> Display for Operation<K, V>
+impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V>
 where
     V::Value: Encode,
 {
@@ -83,11 +86,11 @@ where
             Self::Set(key, value) => {
                 write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
             }
-            Self::Commit(value) => {
+            Self::Commit(value, floor) => {
                 if let Some(value) = value {
-                    write!(f, "[commit {}]", hex(&value.encode()))
+                    write!(f, "[commit {} floor:{}]", hex(&value.encode()), **floor)
                 } else {
-                    write!(f, "[commit]")
+                    write!(f, "[commit floor:{}]", **floor)
                 }
             }
         }
@@ -95,7 +98,7 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Key, V: ValueEncoding> arbitrary::Arbitrary<'_> for Operation<K, V>
+impl<F: Family, K: Key, V: ValueEncoding> arbitrary::Arbitrary<'_> for Operation<F, K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
@@ -108,7 +111,12 @@ where
                 let value = V::Value::arbitrary(u)?;
                 Ok(Self::Set(key, value))
             }
-            1 => Ok(Self::Commit(Option::<V::Value>::arbitrary(u)?)),
+            1 => {
+                let metadata = Option::<V::Value>::arbitrary(u)?;
+                let max_loc = F::MAX_LEAVES;
+                let floor = u.int_in_range(0..=*max_loc)?;
+                Ok(Self::Commit(metadata, Location::new(floor)))
+            }
             _ => unreachable!(),
         }
     }
@@ -117,11 +125,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qmdb::any::value::VariableEncoding;
+    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_utils::sequence::U64;
 
-    type VarOp = Operation<U64, VariableEncoding<U64>>;
+    type VarOp = Operation<mmr::Family, U64, VariableEncoding<U64>>;
 
     #[test]
     fn test_operation_key() {
@@ -131,10 +139,10 @@ mod tests {
         let set_op = VarOp::Set(key.clone(), value.clone());
         assert_eq!(&key, set_op.key().unwrap());
 
-        let commit_op = VarOp::Commit(Some(value));
+        let commit_op = VarOp::Commit(Some(value), Location::new(0));
         assert_eq!(None, commit_op.key());
 
-        let commit_op_none = VarOp::Commit(None);
+        let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(None, commit_op_none.key());
     }
 
@@ -146,11 +154,35 @@ mod tests {
         let set_op = VarOp::Set(key, value.clone());
         assert!(!set_op.is_commit());
 
-        let commit_op = VarOp::Commit(Some(value));
+        let commit_op = VarOp::Commit(Some(value), Location::new(0));
         assert!(commit_op.is_commit());
 
-        let commit_op_none = VarOp::Commit(None);
+        let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert!(commit_op_none.is_commit());
+    }
+
+    #[test]
+    fn test_operation_has_floor() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let set_op = VarOp::Set(key, value.clone());
+        assert_eq!(
+            <VarOp as OperationTrait<mmr::Family>>::has_floor(&set_op),
+            None
+        );
+
+        let commit_op = VarOp::Commit(Some(value), Location::new(42));
+        assert_eq!(
+            <VarOp as OperationTrait<mmr::Family>>::has_floor(&commit_op),
+            Some(Location::new(42))
+        );
+
+        let commit_op_none = VarOp::Commit(None, Location::new(0));
+        assert_eq!(
+            <VarOp as OperationTrait<mmr::Family>>::has_floor(&commit_op_none),
+            Some(Location::new(0))
+        );
     }
 
     #[test]
@@ -164,13 +196,13 @@ mod tests {
             format!("[key:{} value:{}]", hex(&key), hex(&value.encode()))
         );
 
-        let commit_op = VarOp::Commit(Some(value.clone()));
+        let commit_op = VarOp::Commit(Some(value.clone()), Location::new(10));
         assert_eq!(
             format!("{commit_op}"),
-            format!("[commit {}]", hex(&value.encode()))
+            format!("[commit {} floor:10]", hex(&value.encode()))
         );
 
-        let commit_op = VarOp::Commit(None);
-        assert_eq!(format!("{commit_op}"), "[commit]");
+        let commit_op = VarOp::Commit(None, Location::new(0));
+        assert_eq!(format!("{commit_op}"), "[commit floor:0]");
     }
 }

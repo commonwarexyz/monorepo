@@ -44,7 +44,7 @@ where
     H: CHasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
-    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<K, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>>,
 
     /// Pending mutations.
     mutations: BTreeMap<K, V::Value>,
@@ -65,7 +65,7 @@ where
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<K, V>>>,
+    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -92,6 +92,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
     /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
     pub(super) ancestor_diff_ends: Vec<u64>,
+
+    /// The inactivity floor declared by this batch's commit operation.
+    pub(super) new_inactivity_floor_loc: Location<F>,
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -100,7 +103,7 @@ where
     K: Key,
     V: ValueEncoding,
     H: CHasher,
-    Operation<K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
@@ -109,7 +112,7 @@ where
     ) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -139,7 +142,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -164,14 +167,18 @@ where
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `inactivity_floor` declares that all operations before this location are inactive.
+    /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     pub fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T>,
         metadata: Option<V::Value>,
+        inactivity_floor: Location<F>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -179,7 +186,7 @@ where
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
-        let mut ops: Vec<Operation<K, V>> = Vec::with_capacity(self.mutations.len() + 1);
+        let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(self.mutations.len());
 
         for (key, value) in self.mutations {
@@ -189,7 +196,7 @@ where
         }
         debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
 
-        ops.push(Operation::Commit(metadata));
+        ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
 
@@ -220,13 +227,14 @@ where
             db_size: self.db_size,
             ancestor_diffs,
             ancestor_diff_ends,
+            new_inactivity_floor_loc: inactivity_floor,
         })
     }
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding> MerkleizedBatch<F, D, K, V>
 where
-    Operation<K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
 {
     /// Return the speculative root.
     pub fn root(&self) -> D {
@@ -251,7 +259,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -292,7 +300,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
@@ -309,6 +317,7 @@ where
             db_size: journal_size,
             ancestor_diffs: Vec::new(),
             ancestor_diff_ends: Vec::new(),
+            new_inactivity_floor_loc: self.inactivity_floor_loc,
         })
     }
 }

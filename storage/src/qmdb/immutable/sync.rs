@@ -13,7 +13,7 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, Operation},
-        operation::Key,
+        operation::{Key, Operation as _},
         sync::{self},
         Error,
     },
@@ -31,15 +31,15 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>
+    C: Mutable<Item = Operation<mmr::Family, K, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<K, V>>,
+        + sync::Journal<Context = E, Op = Operation<mmr::Family, K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
-    type Op = Operation<K, V>;
+    type Op = Operation<mmr::Family, K, V>;
     type Journal = C;
     type Hasher = H;
     type Config = immutable::Config<T, C::Config>;
@@ -95,28 +95,35 @@ where
         let mut snapshot: Index<T, mmr::Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
-        let last_commit_loc = {
-            // Get the start of the log.
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let start_loc = mmr::Location::new(bounds.start);
+            let last_commit_loc =
+                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
 
-            // Build snapshot from the log
+            // Read the floor from the last commit operation.
+            let last_op = reader.read(*last_commit_loc).await?;
+            let inactivity_floor_loc = last_op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
+
+            // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<mmr::Family, _, _, _>(
-                start_loc,
+                inactivity_floor_loc,
                 &reader,
                 &mut snapshot,
                 |_, _| {},
             )
             .await?;
 
-            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
+            (last_commit_loc, inactivity_floor_loc)
         };
 
         let db = Self {
             journal,
             snapshot,
             last_commit_loc,
+            inactivity_floor_loc,
         };
 
         db.sync().await?;
@@ -131,7 +138,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::mmr::Location,
+        merkle::mmr::{self, Location},
         qmdb::{
             immutable,
             immutable::variable::Operation,
@@ -210,7 +217,7 @@ mod tests {
 
     /// Create n random Set operations using the default seed (0).
     /// create_test_ops(n) is a prefix of create_test_ops(n') for n < n'.
-    fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
+    fn create_test_ops(n: usize) -> Vec<Operation<mmr::Family, sha256::Digest, sha256::Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -219,7 +226,7 @@ mod tests {
     fn create_test_ops_seeded(
         n: usize,
         seed: u64,
-    ) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
+    ) -> Vec<Operation<mmr::Family, sha256::Digest, sha256::Digest>> {
         let mut rng = test_rng_seeded(seed);
         let mut ops = Vec::new();
         for _i in 0..n {
@@ -230,11 +237,21 @@ mod tests {
         ops
     }
 
-    /// Applies the given operations and commits the database.
+    /// Applies the given operations and commits the database with floor=0.
     async fn apply_ops(
         db: &mut ImmutableSyncTest,
-        ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
+        ops: Vec<Operation<mmr::Family, sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
+    ) {
+        apply_ops_with_floor(db, ops, metadata, Location::new(0)).await;
+    }
+
+    /// Applies the given operations and commits the database with a specified floor.
+    async fn apply_ops_with_floor(
+        db: &mut ImmutableSyncTest,
+        ops: Vec<Operation<mmr::Family, sha256::Digest, sha256::Digest>>,
+        metadata: Option<sha256::Digest>,
+        floor: Location,
     ) {
         let mut batch = db.new_batch();
         for op in ops {
@@ -242,12 +259,12 @@ mod tests {
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(_metadata) => {
+                Operation::Commit(_metadata, _floor) => {
                     panic!("Commit operation not supported in apply_ops");
                 }
             }
         }
-        let merkleized = batch.merkleize(db, metadata);
+        let merkleized = batch.merkleize(db, metadata, floor);
         db.apply_batch(merkleized).await.unwrap();
     }
 
@@ -308,6 +325,12 @@ mod tests {
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(), target_root);
+
+            // Verify the inactivity floor matches the target
+            assert_eq!(
+                got_db.inactivity_floor_loc(),
+                target_db.inactivity_floor_loc()
+            );
 
             // Verify that the synced database matches the target state
             for (key, expected_value) in &expected_kvs {
@@ -756,7 +779,12 @@ mod tests {
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops, None).await;
 
-            target_db.prune(Location::new(10)).await.unwrap();
+            // Commit with floor >= prune target, then prune.
+            let floor = Location::new(10);
+            let merkleized = target_db.new_batch().merkleize(&target_db, None, floor);
+            target_db.apply_batch(merkleized).await.unwrap();
+            target_db.commit().await.unwrap();
+            target_db.prune(floor).await.unwrap();
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -892,8 +920,12 @@ mod tests {
             let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut target_db, more_ops, None).await;
 
-            target_db.prune(Location::new(10)).await.unwrap();
-            apply_ops(&mut target_db, vec![], None).await;
+            // Commit with a floor that allows pruning, then prune.
+            let floor = Location::new(10);
+            let merkleized = target_db.new_batch().merkleize(&target_db, None, floor);
+            target_db.apply_batch(merkleized).await.unwrap();
+            target_db.commit().await.unwrap();
+            target_db.prune(floor).await.unwrap();
 
             // Capture final target state
             let bounds = target_db.bounds().await;
@@ -945,6 +977,10 @@ mod tests {
             let bounds = synced_db.bounds().await;
             assert_eq!(bounds.end, final_upper_bound);
             assert_eq!(bounds.start, final_lower_bound);
+            assert_eq!(
+                synced_db.inactivity_floor_loc(),
+                target_db.inactivity_floor_loc()
+            );
 
             synced_db.destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db)
@@ -1005,6 +1041,90 @@ mod tests {
             let bounds = synced_db.bounds().await;
             assert_eq!(bounds.end, upper_bound);
             assert_eq!(bounds.start, lower_bound);
+
+            synced_db.destroy().await.unwrap();
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .destroy()
+                .await
+                .unwrap();
+        });
+    }
+
+    /// Test that sync correctly handles a non-zero inactivity floor.
+    /// Keys set before the floor should not be in the synced snapshot.
+    #[test_traced("WARN")]
+    fn test_sync_nonzero_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut target_db = create_test_db(context.with_label("target")).await;
+
+            // First batch: 50 keys with floor=0.
+            let early_ops = create_test_ops(50);
+            apply_ops(&mut target_db, early_ops.clone(), None).await;
+            target_db.commit().await.unwrap();
+            let first_commit_end = target_db.bounds().await.end;
+
+            // Second batch: 50 more keys (different seed) with floor = first_commit_end.
+            // This declares all operations from the first batch inactive.
+            let late_ops = create_test_ops_seeded(50, 1);
+            apply_ops_with_floor(
+                &mut target_db,
+                late_ops.clone(),
+                Some(Sha256::fill(1)),
+                first_commit_end,
+            )
+            .await;
+            target_db.commit().await.unwrap();
+
+            assert_eq!(target_db.inactivity_floor_loc(), first_commit_end);
+
+            let bounds = target_db.bounds().await;
+            let target_root = target_db.root();
+
+            // Sync the database.
+            let target_db = Arc::new(target_db);
+            let db_config =
+                create_sync_config(&format!("floor_sync_{}", context.next_u64()), &context);
+            let config = Config {
+                db_config,
+                fetch_batch_size: NZU64!(100),
+                target: Target {
+                    root: target_root,
+                    range: non_empty_range!(bounds.start, bounds.end),
+                },
+                context: context.with_label("client"),
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            };
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            // Verify floor and root match.
+            assert_eq!(synced_db.root(), target_root);
+            assert_eq!(synced_db.inactivity_floor_loc(), first_commit_end);
+
+            // Keys from the second batch (after floor) should be findable.
+            for op in &late_ops {
+                if let Operation::Set(key, value) = op {
+                    assert_eq!(synced_db.get(key).await.unwrap(), Some(*value));
+                }
+            }
+
+            // Keys from the first batch (before floor) should NOT be in the snapshot.
+            for op in &early_ops {
+                if let Operation::Set(key, _) = op {
+                    assert_eq!(
+                        synced_db.get(key).await.unwrap(),
+                        None,
+                        "key from before floor should not be in synced snapshot"
+                    );
+                }
+            }
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
