@@ -260,6 +260,8 @@ mod tests {
 
     #[test]
     fn test_publish_arm_disarm_and_submitted() {
+        // Verify the packed wake state tracks submission sequence separately
+        // from sleep intent across the normal publish and acknowledge flow.
         let waker = Waker::new().expect("eventfd creation should succeed");
         assert_eq!(waker.submitted(), 0);
 
@@ -287,9 +289,13 @@ mod tests {
 
     #[test]
     fn test_ring_and_acknowledge_empty_paths_keep_sequence_stable() {
+        // Verify ringing and draining the eventfd does not perturb the
+        // logical submission sequence, even when the counter is already empty.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let before = waker.submitted();
 
+        // Drive one normal wake cycle, then immediately drain again to hit the
+        // non-blocking empty-read path.
         waker.ring();
         waker.acknowledge();
         // Second acknowledge should take the non-blocking empty path.
@@ -301,6 +307,7 @@ mod tests {
 
     #[test]
     fn test_reinstall_pushes_wake_poll() {
+        // Verify reinstall contributes exactly one multishot wake poll SQE.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
 
@@ -313,10 +320,13 @@ mod tests {
 
     #[test]
     fn test_ring_and_acknowledge_error_branches() {
+        // Verify the explicit EAGAIN and generic error branches leave the
+        // logical submission sequence unchanged.
         let mut waker = Waker::new().expect("eventfd creation should succeed");
         let before = waker.submitted();
 
-        // Saturate counter near max so `ring` hits the non-blocking EAGAIN path.
+        // Saturate the eventfd counter near its maximum so `ring` takes the
+        // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
         let fd = waker.inner.wake_fd.as_raw_fd();
         let value = u64::MAX - 1;
         // SAFETY: `fd` is a valid eventfd and `value` points to initialized memory.
@@ -331,7 +341,8 @@ mod tests {
         waker.ring();
         waker.acknowledge();
 
-        // Close the wake fd so `ring`/`acknowledge` hit the generic error branch.
+        // Then close the descriptor so both helpers exercise their generic
+        // error-logging paths.
         // SAFETY: closing a valid fd is safe.
         let closed = unsafe { libc::close(fd) };
         assert_eq!(closed, 0);

@@ -145,6 +145,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         self.data.get(section, offset).await
     }
+
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    fn try_read_sync(
+        &self,
+        position: u64,
+        items_per_section: u64,
+        offsets: &impl super::Reader<Item = u64>,
+    ) -> Option<V> {
+        if position >= self.size || position < self.pruning_boundary {
+            return None;
+        }
+        let offset = offsets.try_read_sync(position)?;
+        let section = position_to_section(position, items_per_section);
+        self.data.try_get_sync(section, offset)
+    }
 }
 
 /// A contiguous journal with variable-size entries.
@@ -225,6 +240,11 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
         self.guard
             .read(position, self.items_per_section, &self.offsets)
             .await
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<V> {
+        self.guard
+            .try_read_sync(position, self.items_per_section, &self.offsets)
     }
 
     async fn replay(

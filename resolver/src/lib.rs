@@ -26,6 +26,9 @@ commonware_macros::stability_scope!(BETA {
         /// Deliver data to the consumer.
         ///
         /// Returns `true` if the data is valid.
+        ///
+        /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
+        /// previously requested via [`Resolver::fetch`] (or its variants).
         fn deliver(
             &mut self,
             key: Self::Key,

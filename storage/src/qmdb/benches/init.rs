@@ -1,7 +1,7 @@
 //! Benchmarks for QMDB startup initialization performance.
 //!
-//! These benchmarks have expensive setup (generating large random databases) and are separated
-//! from the generation benchmarks so they can be filtered easily.
+//! These benchmarks have expensive setup (generating large random databases) that runs lazily
+//! inside `bench_function` so criterion's name filter can skip them entirely.
 
 use crate::common::{
     any_fix_cfg, any_var_digest_cfg, any_var_vec_cfg, cur_fix_cfg, cur_var_digest_cfg,
@@ -50,14 +50,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in FIXED_VALUE_VARIANTS {
-                // Setup: populate database
-                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_fixed_value_db!(ctx, variant, |mut db| {
-                        populate_and_sync(&mut db, elements, operations, make_fixed_value).await;
-                    });
-                });
-
-                // Benchmark: measure init time
+                let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -66,6 +59,25 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
+                        // Setup: populate database (once, on first sample).
+                        if !initialized {
+                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                                |ctx| async move {
+                                    with_fixed_value_db!(ctx, variant, |mut db| {
+                                        populate_and_sync(
+                                            &mut db,
+                                            elements,
+                                            operations,
+                                            make_fixed_value,
+                                        )
+                                        .await;
+                                    });
+                                },
+                            );
+                            initialized = true;
+                        }
+
+                        // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let pc = CacheRef::from_pooler(
@@ -88,12 +100,14 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     },
                 );
 
-                // Cleanup: destroy database
-                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_fixed_value_db!(ctx, variant, |mut db| {
-                        db.destroy().await.unwrap();
+                // Cleanup: destroy database.
+                if initialized {
+                    commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                        with_fixed_value_db!(ctx, variant, |mut db| {
+                            db.destroy().await.unwrap();
+                        });
                     });
-                });
+                }
             }
         }
     }
@@ -104,14 +118,7 @@ fn bench_var_value_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VAR_VALUE_VARIANTS {
-                // Setup: populate database
-                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_var_value_db!(ctx, variant, |mut db| {
-                        populate_and_sync(&mut db, elements, operations, make_var_value).await;
-                    });
-                });
-
-                // Benchmark: measure init time
+                let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -120,6 +127,25 @@ fn bench_var_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
+                        // Setup: populate database (once, on first sample).
+                        if !initialized {
+                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                                |ctx| async move {
+                                    with_var_value_db!(ctx, variant, |mut db| {
+                                        populate_and_sync(
+                                            &mut db,
+                                            elements,
+                                            operations,
+                                            make_var_value,
+                                        )
+                                        .await;
+                                    });
+                                },
+                            );
+                            initialized = true;
+                        }
+
+                        // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let pc = CacheRef::from_pooler(
@@ -140,12 +166,14 @@ fn bench_var_value_init(c: &mut Criterion) {
                     },
                 );
 
-                // Cleanup: destroy database
-                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_var_value_db!(ctx, variant, |mut db| {
-                        db.destroy().await.unwrap();
+                // Cleanup: destroy database.
+                if initialized {
+                    commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                        with_var_value_db!(ctx, variant, |mut db| {
+                            db.destroy().await.unwrap();
+                        });
                     });
-                });
+                }
             }
         }
     }

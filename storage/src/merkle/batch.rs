@@ -130,6 +130,12 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         self
     }
 
+    /// Return a reference to the thread pool, if any.
+    #[cfg(feature = "std")]
+    pub const fn pool(&self) -> Option<&ThreadPool> {
+        self.pool.as_ref()
+    }
+
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position<F> {
         Position::new(*self.parent.size() + self.appended.len() as u64)

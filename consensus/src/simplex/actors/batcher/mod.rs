@@ -723,7 +723,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -865,15 +865,15 @@ mod tests {
         forward_emitted_on_view_advance_with_forwardable_proposal(secp256r1::fixture);
     }
 
-    /// Test that `NextLeader` forwards only to the newly entered leader, and
+    /// Test that `SilentLeader` forwards only to the newly entered leader, and
     /// only when that leader's matching vote was not observed locally.
-    fn next_leader_forwarding_respects_missing_vote<S, F>(mut fixture: F, leader_voted: bool)
+    fn silent_leader_forwarding_respects_missing_vote<S, F>(mut fixture: F, leader_voted: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let namespace = b"batcher_next_leader_forwarding".to_vec();
+        let namespace = b"batcher_silent_leader_forwarding".to_vec();
         let epoch = Epoch::new(101);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -906,7 +906,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::NextLeader,
+                forwarding: ForwardingPolicy::SilentLeader,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -961,7 +961,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, view),
                 View::zero(),
-                Sha256::hash(b"next_leader_payload"),
+                Sha256::hash(b"silent_leader_payload"),
             );
 
             // Toggle whether the next leader appears in the observed vote set.
@@ -1012,7 +1012,7 @@ mod tests {
                 );
             }
 
-            // `NextLeader` forwarding should either target only participant 2
+            // `SilentLeader` forwarding should either target only participant 2
             // or nobody, depending on whether that vote was observed above.
             batcher_mailbox
                 .update(
@@ -1047,54 +1047,63 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_next_leader_forwarding_targets_missing_next_leader() {
-        next_leader_forwarding_respects_missing_vote(
+    fn test_silent_leader_forwarding_targets_missing_leader() {
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
             false,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
             false,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_std::fixture::<MinPk, _>,
             false,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_std::fixture::<MinSig, _>,
             false,
         );
-        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, false);
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinPk, _>,
+            false,
+        );
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_multisig::fixture::<MinSig, _>,
             false,
         );
-        next_leader_forwarding_respects_missing_vote(ed25519::fixture, false);
-        next_leader_forwarding_respects_missing_vote(secp256r1::fixture, false);
+        silent_leader_forwarding_respects_missing_vote(ed25519::fixture, false);
+        silent_leader_forwarding_respects_missing_vote(secp256r1::fixture, false);
     }
 
     #[test_traced]
-    fn test_next_leader_forwarding_skips_observed_next_leader() {
-        next_leader_forwarding_respects_missing_vote(
+    fn test_silent_leader_forwarding_skips_observed_leader() {
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
             true,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
             true,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_std::fixture::<MinPk, _>,
             true,
         );
-        next_leader_forwarding_respects_missing_vote(
+        silent_leader_forwarding_respects_missing_vote(
             bls12381_threshold_std::fixture::<MinSig, _>,
             true,
         );
-        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, true);
-        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinSig, _>, true);
-        next_leader_forwarding_respects_missing_vote(ed25519::fixture, true);
-        next_leader_forwarding_respects_missing_vote(secp256r1::fixture, true);
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinPk, _>,
+            true,
+        );
+        silent_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinSig, _>,
+            true,
+        );
+        silent_leader_forwarding_respects_missing_vote(ed25519::fixture, true);
+        silent_leader_forwarding_respects_missing_vote(secp256r1::fixture, true);
     }
 
     /// Test that a network notarization waits until the next-view update marks
@@ -1139,7 +1148,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1368,7 +1377,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1548,7 +1557,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1778,7 +1787,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::Silent,
+                forwarding: ForwardingPolicy::SilentVoters,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 

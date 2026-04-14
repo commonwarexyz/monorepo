@@ -506,6 +506,10 @@ where
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping propose"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
@@ -648,6 +652,10 @@ where
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping verify"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
