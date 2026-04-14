@@ -2501,7 +2501,19 @@ mod tests {
                 assert_eq!(handle.await.expect("task failed"), expected as u64);
             }
 
-            let buffer = context.encode();
+            // handle.await resolves when the task's output is ready, but
+            // the running-gauge decrement fires on task-struct drop which
+            // may lag slightly. Retry encode() to let the runtime finish
+            // cleanup.
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            let mut buffer = context.encode();
+            for _ in 0..50 {
+                if buffer.contains(running_value) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                buffer = context.encode();
+            }
 
             // Count occurrences of each runtime task metric for our label. If
             // attributes were incorrectly folded into the task family key, we
@@ -2537,7 +2549,6 @@ mod tests {
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
             );
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
             assert!(
                 buffer.contains(running_value),
                 "expected running gauge to return to 0, got: {buffer}",
@@ -2596,7 +2607,16 @@ mod tests {
                 assert_eq!(handle.await.expect("task failed"), expected as u64);
             }
 
-            let buffer = context.encode();
+            // Same race as above: gauge decrement lags handle completion.
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            let mut buffer = context.encode();
+            for _ in 0..50 {
+                if buffer.contains(running_value) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                buffer = context.encode();
+            }
 
             let spawned_lines = buffer
                 .lines()
@@ -2628,7 +2648,6 @@ mod tests {
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
             );
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
             assert!(
                 buffer.contains(running_value),
                 "expected running gauge to return to 0, got: {buffer}",
