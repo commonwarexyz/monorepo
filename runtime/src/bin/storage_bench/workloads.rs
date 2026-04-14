@@ -2,7 +2,7 @@
 
 use crate::{
     config::{CacheMode, Config, Scenario, SyncMode},
-    filesystem::{random_write_payload, drop_page_cache, prepare_blob, prepare_filled_blob},
+    filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::{merge_worker_results, summarize_operation, ScenarioReport, WorkerStats},
     workers::{
         build_worker_shards, next_random_block, run_frontier_read_worker, run_read_loop,
@@ -11,6 +11,7 @@ use crate::{
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
 use futures::future::join_all;
+use rand::{rngs::StdRng, SeedableRng};
 use std::{
     path::Path,
     sync::{
@@ -44,8 +45,9 @@ async fn run_read(cfg: &Config, root: &Path, context: &Context) -> Result<Scenar
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
 
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
     let blob =
-        prepare_filled_blob(context, root, "storage-bench", b"blob", file_size, cfg.seed).await?;
+        prepare_filled_blob(&mut rng, context, root, "storage-bench", b"blob", file_size).await?;
     warm_cache(cfg, root, &blob, total_blocks).await?;
 
     let start = Instant::now();
@@ -92,9 +94,10 @@ async fn run_overwrite(
     let total_blocks = file_size / cfg.io_size as u64;
     let io_size = cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
 
     let blob = prepare_blob(context, root, "storage-bench", b"blob", file_size).await?;
-    let payload = random_write_payload(cfg.io_size, cfg.seed, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -151,7 +154,8 @@ async fn run_overwrite(
 
 async fn run_write_append(cfg: &Config, context: &Context) -> Result<ScenarioReport, String> {
     let (blob, _) = context.open("storage-bench", b"blob").await.str_err()?;
-    let payload = random_write_payload(cfg.io_size, cfg.seed, cfg.write_shape);
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
     let io_size = cfg.io_size as u64;
 
     let start = Instant::now();
@@ -185,20 +189,19 @@ async fn run_read_write_append(
     let total_blocks = initial_size / cfg.io_size as u64;
     let io_size = cfg.io_size as u64;
 
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
     let blob = prepare_filled_blob(
+        &mut rng,
         context,
         root,
         "storage-bench",
         b"blob",
         initial_size,
-        cfg.seed,
     )
     .await?;
     warm_cache(cfg, root, &blob, total_blocks).await?;
 
-    // Use a different seed for the writer so its PRNG stream doesn't overlap
-    // with the reader streams derived from cfg.seed.
-    let payload = random_write_payload(cfg.io_size, cfg.seed ^ 0xA5A5_A5A5, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
     let visible_len = Arc::new(AtomicU64::new(initial_size));
 
     let start = Instant::now();

@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use commonware_utils::hex;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::Rng;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -124,12 +124,12 @@ where
 ///
 /// Returns the open blob handle so the caller can reuse it for the timed phase.
 pub async fn prepare_filled_blob<S>(
+    rng: &mut impl Rng,
     storage: &S,
     root: &Path,
     partition: &str,
     name: &[u8],
     file_size: u64,
-    seed: u64,
 ) -> Result<S::Blob, String>
 where
     S: Storage,
@@ -137,7 +137,6 @@ where
     let blob = prepare_blob(storage, root, partition, name, file_size).await?;
 
     let chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);
-    let mut rng = StdRng::seed_from_u64(seed);
     let mut offset = 0u64;
     while offset < file_size {
         let len = ((file_size - offset) as usize).min(chunk_size);
@@ -151,18 +150,17 @@ where
 }
 
 /// Build a random write payload of the given size and shape.
-pub fn random_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
+pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShape) -> IoBufs {
     match shape {
         WriteShape::Contiguous => {
             let mut buf = vec![0u8; io_size];
-            StdRng::seed_from_u64(seed).fill_bytes(&mut buf);
+            rng.fill_bytes(&mut buf);
             IoBufs::from(Bytes::from(buf))
         }
         WriteShape::Vectored => {
             const CHUNKS: usize = 4;
             let base = io_size / CHUNKS;
             let remainder = io_size % CHUNKS;
-            let mut rng = StdRng::seed_from_u64(seed);
             let chunks = (0..CHUNKS)
                 .map(|idx| {
                     let len = base + usize::from(idx < remainder);
