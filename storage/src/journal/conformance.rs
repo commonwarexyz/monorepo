@@ -285,7 +285,7 @@ impl Conformance for SegmentedOversized {
                 index_partition: format!("segmented-oversized-index-conformance-{seed}"),
                 value_partition: format!("segmented-oversized-value-conformance-{seed}"),
                 index_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),

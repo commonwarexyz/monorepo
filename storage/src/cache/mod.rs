@@ -156,7 +156,7 @@ mod tests {
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache,
             };
-            let mut cache = Cache::init(first_ctx, cfg.clone())
+            let mut cache = Cache::init(first_ctx, cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -182,7 +182,7 @@ mod tests {
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache,
             };
-            let result = Cache::<_, i32>::init(second_ctx, cfg.clone()).await;
+            let result = Cache::<_, i32>::init(second_ctx, cfg).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::Codec(_)))
@@ -209,7 +209,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -274,7 +274,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache,
             };
-            let mut cache = Cache::init(init1_ctx, cfg.clone())
+            let mut cache = Cache::init(init1_ctx, cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -321,7 +321,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache,
             };
-            let mut cache = Cache::<_, [u8; 1024]>::init(init2_ctx, cfg.clone())
+            let mut cache = Cache::<_, [u8; 1024]>::init(init2_ctx, cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -397,7 +397,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -455,7 +455,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -525,25 +525,27 @@ mod tests {
     fn test_cache_intervals_after_restart() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                codec_config: (),
-                compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
-            };
-
             // Insert data and sync
             {
-                let mut cache = Cache::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize cache");
+                let first_ctx = context.with_label("first");
+                let mut cache = Cache::init(
+                    first_ctx.clone(),
+                    Config {
+                        partition: "test-partition".into(),
+                        codec_config: (),
+                        compression: None,
+                        write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                        replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                        items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                        page_cache: CacheRef::from_pooler(
+                            first_ctx.with_label("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
+                    },
+                )
+                .await
+                .expect("Failed to initialize cache");
 
                 cache.put(0, 0).await.expect("Failed to put data");
                 cache.put(100, 100).await.expect("Failed to put data");
@@ -554,9 +556,25 @@ mod tests {
 
             // Reopen and verify intervals are preserved
             {
-                let cache = Cache::<_, i32>::init(context.with_label("second"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize cache");
+                let second_ctx = context.with_label("second");
+                let cache = Cache::<_, i32>::init(
+                    second_ctx.clone(),
+                    Config {
+                        partition: "test-partition".into(),
+                        codec_config: (),
+                        compression: None,
+                        write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                        replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                        items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                        page_cache: CacheRef::from_pooler(
+                            second_ctx.with_label("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
+                    },
+                )
+                .await
+                .expect("Failed to initialize cache");
 
                 // Check gaps are preserved
                 let (current_end, start_next) = cache.next_gap(0);
@@ -591,7 +609,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -647,7 +665,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -709,7 +727,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -766,7 +784,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
