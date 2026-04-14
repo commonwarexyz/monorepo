@@ -24,19 +24,10 @@ use commonware_runtime::{tokio, Runner as _};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let cfg = match Config::parse_from(std::env::args_os()) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            let _ = err.print();
-            return if err.should_exit_success() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
-        }
-    };
+    let cfg = Config::parse_or_exit();
+    let scenario = cfg.scenario.to_string();
 
-    let root = match prepare_root(&cfg.root, cfg.scenario.name()) {
+    let root = match prepare_root(&cfg.root, &scenario) {
         Ok(root) => root,
         Err(err) => {
             eprintln!("failed to create benchmark root: {err}");

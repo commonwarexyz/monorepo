@@ -1,9 +1,6 @@
 //! Reporting helpers for `storage_bench`.
 
-use crate::{
-    config::{Config, OutputFormat},
-    filesystem::backend_name,
-};
+use crate::{config::Config, filesystem::backend_name};
 use serde_json::json;
 use std::time::Duration;
 
@@ -109,7 +106,7 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
     println!(
         "backend={} scenario={} elapsed_s={:.3}",
         backend_name(),
-        cfg.scenario.name(),
+        cfg.scenario,
         report.elapsed.as_secs_f64(),
     );
     println!(
@@ -120,10 +117,7 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
         cfg.global_queue_interval
             .map_or_else(|| "default".to_string(), |value| value.to_string()),
         cfg.seed,
-        match cfg.output {
-            OutputFormat::Human => "human",
-            OutputFormat::Json => "json",
-        }
+        cfg.output,
     );
 
     if let Some(file_size) = cfg.file_size {
@@ -131,13 +125,12 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
     }
     println!("root={}", cfg.root.display());
     if let Some(cache) = cfg.cache {
-        println!("cache={}", cache.name());
+        println!("cache={cache}");
     }
     if cfg.scenario.has_writes() {
         println!(
             "write_shape={} sync_every={}",
-            cfg.write_shape.name(),
-            cfg.sync_mode.name()
+            cfg.write_shape, cfg.sync_mode
         );
     }
 
@@ -156,7 +149,7 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
 pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
     let json = json!({
         "backend": backend_name(),
-        "scenario": cfg.scenario.name(),
+        "scenario": cfg.scenario.to_string(),
         "duration_seconds": cfg.duration.as_secs(),
         "io_size": cfg.io_size,
         "inflight": cfg.inflight,
@@ -164,9 +157,9 @@ pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
         "global_queue_interval": cfg.global_queue_interval,
         "file_size": cfg.file_size,
         "root": cfg.root,
-        "cache": cfg.cache.map(|mode| mode.name()),
-        "write_shape": cfg.scenario.has_writes().then(|| cfg.write_shape.name()),
-        "sync_every": cfg.scenario.has_writes().then(|| cfg.sync_mode.name()),
+        "cache": cfg.cache.map(|mode| mode.to_string()),
+        "write_shape": cfg.scenario.has_writes().then(|| cfg.write_shape.to_string()),
+        "sync_every": cfg.scenario.has_writes().then(|| cfg.sync_mode.to_string()),
         "seed": cfg.seed,
         "elapsed_ns": report.elapsed.as_nanos().min(u64::MAX as u128) as u64,
         "read": report.read.as_ref().map(operation_json),

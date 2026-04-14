@@ -48,7 +48,7 @@ features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["derive"] }
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
