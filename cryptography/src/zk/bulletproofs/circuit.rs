@@ -214,8 +214,8 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     setup: &Setup<G>,
     circuit: &Circuit<F>,
-    witness: &Witness<F>,
     claim: &Claim<G>,
+    witness: &Witness<F>,
     strategy: &impl Strategy,
 ) -> Option<Proof<F, G>> {
     // To set the stage, we're trying to convince the verifier that:
@@ -581,6 +581,130 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         t_tilde_x,
         ipa_proof,
     })
+}
+
+#[must_use]
+pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
+    _rng: &mut impl CryptoRngCore,
+    transcript: &mut Transcript,
+    setup: &Setup<G>,
+    circuit: &Circuit<F>,
+    claim: &Claim<G>,
+    proof: Proof<F, G>,
+    strategy: &impl Strategy,
+) -> bool {
+    circuit.commit(transcript);
+    transcript.commit(claim.encode());
+    let padded_vars = circuit.internal_vars.next_power_of_two();
+    let y = F::random(transcript.noise(b"y"));
+    let y_powers = powers(F::one(), &y).take(padded_vars).collect::<Vec<_>>();
+    let y_inv = y.inv();
+    let y_inv_powers = powers(F::one(), &y_inv)
+        .take(circuit.internal_vars)
+        .collect::<Vec<_>>();
+    let z = F::random(transcript.noise(b"z"));
+    let z_powers = powers(z.clone(), &z)
+        .take(circuit.weights.height())
+        .collect::<Vec<_>>();
+    let (kappa, theta, lambda, rho, omega) = {
+        let mut kappa = F::zero();
+        let mut theta = vec![F::zero(); circuit.committed_vars];
+        let mut lambda = vec![F::zero(); circuit.internal_vars];
+        let mut rho = vec![F::zero(); circuit.internal_vars];
+        let mut omega = vec![F::zero(); circuit.internal_vars];
+        let theta_start = 1;
+        let lambda_start = theta_start + circuit.committed_vars;
+        let rho_start = lambda_start + circuit.internal_vars;
+        let omega_start = rho_start + circuit.internal_vars;
+        for (&(i, j), w_ij) in &circuit.weights.weights {
+            let w_ij = w_ij.clone();
+            if j >= omega_start {
+                omega[j - omega_start] += &(w_ij * &z_powers[i]);
+            } else if j >= rho_start {
+                rho[j - rho_start] += &(w_ij * &z_powers[i]);
+            } else if j >= lambda_start {
+                lambda[j - lambda_start] += &(w_ij * &z_powers[i]);
+            } else if j >= theta_start {
+                theta[j - theta_start] += &(w_ij * &z_powers[i]);
+            } else {
+                kappa += &(w_ij * &z_powers[i]);
+            }
+        }
+        (kappa, theta, lambda, rho, omega)
+    };
+
+    // We cache a few quantities, which we'll need for MSMs later anyways.
+    let mut omega_minus_y = omega
+        .iter()
+        .cloned()
+        .zip(&y_powers)
+        .map(|(omega_i, y_i)| omega_i - y_i)
+        .collect::<Vec<_>>();
+    omega_minus_y.extend(
+        y_powers
+            .iter()
+            .skip(circuit.internal_vars)
+            .cloned()
+            .map(|y_i| -y_i),
+    );
+    let y_inv_rho = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&rho)
+        .map(|(y_inv_i, rho_i)| y_inv_i * rho_i)
+        .collect::<Vec<_>>();
+
+    let delta_y_z = <F as Space<F>>::msm(&y_inv_rho, &lambda, strategy);
+
+    let Proof {
+        t_big,
+        s,
+        s_tilde,
+        t_x,
+        t_tilde_x,
+        ipa_proof,
+    } = proof;
+    for t_big_i in &t_big {
+        transcript.commit(t_big_i.encode());
+    }
+    for s_i in &s {
+        transcript.commit(s_i.encode());
+    }
+    let x = F::random(transcript.noise(b"x"));
+    let x = powers(x.clone(), &x).take(6).collect::<Vec<_>>();
+
+    {
+        let lhs =
+            setup.pedersen_value.clone() * &t_x + &(setup.pedersen_blinding.clone() * &t_tilde_x);
+        let mut rhs = setup.pedersen_value.clone() * &((-kappa + &delta_y_z) * &x[1])
+            - &(G::msm(&claim.commitments, &theta, strategy) * &x[1]);
+        for (x_i, t_big_i) in std::iter::once(&x[0]).chain(&x[2..]).zip(t_big.into_iter()) {
+            rhs += &(t_big_i * x_i);
+        }
+        if lhs != rhs {
+            return false;
+        }
+    }
+
+    let p_0 = G::msm(&setup.ipa.h()[..padded_vars], &omega_minus_y, strategy);
+    let g_internal = &setup.ipa.g()[..circuit.internal_vars];
+    let h_internal = &setup.ipa.h()[..circuit.internal_vars];
+    let p_1 = G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &lambda, strategy);
+    let p = setup.pedersen_blinding.clone() * &(-s_tilde)
+        + &p_0
+        + &((p_1 + &s[0]) * &x[0])
+        + &(s[1].clone() * &x[1])
+        + &(s[2].clone() * &x[2]);
+    let ipa_claim = ipa::Claim {
+        commitment: p,
+        product: t_x,
+        log_len: padded_vars
+            .ilog2()
+            .try_into()
+            .expect("should be less than 2^256 rows"),
+    };
+
+    ipa::verify(transcript, &setup.ipa, &ipa_claim, ipa_proof, strategy)
 }
 
 #[cfg(test)]
