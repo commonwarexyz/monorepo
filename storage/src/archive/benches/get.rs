@@ -92,7 +92,7 @@ fn bench_get(c: &mut Criterion) {
                                 // Setup: populate database (once, on first sample).
                                 if !initialized {
                                     keys =
-                                        commonware_runtime::tokio::Runner::new(Config::default())
+                                        commonware_runtime::tokio::Runner::new(cfg.clone())
                                             .start(|ctx| async move {
                                                 let mut a =
                                                     Archive::init(ctx, variant, compression).await;
