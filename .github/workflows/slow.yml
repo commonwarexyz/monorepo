@@ -85,9 +85,9 @@ jobs:
           - package: commonware-cryptography
             cargo_flags: ""
           - package: commonware-storage
-            cargo_flags: ""
+            cargo_flags: "--features test-traits"
           - package: commonware-storage
-            cargo_flags: "--features commonware-runtime/iouring-storage" # Additional features can be added here
+            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
           - package: commonware-coding
             cargo_flags: ""
           - package: commonware-math
