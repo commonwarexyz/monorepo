@@ -25,6 +25,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// last processed height is greater than the epoch boundary). Applications can compute
 /// the last processed height as an `Update::Block` message as `H - max_pending_acks` (the
 /// next height to process minus the maximum backlog of blocks the application can buffer).
+///
+/// If the [epocher](Self::epocher) or [provider](Self::provider) is not populated for a height
+/// that marshal may request, marshal may halt indefinitely or block peers for serving data that
+/// cannot be verified.
 pub struct Config<B, P, ES, T>
 where
     B: Block,

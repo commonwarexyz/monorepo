@@ -951,13 +951,25 @@ where
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
                 wrote
             }
-            key @ Request::Finalized { height } => {
+            Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
-                    self.handle_missing_verifier(&key, response);
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        reason = "missing epoch",
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                    self.handle_missing_verifier(&key, response);
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        reason = "missing verifier",
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
 
@@ -989,9 +1001,15 @@ where
                 });
                 false
             }
-            key @ Request::Notarized { round } => {
+            Request::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                    self.handle_missing_verifier(&key, response);
+                    debug!(
+                        ?round,
+                        floor = %self.last_processed_height,
+                        reason = "missing verifier",
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
                     return false;
                 };
 
@@ -1173,26 +1191,6 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.provider.all().or_else(|| self.provider.scoped(epoch))
-    }
-
-    /// Respond to a delivery without a verifier.
-    ///
-    /// Deliveries are only produced for requests we issued, and pruning of the
-    /// epocher and provider is monotonic, so a missing verifier at delivery time
-    /// can only mean the relevant entry was pruned between fetch and deliver.
-    /// The response is acknowledged (`true`) so the serving peer is not blamed
-    /// for an in-flight response we asked for but no longer can verify.
-    fn handle_missing_verifier(
-        &self,
-        key: &Request<V::Commitment>,
-        response: oneshot::Sender<bool>,
-    ) {
-        debug!(
-            ?key,
-            floor = %self.last_processed_height,
-            "ignoring stale delivery"
-        );
-        response.send_lossy(true);
     }
 
     // -------------------- Waiters --------------------
