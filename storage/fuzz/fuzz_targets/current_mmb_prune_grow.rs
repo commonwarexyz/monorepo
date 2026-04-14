@@ -295,13 +295,22 @@ async fn bootstrap_pruned_state(
     panic!("bootstrap should create a genuinely pruned state");
 }
 
+struct ReopenEnv<'a> {
+    context: &'a deterministic::Context,
+    config: &'a Config<TwoCap>,
+    count: &'a mut usize,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn drive_post_prune_window(
-    db: &mut Db,
+    mut db: Db,
     reference_db: &mut Db,
     committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
     all_keys: &mut HashSet<LogicalKey>,
-) {
+    reopen: &mut ReopenEnv<'_>,
+) -> Db {
+    let midpoint = POST_PRUNE_WINDOW_STEPS / 2;
     for step in 0..POST_PRUNE_WINDOW_STEPS {
         let key = step % LOGICAL_KEY_SPACE;
         let current_value = expected_value_for_key(key, committed_state, pending_expected);
@@ -322,15 +331,24 @@ async fn drive_post_prune_window(
 
         let mut writes = vec![write];
         commit_pending(
-            db,
+            &mut db,
             reference_db,
             &mut writes,
             committed_state,
             pending_expected,
         )
         .await;
-        prune_to_floor(db, reference_db, "forced-post-prune-window").await;
+        prune_to_floor(&mut db, reference_db, "forced-post-prune-window").await;
+
+        // Reopen midway through the window to exercise the metadata round-trip while
+        // delayed merges are still in progress.
+        if step == midpoint {
+            *reopen.count += 1;
+            db = reopen_pruned_db(db, reopen.context, reopen.config, reference_db, *reopen.count)
+                .await;
+        }
     }
+    db
 }
 
 fn fuzz(data: FuzzInput) {
@@ -359,7 +377,11 @@ fn fuzz(data: FuzzInput) {
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut issued_writes = 0usize;
         let mut forced_window_ran = false;
-        let mut reopen_count = 0usize;
+        let mut reopen_env = ReopenEnv {
+            context: &context,
+            config: &pruned_config,
+            count: &mut 0usize,
+        };
 
         bootstrap_pruned_state(
             &mut db,
@@ -425,7 +447,7 @@ fn fuzz(data: FuzzInput) {
                         issued_writes += 1;
                     }
                 }
-                CurrentOperation::Commit => {
+                CurrentOperation::Commit | CurrentOperation::Root => {
                     commit_pending(
                         &mut db,
                         &mut reference_db,
@@ -437,12 +459,13 @@ fn fuzz(data: FuzzInput) {
                     prune_to_floor(&mut db, &reference_db, "commit+prune").await;
                     if db.pruned_bits() > 0 && !forced_window_ran {
                         forced_window_ran = true;
-                        drive_post_prune_window(
-                            &mut db,
+                        db = drive_post_prune_window(
+                            db,
                             &mut reference_db,
                             &mut committed_state,
                             &mut pending_expected,
                             &mut all_keys,
+                            &mut reopen_env,
                         )
                         .await;
                     }
@@ -457,32 +480,15 @@ fn fuzz(data: FuzzInput) {
                     )
                     .await;
                     prune_to_floor(&mut db, &reference_db, "close-reopen-prep").await;
-                    reopen_count += 1;
-                    db =
-                        reopen_pruned_db(db, &context, &pruned_config, &reference_db, reopen_count)
-                            .await;
-                }
-                CurrentOperation::Root => {
-                    commit_pending(
-                        &mut db,
-                        &mut reference_db,
-                        &mut pending_writes,
-                        &mut committed_state,
-                        &mut pending_expected,
+                    *reopen_env.count += 1;
+                    db = reopen_pruned_db(
+                        db,
+                        reopen_env.context,
+                        reopen_env.config,
+                        &reference_db,
+                        *reopen_env.count,
                     )
                     .await;
-                    prune_to_floor(&mut db, &reference_db, "root").await;
-                    if db.pruned_bits() > 0 && !forced_window_ran {
-                        forced_window_ran = true;
-                        drive_post_prune_window(
-                            &mut db,
-                            &mut reference_db,
-                            &mut committed_state,
-                            &mut pending_expected,
-                            &mut all_keys,
-                        )
-                        .await;
-                    }
                 }
             }
         }

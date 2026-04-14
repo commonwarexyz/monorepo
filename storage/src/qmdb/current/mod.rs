@@ -158,7 +158,7 @@
 //! tree's peak structure to lag behind: a chunk pair's parent node at height `gh+1` is not
 //! created until some number of leaves after the pair's last leaf. Until that merge happens,
 //! the ops tree still has individual height-`gh` peaks for each chunk in the pair, and those
-//! map to grafted _leaves_ (height 0 in the grafted tree) -- which are not pinned peaks.
+//! map to grafted _leaves_ (height 0 in the grafted tree), which are not pinned peaks.
 //!
 //! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose
 //! chunk-pair parent has not yet been born in the ops tree (see
@@ -171,7 +171,7 @@
 //! where the chunk-pair parent has not been born would re-expose the individual ops peaks and
 //! break reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor.
 //! The floor is a pure function of the pruned chunk count and the family geometry, so it does
-//! not need to be persisted -- it is recomputed on startup from the pruned chunk count stored
+//! not need to be persisted; it is recomputed on startup from the pruned chunk count stored
 //! in metadata.
 //!
 //! The pruning lag is small: at most `3 * 2^(gh-1) - 2` ops beyond the chunk boundary
@@ -1638,10 +1638,10 @@ pub mod tests {
         });
     }
 
-    /// Verify that a delayed-merge settle guard can defer bitmap pruning while reopen/proof paths
-    /// remain stable.
+    /// Verify that the delayed-merge settlement guard defers bitmap pruning while reopen/proof
+    /// paths remain stable.
     #[test_traced("INFO")]
-    fn test_current_mmb_reopen_and_prove_after_prune_multi_peak_chunk() {
+    fn test_current_mmb_settlement_guard_defers_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const COMMITS: u64 = 100;

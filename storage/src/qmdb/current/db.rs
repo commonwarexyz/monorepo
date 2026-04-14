@@ -264,6 +264,41 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
+    /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
+    /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
+    /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
+    fn pair_absorption_threshold(
+        pruned_chunks: u64,
+    ) -> Result<Option<u64>, Error<F>> {
+        if pruned_chunks == 0 {
+            return Ok(None);
+        }
+
+        let grafting_height = grafting::height::<N>();
+        let youngest = pruned_chunks - 1;
+        let youngest_start = youngest
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
+        let youngest_end = (youngest + 1)
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
+        let youngest_pos =
+            F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+
+        // Families without delayed merges: birth_size == chunk_end.
+        if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
+            return Ok(None);
+        }
+
+        let pair_chunk = youngest & !1;
+        let pair_start = pair_chunk
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("pair start overflow"))?;
+        let pair_pos =
+            F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
+        Ok(Some(F::peak_birth_size(pair_pos, grafting_height + 1)))
+    }
+
     /// Returns the most aggressive bitmap prune boundary that is safe for the current ops
     /// tree size, accounting for delayed-merge settlement.
     ///
@@ -279,7 +314,8 @@ where
     ///
     /// Because older chunk-pairs have strictly earlier birth times, checking only the youngest
     /// pair is sufficient: if the youngest pair's parent is born, all older pairs' parents are
-    /// too.
+    /// too. In the worst case the loop decrements twice (once past the unsettled chunk, once
+    /// to land on the older pair boundary).
     ///
     /// For families without delayed merges (e.g. MMR), `peak_birth_size` at height `gh`
     /// equals the chunk's last leaf, so condition (1) always holds and the function returns
@@ -305,22 +341,21 @@ where
             let chunk_start = youngest
                 .checked_shl(grafting_height)
                 .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-            let chunk_end = (youngest + 1)
-                .checked_shl(grafting_height)
-                .ok_or(Error::DataCorrupted("chunk end overflow"))?;
             let chunk_pos =
                 F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
 
             // Condition 1: youngest chunk's height-gh subtree root is born.
-            // For families without delayed merges, birth_size == chunk_end so this always
-            // holds and the function returns the inactivity floor unchanged.
             let settled_after = F::peak_birth_size(chunk_pos, grafting_height);
             if ops_leaves < settled_after {
                 pruned_chunks -= 1;
                 continue;
             }
 
-            // For families without delayed merges, condition 1 is sufficient.
+            // Fast path: families without delayed merges (birth_size == chunk_end) need
+            // only condition 1. Return the inactivity floor unchanged.
+            let chunk_end = (youngest + 1)
+                .checked_shl(grafting_height)
+                .ok_or(Error::DataCorrupted("chunk end overflow"))?;
             if settled_after <= chunk_end {
                 let settled_bits = pruned_chunks
                     .checked_mul(chunk_bits)
@@ -330,13 +365,8 @@ where
 
             // Condition 2 (delayed-merge only): youngest chunk-pair's height-(gh+1)
             // parent is born.
-            let pair_chunk = youngest & !1;
-            let pair_start = pair_chunk
-                .checked_shl(grafting_height)
-                .ok_or(Error::DataCorrupted("pair start overflow"))?;
-            let pair_pos =
-                F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
-            let absorbed_after = F::peak_birth_size(pair_pos, grafting_height + 1);
+            let absorbed_after = Self::pair_absorption_threshold(pruned_chunks)?
+                .expect("delayed-merge family must have absorption threshold");
             if ops_leaves < absorbed_after {
                 pruned_chunks -= 1;
                 continue;
@@ -360,35 +390,7 @@ where
     ///
     /// Returns `None` for families without delayed merges.
     fn delayed_merge_rewind_floor(&self) -> Result<Option<u64>, Error<F>> {
-        let pruned_chunks = self.status.pruned_chunks() as u64;
-        if pruned_chunks == 0 {
-            return Ok(None);
-        }
-
-        let grafting_height = grafting::height::<N>();
-        let youngest = pruned_chunks - 1;
-        let youngest_start = youngest
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-        let youngest_end = (youngest + 1)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
-        let youngest_pos =
-            F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
-
-        // Families without delayed merges: birth_size == chunk_end, so no additional
-        // rewind floor is needed (same detection as in `settled_bitmap_prune_loc`).
-        if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
-            return Ok(None);
-        }
-
-        let pair_chunk = youngest & !1;
-        let pair_start = pair_chunk
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("pair start overflow"))?;
-        let pair_pos =
-            F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
-        Ok(Some(F::peak_birth_size(pair_pos, grafting_height + 1)))
+        Self::pair_absorption_threshold(self.status.pruned_chunks() as u64)
     }
 
     /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
@@ -406,8 +408,8 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// `prune_loc` controls ops-log pruning only. Bitmap pruning always advances to the
-    /// settled inactivity floor regardless of `prune_loc`.
+    /// `prune_loc` controls ops-log pruning only. Bitmap pruning advances to the settled
+    /// portion of the inactivity floor, independent of `prune_loc`.
     ///
     /// # Errors
     ///

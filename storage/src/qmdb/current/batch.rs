@@ -531,6 +531,7 @@ where
         .filter(|(&idx, _)| idx < new_grafted_leaves)
         .map(|(&idx, _)| idx)
         .collect();
+    // Both are chunk indices (not bit positions); cast to u64 only for the shift arithmetic.
     let pruned_chunks = bitmap_parent.pruned_chunks();
     if new_grafted_leaves > 0 {
         let last_complete_chunk = new_grafted_leaves - 1;
