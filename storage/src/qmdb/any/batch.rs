@@ -657,7 +657,7 @@ where
                 // A key can only be moved once during this floor raise because, after it is
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
                 diff.extend(floor_diff);
-                diff.sort_by(|a, b| a.0.cmp(&b.0));
+                diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
@@ -926,7 +926,7 @@ where
             active_keys_delta += 1;
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -1024,8 +1024,8 @@ where
             }
         }
 
-        deleted.sort_by(|a, b| a.0.cmp(&b.0));
-        updated.sort_by(|a, b| a.0.cmp(&b.0));
+        deleted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        updated.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         // Handle parent-deleted keys that the child wants to re-create.
         let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
@@ -1237,7 +1237,7 @@ where
             }
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -1686,7 +1686,7 @@ mod tests {
                 },
             ),
         ];
-        base_diff.sort_by(|a, b| a.0.cmp(&b.0));
+        base_diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let creates = extract_parent_deleted_creates(&mut mutations, &base_diff);
 

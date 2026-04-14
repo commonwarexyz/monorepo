@@ -1029,7 +1029,7 @@ mod tests {
                 },
             ),
         ];
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
@@ -1082,7 +1082,7 @@ mod tests {
                 },
             ),
         ];
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         // Segment of 8 ops starting at 64; previous commit at loc 63.
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 8, 64, &diff, &[]);
@@ -1124,7 +1124,7 @@ mod tests {
                 base_old_loc: None,
             },
         )];
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        diff.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 20, 20, &diff, &[]);
 
