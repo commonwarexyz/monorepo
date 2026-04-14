@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, journaled::Config as MmrConfig},
@@ -73,8 +73,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
-    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str, page_cache: CacheRef) -> Config<OneCap> {
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{name}-mmr"),
@@ -111,7 +110,11 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("fuzz-current-unordered-pending-vs-committed-root", &context);
+        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(2));
+        let cfg = test_config(
+            "fuzz-current-unordered-pending-vs-committed-root",
+            page_cache,
+        );
         let mut db = Db::init(context.clone(), cfg)
             .await
             .expect("init current unordered db");

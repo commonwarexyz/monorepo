@@ -109,7 +109,10 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::variable_config, unordered::tests as shared},
+        qmdb::current::{
+            tests::{test_page_cache, variable_config},
+            unordered::tests as shared,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -121,7 +124,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = variable_config::<TwoCap>(&partition_prefix, test_page_cache(&context));
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

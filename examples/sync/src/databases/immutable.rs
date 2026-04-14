@@ -2,7 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{
@@ -14,7 +14,7 @@ use commonware_storage::{
         immutable::{self, Config},
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -25,12 +25,7 @@ pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hashe
 pub type Operation = immutable::variable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
-    let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-        context.with_label("cache"),
-        NZU16!(2048),
-        NZUsize!(10),
-    );
+pub fn create_config(page_cache: CacheRef) -> Config<Translator, VConfig<((), ())>> {
     Config {
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),

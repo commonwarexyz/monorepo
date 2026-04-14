@@ -100,7 +100,10 @@ pub mod test {
     use crate::{
         mmr,
         qmdb::{
-            current::{ordered::tests as shared, tests::fixed_config},
+            current::{
+                ordered::tests as shared,
+                tests::{fixed_config, test_page_cache},
+            },
             Error,
         },
         translator::OneCap,
@@ -118,7 +121,7 @@ pub mod test {
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<OneCap>(&partition_prefix, test_page_cache(&context));
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

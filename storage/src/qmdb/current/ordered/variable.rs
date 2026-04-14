@@ -108,7 +108,10 @@ pub mod partitioned {
 mod test {
     use crate::{
         mmr,
-        qmdb::current::{ordered::tests as shared, tests::variable_config},
+        qmdb::current::{
+            ordered::tests as shared,
+            tests::{test_page_cache, variable_config},
+        },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -121,7 +124,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        let cfg = variable_config::<OneCap>(&partition_prefix, test_page_cache(&context));
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

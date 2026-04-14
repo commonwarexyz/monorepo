@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
@@ -95,9 +95,8 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 #[allow(clippy::type_complexity)]
 fn db_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    page_cache: CacheRef,
 ) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
-    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),
@@ -144,7 +143,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut rng = StdRng::seed_from_u64(input.seed);
 
-            let cfg = db_config(suffix, &context);
+            let page_cache =
+                CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let cfg = db_config(suffix, page_cache);
             let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
                 .await
                 .unwrap();

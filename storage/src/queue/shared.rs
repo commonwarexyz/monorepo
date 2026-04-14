@@ -249,7 +249,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Spawner,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -257,13 +257,13 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+    fn test_config(partition: &str, page_cache: CacheRef) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
             write_buffer: NZUsize!(4096),
         }
     }
@@ -272,7 +272,8 @@ mod tests {
     fn test_shared_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_basic", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_basic", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // Enqueue from writer
@@ -294,7 +295,8 @@ mod tests {
     fn test_shared_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_append_commit", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_append_commit", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // Append several items without committing
@@ -328,7 +330,8 @@ mod tests {
     fn test_shared_enqueue_bulk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_bulk", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_bulk", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             let range = writer
@@ -351,7 +354,8 @@ mod tests {
     fn test_shared_concurrent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_concurrent", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_concurrent", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Spawn writer task
@@ -384,7 +388,8 @@ mod tests {
     fn test_shared_select() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_select", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_select", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Enqueue an item
@@ -410,7 +415,8 @@ mod tests {
     fn test_shared_writer_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_writer_dropped", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_writer_dropped", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Enqueue items then drop writer
@@ -443,7 +449,8 @@ mod tests {
     fn test_shared_try_recv() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_try_recv", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_try_recv", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // try_recv on empty queue returns None
@@ -464,7 +471,8 @@ mod tests {
     fn test_shared_multiple_writers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_multi_writer", &context);
+            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_shared_multi_writer", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Clone writer for second task

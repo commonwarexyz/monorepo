@@ -5,10 +5,12 @@
 
 use crate::common::{
     gen_random_kv, make_fixed_value, make_var_value, open_keyless_db, with_fixed_value_db,
-    with_var_value_db, Digest, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
+    with_var_value_db, Digest, FIXED_VALUE_VARIANTS, PAGE_CACHE_SIZE, PAGE_SIZE,
+    VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
 };
 use commonware_storage::qmdb::any::traits::DbAny;
@@ -128,7 +130,8 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     for _ in 0..iters {
                         let start = Instant::now();
 
-                        let mut db = open_keyless_db(ctx.clone()).await;
+                        let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                        let mut db = open_keyless_db(ctx.clone(), pc).await;
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {

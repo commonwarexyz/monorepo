@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::Family as _,
@@ -138,9 +138,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    page_cache: CacheRef,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
@@ -167,7 +166,8 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
+        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(1));
+        let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
         let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
@@ -319,7 +319,7 @@ fn fuzz(input: FuzzInput) {
                     historical_roots.clear();
                     drop(db);
 
-                    let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
+                    let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
                     db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
                             .with_label("db")

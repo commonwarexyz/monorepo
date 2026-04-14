@@ -1504,7 +1504,7 @@ mod tests {
         mmr,
         qmdb::any::{
             ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config},
+            test::{colliding_digest, fixed_db_config, test_page_cache},
             unordered::fixed::Db as UnorderedFixedDb,
         },
         translator::OneCap,
@@ -1607,7 +1607,8 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
+            let config =
+                fixed_db_config::<OneCap>("batch-collision-regression", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -1688,7 +1689,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -1766,7 +1767,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
+            let config = fixed_db_config::<OneCap>("seq-commit-basic", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key.
@@ -1834,7 +1835,8 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
+            let config =
+                fixed_db_config::<OneCap>("seq-commit-base-old-loc", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
@@ -1907,7 +1909,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
+            let config = fixed_db_config::<OneCap>("fork-after-commit", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed.
@@ -1987,7 +1989,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("ff-cross", &context);
+            let config = fixed_db_config::<OneCap>("ff-cross", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Grandparent: 2 keys.
@@ -2055,7 +2057,8 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
+            let config =
+                fixed_db_config::<OneCap>("recreate-deleted-collision", test_page_cache(&context));
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).

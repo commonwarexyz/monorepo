@@ -10,12 +10,12 @@ use crate::{
     merkle::mmr,
     qmdb::{
         any::sync::tests::{ConfigOf, SyncTestHarness},
-        current::tests::{fixed_config, variable_config},
+        current::tests::{fixed_config, test_page_cache, variable_config},
         sync::Database as SyncDatabase,
     },
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{deterministic::Context, BufferPooler};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics};
 
 // ===== Harness Implementations =====
 
@@ -41,8 +41,12 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn page_cache(pooler: &(impl BufferPooler + Metrics)) -> CacheRef {
+            test_page_cache(pooler)
+        }
+
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix, page_cache)
         }
 
         fn create_ops(
@@ -61,7 +65,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::TwoCap>("default", test_page_cache(&ctx));
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -111,8 +115,12 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn page_cache(pooler: &(impl BufferPooler + Metrics)) -> CacheRef {
+            test_page_cache(pooler)
+        }
+
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix, page_cache)
         }
 
         fn create_ops(
@@ -131,7 +139,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg =
+                variable_config::<crate::translator::TwoCap>("default", test_page_cache(&ctx));
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -181,8 +190,12 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn page_cache(pooler: &(impl BufferPooler + Metrics)) -> CacheRef {
+            test_page_cache(pooler)
+        }
+
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix, page_cache)
         }
 
         fn create_ops(
@@ -199,7 +212,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::OneCap>("default", test_page_cache(&ctx));
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -249,8 +262,12 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn page_cache(pooler: &(impl BufferPooler + Metrics)) -> CacheRef {
+            test_page_cache(pooler)
+        }
+
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix, page_cache)
         }
 
         fn create_ops(
@@ -269,7 +286,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg =
+                variable_config::<crate::translator::OneCap>("default", test_page_cache(&ctx));
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 

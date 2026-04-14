@@ -791,7 +791,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -812,32 +812,24 @@ mod tests {
     >;
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig {
+    fn merkle_config(suffix: &str, page_cache: CacheRef) -> MerkleConfig {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(
-                pooler.with_label("merkle"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache,
         }
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+    fn journal_config(suffix: &str, page_cache: CacheRef) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(
-                pooler.with_label("journal"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache,
         }
     }
 
@@ -846,8 +838,10 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> TestJournal<F> {
-        let merkle_cfg = merkle_config(suffix, &context);
-        let journal_cfg = journal_config(suffix, &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let merkle_cfg = merkle_config(suffix, page_cache.clone());
+        let journal_cfg = journal_config(suffix, page_cache);
         TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |op: &TestOp<F>| {
             op.is_commit()
         })
@@ -897,16 +891,18 @@ mod tests {
         StandardHasher<Sha256>,
     ) {
         let hasher = StandardHasher::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let merkle = Journaled::<F, _, Digest>::init(
             context.with_label("mmr"),
             &hasher,
-            merkle_config(suffix, &context),
+            merkle_config(suffix, page_cache.clone()),
         )
         .await
         .unwrap();
         let journal = ContiguousJournal::init(
             context.with_label("journal"),
-            journal_config(suffix, &context),
+            journal_config(suffix, page_cache),
         )
         .await
         .unwrap();
@@ -1106,8 +1102,10 @@ mod tests {
         // Test 1: Matching operation is kept
         {
             let ctx = context.with_label("rewind_match");
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-match", &ctx))
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-match", page_cache))
                     .await
                     .unwrap();
 
@@ -1136,8 +1134,10 @@ mod tests {
         // Test 2: Last matching operation is chosen when multiple match
         {
             let ctx = context.with_label("rewind_multiple");
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-multiple", &ctx))
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-multiple", page_cache))
                     .await
                     .unwrap();
 
@@ -1169,8 +1169,10 @@ mod tests {
         // Test 3: Rewind to pruning boundary when no match
         {
             let ctx = context.with_label("rewind_no_match");
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-no-match", &ctx))
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-no-match", page_cache))
                     .await
                     .unwrap();
 
@@ -1188,10 +1190,14 @@ mod tests {
         // Test 4: Rewind with existing pruning boundary
         {
             let ctx = context.with_label("rewind_with_pruning");
-            let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-with-pruning", &ctx))
-                    .await
-                    .unwrap();
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = ContiguousJournal::init(
+                ctx.clone(),
+                journal_config("rewind-with-pruning", page_cache),
+            )
+            .await
+            .unwrap();
 
             // Add operations and a commit at position 10 (past first section boundary of 7)
             for i in 0..10 {
@@ -1227,9 +1233,11 @@ mod tests {
         // Test 5: Rewind with no matches after pruning boundary
         {
             let ctx = context.with_label("rewind_no_match_pruned");
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.clone(),
-                journal_config("rewind-no-match-pruned", &ctx),
+                journal_config("rewind-no-match-pruned", page_cache),
             )
             .await
             .unwrap();
@@ -1266,8 +1274,10 @@ mod tests {
         // Test 6: Empty journal
         {
             let ctx = context.with_label("rewind_empty");
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-empty", &ctx))
+                ContiguousJournal::init(ctx.clone(), journal_config("rewind-empty", page_cache))
                     .await
                     .unwrap();
 
@@ -1283,8 +1293,10 @@ mod tests {
         // Test 7: Position based authenticated journal rewind.
         {
             let ctx = context.with_label("rewind_auth");
-            let merkle_cfg = merkle_config("rewind", &ctx);
-            let journal_cfg = journal_config("rewind", &ctx);
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let merkle_cfg = merkle_config("rewind", page_cache.clone());
+            let journal_cfg = journal_config("rewind", page_cache);
             let mut journal =
                 TestJournal::<F>::new(ctx, merkle_cfg, journal_cfg, |op| op.is_commit())
                     .await

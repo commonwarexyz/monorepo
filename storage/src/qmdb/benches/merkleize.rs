@@ -12,7 +12,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    BufferPooler, Metrics, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -147,84 +147,81 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
+fn merkle_cfg(
+    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    page_cache: CacheRef,
+) -> journaled::Config {
     journaled::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: pc,
+        page_cache,
     }
 }
 
-fn fix_log_cfg(pc: CacheRef) -> FConfig {
+fn fix_log_cfg(page_cache: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
-        page_cache: pc,
+        page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
+fn var_log_cfg(page_cache: CacheRef) -> VConfig<((), ())> {
     VConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_section: ITEMS_PER_BLOB,
         compression: None,
         codec_config: ((), ()),
-        page_cache: pc,
+        page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
-}
-
-// -- DB constructors (eliminates repeated config boilerplate in match arms) --
-
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle_config: merkle_cfg(ctx, page_cache.clone()),
+        journal_config: fix_log_cfg(page_cache),
         translator: EightCap,
     }
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle_config: merkle_cfg(ctx, page_cache.clone()),
+        journal_config: var_log_cfg(page_cache),
         translator: EightCap,
     }
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle_config: merkle_cfg(ctx, page_cache.clone()),
+        journal_config: fix_log_cfg(page_cache),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle_config: merkle_cfg(ctx, page_cache.clone()),
+        journal_config: var_log_cfg(page_cache),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
@@ -378,82 +375,83 @@ const VARIANTS: [Variant; 12] = [
 
 /// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db` bound.
 macro_rules! dispatch_variant {
-    ($ctx:expr, $variant:expr, |$db:ident| $body:expr) => {
+    ($ctx:expr, $variant:expr, |$db:ident| $body:expr) => {{
+        let __pc = CacheRef::from_pooler($ctx.clone(), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
         match $variant {
             Variant::AnyFixed => {
-                let $db = AnyUFix::init($ctx.clone(), any_fix_cfg(&$ctx))
+                let $db = AnyUFix::init($ctx.clone(), any_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::AnyVariable => {
-                let $db = AnyUVar::init($ctx.clone(), any_var_cfg(&$ctx))
+                let $db = AnyUVar::init($ctx.clone(), any_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::AnyFixedMmb => {
-                let $db = AnyUFixMmb::init($ctx.clone(), any_fix_cfg(&$ctx))
+                let $db = AnyUFixMmb::init($ctx.clone(), any_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::AnyVariableMmb => {
-                let $db = AnyUVarMmb::init($ctx.clone(), any_var_cfg(&$ctx))
+                let $db = AnyUVarMmb::init($ctx.clone(), any_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentFixed32 => {
-                let $db = CurUFix32::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let $db = CurUFix32::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentVariable32 => {
-                let $db = CurUVar32::init($ctx.clone(), cur_var_cfg(&$ctx))
+                let $db = CurUVar32::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentFixed32Mmb => {
-                let $db = CurUFix32Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let $db = CurUFix32Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentVariable32Mmb => {
-                let $db = CurUVar32Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                let $db = CurUVar32Mmb::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentFixed256 => {
-                let $db = CurUFix256::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let $db = CurUFix256::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentVariable256 => {
-                let $db = CurUVar256::init($ctx.clone(), cur_var_cfg(&$ctx))
+                let $db = CurUVar256::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentFixed256Mmb => {
-                let $db = CurUFix256Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let $db = CurUFix256Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
             Variant::CurrentVariable256Mmb => {
-                let $db = CurUVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx))
+                let $db = CurUVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
             }
         }
-    };
+    }};
 }
 
 fn bench_merkleize(c: &mut Criterion) {

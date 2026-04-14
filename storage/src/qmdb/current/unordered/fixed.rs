@@ -102,7 +102,10 @@ pub mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::fixed_config, unordered::tests as shared},
+        qmdb::current::{
+            tests::{fixed_config, test_page_cache},
+            unordered::tests as shared,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -114,7 +117,7 @@ pub mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<TwoCap>(&partition_prefix, test_page_cache(&context));
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

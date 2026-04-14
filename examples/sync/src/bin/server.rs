@@ -5,8 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf,
+    buffer::paged::CacheRef, tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics,
+    Network, Runner, SinkOf, Spawner, Storage, StreamOf,
 };
 use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -21,7 +21,7 @@ use commonware_utils::{
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    DurationExt,
+    DurationExt, NZUsize, NZU16,
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
@@ -508,7 +508,8 @@ where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = any::create_config(&context);
+    let page_cache = CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+    let db_config = any::create_config(page_cache);
     let database = any::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -519,7 +520,8 @@ async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::e
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
-    let db_config = current::create_config(&context);
+    let page_cache = CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+    let db_config = current::create_config(page_cache);
     let database = current::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -531,7 +533,8 @@ where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = immutable::create_config(&context);
+    let page_cache = CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+    let db_config = immutable::create_config(page_cache);
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await

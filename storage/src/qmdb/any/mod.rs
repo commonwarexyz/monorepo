@@ -177,14 +177,17 @@ pub(crate) mod test {
     }
 
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+    pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    pub(crate) fn test_page_cache(ctx: &(impl BufferPooler + Metrics)) -> CacheRef {
+        CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)
+    }
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        page_cache: CacheRef,
     ) -> FixedConfig<T> {
-        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -206,9 +209,8 @@ pub(crate) mod test {
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        page_cache: CacheRef,
     ) -> VariableConfig<T, ((), ())> {
-        let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1191,15 +1193,17 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc.clone()))
                     .await
                     .unwrap();
                 $f(
                     ctx,
                     db,
                     |ctx| {
+                        let pc = pc.clone();
                         Box::pin(async move {
-                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc))
                                 .await
                                 .unwrap()
                         })
@@ -1217,7 +1221,8 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;
@@ -1358,10 +1363,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("e", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("e", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let batch = db.new_batch();
@@ -1385,10 +1392,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("m", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("m", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let metadata = val(42);
 
@@ -1413,10 +1422,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("g", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("g", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with key A.
             let ka = key(0);
@@ -1458,10 +1469,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("mg", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("mg", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1495,10 +1508,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("sg", &ctx))
-                    .await
-                    .unwrap();
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("sg", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -1534,10 +1549,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("dr", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
 
@@ -1571,10 +1588,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("fr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("fr", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 100 keys.
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
@@ -1615,10 +1634,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ar", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("ar", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // First batch: 5 keys.
             let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1644,10 +1665,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("dc", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("dc", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with keys 0..5.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1710,7 +1733,7 @@ pub(crate) mod test {
             let ctx_a = ctx.with_label("a");
             let mut db_a: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_a.clone(),
-                variable_db_config::<OneCap>("cms-a", &ctx_a),
+                variable_db_config::<OneCap>("cms-a", test_page_cache(&ctx_a)),
             )
             .await
             .unwrap();
@@ -1719,7 +1742,7 @@ pub(crate) mod test {
             let ctx_b = ctx.with_label("b");
             let mut db_b: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_b.clone(),
-                variable_db_config::<OneCap>("cms-b", &ctx_b),
+                variable_db_config::<OneCap>("cms-b", test_page_cache(&ctx_b)),
             )
             .await
             .unwrap();
@@ -1773,10 +1796,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("cd", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("cd", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate key A.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1804,10 +1829,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("da", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("da", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate 5 keys.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
@@ -1835,10 +1862,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pf", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("pf", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate.
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -1886,10 +1915,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("frc", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("frc", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
@@ -1940,10 +1971,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ab", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("ab", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
@@ -1975,7 +2008,7 @@ pub(crate) mod test {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.clone(),
-                variable_db_config::<OneCap>(partition, &ctx),
+                variable_db_config::<OneCap>(partition, test_page_cache(&ctx)),
             )
             .await
             .unwrap();
@@ -1996,7 +2029,7 @@ pub(crate) mod test {
 
             let reopened: UnorderedVariable = UnorderedVariableDb::init(
                 context.with_label("reopen"),
-                variable_db_config::<OneCap>(partition, &context),
+                variable_db_config::<OneCap>(partition, test_page_cache(&context)),
             )
             .await
             .unwrap();
@@ -2015,10 +2048,12 @@ pub(crate) mod test {
             const KEYS: u64 = 64;
 
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rp", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("rp", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
             let first_range = commit_writes(&mut db, initial, None).await;
@@ -2072,10 +2107,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ri", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("ri", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             let size_before = db.size().await;
@@ -2125,7 +2162,7 @@ pub(crate) mod test {
 
             let ctx = context.with_label("db");
             let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", &ctx))
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", test_page_cache(&ctx)))
                     .await
                     .unwrap();
 
@@ -2206,7 +2243,7 @@ pub(crate) mod test {
     >;
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
-        let cfg = variable_db_config::<OneCap>(suffix, &context);
+        let cfg = variable_db_config::<OneCap>(suffix, test_page_cache(&context));
         super::init(context, cfg, None, |_, _| {}).await.unwrap()
     }
 
@@ -2346,10 +2383,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("pipe", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_db_config::<OneCap>("pipe", test_page_cache(&ctx)),
+            )
+            .await
+            .unwrap();
 
             {
                 let mut batch = db.new_batch();

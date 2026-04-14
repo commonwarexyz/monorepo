@@ -1068,7 +1068,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
@@ -1082,27 +1082,25 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config {
-        test_config_labeled(pooler, "default")
-    }
-
-    fn test_config_labeled(pooler: &impl BufferPooler, label: &str) -> Config {
+    fn test_config(page_cache: CacheRef) -> Config {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler.with_label(label), PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
         }
     }
 
     async fn journaled_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
+        let init1_cache =
+            CacheRef::from_pooler(context.with_label("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("first"),
             &hasher,
-            test_config_labeled(&context, "init1"),
+            test_config(init1_cache),
         )
         .await
         .unwrap();
@@ -1126,10 +1124,12 @@ mod tests {
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
+        let init2_cache =
+            CacheRef::from_pooler(context.with_label("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("second"),
             &hasher,
-            test_config_labeled(&context, "init2"),
+            test_config(init2_cache),
         )
         .await
         .unwrap();
@@ -1186,10 +1186,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("oob_prune"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -1225,10 +1227,15 @@ mod tests {
 
         // Case 1: rewind partially succeeds, then returns ElementPruned.
         let element_pruned_context = context.with_label("element_pruned_case");
+        let ep_cache = CacheRef::from_pooler(
+            element_pruned_context.with_label("cache"),
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+        );
         let mut mmr = Journaled::<F, _, Digest>::init(
             element_pruned_context.clone(),
             &hasher,
-            test_config(&element_pruned_context),
+            test_config(ep_cache),
         )
         .await
         .unwrap();
@@ -1250,7 +1257,12 @@ mod tests {
 
         // Case 2: rewind partially succeeds, then returns Empty.
         let empty_context = context.with_label("empty_case");
-        let cfg = test_config(&empty_context);
+        let empty_cache = CacheRef::from_pooler(
+            empty_context.with_label("cache"),
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+        );
+        let cfg = test_config(empty_cache);
         let mut mmr = Journaled::<F, _, Digest>::init(empty_context, &hasher, cfg)
             .await
             .unwrap();
@@ -1281,7 +1293,9 @@ mod tests {
 
     async fn journaled_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
         let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1352,10 +1366,12 @@ mod tests {
         use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
 
         let hasher: Standard<Sha256> = Standard::new();
+        let init1_cache =
+            CacheRef::from_pooler(context.with_label("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("first"),
             &hasher,
-            test_config_labeled(&context, "init1"),
+            test_config(init1_cache),
         )
         .await
         .unwrap();
@@ -1402,10 +1418,12 @@ mod tests {
             assert_eq!(journal.size().await, expected_size + 1);
         }
 
+        let init2_cache =
+            CacheRef::from_pooler(context.with_label("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("second"),
             &hasher,
-            test_config_labeled(&context, "init2"),
+            test_config(init2_cache),
         )
         .await
         .unwrap();
@@ -1417,10 +1435,12 @@ mod tests {
 
         // Make sure dropping it and re-opening it persists the recovered state.
         drop(mmr);
+        let init3_cache =
+            CacheRef::from_pooler(context.with_label("init3"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("third"),
             &hasher,
-            test_config_labeled(&context, "init3"),
+            test_config(init3_cache),
         )
         .await
         .unwrap();
@@ -1445,7 +1465,9 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
-        let cfg_pruned = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg_pruned = test_config(page_cache);
         let mut pruned_mmr = Journaled::<F, _, Digest>::init(
             context.with_label("pruned"),
             &hasher,
@@ -1596,7 +1618,9 @@ mod tests {
         // Build structure with 2000 leaves.
         let hasher: Standard<Sha256> = Standard::new();
         const LEAF_COUNT: usize = 2000;
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
         let mut mmr =
             Journaled::<F, _, Digest>::init(context.with_label("init"), &hasher, cfg.clone())
@@ -1681,7 +1705,9 @@ mod tests {
     async fn journaled_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
         let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1761,10 +1787,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let main_cache =
+            CacheRef::from_pooler(context.with_label("main"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("main"),
             &hasher,
-            test_config_labeled(&context, "main"),
+            test_config(main_cache),
         )
         .await
         .unwrap();
@@ -1948,7 +1976,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
         let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1996,8 +2026,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Test fresh start scenario with completely new structure (no existing data)
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
-            config: test_config(&context),
+            config: test_config(page_cache),
             range: Location::<F>::new(0)..Location::<F>::new(52),
             pinned_nodes: None,
         };
@@ -2041,7 +2073,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
 
         // Create initial structure with elements.
         let mut mmr =
@@ -2119,7 +2153,9 @@ mod tests {
     // boundaries.
     async fn journaled_init_sync_partial_overlap_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
 
         // Create initial structure with elements.
         let mut mmr =
@@ -2200,9 +2236,11 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
-            config: test_config(&context),
+            config: test_config(page_cache),
             range: Location::<F>::new(6)..Location::<F>::new(20),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
@@ -2232,7 +2270,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
 
         // Create a structure with some data and prune it
         let mut mmr =
@@ -2301,7 +2341,9 @@ mod tests {
     // prune the journal to match metadata.
     async fn journaled_init_metadata_ahead_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
 
         // Create a structure with some data
         let mut mmr =
@@ -2430,11 +2472,13 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2496,10 +2540,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2552,10 +2598,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2602,10 +2650,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("init"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2649,10 +2699,12 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Case 1: Empty structure.
+        let empty_cache =
+            CacheRef::from_pooler(context.with_label("empty"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
             context.with_label("empty"),
             &hasher,
-            test_config_labeled(&context, "empty"),
+            test_config(empty_cache),
         )
         .await
         .unwrap();
@@ -2671,10 +2723,15 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 2: Structure has nodes but is fully pruned.
+        let pruned_cache = CacheRef::from_pooler(
+            context.with_label("fully_pruned"),
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+        );
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("fully_pruned"),
             &hasher,
-            test_config_labeled(&context, "fully_pruned"),
+            test_config(pruned_cache),
         )
         .await
         .unwrap();
@@ -2699,10 +2756,15 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 3: All nodes but one (single leaf) are pruned.
+        let leaf_cache = CacheRef::from_pooler(
+            context.with_label("single_leaf"),
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+        );
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("single_leaf"),
             &hasher,
-            test_config_labeled(&context, "single_leaf"),
+            test_config(leaf_cache),
         )
         .await
         .unwrap();
@@ -2749,10 +2811,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("oob"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2792,10 +2856,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("range_validation"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2881,10 +2947,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.with_label("non_size_prune"),
             &hasher,
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -2946,7 +3014,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_config(page_cache);
 
         // Build a structure with 3 leaves, sync, and drop.
         let mut mmr =
@@ -3016,10 +3086,12 @@ mod tests {
 
     async fn journaled_stale_batch_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.clone(),
             &Standard::<Sha256>::new(),
-            test_config(&context),
+            test_config(page_cache),
         )
         .await
         .unwrap();
@@ -3060,9 +3132,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let mmr = Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
-            .await
-            .unwrap();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mmr =
+            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(page_cache))
+                .await
+                .unwrap();
 
         let _batch: UnmerkleizedBatch<F, Digest> = mmr.new_batch();
 
@@ -3089,8 +3164,10 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr =
-            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(&context))
+            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(page_cache))
                 .await
                 .unwrap();
 
