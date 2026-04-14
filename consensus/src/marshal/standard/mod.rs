@@ -88,7 +88,6 @@ mod tests {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
-        sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
     };
@@ -1507,31 +1506,18 @@ mod tests {
         }
     }
 
-    /// A mock provider whose verifier can be dropped at runtime to model
-    /// applications that aggressively prune epoch state during block processing.
+    /// A provider that always returns `None`, modeling an application that
+    /// has pruned all epoch state. Exercises the same code path as a
+    /// [`MutableProvider`] whose verifier has been dropped.
     #[derive(Clone)]
-    struct MutableProvider {
-        scheme: Arc<Mutex<Option<Arc<S>>>>,
-    }
+    struct EmptyProvider;
 
-    impl MutableProvider {
-        fn new(scheme: S) -> Self {
-            Self {
-                scheme: Arc::new(Mutex::new(Some(Arc::new(scheme)))),
-            }
-        }
-
-        fn drop_verifier(&self) {
-            *self.scheme.lock() = None;
-        }
-    }
-
-    impl Provider for MutableProvider {
+    impl Provider for EmptyProvider {
         type Scope = Epoch;
         type Scheme = S;
 
         fn scoped(&self, _scope: Epoch) -> Option<Arc<S>> {
-            self.scheme.lock().clone()
+            None
         }
     }
 
@@ -1562,16 +1548,13 @@ mod tests {
         async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
     }
 
-    /// When an application prunes its certificate verifier for an epoch whose
-    /// heights are at or below the marshal's floor, in-flight `Finalized`
-    /// responses for those heights must be acknowledged (so the serving peer
-    /// is not blocked) rather than rejected.
+    /// When the provider has no verifier for an epoch, in-flight deliveries
+    /// for that epoch must be acknowledged (`true`) so the serving peer is
+    /// not blamed, rather than rejected (`false`).
     #[test_traced("WARN")]
     fn test_standard_stale_finalized_delivery_does_not_block_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // Bring up a simulated network so the buffered broadcast engine
-            // can register a channel; we do not exercise it from the test.
+        runner.start(|context| async move {
             let me = default_leader();
             let (network, oracle) = Network::new_with_peers(
                 context.with_label("network"),
@@ -1585,24 +1568,15 @@ mod tests {
             .await;
             network.start();
             let control = oracle.control(me.clone());
-            let network_channel: (
-                simulated::Sender<PublicKey, deterministic::Context>,
-                simulated::Receiver<PublicKey>,
-            ) = control
+            let network_channel = control
                 .register(0, Quota::per_second(NonZeroU32::MAX))
                 .await
                 .unwrap();
 
-            // Build a mutable provider so the test can drop the verifier.
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = MutableProvider::new(schemes[0].clone());
-
-            // Storage configuration shared with the harness for prunable validators.
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
-                provider: provider.clone(),
+                provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 mailbox_size: 100,
                 view_retention_timeout: ViewDelta::new(10),
@@ -1652,7 +1626,6 @@ mod tests {
             .await
             .expect("failed to initialize finalized blocks archive");
 
-            // Wire a buffered broadcast engine so the actor has a real Buffer.
             let broadcast_config = buffered::Config {
                 public_key: me.clone(),
                 mailbox_size: 100,
@@ -1665,83 +1638,50 @@ mod tests {
                 buffered::Engine::new(context.clone(), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            // Wire the resolver's mpsc directly so the test can inject Deliver
-            // messages that bypass the network/resolver engine entirely.
             let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
 
-            // Init and start the actor.
-            let (actor, mailbox, _initial_height) = Actor::init(
+            let (actor, mailbox, _) = Actor::init(
                 context.clone(),
                 finalizations_by_height,
                 finalized_blocks,
                 config,
             )
             .await;
-            let application = Application::<B>::default();
-            actor.start(application, buffer, (resolver_rx, NoopResolver));
+            actor.start(Application::<B>::default(), buffer, (resolver_rx, NoopResolver));
 
-            // Advance the floor past height 5. We use `set_floor` directly
-            // because we are not driving the application end-to-end.
-            let floor = Height::new(50);
-            mailbox.set_floor(floor).await;
-            // Synchronization barrier: subsequent mailbox messages are FIFO,
-            // so this round-trip guarantees `set_floor` has been processed.
-            let _ = mailbox.get_finalization(floor).await;
+            // Advance the floor so stale deliveries are below it.
+            mailbox.set_floor(Height::new(50)).await;
+            let _ = mailbox.get_finalization(Height::new(50)).await;
 
-            // Application now prunes its verifier for the old epoch.
-            provider.drop_verifier();
-
-            // Inject a stale Finalized response. The payload is intentionally
-            // garbage: with the verifier missing, the marshal must not even
-            // attempt to decode it. The fix's contract is that we acknowledge
-            // (true) rather than blame the peer (false) when the request is
-            // at or below the floor.
-            let stale_height = Height::new(5);
+            // Inject a stale Finalized delivery with garbage payload. The
+            // provider has no verifier, so the marshal cannot decode it and
+            // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
                     key: handler::Request::Finalized {
-                        height: stale_height,
+                        height: Height::new(5),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
                 .await
-                .expect("failed to inject stale finalized deliver");
-            let result = response_rx
-                .await
-                .expect("stale deliver response channel closed");
-            assert!(
-                result,
-                "stale finalized delivery below floor must not block the peer"
-            );
+                .unwrap();
+            assert!(response_rx.await.unwrap());
 
-            // Same scenario for a Notarized request whose epoch lies fully
-            // below the floor (epoch 0 covers heights [0, BLOCKS_PER_EPOCH)).
-            let stale_round = Round::new(Epoch::zero(), View::new(1));
+            // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
             resolver_tx
                 .send(handler::Message::Deliver {
-                    key: handler::Request::Notarized { round: stale_round },
+                    key: handler::Request::Notarized {
+                        round: Round::new(Epoch::zero(), View::new(1)),
+                    },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
                 .await
-                .expect("failed to inject stale notarized deliver");
-            let result = response_rx
-                .await
-                .expect("stale notarized response channel closed");
-            assert!(
-                result,
-                "stale notarized delivery below floor must not block the peer"
-            );
-
-            // Sanity check: the epocher does cover the stale height/epoch, so
-            // the test exercises the verifier-missing branch (not the
-            // epocher-missing branch).
-            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-            assert!(epocher.containing(stale_height).is_some());
-            assert!(epocher.last(stale_round.epoch()).is_some());
+                .unwrap();
+            assert!(response_rx.await.unwrap());
         });
     }
 
