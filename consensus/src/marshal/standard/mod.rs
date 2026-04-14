@@ -49,8 +49,8 @@ mod tests {
                 application::Application,
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    EmptyProvider, StandardHarness, TestHarness, ValidatorHandle, B,
+                    setup_network_with_participants, Ctx, DeferredHarness, EmptyProvider,
+                    InlineHarness, StandardHarness, TestHarness, ValidatorHandle, B,
                     BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
                     PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
                 },
@@ -1631,7 +1631,11 @@ mod tests {
                 config,
             )
             .await;
-            actor.start(Application::<B>::default(), buffer, (resolver_rx, NoopResolver));
+            actor.start(
+                Application::<B>::default(),
+                buffer,
+                (resolver_rx, NoopResolver),
+            );
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
