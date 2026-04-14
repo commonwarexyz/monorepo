@@ -2484,7 +2484,7 @@ mod tests {
     /// `runtime_tasks_spawned` / `runtime_tasks_running`.
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics,
+        R::Context: Clock + Spawner + Metrics,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;
@@ -2503,16 +2503,15 @@ mod tests {
 
             // handle.await resolves when the task's output is ready, but
             // the running-gauge decrement fires on task-struct drop which
-            // may lag slightly. Retry encode() to let the runtime finish
-            // cleanup.
+            // may lag slightly. Loop until the runtime finishes cleanup.
             let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer = context.encode();
-            for _ in 0..50 {
+            let mut buffer;
+            loop {
+                buffer = context.encode();
                 if buffer.contains(running_value) {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                buffer = context.encode();
+                context.sleep(Duration::from_millis(10)).await;
             }
 
             // Count occurrences of each runtime task metric for our label. If
@@ -2549,10 +2548,6 @@ mod tests {
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
             );
-            assert!(
-                buffer.contains(running_value),
-                "expected running gauge to return to 0, got: {buffer}",
-            );
 
             // The per-round attribute must not surface on task metrics (the
             // task `Label` does not include context attributes).
@@ -2588,7 +2583,7 @@ mod tests {
     /// those entries nor create additional ones.
     fn test_metrics_spawn_scope_cardinality<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics,
+        R::Context: Clock + Spawner + Metrics,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;
@@ -2609,13 +2604,13 @@ mod tests {
 
             // Same race as above: gauge decrement lags handle completion.
             let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer = context.encode();
-            for _ in 0..50 {
+            let mut buffer;
+            loop {
+                buffer = context.encode();
                 if buffer.contains(running_value) {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                buffer = context.encode();
+                context.sleep(Duration::from_millis(10)).await;
             }
 
             let spawned_lines = buffer
@@ -2647,10 +2642,6 @@ mod tests {
             assert!(
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
-            );
-            assert!(
-                buffer.contains(running_value),
-                "expected running gauge to return to 0, got: {buffer}",
             );
         });
     }
