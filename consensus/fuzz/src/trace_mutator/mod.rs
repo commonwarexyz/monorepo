@@ -15,21 +15,25 @@
 //!      that will add new implementation traces into `MUTATION_SEEDS_FOLDER`.
 //!   2. Maintain a `mutated_traces_queue: VecDeque<TraceData>` seeded
 //!      from the initial population.
-//!   3. Per iteration: pop a trace from the queue (or fall back to a
-//!      random initial seed when the queue is empty), submit it to the
-//!      tlc-controlled server via [`TlcMapper`] / [`TlcClient`], and
-//!      count fingerprints (`response.keys`) that are not in the
-//!      cumulative `states_map`.
-//!   4. If the trace produced new fingerprints, persist it under
-//!      `consensus/fuzz/artifacts/mutated_traces/` and push
+//!   3. Mutate seeds into candidate traces and submit them to TLC.
+//!   4. Per iteration: pop a mutated trace from the queue (or fall
+//!      back to a fresh mutation of some seed when the queue is empty),
+//!      submit it to the tlc-controlled server via [`TlcMapper`] /
+//!      [`TlcClient`], and count fingerprints (`response.keys`) that
+//!      are not in the cumulative `states_map`.
+//!   5. If the trace produced new fingerprints, validate it against
+//!      both `replica.qnt` and `replica_tla.qnt`. Only traces that pass
+//!      the dual-model check are persisted under
+//!      `consensus/fuzz/artifacts/mutated_traces/` and used to push
 //!      `mut_per_trace * new_states` mutated descendants back onto the
 //!      queue.
-//!   5. Every `reseed_frequency` iterations, generate a fresh population
+//!   6. Every `reseed_frequency` iterations, generate a fresh population
 //!      of mutated traces from the base seeds using the current RNG
 //!      state and refill the queue (mirrors `Fuzzer.seed`).
 //!
-//! There is *no* validity gating: every fingerprint returned by TLC
-//! contributes to coverage, exactly like `TLCStateGuider.Check`.
+//! Every fingerprint returned by TLC contributes to coverage, exactly
+//! like `TLCStateGuider.Check`. The dual-model gate applies only after
+//! TLC has already declared a trace interesting.
 //!
 //! All mutations reorder or duplicate entries but never modify message
 //! contents (sender, receiver, vote/certificate fields). Because only the
@@ -51,6 +55,7 @@
 //!   * `MUTATION_SEEDS_FOLDER` - seed corpus directory, default `corpus/tlc_mutator/`
 
 use crate::{
+    quint_model,
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},
     tracing::{
         data::TraceData,
@@ -71,6 +76,7 @@ const DEFAULT_ITERATIONS: usize = 10000;
 const DEFAULT_RESEED_FREQ: usize = 100;
 const DEFAULT_SEED_POPULATION_SIZE: usize = 100;
 const DEFAULT_FAULTS: Option<usize> = None;
+const MAX_VALID_MUTATION_ATTEMPTS: usize = 32;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,6 +84,14 @@ fn manifest_dir() -> PathBuf {
 
 fn fixtures_dir() -> PathBuf {
     manifest_dir().join("src/tracing/tests/fixtures")
+}
+
+fn selected_fixture_roots(faults_override: Option<usize>) -> Vec<PathBuf> {
+    let fixtures = fixtures_dir();
+    match faults_override {
+        Some(0) => vec![fixtures.join("honest")],
+        _ => vec![fixtures],
+    }
 }
 
 fn seed_dir() -> PathBuf {
@@ -259,6 +273,51 @@ fn trace_leader(trace: &TraceData, view: u64) -> String {
     format!("n{}", ((trace.epoch + view) as usize) % trace.n)
 }
 
+fn with_faults_override(mut trace: TraceData, faults_override: Option<usize>) -> TraceData {
+    if let Some(faults) = faults_override {
+        trace.faults = faults;
+    }
+    trace
+}
+
+fn trace_cache_key(trace: &TraceData) -> Option<String> {
+    serde_json::to_vec(trace)
+        .ok()
+        .map(|bytes| sha256_hex(&bytes))
+}
+
+fn is_dual_model_valid(trace: &TraceData, validation_cache: &mut HashMap<String, bool>) -> bool {
+    let key = trace_cache_key(trace);
+    if let Some(key) = key.as_ref() {
+        if let Some(valid) = validation_cache.get(key) {
+            return *valid;
+        }
+    }
+
+    let label = key.as_deref().unwrap_or("trace");
+    let valid = quint_model::validate_trace_dual(trace, label).is_ok();
+    if let Some(key) = key {
+        validation_cache.insert(key, valid);
+    }
+    valid
+}
+
+fn next_candidate_trace(
+    base: &TraceData,
+    rng: &mut StdRng,
+    faults_override: Option<usize>,
+    allow_base_fallback: bool,
+) -> Option<TraceData> {
+    let candidate = mutate_once(base, rng).map(|trace| with_faults_override(trace, faults_override));
+    if candidate.is_some() {
+        return candidate;
+    }
+    if allow_base_fallback {
+        return Some(with_faults_override(base.clone(), faults_override));
+    }
+    None
+}
+
 fn indices_form_contiguous_block(indices: &[usize]) -> bool {
     indices
         .windows(2)
@@ -378,6 +437,68 @@ const ALL_MUTATIONS: &[Mutation] = &[
     Mutation::RelayPreference,
 ];
 
+const HONEST_MUTATIONS: &[Mutation] = &[
+    Mutation::SwapByRecipient,
+    Mutation::DelayRecipient,
+    Mutation::BatchSplit,
+    Mutation::DelayLink,
+    Mutation::DelaySender,
+    Mutation::FanoutSkew,
+    Mutation::ChannelSkew,
+    Mutation::BurstRelease,
+    Mutation::InterleaveReceivers,
+    Mutation::TimeoutEdge,
+    Mutation::RelayPreference,
+];
+
+fn mutation_candidates(trace: &TraceData) -> &'static [Mutation] {
+    if trace.faults == 0 {
+        HONEST_MUTATIONS
+    } else {
+        ALL_MUTATIONS
+    }
+}
+
+fn first_broadcast_order(entries: &[TraceEntry]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for entry in entries {
+        let id = broadcast_identity(entry);
+        if seen.insert(id.clone()) {
+            order.push(id);
+        }
+    }
+    order
+}
+
+fn first_broadcast_positions(entries: &[TraceEntry]) -> HashMap<String, usize> {
+    let mut positions = HashMap::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        positions.entry(broadcast_identity(entry)).or_insert(idx);
+    }
+    positions
+}
+
+fn preserves_first_broadcast_order(original: &TraceData, mutated: &TraceData) -> bool {
+    if original.faults != 0 {
+        return true;
+    }
+
+    let order = first_broadcast_order(&original.entries);
+    let positions = first_broadcast_positions(&mutated.entries);
+    let mut prev_idx = None;
+    for id in order {
+        let Some(&idx) = positions.get(&id) else {
+            return false;
+        };
+        if prev_idx.is_some_and(|prev| idx <= prev) {
+            return false;
+        }
+        prev_idx = Some(idx);
+    }
+    true
+}
+
 /// Applies a single mutation to `trace.entries`. Shuffles the mutation
 /// list and tries each one until one succeeds. Returns `false` only if
 /// no mutation is applicable (e.g. empty trace).
@@ -386,7 +507,7 @@ pub fn apply_mutation(trace: &mut TraceData, rng: &mut StdRng) -> bool {
     if len == 0 {
         return false;
     }
-    let mut candidates: Vec<Mutation> = ALL_MUTATIONS.to_vec();
+    let mut candidates: Vec<Mutation> = mutation_candidates(trace).to_vec();
     candidates.shuffle(rng);
     for mutation in candidates {
         if try_mutation(trace, rng, mutation) {
@@ -821,12 +942,16 @@ fn try_mutation(trace: &mut TraceData, rng: &mut StdRng, mutation: Mutation) -> 
 /// of `trace`. Returns `None` if the trace was too degenerate for any
 /// mutation (mirrors `Mutator.Mutate -> (trace, ok)`).
 pub fn mutate_once(trace: &TraceData, rng: &mut StdRng) -> Option<TraceData> {
-    let mut copy = trace.clone();
-    if apply_mutation(&mut copy, rng) {
-        Some(copy)
-    } else {
-        None
+    for _ in 0..MAX_VALID_MUTATION_ATTEMPTS {
+        let mut copy = trace.clone();
+        if !apply_mutation(&mut copy, rng) {
+            return None;
+        }
+        if preserves_first_broadcast_order(trace, &copy) {
+            return Some(copy);
+        }
     }
+    None
 }
 
 fn resolve_iterations() -> usize {
@@ -905,9 +1030,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// structure. A `.fixture_manifest` file tracks exactly which relative
 /// paths were copied so stale copies are removed when fixtures are
 /// deleted or renamed upstream, without touching user-added seeds.
-fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
-    let fixtures = fixtures_dir();
-    if !fixtures.is_dir() {
+fn copy_fixtures_to_seed_dir(seed_dir: &Path, faults_override: Option<usize>) {
+    let fixture_roots: Vec<PathBuf> = selected_fixture_roots(faults_override)
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .collect();
+    if fixture_roots.is_empty() {
         return;
     }
     fs::create_dir_all(seed_dir).ok();
@@ -923,9 +1051,14 @@ fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
         .collect();
 
     // Current fixture relative paths.
-    let current: HashSet<PathBuf> = find_json_files(&fixtures)
+    let current: HashSet<PathBuf> = fixture_roots
         .iter()
-        .filter_map(|p| p.strip_prefix(&fixtures).ok().map(PathBuf::from))
+        .flat_map(|root| {
+            find_json_files(root)
+                .into_iter()
+                .filter_map(|p| p.strip_prefix(fixtures_dir()).ok().map(PathBuf::from))
+                .collect::<Vec<_>>()
+        })
         .collect();
 
     // Remove stale copies: paths in the old manifest but not in current fixtures.
@@ -936,7 +1069,7 @@ fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
 
     // Copy current fixtures.
     for rel in &current {
-        let src = fixtures.join(rel);
+        let src = fixtures_dir().join(rel);
         let dst = seed_dir.join(rel);
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).ok();
@@ -963,6 +1096,16 @@ fn copy_fixtures_to_seed_dir(seed_dir: &Path) {
     }
 }
 
+fn filter_seeds_for_faults(
+    mut seeds: Vec<TraceData>,
+    faults_override: Option<usize>,
+) -> Vec<TraceData> {
+    if let Some(faults) = faults_override {
+        seeds.retain(|trace| trace.faults == faults);
+    }
+    seeds
+}
+
 /// Generates a fresh seed population by mutating randomly chosen base
 /// seeds, then pushes them onto the queue. Mirrors Go's `Fuzzer.seed()`
 /// which regenerates fresh traces each reseed rather than replaying the
@@ -972,13 +1115,21 @@ fn seed_queue_generated(
     base_seeds: &[TraceData],
     rng: &mut StdRng,
     n: usize,
+    faults_override: Option<usize>,
 ) {
     queue.clear();
-    for _ in 0..n {
+    for idx in 0..n {
         let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
-        match mutate_once(base, rng) {
-            Some(t) => queue.push_back(t),
-            None => queue.push_back(base.clone()),
+        if let Some(trace) = next_candidate_trace(base, rng, faults_override, false) {
+            queue.push_back(trace);
+        }
+        if n >= 10 && ((idx + 1) % 10 == 0 || idx + 1 == n) {
+            println!(
+                "trace_mutator: queue generation progress {}/{} (queued {})",
+                idx + 1,
+                n,
+                queue.len()
+            );
         }
     }
 }
@@ -1000,11 +1151,23 @@ pub fn run() {
 
     let seed_dir = seed_dir();
     let seed = resolve_seed(&seed_dir);
-    copy_fixtures_to_seed_dir(&seed_dir);
+    copy_fixtures_to_seed_dir(&seed_dir, faults_override);
 
-    let mut base_seeds = load_seeds(&seed_dir);
+    println!(
+        "trace_mutator: loading seeds from {} (faults={})",
+        seed_dir.display(),
+        faults_override.map_or("inherit".to_string(), |f| f.to_string())
+    );
+    let mut validation_cache: HashMap<String, bool> = HashMap::new();
+    let mut base_seeds = filter_seeds_for_faults(load_seeds(&seed_dir), faults_override)
+        .into_iter()
+        .map(|trace| with_faults_override(trace, faults_override))
+        .collect::<Vec<_>>();
     if base_seeds.is_empty() {
-        eprintln!("no usable seed traces under {}", seed_dir.display());
+        eprintln!(
+            "no usable seed traces under {}",
+            seed_dir.display(),
+        );
         process::exit(1);
     }
 
@@ -1043,7 +1206,21 @@ pub fn run() {
     // BFS queue of mutated traces to evaluate next, mirrors
     // `Fuzzer.mutatedTracesQueue`.
     let mut queue: VecDeque<TraceData> = VecDeque::new();
-    seed_queue_generated(&mut queue, &base_seeds, &mut rng, seed_population_size);
+    println!(
+        "trace_mutator: generating initial queue of {} traces",
+        seed_population_size
+    );
+    seed_queue_generated(
+        &mut queue,
+        &base_seeds,
+        &mut rng,
+        seed_population_size,
+        faults_override,
+    );
+    println!(
+        "trace_mutator: initial queue ready ({} traces)",
+        queue.len()
+    );
 
     let mut kept = 0usize;
     let mut empty_actions = 0usize;
@@ -1057,11 +1234,29 @@ pub fn run() {
         // using the current RNG state, matching Go's Fuzzer.seed() which
         // regenerates rather than replaying the same traces.
         if iter > 0 && iter % reseed_freq == 0 {
-            let refreshed = load_seeds(&seed_dir);
-            if !refreshed.is_empty() {
-                base_seeds = refreshed;
+            println!(
+                "[iter {iter}] reseed: loading seeds from {}",
+                seed_dir.display()
+            );
+            let refreshed_loaded = filter_seeds_for_faults(load_seeds(&seed_dir), faults_override)
+                .into_iter()
+                .map(|trace| with_faults_override(trace, faults_override))
+                .collect::<Vec<_>>();
+            if !refreshed_loaded.is_empty() {
+                base_seeds = refreshed_loaded;
             }
-            seed_queue_generated(&mut queue, &base_seeds, &mut rng, seed_population_size);
+            println!(
+                "[iter {iter}] reseed: generating {} fresh traces from {} seed bases",
+                seed_population_size,
+                base_seeds.len()
+            );
+            seed_queue_generated(
+                &mut queue,
+                &base_seeds,
+                &mut rng,
+                seed_population_size,
+                faults_override,
+            );
             println!(
                 "[iter {iter}] reseed: generated {} fresh traces from {} base seeds",
                 seed_population_size,
@@ -1078,8 +1273,25 @@ pub fn run() {
             }
             None => {
                 random_executions += 1;
-                let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
-                mutate_once(base, &mut rng).unwrap_or_else(|| base.clone())
+                let mut generated = None;
+                for _ in 0..base_seeds.len().max(1) {
+                    let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
+                    if let Some(trace) = next_candidate_trace(base, &mut rng, faults_override, false)
+                    {
+                        generated = Some(trace);
+                        break;
+                    }
+                }
+                match generated {
+                    Some(trace) => trace,
+                    None => {
+                        eprintln!(
+                            "failed to produce a mutation from {} seed bases",
+                            base_seeds.len()
+                        );
+                        process::exit(1);
+                    }
+                }
             }
         };
 
@@ -1143,12 +1355,21 @@ pub fn run() {
             continue;
         }
 
+        if !is_dual_model_valid(&trace, &mut validation_cache) {
+            println!(
+                "[iter {iter}] tlc=ok-model-rejected (keys={}, new={}, q={}, traces={}, states={})",
+                response.keys.len(),
+                num_new_states,
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
+            continue;
+        }
+
         // Override faults in persisted traces if requested (e.g. the TLC
         // model validates all-correct behaviour so faults=0 is appropriate).
-        let mut trace = trace;
-        if let Some(f) = faults_override {
-            trace.faults = f;
-        }
+        let trace = with_faults_override(trace, faults_override);
 
         // Persist the keeper as pretty JSON named by sha1 of its bytes.
         // (Mirrors `TLCStateGuider.recordTrace`.)
@@ -1176,7 +1397,7 @@ pub fn run() {
         let num_mutations = num_new_states * mut_per_trace;
         let mut pushed = 0usize;
         for _ in 0..num_mutations {
-            if let Some(child) = mutate_once(&trace, &mut rng) {
+            if let Some(child) = next_candidate_trace(&trace, &mut rng, faults_override, true) {
                 queue.push_back(child);
                 pushed += 1;
             }
@@ -1208,7 +1429,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{try_mutation, Mutation};
+    use super::{preserves_first_broadcast_order, try_mutation, Mutation};
     use crate::tracing::{
         data::TraceData,
         sniffer::{TraceEntry, TracedCert, TracedVote},
@@ -1488,5 +1709,33 @@ mod tests {
     #[test]
     fn relay_preference_mutation_preserves_messages() {
         assert_reordering_mutation_succeeds(Mutation::RelayPreference);
+    }
+
+    #[test]
+    fn honest_first_broadcast_order_rejects_cross_view_crossover() {
+        let original = sample_trace();
+        let mut mutated = original.clone();
+
+        let moved = mutated.entries.remove(9);
+        mutated.entries.insert(0, moved);
+
+        assert!(
+            !preserves_first_broadcast_order(&original, &mutated),
+            "moving the first finalize broadcast ahead of the original earlier broadcasts must be rejected"
+        );
+    }
+
+    #[test]
+    fn honest_first_broadcast_order_allows_later_delivery_reordering() {
+        let original = sample_trace();
+        let mut mutated = original.clone();
+
+        let moved = mutated.entries.remove(8);
+        mutated.entries.insert(12, moved);
+
+        assert!(
+            preserves_first_broadcast_order(&original, &mutated),
+            "reordering non-first deliveries should remain valid for honest traces"
+        );
     }
 }

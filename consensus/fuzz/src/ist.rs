@@ -584,8 +584,7 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                             &correct_nodes_now,
                             &block_map,
                         );
-                        let mismatches =
-                            compare::compare(&expected, &observed, faults);
+                        let mismatches = compare::compare(&expected, &observed, faults);
 
                         // 7. Report result - print both spec and impl state
                         for (ci, impl_state) in observed.iter().enumerate() {

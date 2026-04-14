@@ -184,6 +184,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "validate_trace_corpus"
+path = "src/bin/validate_trace_corpus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ist"
 path = "src/bin/ist.rs"
 test = false

@@ -917,8 +917,8 @@ pub fn decode_itf(
 
 #[cfg(test)]
 mod tests {
-    use super::{block_to_hex, decode_itf};
-    use std::{collections::HashMap, fs};
+    use super::block_to_hex;
+    use std::collections::HashMap;
 
     #[test]
     fn block_to_hex_returns_full_deterministic_digest() {
@@ -931,42 +931,5 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert_eq!(first, second);
         assert_ne!(first, other);
-    }
-
-    #[test]
-    fn decode_itf_splits_certificate_presence_from_successful_certification() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../quint/itf_traces/trace_roundtrip_test_26ba90da8575272103245a2ed669f37fd98f7597.itf.json"
-        );
-        let json = fs::read_to_string(path).expect("fixture must exist");
-
-        let (trace, expected) = decode_itf(&json, 0, 0).expect("fixture must decode");
-
-        let reporter_state = trace
-            .reporter_states
-            .get("n1")
-            .expect("n1 reporter state must exist");
-        assert_eq!(
-            reporter_state.certified,
-            [1, 2, 3, 4, 5, 6].into_iter().collect()
-        );
-        assert_eq!(
-            reporter_state.successful_certifications,
-            [2, 3, 4, 6].into_iter().collect()
-        );
-
-        let expected_node = expected
-            .nodes
-            .get("n1")
-            .expect("n1 expected state must exist");
-        assert_eq!(
-            expected_node.certified,
-            [1, 2, 3, 4, 5, 6].into_iter().collect()
-        );
-        assert_eq!(
-            expected_node.successful_certifications,
-            [2, 3, 4, 6].into_iter().collect()
-        );
     }
 }

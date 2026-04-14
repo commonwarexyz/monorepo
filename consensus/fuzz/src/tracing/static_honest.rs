@@ -161,7 +161,7 @@ fn cert_sender(signers: &[String]) -> String {
         .expect("certificate must have at least one signer")
 }
 
-fn leader_nullify_extension(view: u64) -> ViewExtension {
+fn leader_nullify_extension(view: u64, parent: u64) -> ViewExtension {
     let mut entries = Vec::new();
     let signers = all_replicas();
     for signer in &signers {
@@ -175,7 +175,7 @@ fn leader_nullify_extension(view: u64) -> ViewExtension {
     );
     ViewExtension {
         entries,
-        next_parent: 0,
+        next_parent: parent,
         finalized_delta: 0,
         advances_view: true,
     }
@@ -274,7 +274,7 @@ fn view_extensions(cfg: &SmallHonestTraceConfig, state: &SearchState) -> Vec<Vie
     let view = state.next_view;
     let parent = state.latest_parent;
 
-    out.push(leader_nullify_extension(view));
+    out.push(leader_nullify_extension(view, parent));
 
     for follower_mask in 0u8..(1u8 << (N - 1)) {
         out.push(propose_extension(cfg.epoch, view, parent, follower_mask));
@@ -446,5 +446,92 @@ mod tests {
             let json = serde_json::to_string(trace).expect("serialize generated trace");
             assert!(serialized.insert(json), "generated traces must be unique");
         }
+    }
+
+    #[test]
+    fn parent_survives_nullified_view_after_finalization() {
+        let cfg = SmallHonestTraceConfig {
+            max_views: 3,
+            max_containers: 2,
+            epoch: 0,
+        };
+        let traces = generate_small_honest_traces(cfg);
+        let mut found = false;
+
+        for trace in &traces {
+            let finalized_v1 = trace.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    TraceEntry::Certificate {
+                        cert: TracedCert::Finalization {
+                            view: 1,
+                            parent: 0,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            });
+            let nullified_v2 = trace.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    TraceEntry::Certificate {
+                        cert: TracedCert::Nullification { view: 2, .. },
+                        ..
+                    }
+                )
+            });
+            if !(finalized_v1 && nullified_v2) {
+                continue;
+            }
+
+            let has_view3_activity = trace.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    TraceEntry::Vote {
+                        vote: TracedVote::Notarize { view: 3, .. }
+                            | TracedVote::Finalize { view: 3, .. },
+                        ..
+                    } | TraceEntry::Certificate {
+                        cert: TracedCert::Notarization { view: 3, .. }
+                            | TracedCert::Finalization { view: 3, .. },
+                        ..
+                    }
+                )
+            });
+            if !has_view3_activity {
+                continue;
+            }
+            found = true;
+
+            for entry in &trace.entries {
+                match entry {
+                    TraceEntry::Vote { vote, .. } => match vote {
+                        TracedVote::Notarize {
+                            view: 3, parent, ..
+                        }
+                        | TracedVote::Finalize {
+                            view: 3, parent, ..
+                        } => {
+                            assert_eq!(*parent, 1);
+                        }
+                        _ => {}
+                    },
+                    TraceEntry::Certificate { cert, .. } => match cert {
+                        TracedCert::Notarization {
+                            view: 3, parent, ..
+                        }
+                        | TracedCert::Finalization {
+                            view: 3, parent, ..
+                        } => {
+                            assert_eq!(*parent, 1);
+                        }
+                        _ => {}
+                    },
+                }
+            }
+        }
+
+        assert!(found);
     }
 }

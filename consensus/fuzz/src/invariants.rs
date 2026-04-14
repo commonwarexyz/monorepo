@@ -65,7 +65,7 @@ pub fn check<P: Simplex>(n: u32, replicas: &[ReplicaState]) {
             }
         }
     }
-
+    
     // Invariant: no_conflicting_quorum_notarizations
     // In any view, there cannot be quorum notarizations for multiple digests.
     let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();

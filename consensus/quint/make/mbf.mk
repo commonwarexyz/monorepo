@@ -11,10 +11,11 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
 MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
-MBF_TRACE_STATIC_MAX_VIEWS ?= 6
+MBF_TRACE_STATIC_MAX_VIEWS ?= 4
 MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
+MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
 
-.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen
+.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen mbf_prepare_validated_seeds
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
@@ -90,6 +91,7 @@ mbf_live_watch:
 		while true; do \
 			for f in "$$dir"/*.json; do \
 				[ -f "$$f" ] || continue; \
+				mkdir -p "$$seen_dir" "$$failed_dir"; \
 				hash=$$(basename "$$f" .json); \
 				[ -f "$$seen_dir/$$hash" ] && continue; \
 				echo "=== Replaying $$f ==="; \
@@ -183,5 +185,28 @@ mbf_live_trace_static_gen:
 			"$$dst" \
 			--max-views "$(MBF_TRACE_STATIC_MAX_VIEWS)" \
 			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)"; \
+	'
+
+mbf_prepare_validated_seeds:
+	@bash -eu -o pipefail -c '\
+		tmp=$$(mktemp -d); \
+		trap "rm -rf $$tmp" EXIT INT TERM; \
+		static_dir="$$tmp/static_generated"; \
+		dst="$(MBF_VALIDATED_SEEDS_FOLDER)"; \
+		mkdir -p "$$static_dir"; \
+		echo "generating static seeds into $$static_dir"; \
+		cargo run -p commonware-consensus-fuzz --bin generate_small_honest_traces -- \
+			"$$static_dir" \
+			--max-views "$(MBF_TRACE_STATIC_MAX_VIEWS)" \
+			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)"; \
+		echo "validating fixtures + existing corpus + generated corpus into $$dst"; \
+		MODEL_FAULTS=$(MBF_FAULTS) \
+		cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
+			"$$dst" \
+			"../fuzz/src/tracing/tests/fixtures/honest" \
+			"$(MUTATION_SEEDS_FOLDER)" \
+			"$$static_dir"; \
+		echo "validated seed corpus written to $$dst"; \
+		echo "use it with: make mbf_live_fuzz MUTATION_SEEDS_FOLDER=$$dst"; \
 	'
 	
