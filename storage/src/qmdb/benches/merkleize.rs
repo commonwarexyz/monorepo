@@ -428,27 +428,91 @@ async fn run_chained_bench<
 
 // -- Variant dispatch --
 
-macro_rules! variants {
-    (
-        $(
-            $entry:ident {
-                name: $name:literal,
-                init: |$ctx:ident| $init:expr,
-            }
-        )+
-    ) => {
-        #[derive(Debug, Clone, Copy)]
-        enum Variant {
-            $($entry),+
-        }
+#[derive(Debug, Clone, Copy)]
+enum Variant {
+    AnyFixed,
+    AnyVariable,
+    AnyFixedMmb,
+    AnyVariableMmb,
+    AnyOrderedFixed,
+    AnyOrderedVariable,
+    AnyOrderedFixedMmb,
+    AnyOrderedVariableMmb,
+    CurrentFixed32,
+    CurrentVariable32,
+    CurrentFixed32Mmb,
+    CurrentVariable32Mmb,
+    CurrentFixed256,
+    CurrentVariable256,
+    CurrentFixed256Mmb,
+    CurrentVariable256Mmb,
+    CurrentOrderedFixed32,
+    CurrentOrderedVariable32,
+    CurrentOrderedFixed32Mmb,
+    CurrentOrderedVariable32Mmb,
+    CurrentOrderedFixed256,
+    CurrentOrderedVariable256,
+    CurrentOrderedFixed256Mmb,
+    CurrentOrderedVariable256Mmb,
+}
 
-        impl Variant {
-            const fn name(self) -> &'static str {
-                match self {
-                    $(Self::$entry => $name),+
-                }
-            }
+impl Variant {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::AnyFixed => "any::unordered::fixed::mmr",
+            Self::AnyVariable => "any::unordered::variable::mmr",
+            Self::AnyFixedMmb => "any::unordered::fixed::mmb",
+            Self::AnyVariableMmb => "any::unordered::variable::mmb",
+            Self::AnyOrderedFixed => "any::ordered::fixed::mmr",
+            Self::AnyOrderedVariable => "any::ordered::variable::mmr",
+            Self::AnyOrderedFixedMmb => "any::ordered::fixed::mmb",
+            Self::AnyOrderedVariableMmb => "any::ordered::variable::mmb",
+            Self::CurrentFixed32 => "current::unordered::fixed::mmr chunk=32",
+            Self::CurrentVariable32 => "current::unordered::variable::mmr chunk=32",
+            Self::CurrentFixed32Mmb => "current::unordered::fixed::mmb chunk=32",
+            Self::CurrentVariable32Mmb => "current::unordered::variable::mmb chunk=32",
+            Self::CurrentFixed256 => "current::unordered::fixed::mmr chunk=256",
+            Self::CurrentVariable256 => "current::unordered::variable::mmr chunk=256",
+            Self::CurrentFixed256Mmb => "current::unordered::fixed::mmb chunk=256",
+            Self::CurrentVariable256Mmb => "current::unordered::variable::mmb chunk=256",
+            Self::CurrentOrderedFixed32 => "current::ordered::fixed::mmr chunk=32",
+            Self::CurrentOrderedVariable32 => "current::ordered::variable::mmr chunk=32",
+            Self::CurrentOrderedFixed32Mmb => "current::ordered::fixed::mmb chunk=32",
+            Self::CurrentOrderedVariable32Mmb => "current::ordered::variable::mmb chunk=32",
+            Self::CurrentOrderedFixed256 => "current::ordered::fixed::mmr chunk=256",
+            Self::CurrentOrderedVariable256 => "current::ordered::variable::mmr chunk=256",
+            Self::CurrentOrderedFixed256Mmb => "current::ordered::fixed::mmb chunk=256",
+            Self::CurrentOrderedVariable256Mmb => "current::ordered::variable::mmb chunk=256",
         }
+    }
+}
+
+const VARIANTS: [Variant; 24] = [
+    Variant::AnyFixed,
+    Variant::AnyVariable,
+    Variant::AnyFixedMmb,
+    Variant::AnyVariableMmb,
+    Variant::AnyOrderedFixed,
+    Variant::AnyOrderedVariable,
+    Variant::AnyOrderedFixedMmb,
+    Variant::AnyOrderedVariableMmb,
+    Variant::CurrentFixed32,
+    Variant::CurrentVariable32,
+    Variant::CurrentFixed32Mmb,
+    Variant::CurrentVariable32Mmb,
+    Variant::CurrentFixed256,
+    Variant::CurrentVariable256,
+    Variant::CurrentFixed256Mmb,
+    Variant::CurrentVariable256Mmb,
+    Variant::CurrentOrderedFixed32,
+    Variant::CurrentOrderedVariable32,
+    Variant::CurrentOrderedFixed32Mmb,
+    Variant::CurrentOrderedVariable32Mmb,
+    Variant::CurrentOrderedFixed256,
+    Variant::CurrentOrderedVariable256,
+    Variant::CurrentOrderedFixed256Mmb,
+    Variant::CurrentOrderedVariable256Mmb,
+];
 
 /// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db` bound.
 macro_rules! dispatch_variant {
@@ -476,6 +540,30 @@ macro_rules! dispatch_variant {
             }
             Variant::AnyVariableMmb => {
                 let $db = AnyUVarMmb::init($ctx.clone(), any_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedFixed => {
+                let $db = AnyOFix::init($ctx.clone(), any_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedVariable => {
+                let $db = AnyOVar::init($ctx.clone(), any_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedFixedMmb => {
+                let $db = AnyOFixMmb::init($ctx.clone(), any_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::AnyOrderedVariableMmb => {
+                let $db = AnyOVarMmb::init($ctx.clone(), any_var_cfg(&$ctx, __pc))
                     .await
                     .unwrap();
                 $body
@@ -528,113 +616,62 @@ macro_rules! dispatch_variant {
                     .unwrap();
                 $body
             }
+            Variant::CurrentOrderedFixed32 => {
+                let $db = CurOFix32::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable32 => {
+                let $db = CurOVar32::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed32Mmb => {
+                let $db = CurOFix32Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable32Mmb => {
+                let $db = CurOVar32Mmb::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed256 => {
+                let $db = CurOFix256::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable256 => {
+                let $db = CurOVar256::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedFixed256Mmb => {
+                let $db = CurOFix256Mmb::init($ctx.clone(), cur_fix_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
+            Variant::CurrentOrderedVariable256Mmb => {
+                let $db = CurOVar256Mmb::init($ctx.clone(), cur_var_cfg(&$ctx, __pc))
+                    .await
+                    .unwrap();
+                $body
+            }
         }
     }};
-}
-
-variants! {
-    AnyFixed {
-        name: "any::unordered::fixed::mmr",
-        init: |ctx| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)),
-    }
-    AnyVariable {
-        name: "any::unordered::variable::mmr",
-        init: |ctx| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)),
-    }
-    AnyFixedMmb {
-        name: "any::unordered::fixed::mmb",
-        init: |ctx| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
-    }
-    AnyVariableMmb {
-        name: "any::unordered::variable::mmb",
-        init: |ctx| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
-    }
-    AnyOrderedFixed {
-        name: "any::ordered::fixed::mmr",
-        init: |ctx| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx)),
-    }
-    AnyOrderedVariable {
-        name: "any::ordered::variable::mmr",
-        init: |ctx| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx)),
-    }
-    AnyOrderedFixedMmb {
-        name: "any::ordered::fixed::mmb",
-        init: |ctx| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
-    }
-    AnyOrderedVariableMmb {
-        name: "any::ordered::variable::mmb",
-        init: |ctx| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
-    }
-    CurrentFixed32 {
-        name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentVariable32 {
-        name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentFixed32Mmb {
-        name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentVariable32Mmb {
-        name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentFixed256 {
-        name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentVariable256 {
-        name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentFixed256Mmb {
-        name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentVariable256Mmb {
-        name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentOrderedFixed32 {
-        name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentOrderedVariable32 {
-        name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentOrderedFixed32Mmb {
-        name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentOrderedVariable32Mmb {
-        name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentOrderedFixed256 {
-        name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentOrderedVariable256 {
-        name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
-    CurrentOrderedFixed256Mmb {
-        name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
-    }
-    CurrentOrderedVariable256Mmb {
-        name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
-    }
 }
 
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for num_keys in [10_000u64, 100_000, 1_000_000] {
-        for &variant in VARIANTS {
+        for variant in VARIANTS {
             c.bench_function(
                 &format!(
                     "{}/variant={} num_keys={num_keys}",
@@ -657,7 +694,7 @@ fn bench_merkleize(c: &mut Criterion) {
 fn bench_chained_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for num_keys in [10_000u64, 100_000, 1_000_000] {
-        for &variant in VARIANTS {
+        for variant in VARIANTS {
             c.bench_function(
                 &format!(
                     "{}/chained variant={} num_keys={num_keys}",

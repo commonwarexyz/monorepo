@@ -1684,7 +1684,10 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
+            let config = fixed_db_config::<OneCap>(
+                "read-locations-all-sources",
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
