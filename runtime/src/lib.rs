@@ -2543,6 +2543,11 @@ mod tests {
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
             );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
 
             // The per-round attribute must not surface on task metrics (the
             // task `Label` does not include context attributes).
@@ -2634,6 +2639,11 @@ mod tests {
             assert!(
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
             );
         });
     }
