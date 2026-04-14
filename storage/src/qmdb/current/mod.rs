@@ -1386,6 +1386,19 @@ pub mod tests {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
+    async fn mmb_commit(
+        db: &mut UnorderedVariableMmbDb,
+        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
+    ) {
+        let mut batch = db.new_batch();
+        for (k, v) in writes {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+    }
+
     async fn commit_writes_with_metadata(
         db: &mut UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
@@ -1762,6 +1775,392 @@ pub mod tests {
             )
             .await
             .unwrap();
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Prune, then grow without pruning again so delayed MMB merges occur inside the
+    /// already-pruned region. Verify proof + reopen correctness.
+    #[test_traced]
+    fn test_current_mmb_reopen_and_prove_after_prune_delayed_merge() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+
+            for round in 0..200u64 {
+                mmb_commit(&mut db, [(k, Some(val(60_000 + round)))]).await;
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.sync().await.unwrap();
+
+            // Keep growing without pruning: delayed merges now occur in the pruned region.
+            for round in 200..300u64 {
+                mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
+            }
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &db.root()
+            ));
+
+            let target_root = db.root();
+            drop(db);
+
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+
+            let mut hasher = commonware_cryptography::Sha256::new();
+            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+                &mut hasher,
+                k,
+                val(60_000 + 199),
+                &proof,
+                &reopened.root()
+            ));
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Grow past 2 full pruned chunks, prune, reopen, verify root + value.
+    #[test_traced]
+    fn test_current_mmb_reopen_after_prune_two_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_prune_two", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected;
+
+            // Keep growing until the settle guard allows 2+ pruned chunks.
+            // The absorber for chunk pair [0,1] at gh=8 needs ~766 ops leaves.
+            let mut round = 0u64;
+            loop {
+                expected = Some(val(60_000 + round));
+                mmb_commit(&mut db, [(k, expected)]).await;
+                round += 1;
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                if db.pruned_bits() >= 512 {
+                    break;
+                }
+                assert!(
+                    round < 500,
+                    "failed to reach 2 pruned chunks after {round} commits"
+                );
+            }
+            db.sync().await.unwrap();
+
+            let target_root = db.root();
+            drop(db);
+
+            let reopen_ctx = context.with_label("db_reopen");
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                reopen_ctx.clone(),
+                variable_config::<OneCap>("test_prune_two", &reopen_ctx),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.get(&k).await.unwrap(), expected);
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Three rounds of grow + prune + reopen. Verifies repeated prune cycles don't diverge.
+    #[test_traced]
+    fn test_current_mmb_repeated_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..3u64 {
+                let k = key(round * 1000);
+                let mut expected = None;
+                for i in 0..90 {
+                    expected = Some(val(round * 1000 + i));
+                    mmb_commit(&mut db, [(k, expected)]).await;
+                }
+
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.sync().await.unwrap();
+
+                let root_before = db.root();
+                db_ctx = context.with_label(&format!("db_{round}"));
+
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(db.root(), root_before);
+                assert_eq!(db.get(&k).await.unwrap(), expected);
+                drop(prev_db);
+            }
+        });
+    }
+
+    /// Step-by-step growth after prune, comparing roots against an unpruned reference.
+    #[test_traced]
+    fn test_current_mmb_stepwise_growth_matches_unpruned_reference() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_ctx = context.with_label("db_stepwise");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_stepwise", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref_stepwise");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_stepwise_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut commit_idx = 0u64;
+
+            // Grow until the inactivity floor reaches 4 chunks.
+            while *db.inactivity_floor_loc() < 1024 {
+                let value = Some(val(80_000 + commit_idx));
+                mmb_commit(&mut db, [(k, value)]).await;
+                mmb_commit(&mut ref_db, [(k, value)]).await;
+                commit_idx += 1;
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.sync().await.unwrap();
+            assert_eq!(
+                db.root(),
+                ref_db.root(),
+                "root mismatch immediately after prune"
+            );
+
+            // Step-by-step growth through the delayed-merge window.
+            loop {
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                if db_leaves >= 1560 {
+                    break;
+                }
+
+                let value = Some(val(80_000 + commit_idx));
+                mmb_commit(&mut db, [(k, value)]).await;
+                mmb_commit(&mut ref_db, [(k, value)]).await;
+                commit_idx += 1;
+
+                let db_leaves =
+                    *Location::<mmb::Family>::try_from(db.any.log.merkle.size()).unwrap();
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "stepwise root mismatch: leaves={db_leaves}, commit_idx={commit_idx}"
+                );
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Multi-round prune + reopen + proof against an unpruned reference.
+    #[test_traced]
+    fn test_current_mmb_large_repeated_prune_matches_unpruned_reference() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const ROUNDS: u64 = 8;
+            const COMMITS_PER_ROUND: u64 = 120;
+
+            let mut db_ctx = context.with_label("db_init");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                db_ctx.clone(),
+                variable_config::<OneCap>("test_large_prune", &db_ctx),
+            )
+            .await
+            .unwrap();
+
+            let ref_ctx = context.with_label("ref");
+            let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("test_large_prune_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            let mut expected = None;
+
+            for round in 0..ROUNDS {
+                for i in 0..COMMITS_PER_ROUND {
+                    let value = Some(val(round * 10_000 + i));
+                    expected = value;
+                    mmb_commit(&mut db, [(k, value)]).await;
+                    mmb_commit(&mut ref_db, [(k, value)]).await;
+                }
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch before prune at round {round}"
+                );
+
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.sync().await.unwrap();
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch after prune at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(
+                    UnorderedVariableMmbDb::verify_key_value_proof(
+                        &mut hasher,
+                        k,
+                        expected.expect("value should exist"),
+                        &proof,
+                        &db.root()
+                    ),
+                    "proof verification failed at round {round}"
+                );
+
+                db_ctx = context.with_label(&format!("db_reopen_{round}"));
+                let prev_db = db;
+                db = UnorderedVariableMmbDb::init(
+                    db_ctx.clone(),
+                    variable_config::<OneCap>("test_large_prune", &db_ctx),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(
+                    db.root(),
+                    ref_db.root(),
+                    "root mismatch after reopen at round {round}"
+                );
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected,
+                    "value mismatch after reopen at round {round}"
+                );
+
+                let mut hasher = commonware_cryptography::Sha256::new();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert!(
+                    UnorderedVariableMmbDb::verify_key_value_proof(
+                        &mut hasher,
+                        k,
+                        expected.expect("value should exist"),
+                        &proof,
+                        &db.root()
+                    ),
+                    "proof verification failed after reopen at round {round}"
+                );
+
+                drop(prev_db);
+            }
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that prune beyond the inactivity floor is rejected without mutating state.
+    #[test_traced]
+    fn test_current_prune_rejects_beyond_inactivity_floor_without_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 160;
+
+            let partition = "current-prune-beyond-floor";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key0, Some(val(40_000 + round)))], None)
+                    .await;
+            }
+
+            let expected_root = db.root();
+            let expected_ops_root = db.ops_root();
+            let expected_floor = db.inactivity_floor_loc();
+            let expected_pruned_bits = db.pruned_bits();
+            let expected_value = db.get(&key0).await.unwrap();
+
+            // 32 * 8 = 256 bits per chunk for N=32.
+            let invalid_prune_loc = Location::new(*expected_floor + 256);
+            let result = db.prune(invalid_prune_loc).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
+                    if loc == invalid_prune_loc && floor == expected_floor),
+                "expected prune rejection above inactivity floor, got {result:?}"
+            );
+
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.ops_root(), expected_ops_root);
+            assert_eq!(db.pruned_bits(), expected_pruned_bits);
+            assert_eq!(db.get(&key0).await.unwrap(), expected_value);
+
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), expected_root);
+            assert_eq!(reopened.ops_root(), expected_ops_root);
+            assert_eq!(reopened.pruned_bits(), expected_pruned_bits);
+            assert_eq!(reopened.get(&key0).await.unwrap(), expected_value);
+
             reopened.destroy().await.unwrap();
         });
     }
