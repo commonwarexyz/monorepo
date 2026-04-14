@@ -2504,15 +2504,10 @@ mod tests {
             // handle.await resolves when the task's output is ready, but
             // the running-gauge decrement fires on task-struct drop which
             // may lag slightly. Yield to the executor so it can run cleanup.
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer;
-            loop {
+            while count_running_tasks(&context, "deferred_verify") > 0 {
                 context.sleep(Duration::from_millis(10)).await;
-                buffer = context.encode();
-                if buffer.contains(running_value) {
-                    break;
-                }
             }
+            let buffer = context.encode();
 
             // Count occurrences of each runtime task metric for our label. If
             // attributes were incorrectly folded into the task family key, we
@@ -2605,15 +2600,10 @@ mod tests {
             // handle.await resolves when the task's output is ready, but
             // the running-gauge decrement fires on task-struct drop which
             // may lag slightly. Yield to the executor so it can run cleanup.
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer;
-            loop {
+            while count_running_tasks(&context, "deferred_verify") > 0 {
                 context.sleep(Duration::from_millis(10)).await;
-                buffer = context.encode();
-                if buffer.contains(running_value) {
-                    break;
-                }
             }
+            let buffer = context.encode();
 
             let spawned_lines = buffer
                 .lines()
