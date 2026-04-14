@@ -49,7 +49,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in FIXED_VALUE_VARIANTS {
-                let mut setup_done = false;
+                let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -59,7 +59,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     ),
                     |b| {
                         // Setup: populate database (once, on first sample).
-                        if !setup_done {
+                        if !initialized {
                             commonware_runtime::tokio::Runner::new(Config::default()).start(
                                 |ctx| async move {
                                     with_fixed_value_db!(ctx, variant, |mut db| {
@@ -73,7 +73,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                                     });
                                 },
                             );
-                            setup_done = true;
+                            initialized = true;
                         }
 
                         // Benchmark: measure init time.
@@ -95,7 +95,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                 );
 
                 // Cleanup: destroy database.
-                if setup_done {
+                if initialized {
                     commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                         |ctx| async move {
                             with_fixed_value_db!(ctx, variant, |mut db| {
@@ -114,7 +114,7 @@ fn bench_var_value_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VAR_VALUE_VARIANTS {
-                let mut setup_done = false;
+                let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -124,7 +124,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                     ),
                     |b| {
                         // Setup: populate database (once, on first sample).
-                        if !setup_done {
+                        if !initialized {
                             commonware_runtime::tokio::Runner::new(Config::default()).start(
                                 |ctx| async move {
                                     with_var_value_db!(ctx, variant, |mut db| {
@@ -138,7 +138,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                                     });
                                 },
                             );
-                            setup_done = true;
+                            initialized = true;
                         }
 
                         // Benchmark: measure init time.
@@ -158,7 +158,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                 );
 
                 // Cleanup: destroy database.
-                if setup_done {
+                if initialized {
                     commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                         |ctx| async move {
                             with_var_value_db!(ctx, variant, |mut db| {
