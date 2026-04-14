@@ -707,9 +707,194 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     ipa::verify(transcript, &setup.ipa, &ipa_claim, ipa_proof, strategy)
 }
 
+#[commonware_macros::stability(ALPHA)]
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_math::{
+        algebra::{Additive, Ring},
+        test::{F, G},
+    };
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+    use std::sync::OnceLock;
+
+    const MAX_COMMITTED_VARS: usize = 4;
+    const MAX_INTERNAL_VARS: usize = 24;
+    const MAX_PADDED_INTERNAL_VARS: usize = MAX_INTERNAL_VARS.next_power_of_two();
+    const NUM_GENERATORS: usize = 2 * MAX_PADDED_INTERNAL_VARS + 3;
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
+
+    fn test_setup() -> &'static Setup<G> {
+        static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
+        TEST_SETUP.get_or_init(|| {
+            let generators = (1..=NUM_GENERATORS)
+                .map(|i| G::generator() * &F::from(i as u8))
+                .collect::<Vec<_>>();
+            let ipa_generators = &generators[1..1 + 2 * MAX_PADDED_INTERNAL_VARS];
+            Setup {
+                ipa: ipa::Setup::new(
+                    generators[0],
+                    ipa_generators
+                        .chunks_exact(2)
+                        .map(|chunk| (chunk[0], chunk[1])),
+                ),
+                pedersen_value: generators[1 + 2 * MAX_INTERNAL_VARS],
+                pedersen_blinding: generators[2 + 2 * MAX_INTERNAL_VARS],
+            }
+        })
+    }
+
+    pub struct Instance {
+        circuit: Circuit<F>,
+        claim: Claim<G>,
+        witness: Witness<F>,
+    }
+
+    impl Instance {
+        fn generate(
+            setup: &Setup<G>,
+            committed_values: Vec<F>,
+            internal_vars: usize,
+            u: &mut Unstructured<'_>,
+        ) -> arbitrary::Result<Self> {
+            let committed_vars = committed_values.len();
+            let left_start = 1 + committed_vars;
+            let right_start = left_start + internal_vars;
+            let out_start = right_start + internal_vars;
+            let mut weights = SparseMatrix::default();
+            let mut available = committed_values
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, value)| (1 + i, value))
+                .collect::<Vec<_>>();
+            let mut left = Vec::with_capacity(internal_vars);
+            let mut right = Vec::with_capacity(internal_vars);
+            let mut out = Vec::with_capacity(internal_vars);
+
+            for gate in 0..internal_vars {
+                let constrain_left = u.arbitrary::<bool>()?;
+                let target_col = if constrain_left {
+                    left_start + gate
+                } else {
+                    right_start + gate
+                };
+                let mut target_value = F::zero();
+                for (source_col, source_value) in &available {
+                    let coeff = u.arbitrary::<F>()?;
+                    weights[(gate, *source_col)] = -coeff;
+                    target_value += &(coeff * source_value);
+                }
+                weights[(gate, target_col)] = F::one();
+
+                let (left_i, right_i) = if constrain_left {
+                    (target_value, u.arbitrary::<F>()?)
+                } else {
+                    (u.arbitrary::<F>()?, target_value)
+                };
+                let out_i = left_i * &right_i;
+                left.push(left_i);
+                right.push(right_i);
+                out.push(out_i);
+                available.extend([
+                    (left_start + gate, left_i),
+                    (right_start + gate, right_i),
+                    (out_start + gate, out_i),
+                ]);
+            }
+
+            let last_row = internal_vars;
+            let mut row_value = F::zero();
+            for (col, value) in &available {
+                let coeff = if *col == out_start + internal_vars - 1 {
+                    F::one()
+                } else {
+                    u.arbitrary::<F>()?
+                };
+                weights[(last_row, *col)] = coeff;
+                row_value += &(coeff * value);
+            }
+            weights[(last_row, 0)] = -row_value;
+
+            let circuit = Circuit::new(committed_vars, weights)
+                .expect("generated circuit should have a valid width");
+            let blinding = (0..committed_vars)
+                .map(|_| u.arbitrary::<F>())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            let claim = Claim {
+                commitments: committed_values
+                    .iter()
+                    .cloned()
+                    .zip(&blinding)
+                    .map(|(value, blind)| {
+                        setup.pedersen_value * &value + &(setup.pedersen_blinding * blind)
+                    })
+                    .collect(),
+            };
+            let witness = Witness {
+                values: committed_values,
+                blinding,
+                left,
+                right,
+                out,
+            };
+            assert!(
+                circuit.is_satisfied(&witness.values, &witness.left, &witness.right),
+                "generated circuit should be satisfied by the generated witness",
+            );
+            Ok(Self {
+                circuit,
+                claim,
+                witness,
+            })
+        }
+
+        pub fn run(self) {
+            let setup = test_setup();
+            let mut rng = test_rng();
+            let mut prover_transcript = Transcript::new(NAMESPACE);
+            let proof = prove(
+                &mut rng,
+                &mut prover_transcript,
+                setup,
+                &self.circuit,
+                &self.claim,
+                &self.witness,
+                &Sequential,
+            )
+            .expect("honest circuit prover should create a proof");
+
+            let mut verifier_rng = test_rng();
+            let mut verifier_transcript = Transcript::new(NAMESPACE);
+            assert!(verify(
+                &mut verifier_rng,
+                &mut verifier_transcript,
+                setup,
+                &self.circuit,
+                &self.claim,
+                proof,
+                &Sequential,
+            ));
+        }
+    }
+
+    impl<'a> Arbitrary<'a> for Instance {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            let committed_vars = u.int_in_range(1..=MAX_COMMITTED_VARS)?;
+            let internal_vars = u.int_in_range(1..=MAX_INTERNAL_VARS)?;
+            let committed_values = (0..committed_vars)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            Self::generate(test_setup(), committed_values, internal_vars, u)
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use super::{Circuit, SparseMatrix};
+    use super::{fuzz, Circuit, SparseMatrix};
     use commonware_invariants::minifuzz;
     use commonware_math::{
         algebra::{Additive, Ring},
@@ -771,6 +956,14 @@ mod test {
                     .expect("should be able to make circuit")
                     .is_satisfied(&z, &left, &right)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_fuzz() {
+        minifuzz::test(|u| {
+            u.arbitrary::<fuzz::Instance>()?.run();
             Ok(())
         });
     }
