@@ -35,6 +35,13 @@ pub trait Reader: Send + Sync {
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    ///
+    /// Default implementation always returns `None`.
+    fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
+        None
+    }
+
     /// Return a stream of all items starting from `start_pos`.
     ///
     /// Because the reader holds the lock, validation and stream setup happen

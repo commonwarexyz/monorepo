@@ -229,8 +229,8 @@ where
     ) -> Vec<Participant> {
         match self.forwarding {
             ForwardingPolicy::Disabled => Vec::new(),
-            ForwardingPolicy::Silent => round.missing_voters(proposal),
-            ForwardingPolicy::NextLeader => round
+            ForwardingPolicy::SilentVoters => round.missing_voters(proposal),
+            ForwardingPolicy::SilentLeader => round
                 .is_missing_voter(proposal, next_leader)
                 .then_some(next_leader)
                 .into_iter()
