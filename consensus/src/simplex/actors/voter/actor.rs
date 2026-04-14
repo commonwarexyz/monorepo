@@ -854,11 +854,11 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for (proposal, leader_is_local) in self.state.certify_candidates() {
+                for (proposal, am_leader) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let result = if leader_is_local {
+                    let result = if am_leader {
                         // Once we know the local participant led this view, reaching out to the
                         // automaton is unnecessary.
                         Either::Left(ready(Ok(true)))

@@ -589,6 +589,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// of each view (used to short-circuit certification for own proposals).
     pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
+        let me = self.scheme.me();
         candidates
             .into_iter()
             .filter_map(|view| {
@@ -596,11 +597,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     return None;
                 }
                 let round = self.views.get_mut(&view)?;
-                let leader_is_local = round
+                let am_leader = round
                     .leader()
-                    .is_some_and(|leader| self.scheme.me().is_some_and(|me| me == leader.idx));
+                    .is_some_and(|leader| me.is_some_and(|me| me == leader.idx));
                 let proposal = round.try_certify()?;
-                Some((proposal, leader_is_local))
+                Some((proposal, am_leader))
             })
             .collect()
     }
