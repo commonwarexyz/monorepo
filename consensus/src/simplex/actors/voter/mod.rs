@@ -170,17 +170,21 @@ mod tests {
         (votes, certificate)
     }
 
+    struct VoterCfg {
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        certifier: mocks::application::Certifier<Sha256Digest>,
+    }
+
     /// Helper to set up a voter actor for tests.
-    #[allow(clippy::too_many_arguments)]
     async fn setup_voter<S, L>(
         context: &mut deterministic::Context,
         oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
         participants: &[S::PublicKey],
         schemes: &[S],
         elector: L,
-        leader_timeout: Duration,
-        certification_timeout: Duration,
-        timeout_retry: Duration,
+        cfg: VoterCfg,
     ) -> (
         Mailbox<S, Sha256Digest>,
         mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
@@ -192,41 +196,12 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: ElectorConfig<S>,
     {
-        setup_voter_with_certifier(
-            context,
-            oracle,
-            participants,
-            schemes,
-            elector,
+        let VoterCfg {
             leader_timeout,
             certification_timeout,
             timeout_retry,
-            mocks::application::Certifier::Always,
-        )
-        .await
-    }
-
-    async fn setup_voter_with_certifier<S, L>(
-        context: &mut deterministic::Context,
-        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
-        participants: &[S::PublicKey],
-        schemes: &[S],
-        elector: L,
-        leader_timeout: Duration,
-        certification_timeout: Duration,
-        timeout_retry: Duration,
-        certifier: mocks::application::Certifier<Sha256Digest>,
-    ) -> (
-        Mailbox<S, Sha256Digest>,
-        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
-        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
-        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
-        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
-    )
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
-    {
+            certifier,
+        } = cfg;
         let signing = schemes[0].clone();
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
@@ -883,9 +858,12 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterCfg {
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1000),
+                        timeout_retry: Duration::from_secs(1000),
+                        certifier: mocks::application::Certifier::Always,
+                    },
                 )
                 .await;
 
@@ -1003,9 +981,12 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterCfg {
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1000),
+                        timeout_retry: Duration::from_secs(1000),
+                        certifier: mocks::application::Certifier::Always,
+                    },
                 )
                 .await;
 
@@ -1138,9 +1119,12 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterCfg {
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1000),
+                        timeout_retry: Duration::from_secs(1000),
+                        certifier: mocks::application::Certifier::Always,
+                    },
                 )
                 .await;
 
@@ -2064,9 +2048,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_secs(1000),
-                Duration::from_secs(1000),
+                VoterCfg {
+                    leader_timeout: Duration::from_millis(500),
+                    certification_timeout: Duration::from_secs(1000),
+                    timeout_retry: Duration::from_secs(1000),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -2164,9 +2151,12 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterCfg {
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1000),
+                        timeout_retry: Duration::from_secs(1000),
+                        certifier: mocks::application::Certifier::Always,
+                    },
                 )
                 .await;
 
@@ -3082,9 +3072,12 @@ mod tests {
                 &participants,
                 &schemes,
                 L::default(),
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_mins(60),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -5301,9 +5294,12 @@ mod tests {
                 &participants,
                 &schemes,
                 RoundRobin::<Sha256>::default(),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_secs(5),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -5413,9 +5409,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -5534,9 +5533,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -5688,9 +5690,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -5829,16 +5834,18 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Cancel
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Cancel,
+                VoterCfg {
+                    leader_timeout: Duration::from_millis(500),
+                    certification_timeout: Duration::from_millis(500),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Cancel,
+                },
             )
             .await;
 
@@ -6248,16 +6255,18 @@ mod tests {
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector.clone(),
-                Duration::from_secs(2),
-                Duration::from_secs(3),
-                Duration::from_secs(1),
-                mocks::application::Certifier::Cancel,
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(3),
+                    timeout_retry: Duration::from_secs(1),
+                    certifier: mocks::application::Certifier::Cancel,
+                },
             )
             .await;
 
@@ -6457,16 +6466,18 @@ mod tests {
 
             // Set up voter with Certifier::Custom that always returns false
             // This simulates coding marshal's deferred_verify finding context mismatch
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(100),  // Long timeout to prove nullify comes from cert failure
-                Duration::from_secs(100),
-                Duration::from_secs(100),
-                mocks::application::Certifier::Custom(Box::new(|_, _| false)),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(100),
+                    certification_timeout: Duration::from_secs(100),
+                    timeout_retry: Duration::from_secs(100),
+                    certifier: mocks::application::Certifier::Custom(Box::new(|_, _| false)),
+                },
             )
             .await;
 
@@ -6590,16 +6601,18 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Pending (certify hangs indefinitely).
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(3),
-                Duration::from_secs(4),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Pending,
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(4),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Pending,
+                },
             )
             .await;
 
@@ -6726,9 +6739,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -6863,16 +6879,18 @@ mod tests {
             .await;
 
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Pending,
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Pending,
+                },
             )
             .await;
 
@@ -7000,9 +7018,12 @@ mod tests {
                 &participants,
                 &schemes,
                 RoundRobin::<Sha256>::default(),
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
@@ -7154,9 +7175,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterCfg {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Always,
+                },
             )
             .await;
 
