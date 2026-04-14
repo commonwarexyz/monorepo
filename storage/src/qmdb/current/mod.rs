@@ -162,10 +162,10 @@
 //!
 //! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose
 //! chunk-pair parent has not yet been born in the ops tree (see
-//! `settled_bitmap_prune_loc`). Once the parent is born, every ops peak within
+//! `Db::settled_bitmap_prune_loc`). Once the parent is born, every ops peak within
 //! the pruned region is at height `gh+1` or above, and maps to a pinned peak or an
 //! ancestor of pinned peaks that can be reconstructed by hashing children (see
-//! `reconstruct_grafted_node`).
+//! `grafting::Storage::reconstruct_grafted_node`).
 //!
 //! The same birth threshold also defines a _rewind floor_: rewinding the database to a size
 //! where the chunk-pair parent has not been born would re-expose the individual ops peaks and
@@ -1857,6 +1857,7 @@ pub mod tests {
             .unwrap();
 
             let k = key(0);
+            // Always assigned before the loop breaks.
             let mut expected;
 
             // Keep growing until the settle guard allows 2+ pruned chunks.

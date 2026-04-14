@@ -267,9 +267,7 @@ where
     /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
     /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
     /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
-    fn pair_absorption_threshold(
-        pruned_chunks: u64,
-    ) -> Result<Option<u64>, Error<F>> {
+    fn pair_absorption_threshold(pruned_chunks: u64) -> Result<Option<u64>, Error<F>> {
         if pruned_chunks == 0 {
             return Ok(None);
         }

@@ -270,6 +270,8 @@ async fn bootstrap_pruned_state(
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
     all_keys: &mut HashSet<LogicalKey>,
 ) {
+    // `step as u8` intentionally wraps for step >= 256; uniqueness is not required here,
+    // we just need to drive the inactivity floor forward.
     for step in 0..BOOTSTRAP_COMMITS {
         let key = (step as u8) % LOGICAL_KEY_SPACE;
         let mut value = [0u8; 32];
@@ -301,7 +303,6 @@ struct ReopenEnv<'a> {
     count: &'a mut usize,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn drive_post_prune_window(
     mut db: Db,
     reference_db: &mut Db,
@@ -344,8 +345,14 @@ async fn drive_post_prune_window(
         // delayed merges are still in progress.
         if step == midpoint {
             *reopen.count += 1;
-            db = reopen_pruned_db(db, reopen.context, reopen.config, reference_db, *reopen.count)
-                .await;
+            db = reopen_pruned_db(
+                db,
+                reopen.context,
+                reopen.config,
+                reference_db,
+                *reopen.count,
+            )
+            .await;
         }
     }
     db
