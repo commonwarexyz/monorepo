@@ -181,7 +181,41 @@ mod tests {
         leader_timeout: Duration,
         certification_timeout: Duration,
         timeout_retry: Duration,
-        should_certify: mocks::application::Certifier<Sha256Digest>,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        setup_voter_with_certifier(
+            context,
+            oracle,
+            participants,
+            schemes,
+            elector,
+            leader_timeout,
+            certification_timeout,
+            timeout_retry,
+            mocks::application::Certifier::Always,
+        )
+        .await
+    }
+
+    async fn setup_voter_with_certifier<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        certifier: mocks::application::Certifier<Sha256Digest>,
     ) -> (
         Mailbox<S, Sha256Digest>,
         mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
@@ -210,10 +244,10 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            should_certify,
         };
-        let (actor, application) =
+        let (mut actor, application) =
             mocks::application::Application::new(context.with_label("app"), application_cfg);
+        actor.set_certifier(certifier);
         actor.start();
 
         let voter_cfg = Config {
@@ -352,7 +386,6 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -586,7 +619,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -852,7 +884,6 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -973,7 +1004,6 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -1109,7 +1139,6 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -1238,7 +1267,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (100_000.0, 0.0), // Very slow verification
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1417,7 +1445,6 @@ mod tests {
                 propose_latency: (50.0, 10.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1625,7 +1652,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1855,7 +1881,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -2036,7 +2061,6 @@ mod tests {
                 Duration::from_millis(500),
                 Duration::from_secs(1000),
                 Duration::from_secs(1000),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -2137,7 +2161,6 @@ mod tests {
                     Duration::from_millis(500),
                     Duration::from_secs(1000),
                     Duration::from_secs(1000),
-                    mocks::application::Certifier::Always,
                 )
                 .await;
 
@@ -2260,7 +2283,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (10.0, 0.0), // 10ms verification latency
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2478,7 +2500,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -2683,7 +2704,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -2857,7 +2877,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -3056,7 +3075,6 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_mins(60),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -3215,7 +3233,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -3508,13 +3525,13 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().push(d);
-                    true
-                })),
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
+            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(move |_, d| {
+                tracker.lock().push(d);
+                true
+            })));
             actor.start();
 
             let voter_cfg = Config {
@@ -3644,13 +3661,13 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().push(d);
-                    true
-                })),
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app2"), app_cfg);
+            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(move |_, d| {
+                tracker.lock().push(d);
+                true
+            })));
             actor.start();
 
             let voter_cfg = Config {
@@ -3782,7 +3799,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -3946,7 +3962,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -4039,7 +4054,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) = mocks::application::Application::new(
                 context.with_label("app_restarted"),
@@ -4208,7 +4222,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -4314,7 +4327,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) = mocks::application::Application::new(
                 context.with_label("app_restarted"),
@@ -4483,7 +4495,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -4660,7 +4671,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
@@ -4752,7 +4762,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) = mocks::application::Application::new(
                 context.with_label("app_restarted"),
@@ -4916,7 +4925,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (2_000.0, 0.0), // 2 seconds
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -5110,7 +5118,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (2_000.0, 0.0), // 2 seconds
-                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -5272,7 +5279,6 @@ mod tests {
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -5385,7 +5391,6 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_secs(100),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -5507,7 +5512,6 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_secs(100),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -5662,7 +5666,6 @@ mod tests {
                 Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_secs(100),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -5801,7 +5804,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Cancel
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
                 &mut context,
                 &oracle,
                 &participants,
@@ -5960,10 +5963,10 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Cancel,
             };
-            let (app_actor, application) =
+            let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app_cancel"), app_cfg);
+            app_actor.set_certifier(mocks::application::Certifier::Cancel);
             app_actor.start();
 
             let voter_cfg = Config {
@@ -6073,7 +6076,6 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (2_000.0, 0.0), // 2 seconds
-                should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
                 mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
@@ -6220,7 +6222,7 @@ mod tests {
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
                 &mut context,
                 &oracle,
                 &participants,
@@ -6429,7 +6431,7 @@ mod tests {
 
             // Set up voter with Certifier::Custom that always returns false
             // This simulates coding marshal's deferred_verify finding context mismatch
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
                 &mut context,
                 &oracle,
                 &participants,
@@ -6438,7 +6440,7 @@ mod tests {
                 Duration::from_secs(100),  // Long timeout to prove nullify comes from cert failure
                 Duration::from_secs(100),
                 Duration::from_secs(100),
-                mocks::application::Certifier::Custom(Box::new(|_| false)),
+                mocks::application::Certifier::Custom(Box::new(|_, _| false)),
             )
             .await;
 
@@ -6562,7 +6564,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Pending (certify hangs indefinitely).
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
                 &mut context,
                 &oracle,
                 &participants,
@@ -6701,7 +6703,6 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(5),
                 Duration::from_mins(60),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -6836,7 +6837,7 @@ mod tests {
             .await;
 
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter_with_certifier(
                 &mut context,
                 &oracle,
                 &participants,
@@ -6976,7 +6977,6 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(5),
                 Duration::from_mins(60),
-                mocks::application::Certifier::Always,
             )
             .await;
 
@@ -7131,7 +7131,6 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(5),
                 Duration::from_mins(60),
-                mocks::application::Certifier::Always,
             )
             .await;
 

@@ -141,14 +141,17 @@ type CertifyObserver<H> = Box<dyn Fn(Round, <H as Hasher>::Digest) + Send + 'sta
 
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
+///
+/// Honest applications in an honest cluster always certify: a leader has the
+/// certify record for its own proposal (it just built it) and an honest
+/// follower has the context it verified against. The non-`Always` variants
+/// model realistic runtime failure modes (missing context, late data) or are
+/// used as test escape hatches.
 pub enum Certifier<D: Digest> {
-    /// Always certify.
+    /// Always certify. Default for honest applications.
     Always,
-    /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
-    /// (but deterministically) 82% of the time, depending on the last byte of the payload.
-    Sometimes,
-    /// A custom predicate function.
-    Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
+    /// A custom predicate function that receives the round and payload digest.
+    Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
@@ -173,10 +176,6 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub propose_latency: Latency,
     pub verify_latency: Latency,
     pub certify_latency: Latency,
-
-    /// Predicate to determine whether a payload should be certified.
-    /// Returning true means certify, false means reject.
-    pub should_certify: Certifier<H::Digest>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -251,7 +250,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 fail_verification: false,
                 drop_proposals: false,
                 drop_verifications: false,
-                should_certify: cfg.should_certify,
+                should_certify: Certifier::Always,
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
@@ -286,6 +285,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub fn set_certify_observer(&mut self, observer: CertifyObserver<H>) {
         self.certify_observer = Some(observer);
+    }
+
+    /// Override the certifier used by this application. Must be called before
+    /// [`start`]. Honest applications default to [`Certifier::Always`]; tests
+    /// that need to model missing context (`Cancel`), a hanging certify
+    /// (`Pending`), or a custom predicate set it here.
+    pub fn set_certifier(&mut self, certifier: Certifier<H::Digest>) {
+        self.should_certify = certifier;
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -381,7 +388,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
-    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
+    async fn certify(&mut self, round: Round, payload: H::Digest, _contents: Bytes) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(&mut self.context);
         self.context
@@ -391,8 +398,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Use configured predicate to determine certification
         match &self.should_certify {
             Certifier::Always => Some(true),
-            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
-            Certifier::Custom(func) => Some(func(payload)),
+            Certifier::Custom(func) => Some(func(round, payload)),
             Certifier::Cancel | Certifier::Pending => None,
         }
     }
@@ -467,7 +473,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             observer(round, payload);
                         }
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        if let Some(certified) = self.certify(payload, contents).await {
+                        if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
                         } else if matches!(self.should_certify, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.
