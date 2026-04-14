@@ -21,7 +21,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use std::{future::Future, num::NonZeroU64};
+use std::num::NonZeroU64;
 use tracing::error;
 
 /// Database type alias.
@@ -128,21 +128,20 @@ where
         self.bounds().await.start
     }
 
-    fn historical_proof(
+    async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
-    {
-        self.historical_proof(op_count, start_loc, max_ops)
+    ) -> Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>> {
+        self.historical_proof(op_count, start_loc, max_ops).await
     }
 
-    fn pinned_nodes_at(
+    async fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
-        self.pinned_nodes_at(loc)
+    ) -> Result<Vec<Key>, qmdb::Error<mmr::Family>> {
+        self.pinned_nodes_at(loc).await
     }
 
     fn name() -> &'static str {
