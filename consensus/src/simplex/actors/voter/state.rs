@@ -584,8 +584,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for certification.
-    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+    /// Takes all certification candidates and returns proposals ready for
+    /// certification, along with whether the local participant is the leader
+    /// of each view (used to short-circuit certification for own proposals).
+    pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
         candidates
             .into_iter()
@@ -593,7 +595,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 if view <= self.last_finalized {
                     return None;
                 }
-                self.views.get_mut(&view)?.try_certify()
+                let round = self.views.get_mut(&view)?;
+                let leader_is_local = round
+                    .leader()
+                    .is_some_and(|leader| self.scheme.me().is_some_and(|me| me == leader.idx));
+                let proposal = round.try_certify()?;
+                Some((proposal, leader_is_local))
             })
             .collect()
     }
@@ -1981,7 +1988,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(9));
+            assert_eq!(candidates[0].0.round.view(), View::new(9));
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
@@ -1991,7 +1998,7 @@ mod tests {
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(10));
+            assert_eq!(candidates[0].0.round.view(), View::new(10));
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -2001,7 +2008,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(11));
+            assert_eq!(candidates[0].0.round.view(), View::new(11));
         });
     }
 
@@ -2056,7 +2063,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].0.round.view(), view);
         });
     }
 
@@ -2100,7 +2107,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].0.round.view(), view);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());

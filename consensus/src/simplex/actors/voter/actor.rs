@@ -854,14 +854,10 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for proposal in self.state.certify_candidates() {
+                for (proposal, leader_is_local) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let leader_is_local = self
-                        .state
-                        .leader_index(view)
-                        .is_some_and(|leader| self.state.is_me(leader));
                     let result = if leader_is_local {
                         // Once we know the local participant led this view, reaching out to the
                         // automaton is unnecessary and creates duplicate work.
