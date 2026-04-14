@@ -52,9 +52,9 @@ lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-or
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
 # Tests benchmarks in a given crate
-test-benches crate *args='':
-    cargo test --benches -p {{ crate }} {{ args }} -- --verbose
-    cargo test --benches -p {{ crate }} {{ args }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
+test-benches crate test_flags='' lint_flags='':
+    cargo test --benches -p {{ crate }} {{ test_flags }} -- --verbose
+    RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
 
 # Run tests
 test *args='':

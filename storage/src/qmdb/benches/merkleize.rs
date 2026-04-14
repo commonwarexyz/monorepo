@@ -577,10 +577,18 @@ variants! {
     }
 }
 
+cfg_if::cfg_if! {
+    if #[cfg(not(full_bench))] {
+        const NUM_KEYS: [u64; 1] = [10_000];
+    } else {
+        const NUM_KEYS: [u64; 3] = [10_000, 100_000, 1_000_000];
+    }
+}
+
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
-        for num_keys in [10_000u64, 100_000, 1_000_000] {
+        for num_keys in NUM_KEYS {
             for &variant in VARIANTS {
                 c.bench_function(
                     &format!(
