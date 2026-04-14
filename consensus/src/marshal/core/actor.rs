@@ -956,7 +956,6 @@ where
                     debug!(
                         %height,
                         floor = %self.last_processed_height,
-                        reason = "missing epoch",
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -966,7 +965,6 @@ where
                     debug!(
                         %height,
                         floor = %self.last_processed_height,
-                        reason = "missing verifier",
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1006,7 +1004,6 @@ where
                     debug!(
                         ?round,
                         floor = %self.last_processed_height,
-                        reason = "missing verifier",
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);

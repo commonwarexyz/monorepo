@@ -50,9 +50,9 @@ mod tests {
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    StandardHarness, TestHarness, ValidatorHandle, B, BLOCKS_PER_EPOCH, D, LINK,
-                    NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
-                    UNRELIABLE_LINK, V,
+                    EmptyProvider, StandardHarness, TestHarness, ValidatorHandle, B,
+                    BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
+                    PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -69,7 +69,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
@@ -93,7 +93,6 @@ mod tests {
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-        sync::Arc,
         time::Duration,
     };
 
@@ -1503,20 +1502,6 @@ mod tests {
                     );
                 }
             });
-        }
-    }
-
-    /// A provider that always returns `None`, modeling an application that
-    /// has pruned all epoch state.
-    #[derive(Clone)]
-    struct EmptyProvider;
-
-    impl Provider for EmptyProvider {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, _scope: Epoch) -> Option<Arc<S>> {
-            None
         }
     }
 

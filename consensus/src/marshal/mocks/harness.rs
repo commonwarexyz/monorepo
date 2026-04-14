@@ -28,7 +28,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+    certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
@@ -86,6 +86,20 @@ pub const UNRELIABLE_LINK: Link = Link {
     success_rate: 0.7,
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+/// A provider that always returns `None`, modeling an application that
+/// has pruned all epoch state.
+#[derive(Clone)]
+pub struct EmptyProvider;
+
+impl Provider for EmptyProvider {
+    type Scope = Epoch;
+    type Scheme = S;
+
+    fn scoped(&self, _scope: Epoch) -> Option<std::sync::Arc<S>> {
+        None
+    }
+}
 
 /// Default leader key for tests.
 pub fn default_leader() -> K {

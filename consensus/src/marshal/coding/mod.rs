@@ -73,8 +73,8 @@ mod tests {
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block,
                     setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
-                    CodingHarness, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS,
-                    QUORUM, S, UNRELIABLE_LINK, V,
+                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
+                    NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -86,7 +86,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider},
+        certificate::{mocks::Fixture, ConstantProvider},
         sha256::Sha256,
         Committable, Digestible, Hasher as _,
     };
@@ -1533,19 +1533,6 @@ mod tests {
                 "finalization should not be archived until matching block is available"
             );
         })
-    }
-
-    /// A provider that always returns `None`, modeling missing epoch state.
-    #[derive(Clone)]
-    struct EmptyProvider;
-
-    impl Provider for EmptyProvider {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, _scope: Epoch) -> Option<std::sync::Arc<S>> {
-            None
-        }
     }
 
     /// When the scheme provider has no entry for the current epoch,
