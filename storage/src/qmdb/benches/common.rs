@@ -3,7 +3,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio::Context, BufferPooler, Metrics, ThreadPooler,
+    buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -146,7 +146,7 @@ const PARTITION_KEYLESS: &str = "bench-keyless";
 
 fn mmr_cfg(
     suffix: &str,
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> MmrConfig {
     MmrConfig {
@@ -180,7 +180,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 }
 
 pub fn any_fix_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> AnyFixedConfig<EightCap> {
     AnyFixedConfig {
@@ -191,7 +191,7 @@ pub fn any_fix_cfg(
 }
 
 pub fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> CurrentFixedConfig<EightCap> {
     CurrentFixedConfig {
@@ -203,7 +203,7 @@ pub fn cur_fix_cfg(
 }
 
 pub fn any_var_digest_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     AnyVariableConfig {
@@ -214,7 +214,7 @@ pub fn any_var_digest_cfg(
 }
 
 pub fn cur_var_digest_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     CurrentVariableConfig {
@@ -226,7 +226,7 @@ pub fn cur_var_digest_cfg(
 }
 
 pub fn any_var_vec_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     AnyVariableConfig {
@@ -237,7 +237,7 @@ pub fn any_var_vec_cfg(
 }
 
 pub fn cur_var_vec_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     CurrentVariableConfig {
@@ -249,7 +249,7 @@ pub fn cur_var_vec_cfg(
 }
 
 pub fn keyless_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KeylessConfig {

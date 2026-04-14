@@ -12,7 +12,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Metrics, ThreadPooler,
+    BufferPooler, Metrics as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -148,7 +148,7 @@ const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
 fn merkle_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> journaled::Config {
     journaled::Config {
@@ -182,7 +182,7 @@ fn var_log_cfg(page_cache: CacheRef) -> VConfig<((), ())> {
 }
 
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
     commonware_storage::qmdb::any::FixedConfig {
@@ -193,7 +193,7 @@ fn any_fix_cfg(
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
     commonware_storage::qmdb::any::VariableConfig {
@@ -204,7 +204,7 @@ fn any_var_cfg(
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
     commonware_storage::qmdb::current::FixedConfig {
@@ -216,7 +216,7 @@ fn cur_fix_cfg(
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + Metrics + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
     commonware_storage::qmdb::current::VariableConfig {

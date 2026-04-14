@@ -257,7 +257,7 @@ stability_scope!(BETA {
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
-    pub trait ThreadPooler: Spawner + Metrics {
+    pub trait ThreadPooler: Spawner {
         /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
         ///
         /// # Arguments
