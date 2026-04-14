@@ -48,10 +48,12 @@ features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
+clap.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [features]
@@ -72,6 +74,10 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
+
+[[bin]]
+name = "storage_bench"
+path = "src/bin/storage_bench/main.rs"
 
 [[bench]]
 name = "buffer_paged"
