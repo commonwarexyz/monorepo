@@ -7,10 +7,6 @@
 //! - steady-state random reads and writes on fixed-size files
 //! - append-only writes on a growing file
 //! - mixed append-plus-read pressure with one writer and many readers
-//!
-//! One backend is compiled into each binary. This keeps every run aligned with
-//! the runtime's real storage setup and easy to profile with tools like
-//! `perf stat` or `perf record`.
 
 mod config;
 mod filesystem;
@@ -24,7 +20,7 @@ use crate::{
     report::{print_human_report, print_json_report},
     workloads::run_benchmark,
 };
-use commonware_runtime::Runner as _;
+use commonware_runtime::{tokio, Runner as _};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -48,19 +44,23 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut runtime_cfg = commonware_runtime::tokio::Config::default()
+    let mut runtime_cfg = tokio::Config::default()
         .with_worker_threads(cfg.worker_threads)
         .with_storage_directory(root.clone());
+
     if let Some(global_queue_interval) = cfg.global_queue_interval {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
     }
-    let report = match commonware_runtime::tokio::Runner::new(runtime_cfg)
-        .start(|context| async { run_benchmark(&cfg, &root, context).await })
-    {
+
+    let result = tokio::Runner::new(runtime_cfg)
+        .start(|context| async { run_benchmark(&cfg, &root, context).await });
+
+    cleanup_root(&root);
+
+    let report = match result {
         Ok(report) => report,
         Err(err) => {
             eprintln!("{err}");
-            cleanup_root(&root);
             return ExitCode::FAILURE;
         }
     };
@@ -69,6 +69,5 @@ fn main() -> ExitCode {
         OutputFormat::Human => print_human_report(&cfg, &report),
         OutputFormat::Json => print_json_report(&cfg, &report),
     }
-    cleanup_root(&root);
     ExitCode::SUCCESS
 }

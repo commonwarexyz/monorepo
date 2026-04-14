@@ -23,20 +23,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Concrete blob type used by the Tokio runtime context.
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
-/// Primary blob name used by the benchmark scenarios.
 const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 
-/// Access pattern used when warming read-side workloads.
 #[derive(Clone, Copy)]
 enum ReadPattern {
     Sequential,
     Random,
 }
 
-/// Dispatch to the selected scenario using the runtime's storage context.
 pub(crate) async fn run_benchmark(
     cfg: &Config,
     root: &Path,
@@ -54,7 +50,6 @@ pub(crate) async fn run_benchmark(
     result
 }
 
-/// Run `read_seq`.
 async fn run_read_seq(
     cfg: &Config,
     root: &Path,
@@ -92,7 +87,6 @@ async fn run_read_seq(
     finalize_read_report(cfg.file_size(), start.elapsed(), workers)
 }
 
-/// Run `read_rand`.
 async fn run_read_rand(
     cfg: &Config,
     root: &Path,
@@ -129,7 +123,6 @@ async fn run_read_rand(
     finalize_read_report(cfg.file_size(), start.elapsed(), workers)
 }
 
-/// Run `write_seq`.
 async fn run_write_seq(
     cfg: &Config,
     root: &Path,
@@ -161,7 +154,6 @@ async fn run_write_seq(
     finalize_write_report(blob, start, cfg.sync_mode, stats, cfg.file_size()).await
 }
 
-/// Run `write_rand`.
 async fn run_write_rand(
     cfg: &Config,
     root: &Path,
@@ -194,7 +186,6 @@ async fn run_write_rand(
     finalize_write_report(blob, start, cfg.sync_mode, stats, cfg.file_size()).await
 }
 
-/// Run `write_append`.
 async fn run_write_append(cfg: &Config, context: &Context) -> Result<ScenarioReport, String> {
     let blob = open_primary_blob(context).await?;
     let payload = create_write_payload(cfg.io_size, cfg.seed, cfg.write_shape);
@@ -205,7 +196,6 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<ScenarioRep
     finalize_write_report(blob, start, cfg.sync_mode, stats, final_file_size).await
 }
 
-/// Run `read_write_append`.
 async fn run_read_write_append(
     cfg: &Config,
     root: &Path,
@@ -355,7 +345,6 @@ async fn prepare_read_cache(
     Ok(())
 }
 
-/// Open the benchmark's primary blob.
 async fn open_primary_blob(context: &Context) -> Result<RuntimeBlob, String> {
     let (blob, _) = context
         .open(PARTITION, PRIMARY_BLOB_NAME)
@@ -402,7 +391,6 @@ async fn finalize_write_report(
     })
 }
 
-/// Derive a deterministic per-worker seed.
 #[inline(always)]
 const fn worker_seed(seed: u64, worker_id: usize) -> u64 {
     seed ^ worker_id as u64

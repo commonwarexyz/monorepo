@@ -17,10 +17,8 @@ use std::{
 #[cfg(unix)]
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 
-/// Default partition used by the standalone benchmark harness.
 pub(crate) const PARTITION: &str = "storage-bench";
 
-/// Large chunk used when initially populating fixed-size files.
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Create a fresh root directory for one benchmark run.
@@ -43,7 +41,6 @@ pub(crate) fn cleanup_root(root: &Path) {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Return the compiled storage backend name for this binary.
 #[inline(always)]
 pub(crate) const fn backend_name() -> &'static str {
     #[cfg(feature = "iouring-storage")]
@@ -57,7 +54,6 @@ pub(crate) const fn backend_name() -> &'static str {
     }
 }
 
-/// Return the on-disk path of a blob.
 pub(crate) fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
     root.join(partition).join(hex(name))
 }
@@ -194,14 +190,12 @@ where
     Ok(())
 }
 
-/// Evict a blob from the page cache for a cold-cache benchmark.
 pub(crate) fn prepare_cold_read_cache(root: &Path, name: &[u8]) -> Result<(), String> {
     evict_blob_cache(root, PARTITION, name)
         .map_err(|err| format!("failed to evict file cache: {err}"))?;
     Ok(())
 }
 
-/// Build a write payload according to the configured shape.
 pub(crate) fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
     match shape {
         WriteShape::Contiguous => IoBufs::from(deterministic_bytes(io_size, seed)),
@@ -209,14 +203,12 @@ pub(crate) fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape)
     }
 }
 
-/// Create a deterministic contiguous payload.
 fn deterministic_bytes(size: usize, seed: u64) -> Bytes {
     let mut bytes = vec![0u8; size];
     seeded_rng(size, seed).fill_bytes(&mut bytes);
     Bytes::from(bytes)
 }
 
-/// Create a deterministic four-buffer vectored payload.
 fn vectored_payload(size: usize, seed: u64) -> IoBufs {
     const CHUNKS: usize = 4;
     let base = size / CHUNKS;
@@ -233,7 +225,6 @@ fn vectored_payload(size: usize, seed: u64) -> IoBufs {
     IoBufs::from(chunks)
 }
 
-/// Deterministic RNG used for benchmark payloads.
 fn seeded_rng(size: usize, discriminator: u64) -> StdRng {
     StdRng::seed_from_u64((size as u64).rotate_left(17) ^ discriminator)
 }

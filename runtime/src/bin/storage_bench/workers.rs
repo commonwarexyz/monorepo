@@ -34,7 +34,6 @@ pub(crate) struct BlockShard {
     pub(crate) blocks: u64,
 }
 
-/// Warm a sequential-read workload by replaying one full strided pass.
 pub(crate) async fn warm_sequential_read_worker<B>(
     blob: B,
     io_size: usize,
@@ -81,7 +80,6 @@ where
     .await
 }
 
-/// One sequential read worker.
 pub(crate) async fn run_sequential_read_worker<B>(
     blob: B,
     deadline: Instant,
@@ -102,7 +100,6 @@ where
     .await
 }
 
-/// One random read worker.
 pub(crate) async fn run_random_read_worker<B>(
     blob: B,
     deadline: Instant,
@@ -120,7 +117,6 @@ where
     .await
 }
 
-/// One sequential overwrite worker.
 pub(crate) async fn run_sequential_write_worker<B>(
     blob: B,
     deadline: Instant,
@@ -150,7 +146,11 @@ where
     .await
 }
 
-/// One random overwrite worker over a non-overlapping shard.
+/// Random overwrite worker confined to one disjoint block shard.
+///
+/// Sharding keeps concurrent overwrite workers from racing on the same region,
+/// so the benchmark measures backend behavior rather than last-writer-wins
+/// contention in the harness.
 pub(crate) async fn run_random_write_worker<B>(
     blob: B,
     deadline: Instant,
@@ -179,7 +179,6 @@ where
     .await
 }
 
-/// Single append writer used by `write_append`.
 pub(crate) async fn run_append_writer<B>(
     blob: B,
     deadline: Instant,
@@ -201,7 +200,10 @@ where
     .await
 }
 
-/// Single append writer that also publishes a visible frontier for readers.
+/// Append writer that advances a visible frontier after each completed write.
+///
+/// `read_write_append` readers sample offsets only below this frontier so they
+/// never issue reads beyond the append stream's currently visible length.
 pub(crate) async fn run_append_writer_with_frontier<B>(
     blob: B,
     deadline: Instant,
@@ -232,7 +234,10 @@ where
     .await
 }
 
-/// Random reader that tracks the append writer's published frontier.
+/// Random reader for `read_write_append`.
+///
+/// The reader yields until the writer has published at least one full block,
+/// then samples uniformly below the current visible frontier.
 pub(crate) async fn run_frontier_random_read_worker<B>(
     blob: B,
     deadline: Instant,
@@ -270,7 +275,6 @@ where
     Ok(stats)
 }
 
-/// Build one non-empty random-write shard per worker.
 pub(crate) fn build_worker_shards(
     total_blocks: u64,
     workers: usize,
@@ -391,7 +395,6 @@ where
     Ok(stats)
 }
 
-/// Allocate a reusable read buffer.
 #[inline(always)]
 fn reusable_buffer(size: usize) -> IoBufsMut {
     IoBufsMut::from(IoBufMut::with_capacity(size))
@@ -406,7 +409,6 @@ fn touch_buffer(buf: &IoBufsMut) -> u8 {
         .unwrap_or_default()
 }
 
-/// Deterministic random block selector.
 #[inline(always)]
 const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
     *state = state
@@ -415,7 +417,6 @@ const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
     (*state >> 32) % total_blocks
 }
 
-/// Return whether another timed operation should begin.
 #[inline(always)]
 fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
     if completed_ops.is_multiple_of(DEADLINE_CHECK_STRIDE) {
@@ -425,7 +426,6 @@ fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
     }
 }
 
-/// Return whether this operation should record a latency sample.
 #[inline(always)]
 const fn should_sample_latency(completed_ops: u64) -> bool {
     completed_ops < EAGER_LATENCY_SAMPLES || completed_ops.is_multiple_of(LATENCY_SAMPLE_STRIDE)
