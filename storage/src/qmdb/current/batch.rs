@@ -28,7 +28,10 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// Speculative chunk-level bitmap overlay.
 ///
@@ -513,16 +516,47 @@ where
         &inner.ancestor_diffs,
     );
 
-    // Grafted MMR recomputation: iterate complete chunks in the overlay.
-    // This covers both new chunks and dirty existing chunks in a single pass.
+    let grafting_height = grafting::height::<N>();
+    let ops_tree_adapter =
+        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+    let base_ops_leaves = Location::<F>::try_from(current_db.any.log.merkle.size())?.as_u64();
+
+    // Recompute grafted leaves for dirty complete chunks. For MMB, the last complete chunk can
+    // still change while delayed merges finalize its grafting-height digest, so we force-refresh
+    // that chunk until its peak birth threshold is reached.
     let new_grafted_leaves = overlay.complete_chunks();
-    let chunks_to_update = overlay
+    let mut chunk_indices_to_update: BTreeSet<usize> = overlay
         .chunks
         .iter()
         .filter(|(&idx, _)| idx < new_grafted_leaves)
-        .map(|(&idx, &chunk)| (idx, chunk));
-    let ops_tree_adapter =
-        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+        .map(|(&idx, _)| idx)
+        .collect();
+    let pruned_chunks = bitmap_parent.pruned_chunks();
+    if new_grafted_leaves > 0 {
+        let last_complete_chunk = new_grafted_leaves - 1;
+        let chunk_start = (last_complete_chunk as u64)
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
+        let chunk_end = ((last_complete_chunk + 1) as u64)
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
+        let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
+        let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
+        if stable_after > chunk_end
+            && last_complete_chunk >= pruned_chunks
+            && base_ops_leaves < stable_after
+        {
+            chunk_indices_to_update.insert(last_complete_chunk);
+        }
+    }
+    let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
+        let chunk = overlay
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
+        (idx, chunk)
+    });
+
     let hasher = StandardHasher::<H>::new();
     let new_leaves = compute_grafted_leaves::<F, H, N>(
         &hasher,
@@ -533,7 +567,6 @@ where
     .await?;
 
     // Build grafted MMR from parent batch.
-    let grafting_height = grafting::height::<N>();
     let grafted_batch = {
         let mut grafted_batch = grafted_parent
             .new_batch()
@@ -567,7 +600,8 @@ where
         batch: &grafted_batch,
         mem: &current_db.grafted_tree,
     };
-    let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter);
+    let grafted_storage =
+        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
     // Compute partial chunk (last incomplete chunk, if any).
     let partial = {
         let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
@@ -579,7 +613,7 @@ where
             Some((chunk, rem))
         }
     };
-    let canonical_root = compute_db_root::<F, H, _, _, _, N>(
+    let canonical_root = compute_db_root::<F, H, _, _, N>(
         &hasher,
         &bitmap_batch,
         &grafted_storage,

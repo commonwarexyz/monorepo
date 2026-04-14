@@ -138,9 +138,45 @@
 //! ## Pruning
 //!
 //! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted
-//! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
-//! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
-//! allowing the grafted tree to be rebuilt without the pruned chunks.
+//! tree's peak digests covering the pruned region are persisted to metadata as "pinned nodes".
+//! On recovery, these pinned nodes are loaded and serve as opaque siblings during upward
+//! propagation, allowing the grafted tree to be rebuilt without the pruned chunks.
+//!
+//! ### Delayed-merge settlement
+//!
+//! For families with delayed merges (e.g. MMB), pruning is slightly more conservative than
+//! the inactivity floor alone would allow.
+//!
+//! The grafted root is computed by iterating the _ops tree's_ peaks and looking up the
+//! corresponding nodes in the grafted tree. After pruning, only the grafted tree's pinned
+//! peaks are available in the pruned region; interior nodes (including individual grafted
+//! leaves) are discarded. If the ops tree has a peak that maps to a discarded grafted node,
+//! root computation fails.
+//!
+//! In an MMR the ops tree's peaks within the pruned region always coincide with the grafted
+//! tree's pinned peaks, so this is never a problem. In an MMB, delayed merges cause the ops
+//! tree's peak structure to lag behind: a chunk pair's parent node at height `gh+1` is not
+//! created until some number of leaves after the pair's last leaf. Until that merge happens,
+//! the ops tree still has individual height-`gh` peaks for each chunk in the pair, and those
+//! map to grafted _leaves_ (height 0 in the grafted tree) -- which are not pinned peaks.
+//!
+//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose
+//! chunk-pair parent has not yet been born in the ops tree (see
+//! [`settled_bitmap_prune_loc`](db::Db::settled_bitmap_prune_loc) in db.rs). Once the
+//! parent is born, every ops peak within the pruned region is at height `gh+1` or above,
+//! and maps to a pinned peak or an ancestor of pinned peaks that can be reconstructed by
+//! hashing children (see [`reconstruct_grafted_node`](grafting::Storage::reconstruct_grafted_node)
+//! in grafting.rs).
+//!
+//! The same birth threshold also defines a _rewind floor_: rewinding the database to a size
+//! where the chunk-pair parent has not been born would re-expose the individual ops peaks and
+//! break reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor.
+//! The floor is a pure function of the pruned chunk count and the family geometry, so it does
+//! not need to be persisted -- it is recomputed on startup from the pruned chunk count stored
+//! in metadata.
+//!
+//! The pruning lag is small: at most `3 * 2^(gh-1) - 2` ops beyond the chunk boundary
+//! (about 1.5 chunks for the default chunk size).
 //!
 //! # Root structure
 //!
@@ -309,7 +345,12 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(
+        &grafted_tree,
+        grafting::height::<N>(),
+        &any.log.merkle,
+        hasher.clone(),
+    );
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
     let root = db::compute_db_root(&hasher, &status, &storage, partial_chunk, &ops_root).await?;
@@ -1585,13 +1626,8 @@ pub mod tests {
         });
     }
 
-    /// Verify that reopening and proving a pruned MMB database does not panic when the pruned
-    /// prefix contains sub-grafting-height peaks that require chunk regrouping.
-    ///
-    /// With 100 single-key commits the MMB has 301 leaves (100 writes + 100 commit floors +
-    /// 101 internal nodes). The first 256 leaves span three sub-grafting-height ops peaks
-    /// (128 + 64 + 64), so grafted root recomposition must regroup them as chunk 0. After
-    /// pruning, chunk 0 is gone and get_chunk(0) would panic without the pruned-chunk guard.
+    /// Verify that a delayed-merge settle guard can defer bitmap pruning while reopen/proof paths
+    /// remain stable.
     #[test_traced("INFO")]
     fn test_current_mmb_reopen_and_prove_after_prune_multi_peak_chunk() {
         let executor = deterministic::Runner::default();
@@ -1625,7 +1661,7 @@ pub mod tests {
             );
 
             db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
-            assert_eq!(db.pruned_bits(), 256);
+            assert_eq!(db.pruned_bits(), 0);
             db.sync().await.unwrap();
             drop(db);
 
@@ -1644,6 +1680,88 @@ pub mod tests {
             let mut hasher = commonware_cryptography::Sha256::new();
             let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
 
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_mmb_rewind_rejects_unsettled_pruned_window() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+            const N: usize = 32;
+
+            let partition = "current-mmb-rewind-unsettled-window";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+
+            let key0 = key(0);
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                let mut batch = db.new_batch();
+                batch = batch.write(key0, Some(val(60_000 + round)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0, "expected MMB bitmap pruning to be active");
+            db.sync().await.unwrap();
+
+            let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+            let pruned_chunks = (pruned_bits / chunk_bits) as u64;
+            let gh = super::grafting::height::<N>();
+            let youngest = pruned_chunks - 1;
+            let pair_chunk = youngest & !1;
+            let pair_start = pair_chunk << gh;
+            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+                merkle::Location::<mmb::Family>::new(pair_start),
+                gh + 1,
+            );
+            let absorbed_after =
+                <mmb::Family as merkle::Graftable>::peak_birth_size(pair_pos, gh + 1);
+
+            let unsafe_target = history
+                .iter()
+                .filter_map(|(size, floor)| {
+                    let s = **size;
+                    if s >= pruned_bits && s < absorbed_after && **floor >= pruned_bits {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected rewind target in unsettled window: pruned_bits={pruned_bits}, absorbed_after={absorbed_after}, history={history:?}"
+                    )
+                });
+
+            let err = db
+                .rewind(merkle::Location::<mmb::Family>::new(unsafe_target))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error for unsettled delayed-merge window: {err:?}"
+            );
+            drop(db);
+
+            let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
             reopened.destroy().await.unwrap();
         });
     }
