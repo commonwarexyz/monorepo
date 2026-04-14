@@ -510,7 +510,8 @@ where
         let partition_name = partition_name.clone();
         let operations = operations.clone();
         async move {
-            let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
             let mut journal = J::init(
                 ctx.with_label("journal"),
                 J::config(&partition_name, page_cache, items_per_section, write_buffer),
@@ -533,7 +534,7 @@ where
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
+        let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
         let mut journal = J::init(
             ctx.with_label("recovered"),
             J::config(&partition_name, page_cache, items_per_section, write_buffer),

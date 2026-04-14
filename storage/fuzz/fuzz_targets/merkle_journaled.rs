@@ -115,8 +115,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new();
-            let page_cache =
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let page_cache = CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            );
             let mut merkle = Journaled::<F, _, _>::init(
                 context.clone(),
                 &hasher,

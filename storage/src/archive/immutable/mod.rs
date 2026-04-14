@@ -152,7 +152,7 @@ mod tests {
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "test-key2".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -225,7 +225,7 @@ mod tests {
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "empty-key".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),

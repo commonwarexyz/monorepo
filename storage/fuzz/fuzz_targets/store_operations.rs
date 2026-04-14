@@ -112,8 +112,11 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let page_cache =
-            CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let cfg = test_config("store-fuzz-test", page_cache.clone());
         let mut db = StoreDb::init(context.clone(), cfg)
             .await

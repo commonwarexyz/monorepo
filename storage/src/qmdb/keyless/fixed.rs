@@ -78,7 +78,8 @@ mod test {
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = db_config("partition", page_cache);
         TestDb::init(context, cfg).await.unwrap()
     }

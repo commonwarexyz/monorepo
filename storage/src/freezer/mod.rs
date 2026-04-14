@@ -307,7 +307,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: compression,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -377,7 +381,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -430,7 +438,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -493,7 +505,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -567,7 +583,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -670,7 +690,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -736,7 +760,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -798,7 +826,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -866,7 +898,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -945,7 +981,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1017,7 +1057,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1094,7 +1138,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1159,7 +1207,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1317,7 +1369,11 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),

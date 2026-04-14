@@ -1128,7 +1128,8 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                let page_cache = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 <$db>::init(ctx.clone(), $cfg::<OneCap>(&partition, page_cache))
                     .await
                     .unwrap()
@@ -1369,7 +1370,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1495,7 +1496,7 @@ pub mod tests {
             let partition = "current-rewind-pruned-recovery";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1628,7 +1629,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1661,7 +1662,7 @@ pub mod tests {
                 context.with_label("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1690,7 +1691,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1743,7 +1744,7 @@ pub mod tests {
                 context.with_label("reopen_small_delta"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1767,7 +1768,7 @@ pub mod tests {
             let partition = "current-rewind-pruned";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1826,7 +1827,7 @@ pub mod tests {
             let partition = "current-rewind-bitmap-floor";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE)))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1943,7 +1944,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "mg",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -1988,7 +1989,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "ch",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2038,7 +2039,7 @@ pub mod tests {
                 ctx.clone(),
                 fixed_config::<OneCap>(
                     "ucr",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2115,7 +2116,7 @@ pub mod tests {
                 ctx.clone(),
                 fixed_config::<OneCap>(
                     "ocr",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2191,7 +2192,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2215,7 +2216,7 @@ pub mod tests {
                 context.with_label("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2237,7 +2238,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "pipe",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2280,7 +2281,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "ff",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2354,7 +2355,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "tb",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2403,7 +2404,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "fl-noop",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2427,7 +2428,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "fl-root",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2467,7 +2468,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "fl-idem",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2501,7 +2502,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "fl-then",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2544,7 +2545,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "adrop",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2747,7 +2748,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "stale-clears",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2804,7 +2805,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "pac",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await
@@ -2855,7 +2856,7 @@ pub mod tests {
                 ctx.clone(),
                 variable_config::<OneCap>(
                     "bmo",
-                    CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await

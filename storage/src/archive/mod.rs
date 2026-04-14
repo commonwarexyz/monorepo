@@ -195,7 +195,11 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
             value_partition: "test-value".into(),
             compression,
             codec_config: (),

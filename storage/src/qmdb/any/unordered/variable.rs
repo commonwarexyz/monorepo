@@ -201,7 +201,8 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_test_config(seed, page_cache);
         AnyTest::init(context, config).await.unwrap()
     }
@@ -268,7 +269,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = create_test_config(0, page_cache);
         AnyTest::init(context, cfg).await.unwrap()
     }

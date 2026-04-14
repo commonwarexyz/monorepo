@@ -1,7 +1,7 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, Metrics};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
@@ -90,7 +90,11 @@ impl Archive {
                 let cfg = prunable::Config {
                     translator: TwoCap,
                     key_partition: "archive-bench-key".into(),
-                    key_page_cache: CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    key_page_cache: CacheRef::from_pooler(
+                        ctx.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     value_partition: "archive-bench-value".into(),
                     compression,
                     codec_config: (RangeCfg::new(..), ()),

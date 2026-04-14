@@ -166,7 +166,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(1));
+        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
         let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
         let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await

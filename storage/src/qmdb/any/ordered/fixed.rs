@@ -193,7 +193,8 @@ pub(crate) mod test {
     async fn open_db_generic<F: crate::merkle::Family>(
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config::<TwoCap>("partition", page_cache);
         crate::qmdb::any::init(context, cfg, None, |_, _| {})
             .await
@@ -202,7 +203,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config("partition", page_cache);
         AnyTest::init(context, cfg).await.unwrap()
     }
@@ -210,7 +212,8 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), page_cache);
         AnyTest::init(context, cfg).await.unwrap()
     }
@@ -283,7 +286,7 @@ pub(crate) mod test {
             let seed = context.next_u64();
             let config = fixed_db_config::<OneCap>(
                 &seed.to_string(),
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap>::init(
                 context, config,
@@ -961,7 +964,8 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config("fixed-bytes-partition", page_cache);
         FixedDb::init(context, cfg).await.unwrap()
     }

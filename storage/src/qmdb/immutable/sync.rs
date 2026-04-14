@@ -202,7 +202,8 @@ mod tests {
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_sync_config(&format!("sync-test-{seed}"), page_cache);
         ImmutableSyncTest::init(context, config).await.unwrap()
     }
@@ -278,7 +279,8 @@ mod tests {
                 }
             }
 
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config =
                 create_sync_config(&format!("sync_client_{}", context.next_u64()), page_cache);
 
@@ -361,7 +363,8 @@ mod tests {
             let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
 
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config =
                 create_sync_config(&format!("empty_sync_{}", context.next_u64()), page_cache);
             let target_db = Arc::new(target_db);
@@ -414,7 +417,8 @@ mod tests {
             let op_count = bounds.end;
 
             // Perform sync
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config = create_sync_config("persistence-test", page_cache);
             let client_context = context.with_label("client");
             let target_db = Arc::new(target_db);
@@ -506,7 +510,11 @@ mod tests {
                     context: context.with_label("client"),
                     db_config: create_sync_config(
                         &format!("update_test_{}", context.next_u64()),
-                        CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                        CacheRef::from_pooler(
+                            context.with_label("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                     ),
                     target: Target {
                         root: initial_root,
@@ -599,7 +607,7 @@ mod tests {
             let config = Config {
                 db_config: create_sync_config(
                     &format!("subset_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -640,7 +648,7 @@ mod tests {
             let mut target_db = create_test_db(context.with_label("target")).await;
             let sync_db_config = create_sync_config(
                 &format!("partial_{}", context.next_u64()),
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
@@ -705,7 +713,7 @@ mod tests {
             let mut target_db = create_test_db(context.with_label("target")).await;
             let sync_config = create_sync_config(
                 &format!("exact_{}", context.next_u64()),
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
@@ -780,7 +788,7 @@ mod tests {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
                     &format!("lb-dec-{}", context.next_u64()),
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -846,7 +854,7 @@ mod tests {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
                     &format!("ub-dec-{}", context.next_u64()),
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -927,7 +935,7 @@ mod tests {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
                     &format!("bounds_inc_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
@@ -991,7 +999,7 @@ mod tests {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
                     &format!("done_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(20),
                 target: Target {

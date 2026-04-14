@@ -539,7 +539,11 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
             },
             translator: TwoCap,
         };

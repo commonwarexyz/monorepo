@@ -161,7 +161,7 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(1));
+        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
         let cfg = test_config(TEST_NAME, page_cache.clone());
         let mut db = FixedDb::init(context.clone(), cfg)
             .await

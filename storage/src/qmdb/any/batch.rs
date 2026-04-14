@@ -1510,7 +1510,7 @@ mod tests {
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner as _};
 
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
@@ -1609,7 +1609,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "batch-collision-regression",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
@@ -1691,7 +1691,7 @@ mod tests {
                 OneCap,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -1771,7 +1771,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "seq-commit-basic",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
 
@@ -1842,7 +1842,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "seq-commit-base-old-loc",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
 
@@ -1918,7 +1918,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "fork-after-commit",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
 
@@ -2001,7 +2001,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "ff-cross",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
 
@@ -2072,7 +2072,7 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>(
                 "recreate-deleted-collision",
-                CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
             let mut db = TestDb::init(context, config).await.unwrap();
 

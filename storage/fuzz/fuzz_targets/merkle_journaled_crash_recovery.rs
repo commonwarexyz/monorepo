@@ -233,7 +233,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new();
-            let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
+            let page_cache =
+                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
             let mut merkle = Journaled::<F>::init(
                 ctx.with_label("merkle"),
                 &hasher,
@@ -259,7 +260,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
+        let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
         let mut merkle = Journaled::<F>::init(
             ctx.with_label("recovered"),
             &hasher,

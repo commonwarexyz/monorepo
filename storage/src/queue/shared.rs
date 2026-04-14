@@ -272,7 +272,8 @@ mod tests {
     fn test_shared_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_basic", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -295,7 +296,8 @@ mod tests {
     fn test_shared_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_append_commit", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -330,7 +332,8 @@ mod tests {
     fn test_shared_enqueue_bulk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_bulk", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -354,7 +357,8 @@ mod tests {
     fn test_shared_concurrent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_concurrent", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
@@ -388,7 +392,8 @@ mod tests {
     fn test_shared_select() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_select", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
@@ -415,7 +420,8 @@ mod tests {
     fn test_shared_writer_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_writer_dropped", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
@@ -449,7 +455,8 @@ mod tests {
     fn test_shared_try_recv() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_try_recv", page_cache);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -471,7 +478,8 @@ mod tests {
     fn test_shared_multiple_writers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_multi_writer", page_cache);
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 

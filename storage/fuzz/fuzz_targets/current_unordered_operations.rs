@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, journaled::Config as MmrConfig, Location},
@@ -100,7 +100,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
         let page_cache = CacheRef::from_pooler(
-            context.clone(),
+            context.with_label("cache"),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
         );

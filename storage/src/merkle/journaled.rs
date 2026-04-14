@@ -2410,7 +2410,11 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
         };
 
         // Create structure with enough elements to span multiple sections.

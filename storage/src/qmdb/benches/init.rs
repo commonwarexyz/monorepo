@@ -13,7 +13,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    Runner as _,
+    Metrics, Runner as _,
 };
 use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
@@ -68,7 +68,11 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                            let pc = CacheRef::from_pooler(
+                                ctx.with_label("cache"),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            );
                             let af = any_fix_cfg(&ctx, pc.clone());
                             let cf = cur_fix_cfg(&ctx, pc.clone());
                             let av = any_var_digest_cfg(&ctx, pc.clone());
@@ -118,7 +122,11 @@ fn bench_var_value_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                            let pc = CacheRef::from_pooler(
+                                ctx.with_label("cache"),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            );
                             let av = any_var_vec_cfg(&ctx, pc.clone());
                             let cv = cur_var_vec_cfg(&ctx, pc);
                             let start = Instant::now();

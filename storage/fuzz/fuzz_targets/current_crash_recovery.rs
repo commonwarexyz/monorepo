@@ -11,7 +11,7 @@ use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic::{self, Context},
-    Metrics as _, Runner,
+    Metrics, Runner,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -96,7 +96,7 @@ fn make_config(
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ())> {
-    let page_cache = CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size);
+    let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
     VariableConfig {
         merkle_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),

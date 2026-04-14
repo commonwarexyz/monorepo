@@ -33,7 +33,8 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
-            let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue = Queue::<_, Vec<u8>>::init(
                 context.with_label("queue"),
                 config(seed, page_cache.clone()),

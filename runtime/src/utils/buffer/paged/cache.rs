@@ -799,7 +799,8 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(10));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
             assert_eq!(cache_ref.page_faults(), 0);
@@ -844,7 +845,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let capacity = 4;
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(4));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(4));
             assert_eq!(cache_ref.page_evictions(), 0);
 
             let logical_data = vec![0xABu8; PAGE_SIZE.get() as usize];
@@ -884,7 +886,8 @@ mod tests {
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -911,8 +914,11 @@ mod tests {
         executor.start(|context| async move {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref =
-                CacheRef::from_pooler(context.clone(), NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
+            let cache_ref = CacheRef::from_pooler(
+                context.with_label("cache"),
+                NZU16!(MIN_PAGE_SIZE as u16),
+                NZUsize!(2),
+            );
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
             // only).
@@ -950,7 +956,8 @@ mod tests {
         executor.start(|context| async move {
             // Set up a small cache and a blob whose read never completes once started.
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(10));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(10));
             let (started_tx, started_rx) = oneshot::channel();
             let blob = BlockingBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
@@ -991,7 +998,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(10));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(10));
 
             // Return one valid full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
@@ -1122,7 +1130,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(10));
+            let cache_ref =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(10));
 
             // Hold one shared fetch in flight, then make the underlying read fail.
             let (started_tx, started_rx) = oneshot::channel();

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
@@ -84,7 +84,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         let operations = data.operations.clone();
         async move {
             let page_cache = CacheRef::from_pooler(
-                context.clone(),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             );

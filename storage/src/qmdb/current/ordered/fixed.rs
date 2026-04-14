@@ -123,7 +123,7 @@ pub mod test {
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = fixed_config::<OneCap>(
             &partition_prefix,
-            CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         );
         CurrentTest::init(context, cfg).await.unwrap()
     }

@@ -1242,7 +1242,11 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: NZUsize!(1024),
             };
 

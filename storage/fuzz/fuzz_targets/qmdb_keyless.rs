@@ -153,7 +153,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = test_config(suffix, page_cache.clone());
         let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await

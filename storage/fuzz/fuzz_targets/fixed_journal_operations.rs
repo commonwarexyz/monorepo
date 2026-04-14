@@ -78,7 +78,7 @@ fn fuzz(input: FuzzInput) {
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
             page_cache: CacheRef::from_pooler(
-                context.clone(),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             ),

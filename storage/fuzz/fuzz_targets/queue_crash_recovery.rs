@@ -9,7 +9,7 @@
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     queue::{Config, Queue},
     Persistable,
@@ -473,7 +473,11 @@ fn fuzz(input: FuzzInput) {
                 items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size),
+                page_cache: CacheRef::from_pooler(
+                    ctx.with_label("cache"),
+                    page_size,
+                    page_cache_size,
+                ),
                 write_buffer,
             };
 
@@ -505,7 +509,7 @@ fn fuzz(input: FuzzInput) {
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::from_pooler(ctx.clone(), page_size, page_cache_size),
+            page_cache: CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size),
             write_buffer,
         };
 

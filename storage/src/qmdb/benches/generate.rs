@@ -12,6 +12,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
+    Metrics,
 };
 use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
@@ -130,7 +131,11 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     for _ in 0..iters {
                         let start = Instant::now();
 
-                        let pc = CacheRef::from_pooler(ctx.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+                        let pc = CacheRef::from_pooler(
+                            ctx.with_label("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        );
                         let mut db = open_keyless_db(ctx.clone(), pc).await;
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();

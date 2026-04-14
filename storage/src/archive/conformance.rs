@@ -25,7 +25,11 @@ impl Conformance for ArchivePrunable {
             let config = prunable::Config {
                 translator: TwoCap,
                 key_partition: format!("archive-prunable-key-{seed}"),
-                key_page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: format!("archive-prunable-value-{seed}"),
                 compression: None,
                 codec_config: (),
