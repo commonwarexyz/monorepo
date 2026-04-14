@@ -315,6 +315,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
     /// The height must be at or below the current floor (last processed height),
     /// otherwise the prune request is ignored.
+    ///
+    /// A `prune` request for a height above marshal's current floor is dropped.
     pub async fn prune(&self, height: Height) {
         self.sender.send_lossy(Message::Prune { height }).await;
     }
