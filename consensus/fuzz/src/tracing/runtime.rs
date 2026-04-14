@@ -1184,13 +1184,11 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         join_all(finalizers).await;
         drain_pipeline(&context).await;
 
-        let reporter_states = encode_reporter_states(
-            invariants::extract_replayed(&reporters, config.n as usize),
-            config.faults as usize,
-        );
-
+        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
+        invariants::check_vote_invariants(&replayed, config.faults as usize);
+        let reporter_states = encode_reporter_states(replayed, config.faults as usize);
 
         let trace = trace.lock();
         let max_view = trace.structured.iter().map(|e| e.view()).max().unwrap_or(1);
@@ -1430,13 +1428,11 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
         join_all(finalizers).await;
         drain_pipeline(&context).await;
 
-        let reporter_states = encode_reporter_states(
-            invariants::extract_replayed(&reporters, config.n as usize),
-            config.faults as usize,
-        );
-
+        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
+        invariants::check_vote_invariants(&replayed, config.faults as usize);
+        let reporter_states = encode_reporter_states(replayed, config.faults as usize);
 
         let trace = trace.lock();
         let filtered = filter_unprocessed(&trace.structured, &reporter_states);
@@ -1606,13 +1602,11 @@ async fn build_honest_trace_data(
     join_all(finalizers).await;
     drain_pipeline(&context).await;
 
-    let reporter_states = encode_reporter_states(
-        invariants::extract_replayed(&reporters, config.n as usize),
-        config.faults as usize,
-    );
-
+    let replayed = invariants::extract_replayed(&reporters, config.n as usize);
     let states = invariants::extract(&reporters, config.n as usize);
     invariants::check::<SimplexEd25519>(config.n, &states);
+    invariants::check_vote_invariants(&replayed, config.faults as usize);
+    let reporter_states = encode_reporter_states(replayed, config.faults as usize);
 
     let trace = trace.lock();
     let filtered = filter_unprocessed(&trace.structured, &reporter_states);
@@ -1753,13 +1747,11 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         join_all(finalizers).await;
         drain_pipeline(&context).await;
 
-        let reporter_states = encode_reporter_states(
-            invariants::extract_replayed(&reporters, config.n as usize),
-            config.faults as usize,
-        );
-
+        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
+        invariants::check_vote_invariants(&replayed, config.faults as usize);
+        let reporter_states = encode_reporter_states(replayed, config.faults as usize);
 
         let trace = trace.lock();
         let filtered = filter_unprocessed(&trace.structured, &reporter_states);

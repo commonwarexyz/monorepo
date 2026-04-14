@@ -174,6 +174,59 @@ pub fn check<P: Simplex>(n: u32, replicas: &[ReplicaState]) {
                 "Invariant violation: view {view} has both nullification and finalization",
             );
         }
+
+        // Invariant: unique_notarized_or_finalized_payload_per_view
+        // If a replica has both a notarization and a finalization for the same view,
+        // the payloads must match.
+        for (&view, finalization) in r.2.iter() {
+            if let Some(notarization) = r.0.get(&view) {
+                assert_eq!(
+                    notarization.payload, finalization.payload,
+                    "Invariant violation: replica has notarization and finalization for view {view} with different payloads: notarized={:?}, finalized={:?}",
+                    notarization.payload, finalization.payload
+                );
+            }
+        }
+    }
+}
+
+/// Checks invariants that require per-vote signer information.
+/// `faults` is the number of Byzantine nodes (n0..n{faults-1}); only correct
+/// nodes (n{faults}..n{n-1}) are checked for equivocation.
+pub fn check_vote_invariants(replicas: &[ReplayedReplicaState], faults: usize) {
+    // Invariant: no_vote_equivocation
+    // A correct node cannot both nullify and finalize in the same view.
+    // Aggregate across all replicas to get a global view of who sent what.
+    let correct = |s: &str| -> bool {
+        s.strip_prefix('n')
+            .and_then(|idx| idx.parse::<usize>().ok())
+            .is_some_and(|idx| idx >= faults)
+    };
+
+    let mut seen_nullify: HashMap<u64, HashSet<&str>> = HashMap::new();
+    let mut seen_finalize: HashMap<u64, HashSet<&str>> = HashMap::new();
+    for r in replicas {
+        for (&v, signers) in &r.nullify_signers {
+            seen_nullify
+                .entry(v)
+                .or_default()
+                .extend(signers.iter().map(|s| s.as_str()).filter(|s| correct(s)));
+        }
+        for (&v, signers) in &r.finalize_signers {
+            seen_finalize
+                .entry(v)
+                .or_default()
+                .extend(signers.iter().map(|s| s.as_str()).filter(|s| correct(s)));
+        }
+    }
+    for (v, nullifiers) in &seen_nullify {
+        if let Some(finalizers) = seen_finalize.get(v) {
+            let equivocators: Vec<_> = nullifiers.intersection(finalizers).collect();
+            assert!(
+                equivocators.is_empty(),
+                "Invariant violation: vote equivocation in view {v}: {equivocators:?} both nullified and finalized",
+            );
+        }
     }
 }
 

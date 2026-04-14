@@ -248,5 +248,7 @@ pub fn replay_and_check(
         })
         .collect();
     invariants::check::<crate::SimplexEd25519>(trace.n as u32, &replica_states);
+    let faults = faults_override.unwrap_or(trace.faults);
+    invariants::check_vote_invariants(&states, faults);
     states
 }
