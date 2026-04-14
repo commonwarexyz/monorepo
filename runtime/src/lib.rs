@@ -2602,7 +2602,9 @@ mod tests {
                 assert_eq!(handle.await.expect("task failed"), expected as u64);
             }
 
-            // Same race as above: gauge decrement lags handle completion.
+            // handle.await resolves when the task's output is ready, but
+            // the running-gauge decrement fires on task-struct drop which
+            // may lag slightly. Loop until the runtime finishes cleanup.
             let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
             let mut buffer;
             loop {
