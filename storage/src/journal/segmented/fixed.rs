@@ -486,9 +486,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             let items = {
                 let stream = journal
@@ -559,9 +560,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
             {
@@ -833,9 +835,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
@@ -895,9 +898,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             let count = {
                 let stream = journal
@@ -948,9 +952,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             for i in 0u64..5 {
                 let item = journal.get(1, i).await.expect("failed to get");
@@ -1043,9 +1048,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay and verify all items in order
             {
@@ -1142,9 +1148,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
@@ -1249,9 +1256,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                .await
-                .expect("failed to re-init");
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Verify section now has only 2 items
             assert_eq!(journal.section_len(1).await.unwrap(), 2);

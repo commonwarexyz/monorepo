@@ -35,12 +35,10 @@ impl Conformance for QueueConformance {
         runner.start(|mut context| async move {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut queue = Queue::<_, Vec<u8>>::init(
-                context.with_label("queue"),
-                config(seed, page_cache),
-            )
-            .await
-            .unwrap();
+            let mut queue =
+                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, page_cache))
+                    .await
+                    .unwrap();
 
             // Enqueue random variable-length items across multiple sections
             let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);

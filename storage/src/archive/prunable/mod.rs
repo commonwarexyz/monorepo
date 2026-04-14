@@ -630,10 +630,9 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(init2_context, cfg)
-                    .await
-                    .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(init2_context, cfg)
+                .await
+                .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

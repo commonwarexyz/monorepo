@@ -1594,7 +1594,7 @@ mod tests {
                 test_cfg(second_cache, ITEMS_PER_BLOB),
             )
             .await
-                .unwrap();
+            .unwrap();
 
             // The truncation invalidates the last page (bad checksum), which is removed.
             // This loses one item.
@@ -1793,8 +1793,11 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let result =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5))).await;
+            let result = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1989,11 +1992,8 @@ mod tests {
 
             // Repeat with a different blob size (3 items per blob)
             let second_ctx = context.with_label("second");
-            let second_cache = CacheRef::from_pooler(
-                second_ctx.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut second_cfg = test_cfg(second_cache, NZU64!(3));
             second_cfg.partition = "test-partition-2".into();
             let journal = Journal::init(second_ctx, second_cfg)
@@ -2021,10 +2021,9 @@ mod tests {
             );
             let mut third_cfg = test_cfg(third_cache, NZU64!(3));
             third_cfg.partition = "test-partition-2".into();
-            let journal: Journal<_, Digest> =
-                Journal::init(context.with_label("third"), third_cfg)
-                    .await
-                    .expect("failed to re-initialize journal");
+            let journal: Journal<_, Digest> = Journal::init(context.with_label("third"), third_cfg)
+                .await
+                .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -2114,8 +2113,8 @@ mod tests {
                 context.with_label("second"),
                 test_cfg(second_cache, NZU64!(100)),
             )
-                .await
-                .expect("Failed to re-initialize journal after page truncation");
+            .await
+            .expect("Failed to re-initialize journal after page truncation");
 
             // The journal should have fewer items now (those that fit in the remaining pages).
             // With logical page size 44 and item size 32:
@@ -2518,10 +2517,13 @@ mod tests {
             );
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), test_cfg(first_cache, NZU64!(5)), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init_at_size(
+                context.with_label("first"),
+                test_cfg(first_cache, NZU64!(5)),
+                15,
+            )
+            .await
+            .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -2540,9 +2542,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
 
             // Size and data should be preserved
             let bounds = journal.bounds().await;
@@ -2574,10 +2579,13 @@ mod tests {
             );
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), test_cfg(first_cache, NZU64!(5)), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init_at_size(
+                context.with_label("first"),
+                test_cfg(first_cache, NZU64!(5)),
+                15,
+            )
+            .await
+            .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 15);
@@ -2592,9 +2600,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 15);
@@ -2686,9 +2697,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::init(context.with_label("journal"), test_cfg(first_cache, NZU64!(10)))
-                .await
-                .expect("failed to initialize journal");
+            let journal = Journal::init(
+                context.with_label("journal"),
+                test_cfg(first_cache, NZU64!(10)),
+            )
+            .await
+            .expect("failed to initialize journal");
 
             // Append 25 items (positions 0-24, spanning 3 blobs)
             for i in 0..25u64 {
@@ -2713,10 +2727,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("journal_after_clear"), test_cfg(second_cache, NZU64!(10)))
-                    .await
-                    .expect("failed to re-initialize journal after clear");
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("journal_after_clear"),
+                test_cfg(second_cache, NZU64!(10)),
+            )
+            .await
+            .expect("failed to re-initialize journal after clear");
             assert_eq!(journal.size().await, 100);
 
             // Append new data starting at position 100
@@ -2740,9 +2756,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("journal_reopened"), test_cfg(third_cache, NZU64!(10)))
-                .await
-                .expect("failed to re-initialize journal");
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("journal_reopened"),
+                test_cfg(third_cache, NZU64!(10)),
+            )
+            .await
+            .expect("failed to re-initialize journal");
 
             assert_eq!(journal.size().await, 105);
             for i in 100..105u64 {
@@ -2763,9 +2782,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), test_cfg(first_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("first"),
+                test_cfg(first_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
 
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -2781,9 +2803,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 0);
             assert_eq!(bounds.end, 5);
@@ -2829,14 +2854,14 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let result =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5))).await;
+            let result = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await;
             assert!(matches!(result, Err(Error::Corruption(_))));
             context.remove(&blobs_partition, None).await.unwrap();
-            context
-                .remove(&metadata_partition, None)
-                .await
-                .unwrap();
+            context.remove(&metadata_partition, None).await.unwrap();
         });
     }
 
@@ -2850,10 +2875,13 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), test_cfg(first_cache, NZU64!(5)), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init_at_size(
+                context.with_label("first"),
+                test_cfg(first_cache, NZU64!(5)),
+                7,
+            )
+            .await
+            .unwrap();
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
@@ -2868,9 +2896,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 7);
             assert_eq!(bounds.end, 10);
@@ -2887,10 +2918,13 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), test_cfg(first_cache, NZU64!(5)), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init_at_size(
+                context.with_label("first"),
+                test_cfg(first_cache, NZU64!(5)),
+                7,
+            )
+            .await
+            .unwrap();
             for i in 0..10u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
@@ -2908,9 +2942,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache, NZU64!(5)))
-                .await
-                .unwrap();
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("second"),
+                test_cfg(second_cache, NZU64!(5)),
+            )
+            .await
+            .unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 10);
             assert_eq!(bounds.end, 17);
@@ -3085,9 +3122,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("crash1"), test_cfg(crash1_cache, NZU64!(5)))
-                .await
-                .expect("init failed after clear crash");
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("crash1"),
+                test_cfg(crash1_cache, NZU64!(5)),
+            )
+            .await
+            .expect("init failed after clear crash");
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 0);
             assert_eq!(bounds.start, 0);
@@ -3098,12 +3138,10 @@ mod tests {
                 partition: meta_part,
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(
-                context.with_label("restore_meta"),
-                meta_cfg,
-            )
-            .await
-            .unwrap();
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.with_label("restore_meta"), meta_cfg)
+                    .await
+                    .unwrap();
             metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();
 
@@ -3128,9 +3166,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("crash2"), test_cfg(crash2_cache, NZU64!(5)))
-                .await
-                .expect("init failed after create crash");
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("crash2"),
+                test_cfg(crash2_cache, NZU64!(5)),
+            )
+            .await
+            .expect("init failed after create crash");
 
             // Should recover to blob state (section 0 aligned)
             let bounds = journal.bounds().await;
@@ -3181,10 +3222,12 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("crash_clear"), test_cfg(crash_cache, NZU64!(5)))
-                    .await
-                    .expect("init failed after clear_to_size crash");
+            let journal = Journal::<_, Digest>::init(
+                context.with_label("crash_clear"),
+                test_cfg(crash_cache, NZU64!(5)),
+            )
+            .await
+            .expect("init failed after clear_to_size crash");
 
             // Should fallback to blobs
             let bounds = journal.bounds().await;

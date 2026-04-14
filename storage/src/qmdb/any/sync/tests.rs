@@ -123,7 +123,11 @@ where
         let target_db = H::init_db(context.with_label("target")).await;
 
         // Use an arbitrary target
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let config = Config {
             db_config,
@@ -168,7 +172,11 @@ where
         let resolver = resolver::tests::FailResolver::<OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let engine_config = Config {
             context: context.with_label("client"),
@@ -218,7 +226,11 @@ where
         let lower_bound = target_db.inactivity_floor_loc().await;
 
         // Configure sync
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let target_db = Arc::new(target_db);
         let client_context = context.with_label("client");
@@ -304,7 +316,11 @@ where
         // commit already done in apply_ops
 
         // Sync to the original root (before final_op was added)
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let config = Config {
             db_config,
@@ -356,7 +372,11 @@ where
 
         // Create two databases
         let mut target_db = H::init_db(context.with_label("target")).await;
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let sync_db_config = H::config(&context.next_u64().to_string(), page_cache);
         let client_context = context.with_label("client");
         let mut sync_db: H::Db =
@@ -451,18 +471,20 @@ where
         let target_ops = H::create_ops(num_ops);
 
         // Create two databases with their own configs
-        let target_cache = CacheRef::from_pooler(context.with_label("target_cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
-        let target_config = H::config(
-            &context.next_u64().to_string(),
-            target_cache,
+        let target_cache = CacheRef::from_pooler(
+            context.with_label("target_cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
+        let target_config = H::config(&context.next_u64().to_string(), target_cache);
         let mut target_db =
             H::init_db_with_config(context.with_label("target"), target_config).await;
-        let sync_cache = CacheRef::from_pooler(context.with_label("sync_cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
-        let sync_config = H::config(
-            &context.next_u64().to_string(),
-            sync_cache,
+        let sync_cache = CacheRef::from_pooler(
+            context.with_label("sync_cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
+        let sync_config = H::config(&context.next_u64().to_string(), sync_cache);
         let client_context = context.with_label("client");
         let mut sync_db = H::init_db_with_config(client_context.clone(), sync_config.clone()).await;
 
@@ -558,7 +580,11 @@ where
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -628,7 +654,11 @@ where
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -712,7 +742,11 @@ where
             let (update_sender, update_receiver) = mpsc::channel(1);
 
             let target_db = Arc::new(target_db);
-            let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(
+                context.with_label("cache"),
+                crate::qmdb::any::test::PAGE_SIZE,
+                crate::qmdb::any::test::PAGE_CACHE_SIZE,
+            );
             let config = Config {
                 context: context.with_label("client"),
                 db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -785,7 +819,11 @@ where
         // Create client with target that will complete immediately
         let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -863,7 +901,11 @@ where
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let (reached_sender, mut reached_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -962,7 +1004,11 @@ where
             .expect("finish signal channel should be open");
 
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -1017,7 +1063,11 @@ where
         drop(finish_sender);
 
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -1068,7 +1118,11 @@ where
         drop(reached_receiver);
 
         let target_db = Arc::new(target_db);
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -1131,7 +1185,11 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let (update_sender, update_receiver) = mpsc::channel(1);
         // Step the client to process a batch
         let client = {
-            let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(
+                context.with_label("cache"),
+                crate::qmdb::any::test::PAGE_SIZE,
+                crate::qmdb::any::test::PAGE_CACHE_SIZE,
+            );
             let config = Config {
                 context: context.with_label("client"),
                 db_config: H::config(&context.next_u64().to_string(), page_cache),
@@ -1238,7 +1296,11 @@ where
         let upper_bound = target_db.bounds().await.end;
 
         // Perform sync
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let client_context = context.with_label("client");
         let target_db = Arc::new(target_db);
@@ -1309,7 +1371,11 @@ where
         let upper_bound = target_db.bounds().await.end;
         let target_db = Arc::new(target_db);
 
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let config = H::config(&context.next_u64().to_string(), page_cache);
         let config = Config {
             db_config: config,
@@ -1357,7 +1423,11 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
         let mut db = H::init_db_with_config(context.with_label("source"), db_config.clone()).await;
         let ops = H::create_ops(100);
@@ -1409,7 +1479,11 @@ where
     executor.start(|mut context| async move {
         // Create and populate two databases.
         let mut target_db = H::init_db(context.with_label("target")).await;
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let sync_db_config = H::config(&context.next_u64().to_string(), page_cache);
         let client_context = context.with_label("client");
         let mut sync_db =
@@ -1510,7 +1584,11 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let new_db_config = H::config(&context.next_u64().to_string(), page_cache);
 
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -1556,7 +1634,11 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let new_db_config = H::config(&context.next_u64().to_string(), page_cache);
 
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -1657,7 +1739,11 @@ where
         let lower_bound = target_db.inactivity_floor_loc().await;
         let upper_bound = target_db.bounds().await.end;
 
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), crate::qmdb::any::test::PAGE_SIZE, crate::qmdb::any::test::PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
         let db_config = H::config(&context.next_u64().to_string(), page_cache);
 
         let resolver = CorruptFirstPinnedNodesResolver {
@@ -1707,10 +1793,7 @@ mod harnesses {
             db.root()
         }
 
-        fn config(
-            suffix: &str,
-            page_cache: CacheRef,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        fn config(suffix: &str, page_cache: CacheRef) -> crate::qmdb::any::FixedConfig<TwoCap> {
             crate::qmdb::any::test::fixed_db_config(suffix, page_cache)
         }
 
@@ -1828,10 +1911,7 @@ mod harnesses {
             db.root()
         }
 
-        fn config(
-            suffix: &str,
-            page_cache: CacheRef,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        fn config(suffix: &str, page_cache: CacheRef) -> crate::qmdb::any::FixedConfig<TwoCap> {
             crate::qmdb::any::test::fixed_db_config(suffix, page_cache)
         }
 

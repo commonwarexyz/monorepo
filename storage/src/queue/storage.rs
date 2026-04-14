@@ -494,11 +494,8 @@ mod tests {
             }
 
             {
-                let page_cache = CacheRef::from_pooler(
-                    context.with_label("cache2"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                );
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let mut queue = Queue::<_, Vec<u8>>::init(
                     context.with_label("second"),
                     test_config("test_batch_persist", page_cache),
@@ -894,11 +891,8 @@ mod tests {
 
             // Second session: all items are re-delivered (no pruning occurred)
             {
-                let page_cache = CacheRef::from_pooler(
-                    context.with_label("cache2"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                );
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let mut queue = Queue::<_, Vec<u8>>::init(
                     context.with_label("second"),
                     test_config("test_recovery_replay", page_cache),
@@ -957,11 +951,8 @@ mod tests {
 
             // Second session: only non-pruned items are available
             {
-                let page_cache = CacheRef::from_pooler(
-                    context.with_label("cache2"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                );
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let mut queue = Queue::<_, Vec<u8>>::init(
                     context.with_label("second"),
                     test_config("test_recovery_pruned", page_cache),
@@ -1100,11 +1091,8 @@ mod tests {
 
             // Second session - data should persist
             {
-                let page_cache = CacheRef::from_pooler(
-                    context.with_label("cache2"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                );
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let mut queue = Queue::<_, Vec<u8>>::init(
                     context.with_label("second"),
                     test_config("test_persist", page_cache),

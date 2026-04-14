@@ -84,7 +84,10 @@ fn fuzz(input: FuzzInput) {
             ),
         };
 
-        let mut journal = Journal::init(context.with_label("journal"), make_cfg(&context, "cache_0")).await.unwrap();
+        let mut journal =
+            Journal::init(context.with_label("journal"), make_cfg(&context, "cache_0"))
+                .await
+                .unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;

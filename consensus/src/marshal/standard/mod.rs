@@ -808,9 +808,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // No network links: forces repair to rely on local cache only.
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.with_label("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
 
             let recovering_validator = participants[0].clone();
 
@@ -833,7 +836,7 @@ mod tests {
             // recovering validator can find it locally during trailing repair,
             // without needing a peer to serve it.
             seed_cache_block(
-                context.clone(),
+                context.with_label("seed"),
                 &partition_prefix,
                 Epoch::zero(),
                 View::new(2),
@@ -845,7 +848,7 @@ mod tests {
             // finalization for height 2 but no block_two in the archive.
             // block_two only exists in the cache's notarized storage.
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.with_label("seed_state"),
                 &partition_prefix,
                 &[block_one],
                 &[(Height::new(2), finalization_two)],
