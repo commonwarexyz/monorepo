@@ -147,10 +147,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
-    page_cache: CacheRef,
-) -> journaled::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), page_cache: CacheRef) -> journaled::Config {
     journaled::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
