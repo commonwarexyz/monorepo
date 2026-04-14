@@ -91,15 +91,14 @@ fn bench_get(c: &mut Criterion) {
                             |b| {
                                 // Setup: populate database (once, on first sample).
                                 if !initialized {
-                                    keys =
-                                        commonware_runtime::tokio::Runner::new(cfg.clone())
-                                            .start(|ctx| async move {
-                                                let mut a =
-                                                    Archive::init(ctx, variant, compression).await;
-                                                let keys = append_random(&mut a, ITEMS).await;
-                                                a.sync().await.unwrap();
-                                                keys
-                                            });
+                                    keys = commonware_runtime::tokio::Runner::new(cfg.clone())
+                                        .start(|ctx| async move {
+                                            let mut a =
+                                                Archive::init(ctx, variant, compression).await;
+                                            let keys = append_random(&mut a, ITEMS).await;
+                                            a.sync().await.unwrap();
+                                            keys
+                                        });
                                     initialized = true;
                                 }
 
