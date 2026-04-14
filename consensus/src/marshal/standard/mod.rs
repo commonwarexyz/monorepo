@@ -1507,8 +1507,7 @@ mod tests {
     }
 
     /// A provider that always returns `None`, modeling an application that
-    /// has pruned all epoch state. Exercises the same code path as a
-    /// [`MutableProvider`] whose verifier has been dropped.
+    /// has pruned all epoch state.
     #[derive(Clone)]
     struct EmptyProvider;
 
@@ -1640,7 +1639,7 @@ mod tests {
 
             let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
 
-            let (actor, mailbox, _) = Actor::init(
+            let (actor, _mailbox, _) = Actor::init(
                 context.clone(),
                 finalizations_by_height,
                 finalized_blocks,
@@ -1649,11 +1648,7 @@ mod tests {
             .await;
             actor.start(Application::<B>::default(), buffer, (resolver_rx, NoopResolver));
 
-            // Advance the floor so stale deliveries are below it.
-            mailbox.set_floor(Height::new(50)).await;
-            let _ = mailbox.get_finalization(Height::new(50)).await;
-
-            // Inject a stale Finalized delivery with garbage payload. The
+            // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
