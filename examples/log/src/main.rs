@@ -205,6 +205,8 @@ fn main() {
         );
 
         // Initialize consensus
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), NZU16!(16_384), NZUsize!(10_000));
         let cfg = simplex::Config {
             scheme,
             elector: RoundRobin::<Sha256>::default(),
@@ -224,7 +226,7 @@ fn main() {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            page_cache: CacheRef::from_pooler(context.clone(), NZU16!(16_384), NZUsize!(10_000)),
+            page_cache,
             strategy: Sequential,
             forwarding: simplex::ForwardingPolicy::Disabled,
         };

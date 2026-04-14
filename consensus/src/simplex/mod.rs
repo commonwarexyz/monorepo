@@ -778,6 +778,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -798,11 +799,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1043,6 +1040,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -1063,11 +1061,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1203,6 +1197,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -1223,11 +1218,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1388,6 +1379,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1408,11 +1400,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1513,6 +1501,7 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(me.clone());
+            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1533,11 +1522,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1651,6 +1636,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1671,11 +1657,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1887,6 +1869,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1907,11 +1890,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2056,6 +2035,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2076,11 +2056,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2261,6 +2237,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2281,11 +2258,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2462,6 +2435,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2482,11 +2456,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2718,6 +2688,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -2738,11 +2709,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2898,6 +2865,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2918,11 +2886,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3070,6 +3034,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3090,11 +3055,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3266,6 +3227,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3286,11 +3248,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3431,6 +3389,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3451,11 +3410,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3526,6 +3481,7 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(validator.clone());
+            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3546,11 +3502,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3754,6 +3706,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3774,11 +3727,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3911,6 +3860,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3931,11 +3881,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4085,6 +4031,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4105,11 +4052,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4225,6 +4168,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4245,11 +4189,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4392,6 +4332,7 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(participants[0].clone());
+            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4412,11 +4353,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4615,6 +4552,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4635,11 +4573,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4973,6 +4907,7 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -4993,11 +4928,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine =
@@ -5182,6 +5113,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5202,11 +5134,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5326,6 +5254,7 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5346,11 +5275,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5427,6 +5352,7 @@ mod tests {
                 actor.start();
                 reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
+                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5447,11 +5373,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        context.with_label("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5924,6 +5846,7 @@ mod tests {
                         actor.start();
 
                         let blocker = oracle.control(validator.clone());
+                        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                         let cfg = config::Config {
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
@@ -5944,11 +5867,7 @@ mod tests {
                             fetch_concurrent: 4,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(
-                                context.with_label("cache"),
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            page_cache,
                             forwarding: ForwardingPolicy::Disabled,
                         };
                         let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5997,6 +5916,7 @@ mod tests {
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
+                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -6017,11 +5937,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);

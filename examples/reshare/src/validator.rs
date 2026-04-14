@@ -114,7 +114,7 @@ pub async fn run<S, L>(
         priority_requests: false,
         priority_responses: false,
     };
-    let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
+    let marshal = marshal_resolver::init(context.with_label("resolver"), resolver_cfg, marshal);
 
     let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
@@ -383,7 +383,7 @@ mod test {
                 priority_responses: false,
             };
             let marshal =
-                marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
+                marshal_resolver::init(validator_ctx.with_label("resolver"), resolver_cfg, marshal);
             let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
                 validator_ctx.with_label("consensus"),
                 engine::Config {
