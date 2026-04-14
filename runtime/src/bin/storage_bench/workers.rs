@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Convert any `Display`-able error into `String`.
-pub(crate) trait ResultExt<T> {
+pub trait ResultExt<T> {
     fn str_err(self) -> Result<T, String>;
 }
 
@@ -38,9 +38,11 @@ const DEADLINE_CHECK_STRIDE: u64 = 8;
 const LATENCY_SAMPLE_STRIDE: u64 = 16;
 
 /// Partition of the block space assigned to one random-write worker.
-pub(crate) struct BlockShard {
-    pub(crate) start_block: u64,
-    pub(crate) blocks: u64,
+pub struct BlockShard {
+    /// Inclusive start block within the file.
+    pub start_block: u64,
+    /// Number of blocks owned by this shard.
+    pub blocks: u64,
 }
 
 /// Return a closure that yields block indices in sequential, strided order.
@@ -48,7 +50,7 @@ pub(crate) struct BlockShard {
 /// Each call advances by `stride` blocks and wraps around `total_blocks`,
 /// giving interleaved sequential coverage when multiple workers use different
 /// starting offsets.
-pub(crate) fn sequential_blocks(start: u64, stride: u64, total_blocks: u64) -> impl FnMut() -> u64 {
+pub fn sequential_blocks(start: u64, stride: u64, total_blocks: u64) -> impl FnMut() -> u64 {
     let mut block = start;
     move || {
         let cur = block;
@@ -59,7 +61,7 @@ pub(crate) fn sequential_blocks(start: u64, stride: u64, total_blocks: u64) -> i
 
 /// Read loop without statistics collection (for cache warm-up).
 #[inline]
-pub(crate) async fn warm_read_loop<B, F>(
+pub async fn warm_read_loop<B, F>(
     blob: B,
     io_size: usize,
     ops: u64,
@@ -80,7 +82,7 @@ where
 
 /// Timed read loop that collects sampled latency statistics.
 #[inline]
-pub(crate) async fn run_read_loop<B, F>(
+pub async fn run_read_loop<B, F>(
     blob: B,
     deadline: Instant,
     io_size: usize,
@@ -113,7 +115,7 @@ where
 /// after each completed write (used by the frontier writer to publish the
 /// visible length to concurrent readers).
 #[inline]
-pub(crate) async fn run_write_loop<B, F, G>(
+pub async fn run_write_loop<B, F, G>(
     blob: B,
     deadline: Instant,
     payload: IoBufs,
@@ -157,7 +159,7 @@ where
 ///
 /// Used by `read_write_append`: yields until the writer has published at least
 /// one full block, then samples uniformly below the current frontier.
-pub(crate) async fn run_frontier_read_worker<B>(
+pub async fn run_frontier_read_worker<B>(
     blob: B,
     deadline: Instant,
     io_size: usize,
@@ -193,10 +195,7 @@ where
 }
 
 /// Divide `total_blocks` into `workers` non-overlapping shards.
-pub(crate) fn build_worker_shards(
-    total_blocks: u64,
-    workers: usize,
-) -> Result<Vec<BlockShard>, String> {
+pub fn build_worker_shards(total_blocks: u64, workers: usize) -> Result<Vec<BlockShard>, String> {
     if total_blocks < workers as u64 {
         return Err("not enough blocks to assign one random-write shard per worker".into());
     }
@@ -218,7 +217,7 @@ pub(crate) fn build_worker_shards(
 
 /// Advance a simple LCG and return a block index in `[0, total_blocks)`.
 #[inline(always)]
-pub(crate) const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
+pub const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
     *state = state
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
@@ -230,7 +229,7 @@ pub(crate) const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64
 /// Uses the golden-ratio constant so workers with sequential IDs get
 /// well-separated PRNG streams.
 #[inline(always)]
-pub(crate) const fn worker_seed(seed: u64, worker_id: usize) -> u64 {
+pub const fn worker_seed(seed: u64, worker_id: usize) -> u64 {
     seed.wrapping_add((worker_id as u64).wrapping_mul(0x9E3779B97F4A7C15))
 }
 
@@ -248,6 +247,10 @@ fn touch_buffer(buf: &IoBufsMut) -> u8 {
         .unwrap_or_default()
 }
 
+/// Check whether the timed loop should keep running.
+///
+/// Only polls the clock every `DEADLINE_CHECK_STRIDE` operations to avoid
+/// perturbing hot-cache benchmarks with frequent `Instant::now()` calls.
 #[inline(always)]
 fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
     if completed_ops.is_multiple_of(DEADLINE_CHECK_STRIDE) {
@@ -257,6 +260,9 @@ fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
     }
 }
 
+/// Whether to record a latency sample for this operation.
+///
+/// Uses a constant stride to avoid front-biasing the distribution.
 #[inline(always)]
 const fn should_sample_latency(completed_ops: u64) -> bool {
     completed_ops.is_multiple_of(LATENCY_SAMPLE_STRIDE)

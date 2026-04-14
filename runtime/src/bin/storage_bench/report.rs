@@ -6,28 +6,34 @@ use std::time::Duration;
 
 /// Aggregated stats for one worker stream.
 #[derive(Default)]
-pub(crate) struct WorkerStats {
-    pub(crate) ops: u64,
-    pub(crate) bytes: u64,
-    pub(crate) latency_samples_ns: Vec<u64>,
+pub struct WorkerStats {
+    /// Number of completed operations.
+    pub ops: u64,
+    /// Number of bytes transferred.
+    pub bytes: u64,
+    /// Sampled per-operation latencies in nanoseconds.
+    pub latency_samples_ns: Vec<u64>,
 }
 
 impl WorkerStats {
+    /// Record one completed operation without storing a latency sample.
     #[inline(always)]
-    pub(crate) const fn record(&mut self, bytes: u64) {
+    pub const fn record(&mut self, bytes: u64) {
         self.ops += 1;
         self.bytes += bytes;
     }
 
+    /// Record one completed operation and retain a latency sample.
     #[inline]
-    pub(crate) fn record_latency_sample(&mut self, latency: Duration, bytes: u64) {
+    pub fn record_latency_sample(&mut self, latency: Duration, bytes: u64) {
         self.record(bytes);
         self.latency_samples_ns
             .push(latency.as_nanos().min(u64::MAX as u128) as u64);
     }
 
+    /// Merge another worker's stats into this accumulator.
     #[inline]
-    pub(crate) fn merge(&mut self, mut other: Self) {
+    pub fn merge(&mut self, mut other: Self) {
         self.ops += other.ops;
         self.bytes += other.bytes;
         self.latency_samples_ns
@@ -35,24 +41,38 @@ impl WorkerStats {
     }
 }
 
-pub(crate) struct OperationReport {
+/// Derived metrics for one operation class.
+pub struct OperationReport {
+    /// Completed operations.
     ops: u64,
+    /// Total bytes transferred.
     bytes: u64,
+    /// Throughput in operations per second.
     ops_per_sec: f64,
+    /// Throughput in MiB per second.
     mib_per_sec: f64,
+    /// p50 latency in nanoseconds.
     p50_latency_ns: u64,
+    /// p95 latency in nanoseconds.
     p95_latency_ns: u64,
+    /// p99 latency in nanoseconds.
     p99_latency_ns: u64,
 }
 
-pub(crate) struct ScenarioReport {
-    pub(crate) elapsed: Duration,
-    pub(crate) read: Option<OperationReport>,
-    pub(crate) write: Option<OperationReport>,
-    pub(crate) final_file_size: u64,
+/// Full scenario report.
+pub struct ScenarioReport {
+    /// Actual elapsed time, including any final end-of-run sync.
+    pub elapsed: Duration,
+    /// Read-side metrics, when present.
+    pub read: Option<OperationReport>,
+    /// Write-side metrics, when present.
+    pub write: Option<OperationReport>,
+    /// Final logical file size.
+    pub final_file_size: u64,
 }
 
-pub(crate) fn merge_worker_results(
+/// Merge the results of many worker futures.
+pub fn merge_worker_results(
     results: Vec<Result<WorkerStats, String>>,
 ) -> Result<WorkerStats, String> {
     let mut merged = WorkerStats::default();
@@ -62,7 +82,8 @@ pub(crate) fn merge_worker_results(
     Ok(merged)
 }
 
-pub(crate) fn summarize_operation(mut stats: WorkerStats, elapsed: Duration) -> OperationReport {
+/// Convert accumulated worker stats into a report section.
+pub fn summarize_operation(mut stats: WorkerStats, elapsed: Duration) -> OperationReport {
     stats.latency_samples_ns.sort_unstable();
     let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
     OperationReport {
@@ -76,7 +97,8 @@ pub(crate) fn summarize_operation(mut stats: WorkerStats, elapsed: Duration) -> 
     }
 }
 
-pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
+/// Print a concise human-readable report.
+pub fn print_human_report(cfg: &Config, report: &ScenarioReport) {
     println!(
         "backend={} scenario={} elapsed_s={:.3}",
         backend_name(),
@@ -117,7 +139,8 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
     println!("final_file_size={}", report.final_file_size);
 }
 
-pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
+/// Print a single JSON object for downstream processing.
+pub fn print_json_report(cfg: &Config, report: &ScenarioReport) {
     let json = json!({
         "backend": backend_name(),
         "scenario": cfg.scenario.to_string(),
@@ -140,7 +163,7 @@ pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
     println!("{json}");
 }
 
-/// Nearest-rank percentile from a sorted slice.
+/// Return the nearest-rank percentile from a sorted latency vector.
 fn percentile(sorted: &[u64], pct: u64) -> u64 {
     if sorted.is_empty() {
         return 0;

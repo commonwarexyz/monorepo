@@ -20,15 +20,15 @@ use std::{
 #[cfg(unix)]
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 
-pub(crate) const PARTITION: &str = "storage-bench";
-pub(crate) const PRIMARY_BLOB_NAME: &[u8] = b"blob";
+pub const PARTITION: &str = "storage-bench";
+pub const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Create a fresh root directory for one benchmark run.
 ///
 /// Any leftover directory from a previous interrupted run is removed first.
-pub(crate) fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathBuf> {
+pub fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathBuf> {
     fs::create_dir_all(root)?;
     let root = root.join(format!("commonware_storage_bench_{scenario}"));
     let _ = fs::remove_dir_all(&root);
@@ -36,14 +36,14 @@ pub(crate) fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathB
 }
 
 /// Remove the benchmark root after the runtime has dropped its storage state.
-pub(crate) fn cleanup_root(root: &Path) {
+pub fn cleanup_root(root: &Path) {
     // The io_uring backend owns a dedicated worker thread; give it a brief
     // chance to observe dropped handles before removing the directory.
     std::thread::sleep(Duration::from_millis(10));
     let _ = fs::remove_dir_all(root);
 }
 
-pub(crate) const fn backend_name() -> &'static str {
+pub const fn backend_name() -> &'static str {
     #[cfg(feature = "iouring-storage")]
     {
         "iouring"
@@ -98,7 +98,7 @@ fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Re
 /// for the file. The effect is per-inode, not per-fd, so reopening the file
 /// later does not undo it.
 #[cfg(unix)]
-pub(crate) fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
+pub fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let path = blob_path(root, partition, name);
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     file.sync_all()?;
@@ -112,16 +112,12 @@ pub(crate) fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io:
 }
 
 #[cfg(not(unix))]
-pub(crate) fn evict_blob_cache(
-    _root: &Path,
-    _partition: &str,
-    _name: &[u8],
-) -> std::io::Result<()> {
+pub fn evict_blob_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
 /// Create a fixed-size, preallocated blob. Returns the open blob handle.
-pub(crate) async fn prepare_blob<S>(
+pub async fn prepare_blob<S>(
     storage: &S,
     root: &Path,
     name: &[u8],
@@ -141,7 +137,7 @@ where
 /// Create a fixed-size blob and fill it with deterministic data.
 ///
 /// Returns the open blob handle so the caller can reuse it for the timed phase.
-pub(crate) async fn prepare_filled_blob<S>(
+pub async fn prepare_filled_blob<S>(
     storage: &S,
     root: &Path,
     name: &[u8],
@@ -165,7 +161,8 @@ where
     Ok(blob)
 }
 
-pub(crate) fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
+/// Build a deterministic write payload of the given size and shape.
+pub fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
     match shape {
         WriteShape::Contiguous => IoBufs::from(deterministic_bytes(io_size, seed)),
         WriteShape::Vectored => vectored_payload(io_size, seed),
@@ -194,6 +191,11 @@ fn vectored_payload(size: usize, seed: u64) -> IoBufs {
     IoBufs::from(chunks)
 }
 
+/// Create a deterministic RNG by mixing `size` and `discriminator`.
+///
+/// The rotation spreads the size bits across different positions before XORing
+/// so that (size=4096, offset=0) and (size=0, offset=4096) produce different
+/// seeds.
 fn seeded_rng(size: usize, discriminator: u64) -> StdRng {
     StdRng::seed_from_u64((size as u64).rotate_left(17) ^ discriminator)
 }

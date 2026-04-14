@@ -4,11 +4,11 @@ use clap::{builder::Styles, error::ErrorKind, value_parser, CommandFactory, Pars
 use std::{fmt, path::PathBuf, time::Duration};
 
 /// Default logical I/O size used when the CLI does not override it.
-pub(crate) const DEFAULT_IO_SIZE: usize = 4 * 1024;
+pub const DEFAULT_IO_SIZE: usize = 4 * 1024;
 
 /// Benchmark scenario to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum Scenario {
+pub enum Scenario {
     /// Sequential reads over a fixed-size file.
     #[value(name = "read_seq")]
     ReadSeq,
@@ -31,7 +31,7 @@ pub(crate) enum Scenario {
 
 impl Scenario {
     /// Whether the scenario benchmarks writes.
-    pub(crate) const fn has_writes(self) -> bool {
+    pub const fn has_writes(self) -> bool {
         matches!(
             self,
             Self::WriteSeq | Self::WriteRand | Self::WriteAppend | Self::ReadWriteAppend
@@ -39,14 +39,14 @@ impl Scenario {
     }
 
     /// Whether the scenario benchmarks reads.
-    pub(crate) const fn has_reads(self) -> bool {
+    pub const fn has_reads(self) -> bool {
         matches!(self, Self::ReadSeq | Self::ReadRand | Self::ReadWriteAppend)
     }
 }
 
 /// Read cache preparation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum CacheMode {
+pub enum CacheMode {
     /// Best-effort warming by touching the file before timing.
     #[value(name = "warm")]
     Warm,
@@ -57,7 +57,7 @@ pub(crate) enum CacheMode {
 
 /// Write payload layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum WriteShape {
+pub enum WriteShape {
     /// Single contiguous buffer per write.
     #[value(name = "contiguous")]
     Contiguous,
@@ -68,7 +68,7 @@ pub(crate) enum WriteShape {
 
 /// Write durability policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SyncMode {
+pub enum SyncMode {
     /// Flush once at the end of the timed phase.
     End,
     /// Flush every `N` writes in each writer stream.
@@ -77,7 +77,7 @@ pub(crate) enum SyncMode {
 
 /// Output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum OutputFormat {
+pub enum OutputFormat {
     /// Human-readable multi-line report.
     #[value(name = "human")]
     Human,
@@ -120,22 +120,22 @@ impl fmt::Display for SyncMode {
                   Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",
     styles = Styles::styled(),
 )]
-pub(crate) struct Config {
+pub struct Config {
     /// Scenario to execute.
     #[arg(long, value_enum)]
-    pub(crate) scenario: Scenario,
+    pub scenario: Scenario,
 
     /// Timed run duration in seconds.
-    #[arg(long, default_value_t = 30, value_parser = value_parser!(u64))]
+    #[arg(long, default_value_t = 30, value_parser = value_parser!(u64).range(1..))]
     duration: u64,
 
     /// Read or write size in bytes. Accepts suffixes like 64K, 4M, or 1G.
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
-    pub(crate) io_size: usize,
+    pub io_size: usize,
 
     /// Parallel worker count for steady-state scenarios.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
-    pub(crate) inflight: usize,
+    pub inflight: usize,
 
     /// Tokio worker thread count for the benchmark runtime.
     #[arg(
@@ -143,73 +143,62 @@ pub(crate) struct Config {
         default_value_t = default_worker_threads(),
         value_parser = value_parser!(usize)
     )]
-    pub(crate) worker_threads: usize,
+    pub worker_threads: usize,
 
     /// Tokio scheduler ticks between global queue polls.
     #[arg(long, value_parser = value_parser!(u32))]
-    pub(crate) global_queue_interval: Option<u32>,
+    pub global_queue_interval: Option<u32>,
 
     /// Initial fixed-size file length. Accepts suffixes like 64K, 4M, or 1G.
     #[arg(long, value_parser = parse_byte_size)]
-    pub(crate) file_size: Option<u64>,
+    pub file_size: Option<u64>,
 
     /// Parent directory under which a unique benchmark directory is created.
     #[arg(long, default_value = "/tmp")]
-    pub(crate) root: PathBuf,
+    pub root: PathBuf,
 
     /// Best-effort cache preparation for read-heavy scenarios.
     #[arg(long, value_enum)]
-    pub(crate) cache: Option<CacheMode>,
+    pub cache: Option<CacheMode>,
 
     /// Write payload layout for write-heavy scenarios.
     #[arg(long, value_enum, default_value = "contiguous")]
-    pub(crate) write_shape: WriteShape,
+    pub write_shape: WriteShape,
 
     /// Durability cadence: `end` or a positive integer per writer stream.
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
-    pub(crate) sync_mode: SyncMode,
+    pub sync_mode: SyncMode,
 
     /// Deterministic seed for payloads and random offsets.
     #[arg(long, default_value_t = 0)]
-    pub(crate) seed: u64,
+    pub seed: u64,
 
     /// Report format.
     #[arg(long, value_enum, default_value = "human")]
-    pub(crate) output: OutputFormat,
+    pub output: OutputFormat,
 }
 
 impl Config {
-    pub(crate) fn parse_or_exit() -> Self {
-        Self::try_parse_validated(std::env::args_os()).unwrap_or_else(|err| err.exit())
-    }
-
-    pub(crate) fn try_parse_validated<I, T>(args: I) -> Result<Self, clap::Error>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        let cfg = <Self as Parser>::try_parse_from(args)?;
+    /// Parse CLI arguments and validate cross-field constraints.
+    pub fn parse() -> Result<Self, clap::Error> {
+        let cfg = <Self as Parser>::try_parse_from(std::env::args_os())?;
         cfg.validate()
             .map_err(|msg| Self::command().error(ErrorKind::ValueValidation, msg))?;
         Ok(cfg)
     }
 
-    pub(crate) const fn duration(&self) -> Duration {
+    /// Timed run duration.
+    pub const fn duration(&self) -> Duration {
         Duration::from_secs(self.duration)
     }
 
-    pub(crate) const fn file_size(&self) -> u64 {
+    /// Initial file size (panics if not set; only call after validation).
+    pub const fn file_size(&self) -> u64 {
         self.file_size
             .expect("validated configuration must include --file-size")
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.duration == 0 {
-            return Err("--duration must be greater than zero".into());
-        }
-        if self.io_size == 0 {
-            return Err("--io-size must be greater than zero".into());
-        }
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
         }
@@ -284,7 +273,6 @@ fn parse_sync_mode(value: &str) -> Result<SyncMode, String> {
     if value == "end" {
         return Ok(SyncMode::End);
     }
-
     let count = value
         .parse::<u64>()
         .map_err(|err| format!("invalid value for --sync-every: {err}"))?;
@@ -333,7 +321,11 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         }
     };
 
-    number
+    let result = number
         .checked_mul(multiplier)
-        .ok_or_else(|| format!("size value is too large: {value}"))
+        .ok_or_else(|| format!("size value is too large: {value}"))?;
+    if result == 0 {
+        return Err("size value must be greater than zero".into());
+    }
+    Ok(result)
 }

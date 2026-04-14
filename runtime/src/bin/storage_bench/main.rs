@@ -18,22 +18,16 @@ use crate::{
     config::{Config, OutputFormat},
     filesystem::{cleanup_root, prepare_root},
     report::{print_human_report, print_json_report},
+    workers::ResultExt,
     workloads::run_benchmark,
 };
 use commonware_runtime::{tokio, Runner as _};
-use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    let cfg = Config::parse_or_exit();
+fn main() -> Result<(), String> {
+    let cfg = Config::parse().str_err()?;
     let scenario = cfg.scenario.to_string();
 
-    let root = match prepare_root(&cfg.root, &scenario) {
-        Ok(root) => root,
-        Err(err) => {
-            eprintln!("failed to create benchmark root: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let root = prepare_root(&cfg.root, &scenario).str_err()?;
 
     let mut runtime_cfg = tokio::Config::default()
         .with_worker_threads(cfg.worker_threads)
@@ -43,22 +37,14 @@ fn main() -> ExitCode {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
     }
 
-    let result = tokio::Runner::new(runtime_cfg)
+    let report = tokio::Runner::new(runtime_cfg)
         .start(|context| async { run_benchmark(&cfg, &root, context).await });
 
     cleanup_root(&root);
 
-    let report = match result {
-        Ok(report) => report,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     match cfg.output {
-        OutputFormat::Human => print_human_report(&cfg, &report),
-        OutputFormat::Json => print_json_report(&cfg, &report),
+        OutputFormat::Human => print_human_report(&cfg, &report?),
+        OutputFormat::Json => print_json_report(&cfg, &report?),
     }
-    ExitCode::SUCCESS
+    Ok(())
 }

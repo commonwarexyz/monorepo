@@ -25,7 +25,8 @@ use std::{
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
-pub(crate) async fn run_benchmark(
+/// Run the configured benchmark scenario and return the results.
+pub async fn run_benchmark(
     cfg: &Config,
     root: &Path,
     context: Context,
@@ -190,6 +191,8 @@ async fn run_read_write_append(
         prepare_filled_blob(context, root, PRIMARY_BLOB_NAME, initial_size, cfg.seed).await?;
     warm_cache(cfg, root, &blob, total_blocks).await?;
 
+    // Use a different seed for the writer so its PRNG stream doesn't overlap
+    // with the reader streams derived from cfg.seed.
     let payload = create_write_payload(cfg.io_size, cfg.seed ^ 0xA5A5_A5A5, cfg.write_shape);
     let visible_len = Arc::new(AtomicU64::new(initial_size));
 
