@@ -951,9 +951,8 @@ mod tests {
         all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Integration test where a dishonest leader (validator 0) proposes
-    /// payloads that all honest peers refuse to certify (simulating a leader
-    /// that withholds shard data needed for block reconstruction).
+    /// A dishonest leader (validator 0) proposes payloads that all honest peers
+    /// refuse to certify.
     ///
     /// All n validators use the honest Application, but every peer's certifier
     /// rejects proposals from views where validator 0 is the elected leader.
@@ -1083,7 +1082,22 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_dishonest_leader_certification_rejected() {
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         dishonest_leader_certification_rejected::<_, _>(ed25519::fixture);
+        dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
 
     fn observer<S, F, L>(mut fixture: F)
@@ -4658,8 +4672,6 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    // This test only exercises reporter filtering. Keep certification
-                    // uniform so leader-owned views do not diverge from follower views.
                     certifier: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(

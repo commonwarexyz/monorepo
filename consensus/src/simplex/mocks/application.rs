@@ -136,14 +136,8 @@ type VerifyObserver<H, P> =
 
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
-///
-/// Honest applications in an honest cluster always certify: a leader has the
-/// certify record for its own proposal (it just built it) and an honest
-/// follower has the context it verified against. The non-`Always` variants
-/// model realistic runtime failure modes (missing context, late data) or are
-/// used as test escape hatches.
 pub enum Certifier<D: Digest> {
-    /// Always certify. Default for honest applications.
+    /// Always certify.
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
