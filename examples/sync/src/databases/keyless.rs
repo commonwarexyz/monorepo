@@ -31,8 +31,12 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
 pub type Operation = fixed::Operation<Value>;
 
 /// Create a database configuration for the keyless variant.
-pub fn create_config(context: &impl BufferPooler) -> fixed::Config {
-    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
+pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
+    let page_cache = buffer::paged::CacheRef::from_pooler(
+        &context.with_label("page_cache"),
+        NZU16!(2048),
+        NZUsize!(10),
+    );
     keyless::Config {
         merkle: MmrConfig {
             journal_partition: "mmr-journal".into(),
@@ -137,10 +141,7 @@ where
         self.historical_proof(op_count, start_loc, max_ops).await
     }
 
-    async fn pinned_nodes_at(
-        &self,
-        loc: Location,
-    ) -> Result<Vec<Key>, qmdb::Error<mmr::Family>> {
+    async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<Key>, qmdb::Error<mmr::Family>> {
         self.pinned_nodes_at(loc).await
     }
 

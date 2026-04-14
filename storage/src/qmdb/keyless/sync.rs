@@ -151,11 +151,12 @@ mod tests {
     /// Create a simple config for sync tests.
     fn create_sync_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pooler: &(impl BufferPooler + commonware_runtime::Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(&pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -924,7 +925,11 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(
+                &context.with_label("page_cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let target_config = fixed::Config {
                 merkle: crate::merkle::journaled::Config {
                     journal_partition: format!("fixed-journal-target-{}", context.next_u64()),
@@ -960,7 +965,11 @@ mod tests {
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
-            let client_page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let client_page_cache = CacheRef::from_pooler(
+                &context.with_label("client_page_cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let client_config = fixed::Config {
                 merkle: crate::merkle::journaled::Config {
                     journal_partition: format!("fixed-journal-client-{}", context.next_u64()),
