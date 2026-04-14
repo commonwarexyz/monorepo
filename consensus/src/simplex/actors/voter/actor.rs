@@ -860,7 +860,7 @@ impl<
                     debug!(%view, "attempting certification");
                     let result = if leader_is_local {
                         // Once we know the local participant led this view, reaching out to the
-                        // automaton is unnecessary and creates duplicate work.
+                        // automaton is unnecessary.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;
