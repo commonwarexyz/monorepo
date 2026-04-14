@@ -925,7 +925,9 @@ impl<B: Blob> Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, BufferPool, BufferPoolConfig, Runner as _, Storage as _};
+    use crate::{
+        deterministic, BufferPool, BufferPoolConfig, Metrics as _, Runner as _, Storage as _,
+    };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
