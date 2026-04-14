@@ -86,7 +86,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
+        certificate::{mocks::Fixture, ConstantProvider, Provider},
         sha256::Sha256,
         Committable, Digestible, Hasher as _,
     };
@@ -1533,5 +1533,79 @@ mod tests {
                 "finalization should not be archived until matching block is available"
             );
         })
+    }
+
+    /// A provider that always returns `None`, modeling missing epoch state.
+    #[derive(Clone)]
+    struct EmptyProvider;
+
+    impl Provider for EmptyProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, _scope: Epoch) -> Option<std::sync::Arc<S>> {
+            None
+        }
+    }
+
+    /// When the scheme provider has no entry for the current epoch,
+    /// `Marshaled::propose` and `Marshaled::verify` must return a dropped
+    /// receiver (the consensus engine treats `RecvError` as "abstain").
+    #[test_traced("WARN")]
+    fn test_marshaled_missing_scheme_skips_propose_and_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: setup.mailbox,
+                shards: setup.extra,
+                scheme_provider: EmptyProvider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+
+            // propose with a missing scheme returns a dropped sender
+            let rx = marshaled.propose(ctx.clone()).await;
+            assert!(rx.await.is_err());
+
+            // verify with a missing scheme returns a dropped sender
+            let rx = marshaled.verify(ctx, genesis_commitment()).await;
+            assert!(rx.await.is_err());
+        });
     }
 }

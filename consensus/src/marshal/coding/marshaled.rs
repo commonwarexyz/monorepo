@@ -503,9 +503,11 @@ where
         let strategy = self.strategy.clone();
         let cached_genesis = self.cached_genesis.clone();
 
-        // If there's no scheme for the current epoch, we cannot verify the proposal.
-        // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping propose"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
@@ -645,9 +647,11 @@ where
         consensus_context: Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // If there's no scheme for the current epoch, we cannot vote on the proposal.
-        // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+            debug!(
+                round = %consensus_context.round,
+                "no scheme for epoch, skipping verify"
+            );
             let (_, rx) = oneshot::channel();
             return rx;
         };
