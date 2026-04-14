@@ -2,13 +2,15 @@
 
 use crate::{
     config::{Config, Scenario, SyncMode},
-    environment::{Environment, PARTITION},
+    filesystem::{
+        create_write_payload, prepare_cold_read_cache, prepare_preallocated_blob,
+        prepare_prefilled_blob, PARTITION,
+    },
     helpers::{
-        build_worker_shards, create_write_payload, prepare_cold_read_cache,
-        prepare_preallocated_blob, prepare_prefilled_blob, run_append_writer,
-        run_append_writer_with_frontier, run_frontier_random_read_worker, run_random_read_worker,
-        run_random_write_worker, run_sequential_read_worker, run_sequential_write_worker,
-        warm_random_read_worker, warm_sequential_read_worker,
+        build_worker_shards, run_append_writer, run_append_writer_with_frontier,
+        run_frontier_random_read_worker, run_random_read_worker, run_random_write_worker,
+        run_sequential_read_worker, run_sequential_write_worker, warm_random_read_worker,
+        warm_sequential_read_worker,
     },
     report::{merge_worker_results, summarize_operation, ScenarioReport},
 };
@@ -16,6 +18,7 @@ use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
 use futures::future::join_all;
 use std::{
     hint::black_box,
+    path::Path,
     sync::{atomic::AtomicU64, Arc},
     time::Instant,
 };
@@ -26,16 +29,16 @@ const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 /// Dispatch to the selected scenario using the runtime's storage context.
 pub(crate) async fn run_benchmark(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: Context,
 ) -> Result<ScenarioReport, String> {
     let result = match cfg.scenario {
-        Scenario::ReadSeq => run_read_seq(cfg, environment, &context).await,
-        Scenario::ReadRand => run_read_rand(cfg, environment, &context).await,
-        Scenario::WriteSeq => run_write_seq(cfg, environment, &context).await,
-        Scenario::WriteRand => run_write_rand(cfg, environment, &context).await,
+        Scenario::ReadSeq => run_read_seq(cfg, root, &context).await,
+        Scenario::ReadRand => run_read_rand(cfg, root, &context).await,
+        Scenario::WriteSeq => run_write_seq(cfg, root, &context).await,
+        Scenario::WriteRand => run_write_rand(cfg, root, &context).await,
         Scenario::WriteAppend => run_write_append(cfg, &context).await,
-        Scenario::ReadWriteAppend => run_read_write_append(cfg, environment, &context).await,
+        Scenario::ReadWriteAppend => run_read_write_append(cfg, root, &context).await,
     };
     let _ = context.remove(PARTITION, None).await;
     result
@@ -44,17 +47,10 @@ pub(crate) async fn run_benchmark(
 /// Run `read_seq`.
 async fn run_read_seq(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
-    prepare_prefilled_blob(
-        context,
-        environment,
-        PRIMARY_BLOB_NAME,
-        cfg.file_size(),
-        cfg.seed,
-    )
-    .await?;
+    prepare_prefilled_blob(context, root, PRIMARY_BLOB_NAME, cfg.file_size(), cfg.seed).await?;
     let total_blocks = cfg.file_size() / cfg.io_size as u64;
     match cfg.cache.expect("validated") {
         crate::config::CacheMode::Warm => {
@@ -79,7 +75,7 @@ async fn run_read_seq(
             warmers.into_iter().collect::<Result<Vec<_>, _>>()?;
         }
         crate::config::CacheMode::Cold => {
-            prepare_cold_read_cache(environment, PRIMARY_BLOB_NAME)?;
+            prepare_cold_read_cache(root, PRIMARY_BLOB_NAME)?;
         }
     }
     let (blob, _) = context
@@ -119,17 +115,10 @@ async fn run_read_seq(
 /// Run `read_rand`.
 async fn run_read_rand(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
-    prepare_prefilled_blob(
-        context,
-        environment,
-        PRIMARY_BLOB_NAME,
-        cfg.file_size(),
-        cfg.seed,
-    )
-    .await?;
+    prepare_prefilled_blob(context, root, PRIMARY_BLOB_NAME, cfg.file_size(), cfg.seed).await?;
     let total_blocks = cfg.file_size() / cfg.io_size as u64;
     match cfg.cache.expect("validated") {
         crate::config::CacheMode::Warm => {
@@ -154,7 +143,7 @@ async fn run_read_rand(
             warmers.into_iter().collect::<Result<Vec<_>, _>>()?;
         }
         crate::config::CacheMode::Cold => {
-            prepare_cold_read_cache(environment, PRIMARY_BLOB_NAME)?;
+            prepare_cold_read_cache(root, PRIMARY_BLOB_NAME)?;
         }
     }
     let (blob, _) = context
@@ -193,10 +182,10 @@ async fn run_read_rand(
 /// Run `write_seq`.
 async fn run_write_seq(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
-    prepare_preallocated_blob(context, environment, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
+    prepare_preallocated_blob(context, root, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
     let (blob, _) = context
         .open(PARTITION, PRIMARY_BLOB_NAME)
         .await
@@ -242,10 +231,10 @@ async fn run_write_seq(
 /// Run `write_rand`.
 async fn run_write_rand(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
-    prepare_preallocated_blob(context, environment, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
+    prepare_preallocated_blob(context, root, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
     let (blob, _) = context
         .open(PARTITION, PRIMARY_BLOB_NAME)
         .await
@@ -317,18 +306,11 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<ScenarioRep
 /// Run `read_write_append`.
 async fn run_read_write_append(
     cfg: &Config,
-    environment: &Environment,
+    root: &Path,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     let initial_size = cfg.file_size();
-    prepare_prefilled_blob(
-        context,
-        environment,
-        PRIMARY_BLOB_NAME,
-        initial_size,
-        cfg.seed,
-    )
-    .await?;
+    prepare_prefilled_blob(context, root, PRIMARY_BLOB_NAME, initial_size, cfg.seed).await?;
     match cfg.cache.expect("validated") {
         crate::config::CacheMode::Warm => {
             let (blob, _) = context
@@ -353,7 +335,7 @@ async fn run_read_write_append(
             warmers.into_iter().collect::<Result<Vec<_>, _>>()?;
         }
         crate::config::CacheMode::Cold => {
-            prepare_cold_read_cache(environment, PRIMARY_BLOB_NAME)?;
+            prepare_cold_read_cache(root, PRIMARY_BLOB_NAME)?;
         }
     }
 

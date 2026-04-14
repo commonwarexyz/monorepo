@@ -1,4 +1,4 @@
-//! CLI and configuration types for `storage_bench`.
+//! CLI and configuration types.
 
 use clap::{
     builder::{Styles, ValueParser},
@@ -394,7 +394,7 @@ fn command() -> Command {
     Command::new("storage_bench")
         .color(ColorChoice::Auto)
         .styles(Styles::styled())
-        .about("Benchmark the runtime-selected storage backend")
+        .about("Benchmark the runtime storage backend")
         .after_help(
             "The storage backend is selected at build time.\n\
              Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",

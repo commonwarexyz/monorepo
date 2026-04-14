@@ -1,4 +1,4 @@
-//! Standalone harness for benchmarking the runtime-selected storage backend.
+//! Standalone harness for benchmarking the runtime storage backend.
 //!
 //! This binary exercises the storage implementation selected by normal runtime
 //! feature compilation under a small set of workload shapes that are useful for
@@ -13,14 +13,14 @@
 //! `perf stat` or `perf record`.
 
 mod config;
-mod environment;
+mod filesystem;
 mod helpers;
 mod report;
 mod scenarios;
 
 use crate::{
     config::{Config, OutputFormat},
-    environment::Environment,
+    filesystem::{cleanup_root, prepare_root},
     report::{print_human_report, print_json_report},
     scenarios::run_benchmark,
 };
@@ -40,8 +40,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let environment = match Environment::new(cfg.scenario.name(), &cfg.root) {
-        Ok(environment) => environment,
+    let root = match prepare_root(&cfg.root, cfg.scenario.name()) {
+        Ok(root) => root,
         Err(err) => {
             eprintln!("failed to create benchmark root: {err}");
             return ExitCode::FAILURE;
@@ -50,23 +50,25 @@ fn main() -> ExitCode {
 
     let mut runtime_cfg = commonware_runtime::tokio::Config::default()
         .with_worker_threads(cfg.worker_threads)
-        .with_storage_directory(environment.root().to_path_buf());
+        .with_storage_directory(root.clone());
     if let Some(global_queue_interval) = cfg.global_queue_interval {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
     }
     let report = match commonware_runtime::tokio::Runner::new(runtime_cfg)
-        .start(|context| async { run_benchmark(&cfg, &environment, context).await })
+        .start(|context| async { run_benchmark(&cfg, &root, context).await })
     {
         Ok(report) => report,
         Err(err) => {
             eprintln!("{err}");
+            cleanup_root(&root);
             return ExitCode::FAILURE;
         }
     };
 
     match cfg.output {
-        OutputFormat::Human => print_human_report(&cfg, &environment, &report),
-        OutputFormat::Json => print_json_report(&cfg, &environment, &report),
+        OutputFormat::Human => print_human_report(&cfg, &report),
+        OutputFormat::Json => print_json_report(&cfg, &report),
     }
+    cleanup_root(&root);
     ExitCode::SUCCESS
 }

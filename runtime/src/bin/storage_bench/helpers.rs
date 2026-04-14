@@ -1,13 +1,8 @@
 //! Workload helpers shared across benchmark scenarios.
 
-use crate::{
-    config::{SyncMode, WriteShape},
-    environment::{Environment, PARTITION},
-    report::WorkerStats,
-};
-use bytes::{Buf, Bytes};
-use commonware_runtime::{Blob, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use crate::{config::SyncMode, report::WorkerStats};
+use bytes::Buf;
+use commonware_runtime::{Blob, IoBufMut, IoBufs, IoBufsMut};
 use std::{
     hint::black_box,
     sync::{
@@ -16,9 +11,6 @@ use std::{
     },
     time::Instant,
 };
-
-/// Large chunk used when initially populating fixed-size files.
-const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Number of operations between deadline checks in the timed worker loops.
 ///
@@ -34,131 +26,12 @@ const EAGER_LATENCY_SAMPLES: u64 = 256;
 /// Sampling stride used once the eager latency-sample window has been filled.
 const LATENCY_SAMPLE_STRIDE: u64 = 64;
 
-/// Shape of a write payload reused by worker loops.
-#[derive(Clone)]
-pub(crate) enum WritePayload {
-    /// Single-buffer write payload.
-    Contiguous(Bytes),
-    /// Four-buffer vectored write payload.
-    Vectored(IoBufs),
-}
-
-impl WritePayload {
-    /// Length of the logical write.
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Contiguous(bytes) => bytes.len(),
-            Self::Vectored(bufs) => bufs.remaining(),
-        }
-    }
-
-    /// Clone and submit the payload to the target blob.
-    pub(crate) async fn write_to<B>(&self, blob: &B, offset: u64) -> Result<(), String>
-    where
-        B: Blob,
-    {
-        match self {
-            Self::Contiguous(bytes) => blob
-                .write_at(offset, bytes.clone())
-                .await
-                .map_err(|err| err.to_string()),
-            Self::Vectored(bufs) => blob
-                .write_at(offset, bufs.clone())
-                .await
-                .map_err(|err| err.to_string()),
-        }
-    }
-}
-
 /// Partition of the block space assigned to one random-write worker.
 pub(crate) struct BlockShard {
     /// Inclusive start block within the file.
     pub(crate) start_block: u64,
     /// Number of blocks owned by this shard.
     pub(crate) blocks: u64,
-}
-
-/// Create and fully populate a fixed-size blob for read-heavy scenarios.
-pub(crate) async fn prepare_prefilled_blob<S>(
-    storage: &S,
-    environment: &Environment,
-    name: &[u8],
-    file_size: u64,
-    seed: u64,
-) -> Result<(), String>
-where
-    S: Storage,
-{
-    let (blob, _) = storage
-        .open(PARTITION, name)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.resize(file_size)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.sync().await.map_err(|err| err.to_string())?;
-    environment
-        .preallocate_blob(PARTITION, name)
-        .map_err(|err| {
-            format!(
-                "failed to preallocate {}: {err}",
-                environment.root().display()
-            )
-        })?;
-
-    let fill_chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(crate::config::DEFAULT_IO_SIZE);
-    let mut offset = 0u64;
-    while offset < file_size {
-        let remaining = (file_size - offset) as usize;
-        let len = remaining.min(fill_chunk_size);
-        let payload = payload_bytes(len, seed ^ offset);
-        blob.write_at(offset, payload)
-            .await
-            .map_err(|err| err.to_string())?;
-        offset += len as u64;
-    }
-    blob.sync().await.map_err(|err| err.to_string())?;
-    Ok(())
-}
-
-/// Create a fixed-size preallocated blob for overwrite workloads.
-pub(crate) async fn prepare_preallocated_blob<S>(
-    storage: &S,
-    environment: &Environment,
-    name: &[u8],
-    file_size: u64,
-) -> Result<(), String>
-where
-    S: Storage,
-{
-    let (blob, _) = storage
-        .open(PARTITION, name)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.resize(file_size)
-        .await
-        .map_err(|err| err.to_string())?;
-    blob.sync().await.map_err(|err| err.to_string())?;
-    environment
-        .preallocate_blob(PARTITION, name)
-        .map_err(|err| {
-            format!(
-                "failed to preallocate {}: {err}",
-                environment.root().display()
-            )
-        })?;
-    Ok(())
-}
-
-/// Evict a blob from the page cache for a cold-cache benchmark.
-pub(crate) fn prepare_cold_read_cache(
-    environment: &Environment,
-    name: &[u8],
-) -> Result<(), String> {
-    environment
-        .evict_blob_cache(PARTITION, name)
-        .map_err(|err| format!("failed to evict file cache: {err}"))?;
-    Ok(())
 }
 
 /// Warm a sequential-read workload by replaying one full strided pass.
@@ -292,7 +165,7 @@ pub(crate) async fn run_sequential_write_worker<B>(
     total_blocks: u64,
     worker_id: usize,
     inflight: usize,
-    payload: WritePayload,
+    payload: IoBufs,
     sync_mode: SyncMode,
 ) -> Result<WorkerStats, String>
 where
@@ -301,11 +174,14 @@ where
     let mut stats = WorkerStats::default();
     let mut block = worker_id as u64 % total_blocks;
     let mut writes_since_sync = 0u64;
-    let witness = payload.len() as u64;
+    let payload_len = payload.remaining();
+    let witness = payload_len as u64;
     while should_continue(deadline, stats.ops) {
-        let offset = block * payload.len() as u64;
+        let offset = block * payload_len as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        payload.write_to(&blob, offset).await?;
+        blob.write_at(offset, payload.clone())
+            .await
+            .map_err(|err| err.to_string())?;
         writes_since_sync += 1;
         if let SyncMode::Every(every) = sync_mode {
             if writes_since_sync == every {
@@ -314,9 +190,9 @@ where
             }
         }
         if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload.len() as u64, witness);
+            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
         } else {
-            stats.record(payload.len() as u64, witness);
+            stats.record(payload_len as u64, witness);
         }
         block = (block + inflight as u64) % total_blocks;
     }
@@ -328,7 +204,7 @@ pub(crate) async fn run_random_write_worker<B>(
     blob: B,
     deadline: Instant,
     shard: BlockShard,
-    payload: WritePayload,
+    payload: IoBufs,
     sync_mode: SyncMode,
     seed: u64,
     io_size: usize,
@@ -339,13 +215,16 @@ where
     let mut stats = WorkerStats::default();
     let mut state = seed;
     let mut writes_since_sync = 0u64;
-    let witness = payload.len() as u64;
+    let payload_len = payload.remaining();
+    let witness = payload_len as u64;
     while should_continue(deadline, stats.ops) {
         let local_block = next_random_block(&mut state, shard.blocks);
         let block = shard.start_block + local_block;
         let offset = block * io_size as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        payload.write_to(&blob, offset).await?;
+        blob.write_at(offset, payload.clone())
+            .await
+            .map_err(|err| err.to_string())?;
         writes_since_sync += 1;
         if let SyncMode::Every(every) = sync_mode {
             if writes_since_sync == every {
@@ -354,9 +233,9 @@ where
             }
         }
         if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload.len() as u64, witness);
+            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
         } else {
-            stats.record(payload.len() as u64, witness);
+            stats.record(payload_len as u64, witness);
         }
     }
     Ok(stats)
@@ -367,7 +246,7 @@ pub(crate) async fn run_append_writer<B>(
     blob: B,
     deadline: Instant,
     starting_offset: u64,
-    payload: WritePayload,
+    payload: IoBufs,
     sync_mode: SyncMode,
 ) -> Result<WorkerStats, String>
 where
@@ -389,7 +268,7 @@ pub(crate) async fn run_append_writer_with_frontier<B>(
     blob: B,
     deadline: Instant,
     starting_offset: u64,
-    payload: WritePayload,
+    payload: IoBufs,
     sync_mode: SyncMode,
     visible_len: Arc<AtomicU64>,
 ) -> Result<WorkerStats, String>
@@ -399,11 +278,14 @@ where
     let mut stats = WorkerStats::default();
     let mut writes_since_sync = 0u64;
     let mut offset = starting_offset;
-    let witness = payload.len() as u64;
+    let payload_len = payload.remaining();
+    let witness = payload_len as u64;
     while should_continue(deadline, stats.ops) {
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        payload.write_to(&blob, offset).await?;
-        offset += payload.len() as u64;
+        blob.write_at(offset, payload.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+        offset += payload_len as u64;
         visible_len.store(offset, Ordering::Release);
         writes_since_sync += 1;
         if let SyncMode::Every(every) = sync_mode {
@@ -413,9 +295,9 @@ where
             }
         }
         if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload.len() as u64, witness);
+            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
         } else {
-            stats.record(payload.len() as u64, witness);
+            stats.record(payload_len as u64, witness);
         }
     }
     Ok(stats)
@@ -484,38 +366,6 @@ pub(crate) fn build_worker_shards(
     Ok(shards)
 }
 
-/// Build a write payload according to the configured shape.
-pub(crate) fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> WritePayload {
-    match shape {
-        WriteShape::Contiguous => WritePayload::Contiguous(payload_bytes(io_size, seed)),
-        WriteShape::Vectored => WritePayload::Vectored(vectored_payload(io_size, seed)),
-    }
-}
-
-/// Create a deterministic contiguous payload.
-fn payload_bytes(size: usize, seed: u64) -> Bytes {
-    let mut bytes = vec![0u8; size];
-    seeded_rng(size, seed).fill_bytes(&mut bytes);
-    Bytes::from(bytes)
-}
-
-/// Create a deterministic four-buffer vectored payload.
-fn vectored_payload(size: usize, seed: u64) -> IoBufs {
-    const CHUNKS: usize = 4;
-    let base = size / CHUNKS;
-    let remainder = size % CHUNKS;
-    let mut rng = seeded_rng(size, seed);
-    let chunks = (0..CHUNKS)
-        .map(|idx| {
-            let len = base + usize::from(idx < remainder);
-            let mut chunk = vec![0u8; len];
-            rng.fill_bytes(&mut chunk);
-            IoBuf::from(chunk)
-        })
-        .collect::<Vec<_>>();
-    IoBufs::from(chunks)
-}
-
 /// Allocate a reusable read buffer.
 fn reusable_buffer(size: usize) -> IoBufsMut {
     IoBufsMut::from(IoBufMut::with_capacity(size))
@@ -535,11 +385,6 @@ const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
     (*state >> 32) % total_blocks
-}
-
-/// Deterministic RNG used for benchmark payloads.
-fn seeded_rng(size: usize, discriminator: u64) -> StdRng {
-    StdRng::seed_from_u64((size as u64).rotate_left(17) ^ discriminator)
 }
 
 /// Return whether another timed operation should begin.

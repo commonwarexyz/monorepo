@@ -2,7 +2,7 @@
 
 use crate::{
     config::{Config, OutputFormat},
-    environment::Environment,
+    filesystem::backend_name,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -102,10 +102,10 @@ pub(crate) fn summarize_operation(mut stats: WorkerStats, elapsed: Duration) -> 
 }
 
 /// Print a concise human-readable report.
-pub(crate) fn print_human_report(cfg: &Config, environment: &Environment, report: &ScenarioReport) {
+pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
     println!(
         "backend={} scenario={} elapsed_s={:.3}",
-        environment.backend(),
+        backend_name(),
         cfg.scenario.name(),
         report.elapsed.as_secs_f64(),
     );
@@ -150,9 +150,9 @@ pub(crate) fn print_human_report(cfg: &Config, environment: &Environment, report
 }
 
 /// Print a single JSON object for downstream processing.
-pub(crate) fn print_json_report(cfg: &Config, environment: &Environment, report: &ScenarioReport) {
+pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
     let json = json!({
-        "backend": environment.backend(),
+        "backend": backend_name(),
         "scenario": cfg.scenario.name(),
         "duration_seconds": cfg.duration.as_secs(),
         "io_size": cfg.io_size,
