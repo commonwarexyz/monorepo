@@ -3528,10 +3528,12 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
-            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(move |_, d| {
-                tracker.lock().push(d);
-                true
-            })));
+            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(
+                move |_, d| {
+                    tracker.lock().push(d);
+                    true
+                },
+            )));
             actor.start();
 
             let voter_cfg = Config {
@@ -3664,10 +3666,12 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app2"), app_cfg);
-            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(move |_, d| {
-                tracker.lock().push(d);
-                true
-            })));
+            actor.set_certifier(mocks::application::Certifier::Custom(Box::new(
+                move |_, d| {
+                    tracker.lock().push(d);
+                    true
+                },
+            )));
             actor.start();
 
             let voter_cfg = Config {

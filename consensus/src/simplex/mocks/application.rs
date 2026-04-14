@@ -388,7 +388,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
-    async fn certify(&mut self, round: Round, payload: H::Digest, _contents: Bytes) -> Option<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        payload: H::Digest,
+        _contents: Bytes,
+    ) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(&mut self.context);
         self.context
