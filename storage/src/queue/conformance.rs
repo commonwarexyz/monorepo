@@ -37,7 +37,7 @@ impl Conformance for QueueConformance {
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue = Queue::<_, Vec<u8>>::init(
                 context.with_label("queue"),
-                config(seed, page_cache.clone()),
+                config(seed, page_cache),
             )
             .await
             .unwrap();
@@ -66,6 +66,8 @@ impl Conformance for QueueConformance {
             drop(queue);
 
             // Re-open and verify surviving items are readable
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue =
                 Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, page_cache))
                     .await

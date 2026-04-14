@@ -477,14 +477,15 @@ mod tests {
     fn test_append_commit_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let cfg = test_config("test_batch_persist", page_cache);
-
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_batch_persist", page_cache),
+                )
+                .await
+                .unwrap();
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
@@ -493,9 +494,17 @@ mod tests {
             }
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("cache2"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_batch_persist", page_cache),
+                )
+                .await
+                .unwrap();
                 assert_eq!(queue.size().await, 4);
                 for i in 0..4 {
                     let (pos, item) = queue.dequeue().await.unwrap().unwrap();
@@ -859,15 +868,16 @@ mod tests {
         // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let cfg = test_config("test_recovery_replay", page_cache);
-
             // First session: enqueue items, ack some (but not enough to prune)
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_recovery_replay", page_cache),
+                )
+                .await
+                .unwrap();
 
                 for i in 0..5u8 {
                     queue.enqueue(vec![i]).await.unwrap();
@@ -884,10 +894,17 @@ mod tests {
 
             // Second session: all items are re-delivered (no pruning occurred)
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("cache2"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_recovery_replay", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // ack_floor = pruning_boundary = 0 (nothing was pruned)
                 assert_eq!(queue.ack_floor(), 0);
@@ -906,15 +923,16 @@ mod tests {
         // Items pruned before crash are not re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let cfg = test_config("test_recovery_pruned", page_cache);
-
             // First session: enqueue many items, ack enough to trigger pruning
             let expected_pruning_boundary = {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_recovery_pruned", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // Enqueue items across multiple sections (items_per_section = 10)
                 for i in 0..25u8 {
@@ -939,10 +957,17 @@ mod tests {
 
             // Second session: only non-pruned items are available
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("cache2"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_recovery_pruned", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // ack_floor = pruning_boundary (items 0-9 were pruned)
                 let pruning_boundary = queue.journal.bounds().await.start;
@@ -1057,15 +1082,16 @@ mod tests {
     fn test_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let cfg = test_config("test_persist", page_cache);
-
             // First session
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_persist", page_cache),
+                )
+                .await
+                .unwrap();
 
                 queue.enqueue(b"item0".to_vec()).await.unwrap();
                 queue.enqueue(b"item1".to_vec()).await.unwrap();
@@ -1074,10 +1100,17 @@ mod tests {
 
             // Second session - data should persist
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("cache2"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_persist", page_cache),
+                )
+                .await
+                .unwrap();
 
                 assert_eq!(queue.size().await, 2);
 
