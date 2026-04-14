@@ -38,6 +38,11 @@ Rules
    - The params string is extracted via `split("/", 2)` so only the first `/` matters
    - Multiple `/` in params may indicate unclear parameter formatting
 
+5. Names must not be truncated by criterion
+   - Criterion truncates names longer than 100 chars and appends `...`
+   - This causes collisions and broken dashboard entries
+   - Shorten names so they stay under 100 characters
+
 How it works
 ------------
 This script parses benchmark names from benchmark command output and validates
@@ -97,6 +102,12 @@ def read_inputs(paths: list[str]) -> list[str]:
 def validate_benchmark_name(name: str) -> list[str]:
     """Validate a single benchmark name and return any violations."""
     violations = []
+
+    if re.search(r"\.\.\.\s*(#\d+)?$", name):
+        violations.append(
+            f"`{name}`: Name was truncated by criterion (exceeds 100-char limit). "
+            f"Shorten the name to avoid collisions"
+        )
 
     # Parse the name: module::function/params
     if "::" not in name:
@@ -170,6 +181,7 @@ def main() -> int:
         print("2. Use `key=value` format in benchmark params (e.g., `group=g1`)")
         print("3. Separate parameters with spaces, not commas")
         print("4. Use only one `/` separator (between function name and params)")
+        print("5. Names must not be truncated (keep under 100 chars)")
         return 1
 
     print(f"Checked {len(benchmarks)} benchmarks, all naming conventions followed.")

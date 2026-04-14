@@ -12,7 +12,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
 
-fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
+fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
@@ -24,13 +24,13 @@ fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
                     let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
-                            "{}/mode={:?} n={} t={} invalid={} conc={}",
+                            "{}/n={} t={} invalid={} conc={} mode={:?}",
                             module_path!(),
-                            mode,
                             n,
                             t,
                             invalid,
-                            concurrency
+                            concurrency,
+                            mode
                         ),
                         |b| {
                             b.iter_batched(
@@ -118,5 +118,5 @@ fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_threshold_batch_verify_same_message_precomputed
+    targets = bench_threshold_batch_verify_same_message_pre
 }
