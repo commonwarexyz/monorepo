@@ -381,6 +381,7 @@ where
         application::Application::new(context.with_label("application"), app_cfg);
     actor.start();
 
+    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
     let blocker = oracle.control(validator.clone());
     let engine_cfg = config::Config {
         blocker,
@@ -401,7 +402,7 @@ where
         fetch_concurrent: 1,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache,
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
@@ -615,6 +616,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 application::Application::new(primary_context.with_label("application"), app_cfg);
             actor.start();
 
+            let page_cache = CacheRef::from_pooler(
+                primary_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let blocker = oracle.control(validator.clone());
             let engine_cfg = config::Config {
                 blocker,
@@ -635,11 +641,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    primary_context.clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache,
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };
