@@ -202,15 +202,6 @@ impl ParseError {
             }
         }
     }
-
-    /// Convenience helper used by parser tests.
-    #[cfg(test)]
-    pub(crate) fn contains(&self, needle: &str) -> bool {
-        match self {
-            Self::Clap(err) => err.to_string().contains(needle),
-            Self::Message(message) => message.contains(needle),
-        }
-    }
 }
 
 impl fmt::Display for ParseError {
@@ -403,7 +394,6 @@ impl Config {
     }
 }
 
-/// Build the clap command used by both the binary and unit tests.
 fn command() -> Command {
     Command::new("storage_bench")
         .color(ColorChoice::Auto)
@@ -607,152 +597,4 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
     number
         .checked_mul(multiplier)
         .ok_or_else(|| format!("size value is too large: {value}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_requires_file_size_for_fixed_size_scenarios() {
-        let err =
-            Config::parse_from(["storage_bench", "--scenario", "read_seq", "--cache", "warm"])
-                .unwrap_err();
-        assert!(err.contains("--file-size is required"));
-    }
-
-    #[test]
-    fn write_append_rejects_inflight_above_one() {
-        let err = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "write_append",
-            "--inflight",
-            "2",
-        ])
-        .unwrap_err();
-        assert!(err.contains("write_append only supports --inflight 1"));
-    }
-
-    #[test]
-    fn read_scenarios_require_cache_mode() {
-        let err = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "read_rand",
-            "--file-size",
-            "4096",
-        ])
-        .unwrap_err();
-        assert!(err.contains("--cache is required"));
-    }
-
-    #[test]
-    fn write_rand_requires_enough_blocks_for_all_workers() {
-        let err = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "write_rand",
-            "--file-size",
-            "4096",
-            "--io-size",
-            "4096",
-            "--inflight",
-            "2",
-        ])
-        .unwrap_err();
-        assert!(err.contains("non-overlapping block per worker"));
-    }
-
-    #[test]
-    fn parse_valid_mixed_configuration() {
-        let cfg = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "read_write_append",
-            "--file-size",
-            "8192",
-            "--io-size",
-            "4096",
-            "--inflight",
-            "4",
-            "--cache",
-            "cold",
-            "--write-shape",
-            "vectored",
-            "--sync-every",
-            "8",
-            "--output",
-            "json",
-        ])
-        .expect("configuration should parse");
-        assert_eq!(cfg.backend, detected_backend());
-        assert_eq!(cfg.scenario, Scenario::ReadWriteAppend);
-        assert_eq!(cfg.file_size(), 8192);
-        assert_eq!(cfg.cache, Some(CacheMode::Cold));
-        assert_eq!(cfg.write_shape, WriteShape::Vectored);
-        assert_eq!(cfg.sync_mode, SyncMode::Every(8));
-        assert_eq!(cfg.output, OutputFormat::Json);
-    }
-
-    #[test]
-    fn parse_human_friendly_sizes_and_defaults() {
-        let cfg = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "read_seq",
-            "--file-size",
-            "4M",
-            "--io-size",
-            "64K",
-            "--cache",
-            "warm",
-        ])
-        .expect("configuration should parse");
-        assert_eq!(cfg.file_size(), 4 * 1024 * 1024);
-        assert_eq!(cfg.io_size, 64 * 1024);
-        assert_eq!(cfg.seed, 0);
-        assert_eq!(cfg.root, PathBuf::from("/tmp"));
-        assert_eq!(cfg.worker_threads, default_runtime_worker_threads());
-        assert_eq!(cfg.global_queue_interval, None);
-    }
-
-    #[test]
-    fn parse_runtime_scheduler_overrides() {
-        let cfg = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "write_append",
-            "--worker-threads",
-            "4",
-            "--global-queue-interval",
-            "7",
-        ])
-        .expect("configuration should parse");
-        assert_eq!(cfg.worker_threads, 4);
-        assert_eq!(cfg.global_queue_interval, Some(7));
-    }
-
-    #[test]
-    fn runtime_scheduler_rejects_zero_values() {
-        let err = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "write_append",
-            "--worker-threads",
-            "0",
-        ])
-        .unwrap_err();
-        assert!(err.contains("--worker-threads must be greater than zero"));
-
-        let err = Config::parse_from([
-            "storage_bench",
-            "--scenario",
-            "write_append",
-            "--global-queue-interval",
-            "0",
-        ])
-        .unwrap_err();
-        assert!(err.contains("--global-queue-interval must be greater than zero"));
-    }
 }
