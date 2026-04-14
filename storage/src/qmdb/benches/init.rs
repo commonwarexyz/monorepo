@@ -58,6 +58,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
+                        // Setup: populate database (once, on first sample).
                         if !setup_done {
                             commonware_runtime::tokio::Runner::new(Config::default()).start(
                                 |ctx| async move {
@@ -74,6 +75,8 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                             );
                             setup_done = true;
                         }
+
+                        // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let af = any_fix_cfg(&ctx);
@@ -90,6 +93,8 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         });
                     },
                 );
+
+                // Cleanup: destroy database.
                 if setup_done {
                     commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                         |ctx| async move {
@@ -118,6 +123,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
+                        // Setup: populate database (once, on first sample).
                         if !setup_done {
                             commonware_runtime::tokio::Runner::new(Config::default()).start(
                                 |ctx| async move {
@@ -134,6 +140,8 @@ fn bench_var_value_init(c: &mut Criterion) {
                             );
                             setup_done = true;
                         }
+
+                        // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let av = any_var_vec_cfg(&ctx);
@@ -148,6 +156,8 @@ fn bench_var_value_init(c: &mut Criterion) {
                         });
                     },
                 );
+
+                // Cleanup: destroy database.
                 if setup_done {
                     commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                         |ctx| async move {
