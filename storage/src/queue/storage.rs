@@ -367,22 +367,20 @@ mod tests {
     use super::*;
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
-    };
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+    fn test_config(partition: &str, page_cache: CacheRef) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
             write_buffer: NZUsize!(4096),
         }
     }
@@ -391,7 +389,9 @@ mod tests {
     fn test_basic_enqueue_dequeue() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_basic", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_basic", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -439,7 +439,9 @@ mod tests {
     fn test_append_commit_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_batch", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_batch", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -475,12 +477,15 @@ mod tests {
     fn test_append_commit_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_batch_persist", &context);
-
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_batch_persist", page_cache),
+                )
+                .await
+                .unwrap();
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
@@ -489,9 +494,14 @@ mod tests {
             }
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_batch_persist", page_cache),
+                )
+                .await
+                .unwrap();
                 assert_eq!(queue.size().await, 4);
                 for i in 0..4 {
                     let (pos, item) = queue.dequeue().await.unwrap().unwrap();
@@ -506,7 +516,9 @@ mod tests {
     fn test_sequential_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_seq_ack", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_seq_ack", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -534,7 +546,9 @@ mod tests {
     fn test_out_of_order_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ooo_ack", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ooo_ack", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -575,7 +589,9 @@ mod tests {
     fn test_ack_up_to() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_up_to", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -608,7 +624,9 @@ mod tests {
     fn test_ack_up_to_with_existing_acks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_existing", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_up_to_existing", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -639,7 +657,9 @@ mod tests {
     fn test_ack_up_to_coalesces_with_acked_above() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_coalesce", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_up_to_coalesce", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -665,7 +685,9 @@ mod tests {
     fn test_ack_up_to_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_errors", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_up_to_errors", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -691,7 +713,9 @@ mod tests {
     fn test_dequeue_skips_acked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_skip_acked", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_skip_acked", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -726,7 +750,9 @@ mod tests {
     fn test_ack_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_errors", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_errors", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -751,7 +777,9 @@ mod tests {
     fn test_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_prune", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_prune", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -780,7 +808,9 @@ mod tests {
     fn test_ack_across_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_multi_prune", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_multi_prune", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -835,13 +865,16 @@ mod tests {
         // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_recovery_replay", &context);
-
             // First session: enqueue items, ack some (but not enough to prune)
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_recovery_replay", page_cache),
+                )
+                .await
+                .unwrap();
 
                 for i in 0..5u8 {
                     queue.enqueue(vec![i]).await.unwrap();
@@ -858,10 +891,14 @@ mod tests {
 
             // Second session: all items are re-delivered (no pruning occurred)
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_recovery_replay", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // ack_floor = pruning_boundary = 0 (nothing was pruned)
                 assert_eq!(queue.ack_floor(), 0);
@@ -880,13 +917,16 @@ mod tests {
         // Items pruned before crash are not re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_recovery_pruned", &context);
-
             // First session: enqueue many items, ack enough to trigger pruning
             let expected_pruning_boundary = {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_recovery_pruned", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // Enqueue items across multiple sections (items_per_section = 10)
                 for i in 0..25u8 {
@@ -911,10 +951,14 @@ mod tests {
 
             // Second session: only non-pruned items are available
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_recovery_pruned", page_cache),
+                )
+                .await
+                .unwrap();
 
                 // ack_floor = pruning_boundary (items 0-9 were pruned)
                 let pruning_boundary = queue.journal.bounds().await.start;
@@ -937,7 +981,9 @@ mod tests {
     fn test_reset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_reset", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_reset", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -968,7 +1014,9 @@ mod tests {
     fn test_reset_with_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_reset_ack", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_reset_ack", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1006,7 +1054,9 @@ mod tests {
     fn test_empty_queue_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_empty", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_empty", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1023,13 +1073,16 @@ mod tests {
     fn test_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_persist", &context);
-
             // First session
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    test_config("test_persist", page_cache),
+                )
+                .await
+                .unwrap();
 
                 queue.enqueue(b"item0".to_vec()).await.unwrap();
                 queue.enqueue(b"item1".to_vec()).await.unwrap();
@@ -1038,10 +1091,14 @@ mod tests {
 
             // Second session - data should persist
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    test_config("test_persist", page_cache),
+                )
+                .await
+                .unwrap();
 
                 assert_eq!(queue.size().await, 2);
 
@@ -1058,7 +1115,9 @@ mod tests {
     fn test_large_queue_with_sparse_acks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_sparse", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_sparse", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1089,7 +1148,9 @@ mod tests {
     fn test_acked_above_coalescing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_coalesce", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_coalesce", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1119,7 +1180,9 @@ mod tests {
     fn test_ack_up_to_past_read_pos() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_past_read_pos", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test_ack_up_to_past_read_pos", page_cache);
             let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1149,7 +1212,9 @@ mod tests {
     fn test_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test-metrics", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test-metrics", page_cache);
             let ctx = context.with_label("test_metrics");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
@@ -1253,7 +1318,9 @@ mod tests {
     fn test_metrics_next_updates_on_fast_forward() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test-ff", &context);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = test_config("test-ff", page_cache);
             let ctx = context.with_label("test_ff");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 

@@ -157,7 +157,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        Metrics as _, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -166,11 +166,10 @@ pub(crate) mod test {
         sync::Arc,
     };
 
-    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
+    pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    pub(crate) fn create_test_config(seed: u64, page_cache: CacheRef) -> VarConfig {
         VariableConfig {
             merkle_config: crate::mmr::journaled::Config {
                 journal_partition: format!("journal-{seed}"),
@@ -202,7 +201,9 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let config = create_test_config(seed, page_cache);
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -268,7 +269,9 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = create_test_config(0, &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = create_test_config(0, page_cache);
         AnyTest::init(context, cfg).await.unwrap()
     }
 

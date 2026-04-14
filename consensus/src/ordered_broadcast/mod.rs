@@ -240,6 +240,8 @@ mod tests {
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
+            let journal_page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let engine = Engine::new(
                 context.with_label("engine"),
                 Config {
@@ -264,7 +266,7 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache,
                     strategy: Sequential,
                 },
             );
@@ -772,6 +774,8 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
+                let journal_page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
@@ -796,11 +800,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        journal_page_cache,
                         strategy: Sequential,
                     },
                 );
@@ -939,6 +939,8 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
+                let journal_page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
@@ -960,11 +962,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        journal_page_cache,
                         strategy: Sequential,
                     },
                 );
@@ -992,6 +990,8 @@ mod tests {
                 let validators_provider = mocks::Provider::new();
                 assert!(validators_provider.register(epoch, fixture.verifier.clone()));
 
+                let journal_page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
@@ -1018,11 +1018,7 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        journal_page_cache,
                         strategy: Sequential,
                     },
                 );

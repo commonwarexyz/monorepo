@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::mmr::Family,
@@ -91,8 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(test_name: &str, page_cache: CacheRef) -> Config<TwoCap> {
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
@@ -124,8 +123,9 @@ async fn test_sync<
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
+    page_cache: CacheRef,
 ) -> bool {
-    let db_config = test_config(test_name, &context);
+    let db_config = test_config(test_name, page_cache);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
@@ -161,7 +161,8 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config(TEST_NAME, &context);
+        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
+        let cfg = test_config(TEST_NAME, page_cache.clone());
         let mut db = FixedDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
@@ -246,6 +247,7 @@ fn fuzz(mut input: FuzzInput) {
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
                         sync_id,
+                        page_cache.clone(),
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
@@ -258,7 +260,7 @@ fn fuzz(mut input: FuzzInput) {
                     pending_writes.clear();
                     drop(db);
 
-                    let cfg = test_config(TEST_NAME, &context);
+                    let cfg = test_config(TEST_NAME, page_cache.clone());
                     db = FixedDb::init(
                         context
                             .with_label("db")

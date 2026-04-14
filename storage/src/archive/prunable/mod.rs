@@ -126,7 +126,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -143,7 +143,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo-index".into(),
-//!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: CacheRef::from_pooler(context.with_label("cache"), NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -244,14 +244,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let first_context = context.with_label("first");
+            let key_page_cache = CacheRef::from_pooler(
+                first_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &first_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache,
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -260,7 +261,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(first_context, cfg.clone())
+            let mut archive = Archive::init(first_context, cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -280,14 +281,15 @@ mod tests {
             // Initialize the archive again without compression.
             // Index journal replay succeeds (no compression), but value reads will fail.
             let second_context = context.with_label("second");
+            let key_page_cache = CacheRef::from_pooler(
+                second_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &second_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache,
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -296,12 +298,9 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                second_context,
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(second_context, cfg)
+                .await
+                .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
@@ -325,7 +324,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -334,7 +337,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -390,7 +393,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -399,7 +406,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -449,7 +456,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -458,7 +469,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -535,14 +546,15 @@ mod tests {
             // Initialize the archive
             let items_per_section = 256u64;
             let init1_context = context.with_label("init1");
+            let key_page_cache = CacheRef::from_pooler(
+                init1_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &init1_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache,
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -551,7 +563,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(init1_context, cfg.clone())
+            let mut archive = Archive::init(init1_context, cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -601,14 +613,15 @@ mod tests {
 
             // Reinitialize the archive
             let init2_context = context.with_label("init2");
+            let key_page_cache = CacheRef::from_pooler(
+                init2_context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(
-                    &init2_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache,
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -617,12 +630,9 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
-                init2_context,
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(init2_context, cfg)
+                .await
+                .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -708,7 +718,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -745,7 +759,11 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.with_label("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,

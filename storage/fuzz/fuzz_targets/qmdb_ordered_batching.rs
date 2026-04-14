@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
@@ -84,7 +84,11 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = data.operations.clone();
         async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let page_cache = CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            );
             let cfg = Config::<EightCap> {
                 merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),

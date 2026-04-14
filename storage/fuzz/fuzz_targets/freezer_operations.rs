@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -53,7 +53,11 @@ fn fuzz(input: FuzzInput) {
         let cfg = Config {
             key_partition: "fuzz-key".into(),
             key_write_buffer: NZUsize!(1024 * 1024),
-            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
             value_partition: "fuzz-value".into(),
             value_compression: None,
             value_write_buffer: NZUsize!(1024 * 1024),

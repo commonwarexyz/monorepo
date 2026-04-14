@@ -168,13 +168,14 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        Metrics as _, Runner as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
+    use std::num::{NonZeroU16, NonZeroUsize};
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: u16 = 103;
-    const PAGE_CACHE_SIZE: usize = 13;
+    pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(103);
+    pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(13);
 
     pub(crate) type VarConfig =
         VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
@@ -183,9 +184,7 @@ pub(crate) mod test {
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache =
-            CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
+    pub(crate) fn create_test_config(seed: u64, page_cache: CacheRef) -> VarConfig {
         VariableConfig {
             merkle_config: crate::mmr::journaled::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
@@ -210,7 +209,9 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let config = create_test_config(seed, page_cache);
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -286,7 +287,12 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        let page_cache = CacheRef::from_pooler(
+            context.clone(),
+            crate::qmdb::any::test::PAGE_SIZE,
+            crate::qmdb::any::test::PAGE_CACHE_SIZE,
+        );
+        let cfg = variable_db_config("fixed-bytes-var-partition", page_cache);
         VariableDb::init(context, cfg).await.unwrap()
     }
 

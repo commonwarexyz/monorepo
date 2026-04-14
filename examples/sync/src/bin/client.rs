@@ -6,7 +6,8 @@
 use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
+    buffer::paged::CacheRef, tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner,
+    Spawner, Storage,
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
@@ -15,7 +16,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
-    DurationExt,
+    DurationExt, NZUsize, NZU16,
 };
 use rand::Rng;
 use std::{
@@ -123,7 +124,9 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any::create_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = any::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -189,7 +192,9 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = current::create_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = current::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -252,7 +257,9 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = immutable::create_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = immutable::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {

@@ -143,7 +143,7 @@ pub(crate) mod test {
         },
         qmdb::{
             any::{
-                test::fixed_db_config,
+                test::{fixed_db_config, PAGE_CACHE_SIZE, PAGE_SIZE},
                 unordered::{fixed::Operation, Update},
             },
             verify_proof,
@@ -154,6 +154,7 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics, Runner as _,
     };
@@ -181,7 +182,9 @@ pub(crate) mod test {
     async fn open_db_generic<F: crate::merkle::Family>(
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
-        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = fixed_db_config::<TwoCap>("partition", page_cache);
         crate::qmdb::any::init(context, cfg, None, |_, _| {})
             .await
             .unwrap()
@@ -190,7 +193,9 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), page_cache);
         AnyTest::init(context, cfg).await.unwrap()
     }
 

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},
@@ -93,7 +93,7 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    page_cache: CacheRef,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log: VConfig {
@@ -102,7 +102,7 @@ fn test_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache,
         },
         translator: TwoCap,
     }
@@ -112,7 +112,12 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("store-fuzz-test", &context);
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
+        let cfg = test_config("store-fuzz-test", page_cache.clone());
         let mut db = StoreDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init db");
@@ -178,7 +183,7 @@ fn fuzz(input: FuzzInput) {
                     pending.clear();
                     drop(db);
 
-                    let cfg = test_config("store-fuzz-test", &context);
+                    let cfg = test_config("store-fuzz-test", page_cache.clone());
                     db = StoreDb::init(
                         context
                             .with_label("db")

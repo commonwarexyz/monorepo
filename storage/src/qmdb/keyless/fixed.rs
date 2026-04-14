@@ -49,17 +49,14 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
-    };
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config(suffix: &str, page_cache: CacheRef) -> Config {
         Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),
@@ -81,7 +78,9 @@ mod test {
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
-        let cfg = db_config("partition", &context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = db_config("partition", page_cache);
         TestDb::init(context, cfg).await.unwrap()
     }
 

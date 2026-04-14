@@ -208,7 +208,8 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
         let items_per_section = NonZeroU64::new(10).unwrap();
@@ -328,7 +329,8 @@ mod tests {
             .await
             .expect("failed to sync cache metadata");
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.with_label("seed_notarized"),
@@ -806,9 +808,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // No network links: forces repair to rely on local cache only.
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.with_label("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
 
             let recovering_validator = participants[0].clone();
 
@@ -831,7 +836,7 @@ mod tests {
             // recovering validator can find it locally during trailing repair,
             // without needing a peer to serve it.
             seed_cache_block(
-                context.clone(),
+                context.with_label("seed"),
                 &partition_prefix,
                 Epoch::zero(),
                 View::new(2),
@@ -843,7 +848,7 @@ mod tests {
             // finalization for height 2 but no block_two in the archive.
             // block_two only exists in the cache's notarized storage.
             seed_inconsistent_restart_state(
-                context.clone(),
+                context.with_label("seed_state"),
                 &partition_prefix,
                 &[block_one],
                 &[(Height::new(2), finalization_two)],
@@ -876,17 +881,13 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let prefix = "test-cache";
-            let make_cfg = |label: &str| cache::Config {
+            let make_cfg = |page_cache: CacheRef| cache::Config {
                 partition_prefix: prefix.to_string(),
                 prunable_items_per_section: NZU64!(10),
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(
-                    &context.with_label(label),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: page_cache,
             };
 
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
@@ -895,9 +896,14 @@ mod tests {
 
             // Write a block into the cache.
             {
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("write_cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                    context.with_label("write"),
-                    make_cfg("cfg1"),
+                    context.with_label("manager"),
+                    make_cfg(page_cache),
                     (),
                 )
                 .await;
@@ -905,10 +911,11 @@ mod tests {
             }
 
             // Re-init the cache (simulating restart). find_block should fail
-            // before loading persisted epochs.
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("read_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.with_label("read"),
-                make_cfg("cfg2"),
+                context.with_label("manager_restarted"),
+                make_cfg(page_cache),
                 (),
             )
             .await;

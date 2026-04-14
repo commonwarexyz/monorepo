@@ -73,14 +73,21 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = JournalConfig {
+        let make_cfg = |ctx: &deterministic::Context, label: &str| JournalConfig {
             partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(
+                ctx.with_label(label),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
         };
 
-        let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+        let mut journal =
+            Journal::init(context.with_label("journal"), make_cfg(&context, "cache_0"))
+                .await
+                .unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
@@ -157,15 +164,15 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Restart => {
                     drop(journal);
+                    restarts += 1;
                     journal = Journal::init(
                         context
                             .with_label("journal")
                             .with_attribute("instance", restarts),
-                        cfg.clone(),
+                        make_cfg(&context, &format!("cache_{restarts}")),
                     )
                     .await
                     .unwrap();
-                    restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size().await;
                     oldest_retained_pos = journal.reader().await.bounds().start;
