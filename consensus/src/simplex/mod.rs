@@ -778,7 +778,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1040,7 +1041,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -1197,7 +1199,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -1379,7 +1385,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1501,7 +1508,8 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(me.clone());
-            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1636,7 +1644,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1869,7 +1878,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2035,7 +2045,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2237,7 +2248,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2435,7 +2447,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2688,7 +2701,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -2865,7 +2882,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3034,7 +3052,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3227,7 +3246,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3389,7 +3412,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3481,7 +3508,8 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(validator.clone());
-            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3706,7 +3734,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3860,7 +3892,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4031,7 +4067,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4168,7 +4208,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4332,7 +4373,8 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(participants[0].clone());
-            let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4552,7 +4594,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4907,7 +4950,11 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -5113,7 +5160,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5254,7 +5302,8 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5352,7 +5401,8 @@ mod tests {
                 actor.start();
                 reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
-                let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5846,7 +5896,11 @@ mod tests {
                         actor.start();
 
                         let blocker = oracle.control(validator.clone());
-                        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                        let page_cache = CacheRef::from_pooler(
+                            context.with_label("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        );
                         let cfg = config::Config {
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
@@ -5916,7 +5970,11 @@ mod tests {
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    let page_cache = CacheRef::from_pooler(
+                        context.with_label("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    );
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),

@@ -205,8 +205,11 @@ fn main() {
         );
 
         // Initialize consensus
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), NZU16!(16_384), NZUsize!(10_000));
+        let page_cache = CacheRef::from_pooler(
+            context.with_label("cache"),
+            NZU16!(16_384),
+            NZUsize!(10_000),
+        );
         let cfg = simplex::Config {
             scheme,
             elector: RoundRobin::<Sha256>::default(),
