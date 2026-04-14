@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, Metrics};
 
 // ===== Harness Implementations =====
 
@@ -41,8 +41,7 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
             fixed_config::<crate::translator::TwoCap>(suffix, page_cache)
         }
 
@@ -62,7 +61,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = Self::config("default", &ctx);
+            let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -112,8 +112,7 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
             variable_config::<crate::translator::TwoCap>(suffix, page_cache)
         }
 
@@ -133,7 +132,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = Self::config("default", &ctx);
+            let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -183,8 +183,7 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
             fixed_config::<crate::translator::OneCap>(suffix, page_cache)
         }
 
@@ -202,7 +201,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = Self::config("default", &ctx);
+            let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -252,8 +252,7 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            let page_cache = CacheRef::from_pooler(pooler.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        fn config(suffix: &str, page_cache: CacheRef) -> ConfigOf<Self> {
             variable_config::<crate::translator::OneCap>(suffix, page_cache)
         }
 
@@ -273,7 +272,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = Self::config("default", &ctx);
+            let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
