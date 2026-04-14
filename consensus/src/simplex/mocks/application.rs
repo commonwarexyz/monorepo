@@ -171,6 +171,8 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub propose_latency: Latency,
     pub verify_latency: Latency,
     pub certify_latency: Latency,
+
+    pub certifier: Certifier<H::Digest>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -190,7 +192,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     drop_verifications: bool,
-    should_certify: Certifier<H::Digest>,
+    certifier: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -240,7 +242,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 fail_verification: false,
                 drop_proposals: false,
                 drop_verifications: false,
-                should_certify: Certifier::Always,
+                certifier: cfg.certifier,
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
@@ -270,14 +272,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
         self.verify_observer = Some(observer);
-    }
-
-    /// Override the certifier used by this application. Must be called before
-    /// [`start`]. Honest applications default to [`Certifier::Always`]; tests
-    /// that need to model missing context (`Cancel`), a hanging certify
-    /// (`Pending`), or a custom predicate set it here.
-    pub fn set_certifier(&mut self, certifier: Certifier<H::Digest>) {
-        self.should_certify = certifier;
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -386,7 +380,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Use configured predicate to determine certification
-        match &self.should_certify {
+        match &self.certifier {
             Certifier::Always => Some(true),
             Certifier::Custom(func) => Some(func(round, payload)),
             Certifier::Cancel | Certifier::Pending => None,
@@ -462,7 +456,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
-                        } else if matches!(self.should_certify, Certifier::Pending) {
+                        } else if matches!(self.certifier, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.
                             // This simulates a certify that hangs indefinitely (e.g.,
                             // block never arrives for reconstruction).
