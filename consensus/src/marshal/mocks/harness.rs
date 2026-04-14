@@ -337,6 +337,8 @@ impl TestHarness for StandardHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -350,7 +352,7 @@ impl TestHarness for StandardHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
             strategy: Sequential,
         };
         let control = oracle.control(validator.clone());
@@ -366,7 +368,7 @@ impl TestHarness for StandardHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.with_label("resolver"), resolver_cfg, backfill);
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
@@ -376,7 +378,8 @@ impl TestHarness for StandardHarness {
             codec_config: (),
             peer_provider: oracle.manager(),
         };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
+        let (broadcast_engine, buffer) =
+            buffered::Engine::new(context.with_label("broadcast"), broadcast_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         broadcast_engine.start(network);
 
@@ -462,7 +465,7 @@ impl TestHarness for StandardHarness {
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         let (actor, mailbox, height) = Actor::init(
-            context.clone(),
+            context.with_label("actor"),
             finalizations_by_height,
             finalized_blocks,
             config,
@@ -596,7 +599,7 @@ impl TestHarness for StandardHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.with_label("resolver"), resolver_cfg, backfill);
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
@@ -606,7 +609,8 @@ impl TestHarness for StandardHarness {
             codec_config: (),
             peer_provider: oracle.manager(),
         };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
+        let (broadcast_engine, buffer) =
+            buffered::Engine::new(context.with_label("broadcast"), broadcast_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
         broadcast_engine.start(network);
 
@@ -1099,6 +1103,8 @@ impl TestHarness for CodingHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1112,7 +1118,7 @@ impl TestHarness for CodingHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
             strategy: Sequential,
         };
 
@@ -1129,7 +1135,7 @@ impl TestHarness for CodingHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.with_label("resolver"), resolver_cfg, backfill);
 
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
@@ -1225,12 +1231,13 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.with_label("shard"), shard_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
         let (actor, mailbox, height) = Actor::init(
-            context.clone(),
+            context.with_label("actor"),
             finalizations_by_height,
             finalized_blocks,
             config,
@@ -1387,7 +1394,7 @@ impl TestHarness for CodingHarness {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(context.with_label("resolver"), resolver_cfg, backfill);
 
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),
@@ -1402,7 +1409,8 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.with_label("shard"), shard_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
@@ -1443,7 +1451,7 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
 
         let (actor, mailbox, _) = Actor::init(
-            context.clone(),
+            context.with_label("actor"),
             finalizations_by_height,
             finalized_blocks,
             config,
@@ -1971,13 +1979,17 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let validator = participants[0].clone();
         let partition_prefix = format!("prune-test-{}", validator.clone());
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let init_marshal = |ctx: deterministic::Context| {
             let validator = validator.clone();
@@ -2151,10 +2163,15 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), peers.clone()).await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            peers.clone(),
+        )
+        .await;
 
-        let page_cache = CacheRef::from_pooler(context.clone(), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
             context.with_label("victim"),
             &oracle,
@@ -2265,9 +2282,12 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2339,9 +2359,12 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2432,9 +2455,12 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2516,9 +2542,12 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2723,9 +2752,12 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2807,9 +2839,12 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2882,9 +2917,12 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2974,9 +3012,12 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -3036,9 +3077,12 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -3121,9 +3165,12 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         // Set up two validators
         let setup0 = H::setup_validator(
@@ -3231,9 +3278,12 @@ pub fn ancestry_stream<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -3300,9 +3350,12 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         // Set up two validators
         let mut handles = Vec::new();
@@ -3430,9 +3483,12 @@ pub fn init_processed_height<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let validator = participants[0].clone();
 
@@ -3516,9 +3572,12 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.with_label("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         // Set up one validator
         let validator = participants[0].clone();
