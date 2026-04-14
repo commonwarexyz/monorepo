@@ -85,7 +85,8 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );
-                            let thread_pool = ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let thread_pool =
+                                ctx.create_thread_pool(crate::common::THREADS).unwrap();
                             let af = any_fix_cfg(thread_pool.clone(), page_cache.clone());
                             let cf = cur_fix_cfg(thread_pool.clone(), page_cache.clone());
                             let av = any_var_digest_cfg(thread_pool.clone(), page_cache.clone());
@@ -154,7 +155,8 @@ fn bench_var_value_init(c: &mut Criterion) {
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );
-                            let thread_pool = ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let thread_pool =
+                                ctx.create_thread_pool(crate::common::THREADS).unwrap();
                             let av = any_var_vec_cfg(thread_pool.clone(), page_cache.clone());
                             let cv = cur_var_vec_cfg(thread_pool, page_cache);
                             let start = Instant::now();

@@ -175,10 +175,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
     }
 }
 
-pub fn any_fix_cfg(
-    thread_pool: ThreadPool,
-    page_cache: CacheRef,
-) -> AnyFixedConfig<EightCap> {
+pub fn any_fix_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> AnyFixedConfig<EightCap> {
     AnyFixedConfig {
         merkle_config: mmr_cfg(PARTITION_FIX, thread_pool, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
@@ -186,10 +183,7 @@ pub fn any_fix_cfg(
     }
 }
 
-pub fn cur_fix_cfg(
-    thread_pool: ThreadPool,
-    page_cache: CacheRef,
-) -> CurrentFixedConfig<EightCap> {
+pub fn cur_fix_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> CurrentFixedConfig<EightCap> {
     CurrentFixedConfig {
         merkle_config: mmr_cfg(PARTITION_FIX, thread_pool, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),

@@ -1187,7 +1187,8 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, page_cache.clone()))
                     .await
                     .unwrap();
@@ -1215,7 +1216,8 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache =
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, page_cache))
                     .await
                     .unwrap();
