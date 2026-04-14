@@ -25,7 +25,7 @@ use commonware_cryptography::{Digest, Hasher};
 use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Weak},
 };
 use tracing::debug;
@@ -1190,8 +1190,9 @@ where
         }
 
         // Update predecessors of created and deleted keys.
-        let mut rewritten_predecessors = BTreeSet::new();
         if !prev_candidates.is_empty() {
+            // Safe to use a HashSet here since we don't rely on iteration order.
+            let mut rewritten_predecessors = HashSet::new();
             for key in created
                 .iter()
                 .map(|(k, _, _)| k)
@@ -1388,10 +1389,10 @@ where
         // 1. Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // 2. Build committed_locs: for each key in a committed ancestor batch,
-        //    record the nearest (to child) committed ancestor's final state.
-        //    Some(loc) = Active at loc, None = Deleted.
-        let mut committed_locs: BTreeMap<&U::Key, Option<Location<F>>> = BTreeMap::new();
+        // 2. Build committed_locs: for each key in a committed ancestor batch, record the nearest
+        //    (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
+        //    Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
+        let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.ancestor_diff_ends[i] <= db_size {
                 for (key, entry) in ancestor_diff.iter() {
@@ -1401,8 +1402,9 @@ where
             }
         }
 
-        // 3. Apply child's diff (child wins via seen set).
-        let mut seen = BTreeSet::<&U::Key>::new();
+        // 3. Apply child's diff (child wins via seen set). Safe to use a HashSet here since we
+        //    don't rely on iteration order.
+        let mut seen = HashSet::<&U::Key>::new();
         for (key, entry) in batch.diff.iter() {
             seen.insert(key);
             let base_old_loc = committed_locs

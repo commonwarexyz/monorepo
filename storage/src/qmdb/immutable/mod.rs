@@ -70,7 +70,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
-use std::{collections::BTreeSet, num::NonZeroU64, ops::Range, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
 pub mod batch;
@@ -454,7 +454,7 @@ where
         // Apply snapshot inserts. Child first (child wins via `seen`), then
         // uncommitted ancestor batches.
         let bounds = self.journal.reader().await.bounds();
-        let mut seen = BTreeSet::new();
+        let mut seen = HashSet::new();
         for (key, entry) in batch.diff.iter() {
             seen.insert(key.clone());
             self.snapshot
