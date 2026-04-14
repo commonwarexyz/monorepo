@@ -208,7 +208,6 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let context = context.with_label("seed_inconsistent_restart_state");
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
@@ -311,7 +310,6 @@ mod tests {
         view: View,
         block: &B,
     ) {
-        let context = context.with_label("seed_cache_block");
         let cache_prefix = format!("{partition_prefix}-cache");
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
@@ -880,17 +878,13 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let prefix = "test-cache";
-            let make_cfg = |ctx: &deterministic::Context| cache::Config {
+            let make_cfg = |page_cache: CacheRef| cache::Config {
                 partition_prefix: prefix.to_string(),
                 prunable_items_per_section: NZU64!(10),
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(
-                    ctx.with_label("cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache: page_cache,
             };
 
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
@@ -899,10 +893,14 @@ mod tests {
 
             // Write a block into the cache.
             {
-                let write_ctx = context.with_label("write");
+                let page_cache = CacheRef::from_pooler(
+                    context.with_label("write_cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                    write_ctx.clone(),
-                    make_cfg(&write_ctx),
+                    context.with_label("manager"),
+                    make_cfg(page_cache),
                     (),
                 )
                 .await;
@@ -910,11 +908,11 @@ mod tests {
             }
 
             // Re-init the cache (simulating restart). find_block should fail
-            // before loading persisted epochs.
-            let read_ctx = context.with_label("read");
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("read_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                read_ctx.clone(),
-                make_cfg(&read_ctx),
+                context.with_label("manager"),
+                make_cfg(page_cache),
                 (),
             )
             .await;
