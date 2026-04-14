@@ -134,11 +134,6 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// Observer invoked on every `Message::Certify` request. Used by tests to
-/// detect spurious certification calls (e.g. a leader being asked to certify
-/// its own proposal).
-type CertifyObserver<H> = Box<dyn Fn(Round, <H as Hasher>::Digest) + Send + 'static>;
-
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
 ///
@@ -210,11 +205,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     /// of a leader-owned proposal).
     verify_observer: Option<VerifyObserver<H, P>>,
 
-    /// Invoked on every `Message::Certify` request received by the application.
-    /// Used by tests to detect spurious certification requests (e.g. a leader
-    /// being asked to certify its own proposal).
-    certify_observer: Option<CertifyObserver<H>>,
-
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
     pending_certifications: Vec<oneshot::Sender<bool>>,
@@ -256,7 +246,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 verified: HashSet::new(),
                 propose_observer: None,
                 verify_observer: None,
-                certify_observer: None,
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -281,10 +270,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
         self.verify_observer = Some(observer);
-    }
-
-    pub fn set_certify_observer(&mut self, observer: CertifyObserver<H>) {
-        self.certify_observer = Some(observer);
     }
 
     /// Override the certifier used by this application. Must be called before
@@ -474,9 +459,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
-                        if let Some(observer) = &self.certify_observer {
-                            observer(round, payload);
-                        }
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);

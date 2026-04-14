@@ -4502,9 +4502,12 @@ mod tests {
             };
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
-            app_actor.set_certify_observer(Box::new(move |round, _| {
-                certify_tracker.lock().push(round.view())
-            }));
+            app_actor.set_certifier(mocks::application::Certifier::Custom(Box::new(
+                move |round, _| {
+                    certify_tracker.lock().push(round.view());
+                    true
+                },
+            )));
             app_actor.start();
 
             // Build and start the voter wired to the observing application.
@@ -4771,9 +4774,12 @@ mod tests {
                 context.with_label("app_restarted"),
                 app_cfg,
             );
-            app_actor.set_certify_observer(Box::new(move |round, _| {
-                certify_tracker.lock().push(round.view())
-            }));
+            app_actor.set_certifier(mocks::application::Certifier::Custom(Box::new(
+                move |round, _| {
+                    certify_tracker.lock().push(round.view());
+                    true
+                },
+            )));
             app_actor.start();
 
             // Build and start the post-restart voter against the same journal partition.
