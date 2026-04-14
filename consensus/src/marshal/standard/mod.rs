@@ -914,7 +914,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("read_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.with_label("manager"),
+                context.with_label("manager_restarted"),
                 make_cfg(page_cache),
                 (),
             )
