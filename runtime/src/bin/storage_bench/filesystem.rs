@@ -1,8 +1,4 @@
-//! Filesystem helpers for `storage_bench`.
-//!
-//! The benchmark uses the runtime's normal storage selection path. The active
-//! backend is detected from compile-time feature selection and reported at
-//! runtime so results cannot be mixed up.
+//! Filesystem helpers.
 
 use crate::{
     config::{WriteShape, DEFAULT_IO_SIZE},
@@ -19,9 +15,6 @@ use std::{
 };
 #[cfg(unix)]
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
-
-pub const PARTITION: &str = "storage-bench";
-pub const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -44,19 +37,11 @@ pub fn cleanup_root(root: &Path) {
 }
 
 pub const fn backend_name() -> &'static str {
-    #[cfg(feature = "iouring-storage")]
-    {
+    if cfg!(feature = "iouring-storage") {
         "iouring"
-    }
-
-    #[cfg(not(feature = "iouring-storage"))]
-    {
+    } else {
         "tokio"
     }
-}
-
-fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
-    root.join(partition).join(hex(name))
 }
 
 /// Force physical allocation for a blob that already has the desired size.
@@ -65,7 +50,7 @@ fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
 /// rather than first-write allocation behavior.
 #[cfg(unix)]
 fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = blob_path(root, partition, name);
+    let path = root.join(partition).join(hex(name));
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     let length = file.metadata()?.len();
 
@@ -98,8 +83,8 @@ fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Re
 /// for the file. The effect is per-inode, not per-fd, so reopening the file
 /// later does not undo it.
 #[cfg(unix)]
-pub fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = blob_path(root, partition, name);
+pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
+    let path = root.join(partition).join(hex(name));
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     file.sync_all()?;
 
@@ -112,7 +97,7 @@ pub fn evict_blob_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result
 }
 
 #[cfg(not(unix))]
-pub fn evict_blob_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
+pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -120,26 +105,28 @@ pub fn evict_blob_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io
 pub async fn prepare_blob<S>(
     storage: &S,
     root: &Path,
+    partition: &str,
     name: &[u8],
     file_size: u64,
 ) -> Result<S::Blob, String>
 where
     S: Storage,
 {
-    let (blob, _) = storage.open(PARTITION, name).await.str_err()?;
+    let (blob, _) = storage.open(partition, name).await.str_err()?;
     blob.resize(file_size).await.str_err()?;
     blob.sync().await.str_err()?;
-    preallocate_blob(root, PARTITION, name)
+    preallocate_blob(root, partition, name)
         .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
     Ok(blob)
 }
 
-/// Create a fixed-size blob and fill it with deterministic data.
+/// Create a fixed-size blob and fill it with random data.
 ///
 /// Returns the open blob handle so the caller can reuse it for the timed phase.
 pub async fn prepare_filled_blob<S>(
     storage: &S,
     root: &Path,
+    partition: &str,
     name: &[u8],
     file_size: u64,
     seed: u64,
@@ -147,13 +134,15 @@ pub async fn prepare_filled_blob<S>(
 where
     S: Storage,
 {
-    let blob = prepare_blob(storage, root, name, file_size).await?;
+    let blob = prepare_blob(storage, root, partition, name, file_size).await?;
 
     let chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut offset = 0u64;
     while offset < file_size {
         let len = ((file_size - offset) as usize).min(chunk_size);
-        let payload = deterministic_bytes(len, seed ^ offset);
+        let mut payload = vec![0u8; len];
+        rng.fill_bytes(&mut payload);
         blob.write_at(offset, payload).await.str_err()?;
         offset += len as u64;
     }
@@ -161,41 +150,28 @@ where
     Ok(blob)
 }
 
-/// Build a deterministic write payload of the given size and shape.
-pub fn create_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
+/// Build a random write payload of the given size and shape.
+pub fn random_write_payload(io_size: usize, seed: u64, shape: WriteShape) -> IoBufs {
     match shape {
-        WriteShape::Contiguous => IoBufs::from(deterministic_bytes(io_size, seed)),
-        WriteShape::Vectored => vectored_payload(io_size, seed),
+        WriteShape::Contiguous => {
+            let mut buf = vec![0u8; io_size];
+            StdRng::seed_from_u64(seed).fill_bytes(&mut buf);
+            IoBufs::from(Bytes::from(buf))
+        }
+        WriteShape::Vectored => {
+            const CHUNKS: usize = 4;
+            let base = io_size / CHUNKS;
+            let remainder = io_size % CHUNKS;
+            let mut rng = StdRng::seed_from_u64(seed);
+            let chunks = (0..CHUNKS)
+                .map(|idx| {
+                    let len = base + usize::from(idx < remainder);
+                    let mut chunk = vec![0u8; len];
+                    rng.fill_bytes(&mut chunk);
+                    IoBuf::from(chunk)
+                })
+                .collect::<Vec<_>>();
+            IoBufs::from(chunks)
+        }
     }
-}
-
-fn deterministic_bytes(size: usize, seed: u64) -> Bytes {
-    let mut bytes = vec![0u8; size];
-    seeded_rng(size, seed).fill_bytes(&mut bytes);
-    Bytes::from(bytes)
-}
-
-fn vectored_payload(size: usize, seed: u64) -> IoBufs {
-    const CHUNKS: usize = 4;
-    let base = size / CHUNKS;
-    let remainder = size % CHUNKS;
-    let mut rng = seeded_rng(size, seed);
-    let chunks = (0..CHUNKS)
-        .map(|idx| {
-            let len = base + usize::from(idx < remainder);
-            let mut chunk = vec![0u8; len];
-            rng.fill_bytes(&mut chunk);
-            IoBuf::from(chunk)
-        })
-        .collect::<Vec<_>>();
-    IoBufs::from(chunks)
-}
-
-/// Create a deterministic RNG by mixing `size` and `discriminator`.
-///
-/// The rotation spreads the size bits across different positions before XORing
-/// so that (size=4096, offset=0) and (size=0, offset=4096) produce different
-/// seeds.
-fn seeded_rng(size: usize, discriminator: u64) -> StdRng {
-    StdRng::seed_from_u64((size as u64).rotate_left(17) ^ discriminator)
 }
