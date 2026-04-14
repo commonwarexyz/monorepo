@@ -178,11 +178,6 @@ impl CacheRef {
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
-    ///
-    /// `context` is used to register the `page_faults` and `page_evictions` counters.
-    /// Callers are expected to pass a context already labeled with `.with_label("cache")` so
-    /// the metrics live at a predictable sub-scope and do not collide with sibling components
-    /// on the same parent context.
     pub fn new(
         context: impl Metrics,
         pool: BufferPool,
