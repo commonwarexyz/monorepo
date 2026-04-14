@@ -24,13 +24,13 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
                     let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
-                            "{}/mode={:?} n={} t={} invalid={} conc={}",
+                            "{}/n={} t={} invalid={} conc={} mode={:?}",
                             module_path!(),
-                            mode,
                             n,
                             t,
                             invalid,
-                            concurrency
+                            concurrency,
+                            mode
                         ),
                         |b| {
                             b.iter_batched(

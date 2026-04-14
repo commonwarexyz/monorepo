@@ -70,11 +70,7 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng,
-                                                &polynomial,
-                                                index,
-                                                &refs,
-                                                &strategy,
+                                                &mut rng, &polynomial, index, &refs, &strategy
                                             ),
                                         )
                                     } else {
@@ -84,11 +80,7 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng,
-                                                &polynomial,
-                                                index,
-                                                &refs,
-                                                &Sequential,
+                                                &mut rng, &polynomial, index, &refs, &Sequential
                                             ),
                                         )
                                     };
