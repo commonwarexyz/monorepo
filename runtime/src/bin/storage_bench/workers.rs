@@ -1,4 +1,4 @@
-//! Workload helpers shared across benchmark scenarios.
+//! Worker loops for `storage_bench`.
 
 use crate::{config::SyncMode, report::WorkerStats};
 use bytes::Buf;
@@ -45,19 +45,14 @@ pub(crate) async fn warm_sequential_read_worker<B>(
 where
     B: Blob,
 {
-    let mut buffer = reusable_buffer(io_size);
-    let warm_ops = total_blocks.div_ceil(inflight as u64);
     let mut block = worker_id as u64 % total_blocks;
-    for _ in 0..warm_ops {
-        let offset = block * io_size as u64;
-        buffer = blob
-            .read_at_buf(offset, io_size, buffer)
-            .await
-            .map_err(|err| err.to_string())?;
-        black_box(touch_buffer(&buffer) as u64);
+    let warm_ops = total_blocks.div_ceil(inflight as u64);
+    warm_read_loop(blob, io_size, warm_ops, || {
+        let current = block;
         block = (block + inflight as u64) % total_blocks;
-    }
-    Ok(())
+        current
+    })
+    .await
 }
 
 /// Warm a random-read workload by replaying a deterministic random trace.
@@ -75,22 +70,15 @@ pub(crate) async fn warm_random_read_worker<B>(
 where
     B: Blob,
 {
-    let mut buffer = reusable_buffer(io_size);
     let mut state = seed;
     let warm_ops = total_blocks
         .saturating_mul(3)
         .div_ceil(inflight as u64)
         .max(1);
-    for _ in 0..warm_ops {
-        let block = next_random_block(&mut state, total_blocks);
-        let offset = block * io_size as u64;
-        buffer = blob
-            .read_at_buf(offset, io_size, buffer)
-            .await
-            .map_err(|err| err.to_string())?;
-        black_box(touch_buffer(&buffer) as u64);
-    }
-    Ok(())
+    warm_read_loop(blob, io_size, warm_ops, || {
+        next_random_block(&mut state, total_blocks)
+    })
+    .await
 }
 
 /// One sequential read worker.
@@ -105,25 +93,13 @@ pub(crate) async fn run_sequential_read_worker<B>(
 where
     B: Blob,
 {
-    let mut stats = WorkerStats::default();
-    let mut buffer = reusable_buffer(io_size);
     let mut block = worker_id as u64 % total_blocks;
-    while should_continue(deadline, stats.ops) {
-        let offset = block * io_size as u64;
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        buffer = blob
-            .read_at_buf(offset, io_size, buffer)
-            .await
-            .map_err(|err| err.to_string())?;
-        let witness = touch_buffer(&buffer) as u64;
-        if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), io_size as u64, witness);
-        } else {
-            stats.record(io_size as u64, witness);
-        }
+    run_read_loop(blob, deadline, io_size, || {
+        let current = block;
         block = (block + inflight as u64) % total_blocks;
-    }
-    Ok(stats)
+        current
+    })
+    .await
 }
 
 /// One random read worker.
@@ -137,25 +113,11 @@ pub(crate) async fn run_random_read_worker<B>(
 where
     B: Blob,
 {
-    let mut stats = WorkerStats::default();
-    let mut buffer = reusable_buffer(io_size);
     let mut state = seed;
-    while should_continue(deadline, stats.ops) {
-        let block = next_random_block(&mut state, total_blocks);
-        let offset = block * io_size as u64;
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        buffer = blob
-            .read_at_buf(offset, io_size, buffer)
-            .await
-            .map_err(|err| err.to_string())?;
-        let witness = touch_buffer(&buffer) as u64;
-        if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), io_size as u64, witness);
-        } else {
-            stats.record(io_size as u64, witness);
-        }
-    }
-    Ok(stats)
+    run_read_loop(blob, deadline, io_size, || {
+        next_random_block(&mut state, total_blocks)
+    })
+    .await
 }
 
 /// One sequential overwrite worker.
@@ -171,32 +133,21 @@ pub(crate) async fn run_sequential_write_worker<B>(
 where
     B: Blob,
 {
-    let mut stats = WorkerStats::default();
+    let payload_len = payload.remaining() as u64;
     let mut block = worker_id as u64 % total_blocks;
-    let mut writes_since_sync = 0u64;
-    let payload_len = payload.remaining();
-    let witness = payload_len as u64;
-    while should_continue(deadline, stats.ops) {
-        let offset = block * payload_len as u64;
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone())
-            .await
-            .map_err(|err| err.to_string())?;
-        writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await.map_err(|err| err.to_string())?;
-                writes_since_sync = 0;
-            }
-        }
-        if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
-        } else {
-            stats.record(payload_len as u64, witness);
-        }
-        block = (block + inflight as u64) % total_blocks;
-    }
-    Ok(stats)
+    run_write_loop(
+        blob,
+        deadline,
+        payload,
+        sync_mode,
+        || {
+            let offset = block * payload_len;
+            block = (block + inflight as u64) % total_blocks;
+            offset
+        },
+        |_| {},
+    )
+    .await
 }
 
 /// One random overwrite worker over a non-overlapping shard.
@@ -212,33 +163,20 @@ pub(crate) async fn run_random_write_worker<B>(
 where
     B: Blob,
 {
-    let mut stats = WorkerStats::default();
     let mut state = seed;
-    let mut writes_since_sync = 0u64;
-    let payload_len = payload.remaining();
-    let witness = payload_len as u64;
-    while should_continue(deadline, stats.ops) {
-        let local_block = next_random_block(&mut state, shard.blocks);
-        let block = shard.start_block + local_block;
-        let offset = block * io_size as u64;
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone())
-            .await
-            .map_err(|err| err.to_string())?;
-        writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await.map_err(|err| err.to_string())?;
-                writes_since_sync = 0;
-            }
-        }
-        if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
-        } else {
-            stats.record(payload_len as u64, witness);
-        }
-    }
-    Ok(stats)
+    run_write_loop(
+        blob,
+        deadline,
+        payload,
+        sync_mode,
+        || {
+            let local_block = next_random_block(&mut state, shard.blocks);
+            let block = shard.start_block + local_block;
+            block * io_size as u64
+        },
+        |_| {},
+    )
+    .await
 }
 
 /// Single append writer used by `write_append`.
@@ -275,32 +213,23 @@ pub(crate) async fn run_append_writer_with_frontier<B>(
 where
     B: Blob,
 {
-    let mut stats = WorkerStats::default();
-    let mut writes_since_sync = 0u64;
+    let payload_len = payload.remaining() as u64;
     let mut offset = starting_offset;
-    let payload_len = payload.remaining();
-    let witness = payload_len as u64;
-    while should_continue(deadline, stats.ops) {
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone())
-            .await
-            .map_err(|err| err.to_string())?;
-        offset += payload_len as u64;
-        visible_len.store(offset, Ordering::Release);
-        writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await.map_err(|err| err.to_string())?;
-                writes_since_sync = 0;
-            }
-        }
-        if let Some(started) = started {
-            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
-        } else {
-            stats.record(payload_len as u64, witness);
-        }
-    }
-    Ok(stats)
+    run_write_loop(
+        blob,
+        deadline,
+        payload,
+        sync_mode,
+        || {
+            let current = offset;
+            offset += payload_len;
+            current
+        },
+        |end_offset| {
+            visible_len.store(end_offset, Ordering::Release);
+        },
+    )
+    .await
 }
 
 /// Random reader that tracks the append writer's published frontier.
@@ -325,8 +254,7 @@ where
             continue;
         }
 
-        let block = next_random_block(&mut state, total_blocks);
-        let offset = block * io_size as u64;
+        let offset = next_random_block(&mut state, total_blocks) * io_size as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
         buffer = blob
             .read_at_buf(offset, io_size, buffer)
@@ -366,12 +294,111 @@ pub(crate) fn build_worker_shards(
     Ok(shards)
 }
 
+/// Warm a read trace without collecting benchmark statistics.
+#[inline]
+async fn warm_read_loop<B, F>(
+    blob: B,
+    io_size: usize,
+    warm_ops: u64,
+    mut next_block: F,
+) -> Result<(), String>
+where
+    B: Blob,
+    F: FnMut() -> u64,
+{
+    let mut buffer = reusable_buffer(io_size);
+    for _ in 0..warm_ops {
+        let offset = next_block() * io_size as u64;
+        buffer = blob
+            .read_at_buf(offset, io_size, buffer)
+            .await
+            .map_err(|err| err.to_string())?;
+        black_box(touch_buffer(&buffer) as u64);
+    }
+    Ok(())
+}
+
+/// Run a timed read loop and collect sampled latency statistics.
+#[inline]
+async fn run_read_loop<B, F>(
+    blob: B,
+    deadline: Instant,
+    io_size: usize,
+    mut next_block: F,
+) -> Result<WorkerStats, String>
+where
+    B: Blob,
+    F: FnMut() -> u64,
+{
+    let mut stats = WorkerStats::default();
+    let mut buffer = reusable_buffer(io_size);
+    while should_continue(deadline, stats.ops) {
+        let offset = next_block() * io_size as u64;
+        let started = should_sample_latency(stats.ops).then(Instant::now);
+        buffer = blob
+            .read_at_buf(offset, io_size, buffer)
+            .await
+            .map_err(|err| err.to_string())?;
+        let witness = touch_buffer(&buffer) as u64;
+        if let Some(started) = started {
+            stats.record_latency_sample(started.elapsed(), io_size as u64, witness);
+        } else {
+            stats.record(io_size as u64, witness);
+        }
+    }
+    Ok(stats)
+}
+
+/// Run a timed write loop with caller-defined offset selection.
+#[inline]
+async fn run_write_loop<B, F, G>(
+    blob: B,
+    deadline: Instant,
+    payload: IoBufs,
+    sync_mode: SyncMode,
+    mut next_offset: F,
+    mut after_write: G,
+) -> Result<WorkerStats, String>
+where
+    B: Blob,
+    F: FnMut() -> u64,
+    G: FnMut(u64),
+{
+    let mut stats = WorkerStats::default();
+    let mut writes_since_sync = 0u64;
+    let payload_len = payload.remaining();
+    let witness = payload_len as u64;
+    while should_continue(deadline, stats.ops) {
+        let offset = next_offset();
+        let started = should_sample_latency(stats.ops).then(Instant::now);
+        blob.write_at(offset, payload.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+        after_write(offset + payload_len as u64);
+        writes_since_sync += 1;
+        if let SyncMode::Every(every) = sync_mode {
+            if writes_since_sync == every {
+                blob.sync().await.map_err(|err| err.to_string())?;
+                writes_since_sync = 0;
+            }
+        }
+        if let Some(started) = started {
+            stats.record_latency_sample(started.elapsed(), payload_len as u64, witness);
+        } else {
+            stats.record(payload_len as u64, witness);
+        }
+    }
+    Ok(stats)
+}
+
 /// Allocate a reusable read buffer.
+#[inline(always)]
 fn reusable_buffer(size: usize) -> IoBufsMut {
     IoBufsMut::from(IoBufMut::with_capacity(size))
 }
 
 /// Touch the read buffer to prevent the compiler from discarding the read.
+#[inline(always)]
 fn touch_buffer(buf: &IoBufsMut) -> u8 {
     buf.as_single()
         .and_then(|chunk| chunk.as_ref().first())
@@ -380,6 +407,7 @@ fn touch_buffer(buf: &IoBufsMut) -> u8 {
 }
 
 /// Deterministic random block selector.
+#[inline(always)]
 const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
     *state = state
         .wrapping_mul(6364136223846793005)
@@ -388,6 +416,7 @@ const fn next_random_block(state: &mut u64, total_blocks: u64) -> u64 {
 }
 
 /// Return whether another timed operation should begin.
+#[inline(always)]
 fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
     if completed_ops.is_multiple_of(DEADLINE_CHECK_STRIDE) {
         Instant::now() < deadline
@@ -397,6 +426,7 @@ fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
 }
 
 /// Return whether this operation should record a latency sample.
+#[inline(always)]
 const fn should_sample_latency(completed_ops: u64) -> bool {
     completed_ops < EAGER_LATENCY_SAMPLES || completed_ops.is_multiple_of(LATENCY_SAMPLE_STRIDE)
 }

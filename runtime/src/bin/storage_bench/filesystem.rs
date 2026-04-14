@@ -44,6 +44,7 @@ pub(crate) fn cleanup_root(root: &Path) {
 }
 
 /// Return the compiled storage backend name for this binary.
+#[inline(always)]
 pub(crate) const fn backend_name() -> &'static str {
     #[cfg(feature = "iouring-storage")]
     {

@@ -22,6 +22,7 @@ pub(crate) struct WorkerStats {
 
 impl WorkerStats {
     /// Record one completed operation without storing a latency sample.
+    #[inline(always)]
     pub(crate) const fn record(&mut self, bytes: u64, witness: u64) {
         self.ops += 1;
         self.bytes += bytes;
@@ -29,6 +30,7 @@ impl WorkerStats {
     }
 
     /// Record one completed operation and retain a latency sample.
+    #[inline]
     pub(crate) fn record_latency_sample(&mut self, latency: Duration, bytes: u64, witness: u64) {
         self.record(bytes, witness);
         self.latency_samples_ns
@@ -36,6 +38,7 @@ impl WorkerStats {
     }
 
     /// Merge another worker into this accumulator.
+    #[inline]
     pub(crate) fn merge(&mut self, mut other: Self) {
         self.ops += other.ops;
         self.bytes += other.bytes;

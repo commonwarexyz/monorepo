@@ -14,15 +14,15 @@
 
 mod config;
 mod filesystem;
-mod helpers;
 mod report;
-mod scenarios;
+mod workers;
+mod workloads;
 
 use crate::{
     config::{Config, OutputFormat},
     filesystem::{cleanup_root, prepare_root},
     report::{print_human_report, print_json_report},
-    scenarios::run_benchmark,
+    workloads::run_benchmark,
 };
 use commonware_runtime::Runner as _;
 use std::process::ExitCode;
