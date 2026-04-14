@@ -12,7 +12,7 @@ use crate::{
     qmdb::{
         any::{
             self,
-            batch::{DiffEntry, FloorScan},
+            batch::{lookup_sorted, DiffEntry, FloorScan},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -430,8 +430,8 @@ fn build_chunk_overlay<F: Graftable, U, B: BitmapReadable<N>, const N: usize>(
     base: &B,
     batch_len: usize,
     batch_base: u64,
-    diff: &BTreeMap<U::Key, DiffEntry<F, U::Value>>,
-    ancestor_diffs: &[Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>],
+    diff: &[(U::Key, DiffEntry<F, U::Value>)],
+    ancestor_diffs: &[Arc<Vec<(U::Key, DiffEntry<F, U::Value>)>>],
 ) -> ChunkOverlay<N>
 where
     U: update::Update,
@@ -459,7 +459,7 @@ where
         // ancestor batch that superseded them.
         let mut prev_loc = entry.base_old_loc();
         for ancestor_diff in ancestor_diffs {
-            if let Some(ancestor_entry) = ancestor_diff.get(key) {
+            if let Some(ancestor_entry) = lookup_sorted(ancestor_diff.as_slice(), key) {
                 prev_loc = ancestor_entry.loc();
                 break;
             }
@@ -1011,23 +1011,25 @@ mod tests {
         // Diff: key1 active at loc=4 (in batch), key2 active at loc=99 (not in batch,
         // so superseded within this batch).
         let base = make_bitmap(&[true; 4]);
-        let mut diff = BTreeMap::new();
-        diff.insert(
-            key1,
-            DiffEntry::Active {
-                value: 100u64,
-                loc: Location::new(4), // offset 0 in batch
-                base_old_loc: None,
-            },
-        );
-        diff.insert(
-            key2,
-            DiffEntry::Active {
-                value: 200u64,
-                loc: Location::new(99), // not in batch [4,8), so superseded
-                base_old_loc: None,
-            },
-        );
+        let mut diff = vec![
+            (
+                key1,
+                DiffEntry::Active {
+                    value: 100u64,
+                    loc: Location::new(4), // offset 0 in batch
+                    base_old_loc: None,
+                },
+            ),
+            (
+                key2,
+                DiffEntry::Active {
+                    value: 200u64,
+                    loc: Location::new(99), // not in batch [4,8), so superseded
+                    base_old_loc: None,
+                },
+            ),
+        ];
+        diff.sort_by(|a, b| a.0.cmp(&b.0));
 
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
@@ -1056,35 +1058,31 @@ mod tests {
         // Base bitmap with 64 bits, all set.
         let base = make_bitmap(&[true; 64]);
 
-        let mut diff: BTreeMap<K, DiffEntry<mmr::Family, u64>> = BTreeMap::new();
-
-        // key1: Active with base_old_loc = Some(5) -> should clear bit 5.
-        diff.insert(
-            key1,
-            DiffEntry::Active {
-                value: 100,
-                loc: Location::new(70),
-                base_old_loc: Some(Location::new(5)),
-            },
-        );
-
-        // key2: Deleted with base_old_loc = Some(10) -> should clear bit 10.
-        diff.insert(
-            key2,
-            DiffEntry::Deleted {
-                base_old_loc: Some(Location::new(10)),
-            },
-        );
-
-        // key3: Active with base_old_loc = None -> no clear.
-        diff.insert(
-            key3,
-            DiffEntry::Active {
-                value: 300,
-                loc: Location::new(71),
-                base_old_loc: None,
-            },
-        );
+        let mut diff: Vec<(K, DiffEntry<mmr::Family, u64>)> = vec![
+            (
+                key1,
+                DiffEntry::Active {
+                    value: 100,
+                    loc: Location::new(70),
+                    base_old_loc: Some(Location::new(5)),
+                },
+            ),
+            (
+                key2,
+                DiffEntry::Deleted {
+                    base_old_loc: Some(Location::new(10)),
+                },
+            ),
+            (
+                key3,
+                DiffEntry::Active {
+                    value: 300,
+                    loc: Location::new(71),
+                    base_old_loc: None,
+                },
+            ),
+        ];
+        diff.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Segment of 8 ops starting at 64; previous commit at loc 63.
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 8, 64, &diff, &[]);
@@ -1118,15 +1116,15 @@ mod tests {
         // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
         // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
         let key1 = FixedBytes::from([1, 0, 0, 0]);
-        let mut diff = BTreeMap::new();
-        diff.insert(
+        let mut diff = vec![(
             key1,
             DiffEntry::Active {
                 value: 42u64,
                 loc: Location::new(35),
                 base_old_loc: None,
             },
-        );
+        )];
+        diff.sort_by(|a, b| a.0.cmp(&b.0));
 
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 20, 20, &diff, &[]);
 

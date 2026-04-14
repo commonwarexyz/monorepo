@@ -4,7 +4,12 @@ use super::Immutable;
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::ValueEncoding, immutable::operation::Operation, operation::Key, Error},
+    qmdb::{
+        any::{batch::lookup_sorted, ValueEncoding},
+        immutable::operation::Operation,
+        operation::Key,
+        Error,
+    },
     translator::Translator,
     Context, Persistable,
 };
@@ -15,6 +20,8 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
 };
+
+type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -61,7 +68,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<K, V>>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
-    pub(super) diff: Arc<BTreeMap<K, DiffEntry<F, V::Value>>>,
+    /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
+    pub(super) diff: Arc<DiffVec<K, F, V::Value>>,
 
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
@@ -78,8 +86,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
     /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
     /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
-    #[allow(clippy::type_complexity)]
-    pub(super) ancestor_diffs: Vec<Arc<BTreeMap<K, DiffEntry<F, V::Value>>>>,
+    pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
@@ -143,11 +150,11 @@ where
         // Walk parent chain. The first parent is a strong Arc (held by UnmerkleizedBatch),
         // subsequent parents are Weak refs.
         if let Some(parent) = self.parent.as_ref() {
-            if let Some(entry) = parent.diff.get(key) {
+            if let Some(entry) = lookup_sorted(parent.diff.as_slice(), key) {
                 return Ok(Some(entry.value.clone()));
             }
             for batch in parent.ancestors() {
-                if let Some(entry) = batch.diff.get(key) {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                     return Ok(Some(entry.value.clone()));
                 }
             }
@@ -170,15 +177,17 @@ where
     {
         let base = self.base_size;
 
-        // Build operations: one Set per key (BTreeMap iterates in sorted order), then Commit.
+        // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
+        // iteration yields keys in sorted order, which `diff` relies on for binary search.
         let mut ops: Vec<Operation<K, V>> = Vec::with_capacity(self.mutations.len() + 1);
-        let mut diff: BTreeMap<K, DiffEntry<F, V::Value>> = BTreeMap::new();
+        let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(self.mutations.len());
 
         for (key, value) in self.mutations {
             let loc = Location::new(base + ops.len() as u64);
             ops.push(Operation::Set(key.clone(), value.clone()));
-            diff.insert(key, DiffEntry { value, loc });
+            diff.push((key, DiffEntry { value, loc }));
         }
+        debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
 
         ops.push(Operation::Commit(metadata));
 
@@ -247,11 +256,11 @@ where
         H: CHasher<Digest = D>,
         T: Translator,
     {
-        if let Some(entry) = self.diff.get(key) {
+        if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(Some(entry.value.clone()));
         }
         for batch in self.ancestors() {
-            if let Some(entry) = batch.diff.get(key) {
+            if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                 return Ok(Some(entry.value.clone()));
             }
         }
@@ -293,7 +302,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
-            diff: Arc::new(BTreeMap::new()),
+            diff: Arc::new(Vec::new()),
             parent: None,
             base_size: journal_size,
             total_size: journal_size,
