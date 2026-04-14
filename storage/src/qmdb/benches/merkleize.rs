@@ -376,7 +376,8 @@ const VARIANTS: [Variant; 12] = [
 /// Dispatch a variant to its concrete DB type and config, then execute `$body` with `db` bound.
 macro_rules! dispatch_variant {
     ($ctx:expr, $variant:expr, |$db:ident| $body:expr) => {{
-        let __pc = CacheRef::from_pooler($ctx.with_label("cache"), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
+        let __pc =
+            CacheRef::from_pooler($ctx.with_label("cache"), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
         match $variant {
             Variant::AnyFixed => {
                 let $db = AnyUFix::init($ctx.clone(), any_fix_cfg(&$ctx, __pc))
