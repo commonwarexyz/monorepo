@@ -217,6 +217,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(items)
     }
 
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
+        let remaining = blob.try_size()?.checked_sub(offset)?;
+        if remaining < Self::CHUNK_SIZE_U64 {
+            return None;
+        }
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync(offset, &mut buf) {
+            return None;
+        }
+        A::decode(&buf[..]).ok()
+    }
+
     /// Read the last item in a section, if any.
     ///
     /// Returns `Ok(None)` if the section is empty.

@@ -43,40 +43,56 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            core::{cache, Mailbox},
+            config::Config,
+            core::{cache, Actor, Mailbox},
             mocks::{
+                application::Application,
                 harness::{
                     self, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants, Ctx, DeferredHarness, InlineHarness,
-                    StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK, NAMESPACE,
-                    NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, S, UNRELIABLE_LINK, V,
+                    setup_network_with_participants, Ctx, DeferredHarness, EmptyProvider,
+                    InlineHarness, StandardHarness, TestHarness, ValidatorHandle, B,
+                    BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
+                    PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
+            resolver::handler,
             Identifier,
         },
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
-        types::{Epoch, FixedEpocher, Height, Round, View},
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
         Automaton, CertifiableAutomaton, Heightable,
     };
+    use bytes::Bytes;
+    use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+        ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
+    use commonware_p2p::simulated::{self, Network};
+    use commonware_parallel::Sequential;
+    use commonware_resolver::Resolver;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+    };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
         metadata::{self, Metadata},
-        translator::TwoCap,
+        translator::{EightCap, TwoCap},
     };
-    use commonware_utils::{channel::oneshot, NZUsize, NZU64};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        vec::NonEmptyVec,
+        NZUsize, NZU16, NZU64,
+    };
     use std::{
-        num::{NonZeroU64, NonZeroUsize},
+        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         time::Duration,
     };
 
@@ -1487,5 +1503,302 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// A no-op resolver used by tests that drive the marshal actor's
+    /// resolver_rx channel directly. Outbound fetches/cancellations are dropped.
+    #[derive(Clone, Default)]
+    struct NoopResolver;
+
+    impl Resolver for NoopResolver {
+        type Key = handler::Request<D>;
+        type PublicKey = PublicKey;
+
+        async fn fetch(&mut self, _key: Self::Key) {}
+        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
+        async fn fetch_targeted(
+            &mut self,
+            _key: Self::Key,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) {
+        }
+        async fn fetch_all_targeted(
+            &mut self,
+            _requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+        ) {
+        }
+        async fn cancel(&mut self, _key: Self::Key) {}
+        async fn clear(&mut self) {}
+        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+    }
+
+    /// When the provider has no verifier for an epoch, in-flight deliveries
+    /// for that epoch must be acknowledged (`true`) so the serving peer is
+    /// not blamed, rather than rejected (`false`).
+    #[test_traced("WARN")]
+    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let me = default_leader();
+            let (network, oracle) = Network::new_with_peers(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                vec![me.clone()],
+            )
+            .await;
+            network.start();
+            let control = oracle.control(me.clone());
+            let network_channel = control
+                .register(0, Quota::per_second(NonZeroU32::MAX))
+                .await
+                .unwrap();
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let partition_prefix = "stale-finalized-test".to_string();
+            let config = Config {
+                provider: EmptyProvider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                mailbox_size: 100,
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: partition_prefix.clone(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: page_cache.clone(),
+                strategy: Sequential,
+            };
+            let finalizations_by_height = prunable::Archive::init(
+                context.with_label("finalizations_by_height"),
+                prunable::Config {
+                    translator: EightCap,
+                    key_partition: format!("{partition_prefix}-fbh-key"),
+                    key_page_cache: page_cache.clone(),
+                    value_partition: format!("{partition_prefix}-fbh-value"),
+                    compression: None,
+                    codec_config: S::certificate_codec_config_unbounded(),
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .expect("failed to initialize finalizations archive");
+            let finalized_blocks = prunable::Archive::init(
+                context.with_label("finalized_blocks"),
+                prunable::Config {
+                    translator: EightCap,
+                    key_partition: format!("{partition_prefix}-fb-key"),
+                    key_page_cache: page_cache,
+                    value_partition: format!("{partition_prefix}-fb-value"),
+                    compression: None,
+                    codec_config: (),
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .expect("failed to initialize finalized blocks archive");
+
+            let broadcast_config = buffered::Config {
+                public_key: me.clone(),
+                mailbox_size: 100,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+                peer_provider: oracle.manager(),
+            };
+            let (broadcast_engine, buffer) =
+                buffered::Engine::new(context.clone(), broadcast_config);
+            broadcast_engine.start(network_channel);
+
+            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+
+            let (actor, _mailbox, _) = Actor::init(
+                context.clone(),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            actor.start(
+                Application::<B>::default(),
+                buffer,
+                (resolver_rx, NoopResolver),
+            );
+
+            // Inject a Finalized delivery with garbage payload. The
+            // provider has no verifier, so the marshal cannot decode it and
+            // must ack (true) rather than blame the peer (false).
+            let (response, response_rx) = oneshot::channel();
+            resolver_tx
+                .send(handler::Message::Deliver {
+                    key: handler::Request::Finalized {
+                        height: Height::new(5),
+                    },
+                    value: Bytes::from_static(b"unverifiable"),
+                    response,
+                })
+                .await
+                .unwrap();
+            assert!(response_rx.await.unwrap());
+
+            // Same for a Notarized delivery.
+            let (response, response_rx) = oneshot::channel();
+            resolver_tx
+                .send(handler::Message::Deliver {
+                    key: handler::Request::Notarized {
+                        round: Round::new(Epoch::zero(), View::new(1)),
+                    },
+                    value: Bytes::from_static(b"unverifiable"),
+                    response,
+                })
+                .await
+                .unwrap();
+            assert!(response_rx.await.unwrap());
+        });
+    }
+
+    /// Parse the `processed_height` gauge value from a prometheus-encoded
+    /// metrics dump produced by `Metrics::encode`. Looks for any line of the
+    /// form `<prefix>processed_height <value>`.
+    fn parse_processed_height(metrics: &str) -> Option<u64> {
+        for line in metrics.lines() {
+            let line = line.trim();
+            if line.starts_with('#') {
+                continue;
+            }
+            let needle = "processed_height ";
+            if let Some(idx) = line.find(needle) {
+                let value = line[idx + needle.len()..].split_whitespace().next()?;
+                return value.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Regression test for the [`crate::marshal::Update::Block`] pruning
+    /// contract.
+    ///
+    /// Asserts that for every block at height `H` the application has
+    /// received, marshal's `processed_height` gauge is at least
+    /// `H - max_pending_acks`. Because `processed_height` is monotonic, the
+    /// invariant holds at *every* observation point, so the test simply
+    /// drives the pipeline (fill, drain, refill) and re-checks the bound
+    /// after each step.
+    #[test_traced("WARN")]
+    fn test_standard_update_block_processed_height_invariant() {
+        const MAX_PENDING_ACKS: u64 = 4;
+        const NUM_BLOCKS: u64 = 12;
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let validator = participants[0].clone();
+            let application = Application::<B>::manual_ack();
+            let setup = StandardHarness::setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NonZeroUsize::new(MAX_PENDING_ACKS as usize).unwrap(),
+                application,
+            )
+            .await;
+            let application = setup.application;
+            let mut handle = ValidatorHandle {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            };
+            let mut handles = vec![handle.clone()];
+
+            // Submit finalizations; marshal dispatches up to MAX_PENDING_ACKS
+            // blocks at a time and stalls until the application acks.
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            let mut parent_commitment =
+                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            for i in 1..=NUM_BLOCKS {
+                let block = StandardHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(i),
+                    i,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = StandardHarness::commitment(&block);
+                parent = StandardHarness::digest(&block);
+                parent_commitment = commitment;
+                let round = Round::new(
+                    epocher
+                        .containing(StandardHarness::height(&block))
+                        .unwrap()
+                        .epoch(),
+                    View::new(i),
+                );
+                StandardHarness::verify(&mut handle, round, &block, &mut handles).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: commitment,
+                };
+                let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+                StandardHarness::report_finalization(&mut handle.mailbox, finalization).await;
+            }
+
+            let check_invariant = |label: &str| {
+                let Some(highest) = application.blocks().keys().max().copied() else {
+                    return;
+                };
+                let processed = parse_processed_height(&context.encode())
+                    .expect("processed_height gauge missing");
+                let gap = highest.get().saturating_sub(processed);
+                assert!(
+                    gap <= MAX_PENDING_ACKS,
+                    "{label}: highest={} processed={} gap={} > max_pending_acks={}",
+                    highest.get(),
+                    processed,
+                    gap,
+                    MAX_PENDING_ACKS,
+                );
+            };
+
+            // Wait until marshal has dispatched up to the pipeline limit
+            // (we submitted more than MAX_PENDING_ACKS finalizations above,
+            // so the pipeline must stall at MAX_PENDING_ACKS unacked blocks).
+            // This is the peak-gap observation point.
+            while (application.blocks().len() as u64) < MAX_PENDING_ACKS {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            check_invariant("pipeline full");
+
+            // Drain: acknowledge blocks as they arrive; re-check the bound
+            // after each dispatch cycle.
+            loop {
+                let acked = application.acknowledged().await;
+                check_invariant(&format!("after ack {acked}"));
+                if acked.get() == NUM_BLOCKS {
+                    break;
+                }
+            }
+        });
     }
 }

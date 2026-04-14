@@ -3,16 +3,14 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event
-//! loop running in a separate thread. Operation results are returned via a [commonware_utils::channel::oneshot]
-//! channel. This implementation uses two separate io_uring instances: one for send operations and
-//! one for receive operations.
+//! Network operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
+//! dedicated event loop running in a separate thread. This implementation uses two separate
+//! io_uring instances: one for send operations and one for receive operations.
 //!
 //! ## Memory Safety
 //!
-//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
-//! Therefore, we ensure that the memory location is valid for the duration of the operation.
-//! That is, it doesn't move or go out of scope until the operation completes.
+//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
+//! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
 //! ## Feature Flag
 //!
@@ -24,15 +22,13 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    utils, Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    iouring::{self},
+    utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
-use commonware_utils::channel::oneshot;
-use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::OwnedFd,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,10 +38,7 @@ use tracing::warn;
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Cap iovec batch size: larger iovecs reduce syscall count but increase
-/// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
-
+/// Configuration for the io_uring network backend.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
@@ -62,7 +55,7 @@ pub struct Config {
     ///
     /// This is a network-level policy and is independent from io_uring loop
     /// tuning. At startup, the loop timeout horizon is raised as needed so this
-    /// value is never clamped by `iouring_config.max_op_timeout`.
+    /// value is never clamped by `iouring_config.max_request_timeout`.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
@@ -81,7 +74,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            read_write_timeout: iouring_config.max_op_timeout,
+            read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
             thread_stack_size: utils::thread::system_thread_stack_size(),
@@ -89,8 +82,8 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
+#[derive(Clone)]
 pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
@@ -98,9 +91,9 @@ pub struct Network {
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: iouring::Submitter,
+    send_handle: iouring::Handle,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: iouring::Submitter,
+    recv_handle: iouring::Handle,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -128,28 +121,28 @@ impl Network {
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
-        cfg.iouring_config.max_op_timeout = cfg
+        cfg.iouring_config.max_request_timeout = cfg
             .iouring_config
-            .max_op_timeout
+            .max_request_timeout
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
-        let (send_submitter, send_loop) =
+        let (send_handle, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
-        let (recv_submitter, recv_loop) =
+        let (recv_handle, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
-            send_submitter,
-            recv_submitter,
+            send_handle,
+            recv_handle,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
@@ -168,8 +161,8 @@ impl crate::Network for Network {
             tcp_nodelay: self.tcp_nodelay,
             zero_linger: self.zero_linger,
             inner: listener,
-            send_submitter: self.send_submitter.clone(),
-            recv_submitter: self.recv_submitter.clone(),
+            send_handle: self.send_handle.clone(),
+            recv_handle: self.recv_handle.clone(),
             read_write_timeout: self.read_write_timeout,
             read_buffer_size: self.read_buffer_size,
             pool: self.pool.clone(),
@@ -210,12 +203,12 @@ impl crate::Network for Network {
         Ok((
             Sink::new(
                 fd.clone(),
-                self.send_submitter.clone(),
+                self.send_handle.clone(),
                 self.read_write_timeout,
             ),
             Stream::new(
                 fd,
-                self.recv_submitter.clone(),
+                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -233,9 +226,9 @@ pub struct Listener {
     zero_linger: bool,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: iouring::Submitter,
+    send_handle: iouring::Handle,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: iouring::Submitter,
+    recv_handle: iouring::Handle,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -283,12 +276,12 @@ impl crate::Listener for Listener {
             remote_addr,
             Sink::new(
                 fd.clone(),
-                self.send_submitter.clone(),
+                self.send_handle.clone(),
                 self.read_write_timeout,
             ),
             Stream::new(
                 fd,
-                self.recv_submitter.clone(),
+                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -305,180 +298,32 @@ impl crate::Listener for Listener {
 pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    submitter: iouring::Submitter,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
 }
 
 impl Sink {
-    const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter, timeout: Duration) -> Self {
+    /// Construct a sink that submits logical send requests through one io_uring loop.
+    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
         Self {
             fd,
-            submitter,
+            handle,
             timeout,
         }
-    }
-
-    fn as_raw_fd(&self) -> Fd {
-        Fd(self.fd.as_raw_fd())
-    }
-
-    async fn send_single(&self, mut buf: IoBuf) -> Result<(), Error> {
-        let mut bytes_sent = 0;
-        let buf_len = buf.len();
-        let deadline = Instant::now() + self.timeout;
-
-        while bytes_sent < buf_len {
-            // Figure out how much is left to send and where to send from.
-            //
-            // SAFETY: `buf` is an `IoBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `buf_len - bytes_sent`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { buf.as_ptr().add(bytes_sent) };
-            let remaining_len = buf_len - bytes_sent;
-
-            // Create the io_uring send operation
-            let op = opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
-
-            // Submit the operation to the io_uring event loop
-            let (sender, receiver) = oneshot::channel();
-            self.submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Write(buf)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: None,
-                    deadline: Some(deadline),
-                })
-                .await
-                .map_err(|_| Error::SendFailed)?;
-
-            // Wait for the operation to complete and get the buffer back
-            let (return_value, return_buf) = receiver.await.map_err(|_| Error::SendFailed)?;
-            buf = match return_buf {
-                Some(OpBuffer::Write(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as send failure
-            if return_value <= 0 {
-                if return_value == -libc::ETIMEDOUT {
-                    return Err(Error::Timeout);
-                } else {
-                    return Err(Error::SendFailed);
-                };
-            }
-
-            // Mark bytes as sent.
-            bytes_sent += return_value as usize;
-        }
-
-        Ok(())
-    }
-
-    async fn send_vectored(&self, mut bufs: IoBufs) -> Result<(), Error> {
-        let deadline = Instant::now() + self.timeout;
-        while bufs.has_remaining() {
-            let (iovecs, iovecs_len) = {
-                // Figure out how much is left to send and where to send from.
-                //
-                // Use one pre-initialized `libc::iovec` array as scratch space and
-                // view it as `IoSlice` to fill via `chunks_vectored`, since
-                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
-                assert!(
-                    max_iovecs > 0,
-                    "chunk_count should be > 0 if bufs.has_remaining() is true"
-                );
-                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
-                    libc::iovec {
-                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
-                        iov_len: 0,
-                    },
-                    max_iovecs,
-                )
-                .collect();
-
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                // `iovecs` is initialized with valid empty entries, so `io_slices`
-                // starts in a valid state for `chunks_vectored` to overwrite.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        iovecs.len(),
-                    )
-                };
-                let io_slices_len = bufs.chunks_vectored(io_slices);
-                assert!(
-                    io_slices_len > 0,
-                    "chunks_vectored should produce at least one slice when bufs has remaining"
-                );
-                (OpIovecs::new(iovecs), io_slices_len)
-            };
-
-            // Create an operation to do the writev.
-            //
-            // For this payload send path, `writev` is sufficient since we don't need
-            // per-send flags, destination addresses, or cmsgs. This keeps the operation
-            // simpler and avoids building an `msghdr` that's required for `sendmsg`.
-            let op =
-                opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _).build();
-
-            // Submit the operation.
-            let (sender, receiver) = oneshot::channel();
-            self.submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::WriteVectored(bufs)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: Some(iovecs),
-                    deadline: Some(deadline),
-                })
-                .await
-                .map_err(|_| Error::SendFailed)?;
-
-            // Wait for the result.
-            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::SendFailed)?;
-            bufs = match return_bufs {
-                Some(OpBuffer::WriteVectored(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as send failure
-            if return_value <= 0 {
-                if return_value == -libc::ETIMEDOUT {
-                    return Err(Error::Timeout);
-                } else {
-                    return Err(Error::SendFailed);
-                };
-            }
-
-            bufs.advance(return_value as usize);
-        }
-
-        Ok(())
     }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        match bufs.into().try_into_single() {
-            Ok(buf) => self.send_single(buf).await,
-            Err(bufs) => self.send_vectored(bufs).await,
+        let bufs = bufs.into();
+        if !bufs.has_remaining() {
+            return Ok(());
         }
+
+        self.handle
+            .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
+            .await
     }
 }
 
@@ -489,7 +334,7 @@ impl crate::Sink for Sink {
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    submitter: iouring::Submitter,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Internal read buffer.
@@ -503,16 +348,17 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        submitter: iouring::Submitter,
+        handle: iouring::Handle,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,
     ) -> Self {
         Self {
             fd,
-            submitter,
+            handle,
             timeout,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
@@ -521,76 +367,35 @@ impl Stream {
         }
     }
 
-    fn as_raw_fd(&self) -> Fd {
-        Fd(self.fd.as_raw_fd())
-    }
-
-    /// Submits a recv operation to io_uring.
+    /// Submit a recv request to io_uring and wait for completion.
     ///
-    /// # Arguments
-    /// * `buffer` - Buffer for receiving data (kernel writes into this)
-    /// * `offset` - Offset into buffer to write received data
-    /// * `len` - Maximum bytes to receive
+    /// `offset` is the byte offset into `buffer` where received data should
+    /// start. `len` is the number of bytes to read starting at that offset.
     ///
-    /// # Returns
-    /// The buffer and either bytes received or an error.
+    /// Returns the buffer and either the number of bytes read for this
+    /// invocation or an error.
     async fn submit_recv(
-        &mut self,
-        mut buffer: IoBufMut,
+        &self,
+        buffer: IoBufMut,
         offset: usize,
         len: usize,
+        exact: bool,
         deadline: Instant,
-    ) -> (IoBufMut, Result<usize, Error>) {
-        loop {
-            // SAFETY: offset + len <= buffer.capacity() as guaranteed by callers.
-            // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
-            let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
-            let op = opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
-
-            let (sender, receiver) = oneshot::channel();
-            if self
-                .submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Read(buffer)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: None,
-                    deadline: Some(deadline),
-                })
-                .await
-                .is_err()
-            {
-                // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(Error::RecvFailed));
-            }
-
-            let Ok((return_value, return_buf)) = receiver.await else {
-                // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(Error::RecvFailed));
-            };
-            buffer = match return_buf {
-                Some(OpBuffer::Read(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as recv failure
-            if return_value <= 0 {
-                let err = if return_value == -libc::ETIMEDOUT {
-                    Error::Timeout
-                } else {
-                    Error::RecvFailed
-                };
-                return (buffer, Err(err));
-            }
-
-            return (buffer, Ok(return_value as usize));
-        }
+    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
+        self.handle
+            .recv(
+                self.fd.clone(),
+                buffer,
+                offset,
+                offset + len,
+                exact,
+                deadline,
+            )
+            .await
+            .map(|(buf, total)| {
+                // Translate the total-bytes-received into bytes-read-in-this-call.
+                (buf, total - offset)
+            })
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
@@ -601,11 +406,16 @@ impl Stream {
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        // If the buffer is lost due to a channel error, we don't restore it.
-        // Channel errors mean the io_uring thread died, so the stream is unusable anyway.
-        let (buffer, result) = self.submit_recv(buffer, 0, len, deadline).await;
-        self.buffer = buffer;
-        self.buffer_len = result?;
+        self.buffer_len = match self.submit_recv(buffer, 0, len, false, deadline).await {
+            Ok((buffer, read)) => {
+                self.buffer = buffer;
+                read
+            }
+            Err((buffer, err)) => {
+                self.buffer = buffer;
+                return Err(err);
+            }
+        };
         // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
         unsafe { self.buffer.set_len(self.buffer_len) };
         Ok(self.buffer_len)
@@ -638,11 +448,17 @@ impl crate::Stream for Stream {
             // to fill the buffer and immediately drain it
             let buffer_capacity = self.buffer.capacity();
             if buffer_capacity == 0 || remaining >= buffer_capacity {
-                let (returned_buf, result) = self
-                    .submit_recv(owned_buf, bytes_received, remaining, deadline)
-                    .await;
-                owned_buf = returned_buf;
-                bytes_received += result?;
+                // Direct recv into the result buffer with exact=true.
+                match self
+                    .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
+                    .await
+                {
+                    Ok((buf, read)) => {
+                        owned_buf = buf;
+                        bytes_received += read;
+                    }
+                    Err((_, err)) => return Err(err),
+                }
             } else {
                 // Fill internal buffer, then loop will copy
                 self.fill_buffer(deadline).await?;
@@ -661,18 +477,21 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
+    use super::{Sink, Stream};
     use crate::{
         iouring,
         network::{
             iouring::{Config, Network},
             tests,
         },
-        thread, BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _,
-        Stream as _,
+        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
+        Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
     use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -691,6 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_trait() {
+        // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
             Network::start(Config::default(), &mut Registry::default(), test_pool())
                 .expect("Failed to start io_uring")
@@ -701,6 +521,7 @@ mod tests {
     #[test_group("slow")]
     #[tokio::test]
     async fn test_stress_trait() {
+        // Exercise the io_uring backend under the shared stress suite.
         tests::stress_test_network_trait(|| {
             Network::start(
                 Config {
@@ -720,6 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
+        // Verify a small message is delivered promptly through the buffered recv path.
         let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
             .expect("Failed to start io_uring");
 
@@ -749,6 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_timeout_with_partial_data() {
+        // Verify a top-level recv returns timeout after partial progress stalls.
         // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
         let network = Network::start(
@@ -792,7 +615,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_unbuffered_mode() {
-        // Set read_buffer_size to 0 to disable buffering
+        // Verify disabling the internal read buffer preserves direct recv behavior.
+        // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = Network::start(
             Config {
                 read_buffer_size: 0,
@@ -807,7 +631,8 @@ mod tests {
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Spawn a task to accept and read
+        // Accept one connection and verify that peeking never observes buffered
+        // bytes because the wrapper should not retain any internal read state.
         let reader = tokio::spawn(async move {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
@@ -826,24 +651,24 @@ mod tests {
             (buf1, buf2)
         });
 
-        // Connect and send two messages
+        // Send two independent messages so the reader exercises repeated direct recvs.
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
         sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
-        // Wait for the reader to complete
+        // Both messages should arrive exactly as sent, with no extra bytes hidden in `peek`.
         let (buf1, buf2) = reader.await.unwrap();
 
-        // Verify we got the right data
         assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 
     #[tokio::test]
     async fn test_op_fd_keeps_descriptor_alive() {
-        // When a recv future is cancelled (e.g. via select!) after the Op has
+        // Verify queued recv requests keep their socket fd alive after caller cancellation.
+        // When a recv future is cancelled (e.g. via select!) after the Request has
         // been sent to the io_uring channel, the Stream can be dropped while
-        // the Op is still queued. The Op's `fd` field keeps the socket alive
+        // the request is still queued. The request's fd field keeps the socket alive
         // so the OS cannot reuse the FD number.
         let op_timeout = Duration::from_millis(200);
         let network = Network::start(
@@ -867,28 +692,27 @@ mod tests {
         assert_eq!(Arc::strong_count(&fd), 3);
 
         // Cancel a recv mid-flight (blocks because no data arrives).
-        // Polling the future submits the Op (with an fd clone) to the
-        // io_uring channel, the timeout then cancels the future.
         select! {
             _ = client_stream.recv(1) => unreachable!("no data was sent"),
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
         }
 
-        // The queued Op holds an additional clone.
+        // The queued request holds an additional clone.
         assert_eq!(Arc::strong_count(&fd), 4);
 
-        // Drop all handles. The queued Op still retains the fd.
+        // Drop all handles. The queued request still retains the fd.
         drop(client_sink);
         drop(client_stream);
-        assert_eq!(Arc::strong_count(&fd), 2); // our clone + Op
+        assert_eq!(Arc::strong_count(&fd), 2); // our clone + request
 
-        // After op_timeout, the Op completes and releases its fd clone.
+        // After op_timeout, the request completes and releases its fd clone.
         tokio::time::sleep(op_timeout).await;
         assert_eq!(Arc::strong_count(&fd), 1);
     }
 
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
+        // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
         let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
             .expect("Failed to start io_uring");
@@ -930,5 +754,208 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_recv_returns_bytes_for_this_call() {
+        // Verify `submit_recv` translates the request state's cumulative total
+        // back into the per-call byte count expected by the higher-level recv loop.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let handle = std::thread::spawn(move || io_loop.run());
+
+        // Build the wrapper directly so the test exercises `submit_recv`
+        // without involving the higher-level buffered recv machinery.
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let stream = Stream::new(
+            Arc::new(left.into()),
+            submitter,
+            Duration::from_secs(1),
+            0,
+            test_pool(),
+        );
+
+        // Pretend the caller already filled two bytes, then complete exactly
+        // three more bytes from the socket.
+        let writer = tokio::task::spawn_blocking(move || right.write_all(b"abc"));
+        let buffer = IoBufMut::with_capacity(5);
+        let result = stream
+            .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
+            .await;
+
+        // The wrapper should report only the bytes read by this invocation,
+        // not the cumulative total tracked inside the request state.
+        writer.await.unwrap().unwrap();
+        let (_buffer, read) = result.expect("submit_recv should succeed");
+        assert_eq!(read, 3);
+
+        drop(stream);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_vectored_send_path() {
+        // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let handle = std::thread::spawn(move || io_loop.run());
+
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+
+        // Queue two buffers so the wrapper must preserve vectored ordering.
+        let mut bufs = IoBufs::default();
+        bufs.append(IoBuf::from(b"ab"));
+        bufs.append(IoBuf::from(b"cd"));
+
+        // Read from the peer in one shot so the final payload ordering is unambiguous.
+        let reader = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 4];
+            right.read_exact(&mut buf).unwrap();
+            buf
+        });
+
+        // The peer should observe the concatenated payload in-order.
+        sink.send(bufs).await.unwrap();
+        assert_eq!(&reader.await.unwrap(), b"abcd");
+
+        drop(sink);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_zero_length_send_short_circuits_before_submit() {
+        // Verify empty sends return locally without depending on a live io_uring loop.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        drop(io_loop);
+
+        // Construct a sink whose handle would fail immediately if the wrapper
+        // tried to hand work to the loop.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+
+        sink.send(IoBufs::default()).await.unwrap();
+        sink.send(IoBuf::default()).await.unwrap();
+        sink.send(Vec::<u8>::new()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_large_recv_skips_internal_buffer() {
+        // Verify reads that are at least as large as the internal buffer go
+        // straight into the caller-owned output buffer.
+        let network = Network::start(
+            Config {
+                read_buffer_size: 8,
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected = *b"abcdefgh";
+
+        // Accept one connection and issue a recv that exactly matches the
+        // internal buffer size, forcing the direct-recv branch.
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let received = stream.recv(expected.len()).await.unwrap();
+            assert!(stream.peek(1).is_empty());
+            received
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(expected.to_vec()).await.unwrap();
+
+        assert_eq!(reader.await.unwrap().coalesce(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_configured_socket_options_cover_accept_and_dial_paths() {
+        // Verify both dial and accept exercise the configured socket-option branches.
+        let network = Network::start(
+            Config {
+                tcp_nodelay: Some(true),
+                zero_linger: true,
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accepting the connection covers the listener-side option setters.
+        let accepter = tokio::spawn(async move {
+            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+        });
+
+        // Dialing the listener covers the client-side option setters.
+        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        accepter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
+        // Verify both dial and accept also cover the "do not touch socket options" branches.
+        let network = Network::start(
+            Config {
+                tcp_nodelay: None,
+                zero_linger: false,
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let accepter = tokio::spawn(async move {
+            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+        });
+
+        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        accepter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_channel_close_fallbacks() {
+        // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let recv_handle = submitter.clone();
+        drop(io_loop);
+
+        // Send should fail locally once the submission channel has been
+        // disconnected and no loop remains to accept work.
+        let (send_left, _send_right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(
+            Arc::new(send_left.into()),
+            submitter,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(sink.send(b"hello").await, Err(Error::SendFailed)));
+
+        // Recv should surface the symmetric wrapper-specific failure.
+        let (recv_left, _recv_right) = UnixStream::pair().unwrap();
+        let mut stream = Stream::new(
+            Arc::new(recv_left.into()),
+            recv_handle,
+            Duration::from_secs(1),
+            0,
+            test_pool(),
+        );
+        assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
     }
 }
