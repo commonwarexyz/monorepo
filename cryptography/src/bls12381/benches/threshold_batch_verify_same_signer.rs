@@ -22,13 +22,13 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                     let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
-                            "{}/mode={:?} n={} t={} msgs={} conc={}",
+                            "{}/n={} t={} msgs={} conc={} mode={:?}",
                             module_path!(),
-                            mode,
                             n,
                             t,
                             msgs,
-                            concurrency
+                            concurrency,
+                            mode
                         ),
                         |b| {
                             b.iter_batched(
