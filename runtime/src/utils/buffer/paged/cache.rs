@@ -207,7 +207,7 @@ impl CacheRef {
     /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
     /// [BufferPooler].
     pub fn from_pooler(
-        pooler: impl BufferPooler,
+        pooler: impl BufferPooler + Metrics,
         page_size: NonZeroU16,
         capacity: NonZeroUsize,
     ) -> Self {

@@ -753,7 +753,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Metrics + Clone + Send + Sync + 'static {
+    pub trait BufferPooler: Clone + Send + Sync + 'static {
         /// Returns the network [BufferPool].
         fn network_buffer_pool(&self) -> &BufferPool;
 
