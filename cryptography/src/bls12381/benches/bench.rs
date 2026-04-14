@@ -14,8 +14,8 @@ mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
 mod signature_verification;
-mod threshold_batch_verify_same_message;
-mod threshold_batch_verify_same_message_precomputed;
+mod threshold_batch_verify;
+mod threshold_batch_verify_precomputed;
 mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
@@ -36,8 +36,8 @@ criterion_main!(
     scheme_batch_verify_same_message::benches,
     evaluate_point::benches,
     msm::benches,
-    threshold_batch_verify_same_message::benches,
-    threshold_batch_verify_same_message_precomputed::benches,
+    threshold_batch_verify::benches,
+    threshold_batch_verify_precomputed::benches,
     tle_encrypt::benches,
     tle_decrypt::benches,
 );

@@ -12,7 +12,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
 
-fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
+fn bench_threshold_batch_verify(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
@@ -43,8 +43,6 @@ fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
                                     let (output, shares) =
                                         deal::<MinSig, _, N3f1>(&mut rng, mode, players)
                                             .expect("deal should succeed");
-                                    let polynomial = output.public().clone();
-                                    polynomial.precompute_partial_publics();
                                     let signatures = shares
                                         .values()
                                         .iter()
@@ -61,9 +59,9 @@ fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
                                             }
                                         })
                                         .collect::<Vec<_>>();
-                                    (rng, polynomial, signatures)
+                                    (rng, output.public().clone(), signatures)
                                 },
-                                |(mut rng, polynomial, mut signatures): (_, _, Vec<_>)| {
+                                |(mut rng, polynomial, mut signatures)| {
                                     if invalid > 0 {
                                         signatures.shuffle(&mut rng);
                                     }
@@ -118,5 +116,5 @@ fn bench_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_threshold_batch_verify_same_message_precomputed
+    targets = bench_threshold_batch_verify
 }
