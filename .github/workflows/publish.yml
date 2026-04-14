@@ -25,6 +25,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish actor-macros
+      run: cargo publish --manifest-path actor/macros/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish conformance-macros
       run: cargo publish --manifest-path conformance/macros/Cargo.toml
       continue-on-error: true
@@ -67,6 +72,11 @@ jobs:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish runtime
       run: cargo publish --manifest-path runtime/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish actor
+      run: cargo publish --manifest-path actor/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,23 @@
+[package]
+name = "commonware-actor-macros"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Procedural macros for commonware-actor."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/actor/macros"
+documentation = "https://docs.rs/commonware-actor-macros"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full", "parsing", "visit"] }
+
+[lints]
+workspace = true

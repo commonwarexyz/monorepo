@@ -59,6 +59,34 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **log** (`examples/log`): Commit to a secret log and agree to its hash.
 - **sync** (`examples/sync`): Synchronize state between a server and client.
 
+### Actor Patterns
+
+Use the `actor` crate (`commonware-actor`) for actor-based concurrency instead of manually writing `select!` loops and custom mailbox definitions. The `ingress!` macro generates typed mailboxes, message enums, and convenience methods from a declarative specification. Pair it with `ServiceBuilder` to wire up the actor service loop. See the `actor` crate README and docs for full details.
+
+```rust
+use commonware_actor::{ingress, service::ServiceBuilder, Actor};
+
+// 1. Declare the mailbox
+ingress! {
+    MyMailbox,
+    pub tell DoWork { payload: Vec<u8> };
+    pub ask GetStatus -> String;
+}
+
+// 2. Implement the Actor trait (type Mailbox, Ingress, Snapshot, on_read_only, on_read_write, ...)
+
+// 3. Build and start
+let (mut mailbox, service) = ServiceBuilder::new(my_actor)
+    .build(context.with_label("my-actor"));
+service.start();
+```
+
+Key concepts:
+- `tell`: fire-and-forget. `ask`: request/response (read-only by default, `ask read_write` for mutable). `subscribe`: enqueue and get a `oneshot::Receiver`.
+- Read-only handlers run concurrently on snapshots; read-write handlers run serially.
+- Use `on_external` to translate non-mailbox events (timers, channels) into ingress messages.
+- Use `ServiceBuilder::with_lane(...)` for priority lanes (e.g., control vs data).
+
 ### Key Design Principles
 
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
