@@ -33,7 +33,7 @@ fn bench_restart(c: &mut Criterion) {
                     |b| {
                         // Setup: populate database (once, on first sample).
                         if !initialized {
-                            commonware_runtime::tokio::Runner::new(Config::default()).start(
+                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                                 |ctx| async move {
                                     let mut a = Archive::init(ctx, variant, compression).await;
                                     append_random(&mut a, items).await;
