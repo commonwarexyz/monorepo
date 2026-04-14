@@ -2,7 +2,7 @@
 
 use crate::{
     config::{SyncMode, WriteShape},
-    environment::{BenchmarkEnvironment, PARTITION},
+    environment::{Environment, PARTITION},
     report::WorkerStats,
 };
 use bytes::{Buf, Bytes};
@@ -81,7 +81,7 @@ pub(crate) struct BlockShard {
 /// Create and fully populate a fixed-size blob for read-heavy scenarios.
 pub(crate) async fn prepare_prefilled_blob<S>(
     storage: &S,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     name: &[u8],
     file_size: u64,
     seed: u64,
@@ -124,7 +124,7 @@ where
 /// Create a fixed-size preallocated blob for overwrite workloads.
 pub(crate) async fn prepare_preallocated_blob<S>(
     storage: &S,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     name: &[u8],
     file_size: u64,
 ) -> Result<(), String>
@@ -152,7 +152,7 @@ where
 
 /// Evict a blob from the page cache for a cold-cache benchmark.
 pub(crate) fn prepare_cold_read_cache(
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     name: &[u8],
 ) -> Result<(), String> {
     environment

@@ -1,6 +1,9 @@
 //! Reporting helpers for `storage_bench`.
 
-use crate::config::{Config, OutputFormat};
+use crate::{
+    config::{Config, OutputFormat},
+    environment::Environment,
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -99,10 +102,10 @@ pub(crate) fn summarize_operation(mut stats: WorkerStats, elapsed: Duration) -> 
 }
 
 /// Print a concise human-readable report.
-pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
+pub(crate) fn print_human_report(cfg: &Config, environment: &Environment, report: &ScenarioReport) {
     println!(
         "backend={} scenario={} elapsed_s={:.3}",
-        cfg.backend.name(),
+        environment.backend(),
         cfg.scenario.name(),
         report.elapsed.as_secs_f64(),
     );
@@ -147,9 +150,9 @@ pub(crate) fn print_human_report(cfg: &Config, report: &ScenarioReport) {
 }
 
 /// Print a single JSON object for downstream processing.
-pub(crate) fn print_json_report(cfg: &Config, report: &ScenarioReport) {
+pub(crate) fn print_json_report(cfg: &Config, environment: &Environment, report: &ScenarioReport) {
     let json = json!({
-        "backend": cfg.backend.name(),
+        "backend": environment.backend(),
         "scenario": cfg.scenario.name(),
         "duration_seconds": cfg.duration.as_secs(),
         "io_size": cfg.io_size,

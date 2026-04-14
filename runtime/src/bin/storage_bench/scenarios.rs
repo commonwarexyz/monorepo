@@ -2,7 +2,7 @@
 
 use crate::{
     config::{Config, Scenario, SyncMode},
-    environment::{BenchmarkEnvironment, PARTITION},
+    environment::{Environment, PARTITION},
     helpers::{
         build_worker_shards, create_write_payload, prepare_cold_read_cache,
         prepare_preallocated_blob, prepare_prefilled_blob, run_append_writer,
@@ -26,7 +26,7 @@ const PRIMARY_BLOB_NAME: &[u8] = b"blob";
 /// Dispatch to the selected scenario using the runtime's storage context.
 pub(crate) async fn run_benchmark(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: Context,
 ) -> Result<ScenarioReport, String> {
     let result = match cfg.scenario {
@@ -44,7 +44,7 @@ pub(crate) async fn run_benchmark(
 /// Run `read_seq`.
 async fn run_read_seq(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     prepare_prefilled_blob(
@@ -119,7 +119,7 @@ async fn run_read_seq(
 /// Run `read_rand`.
 async fn run_read_rand(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     prepare_prefilled_blob(
@@ -193,7 +193,7 @@ async fn run_read_rand(
 /// Run `write_seq`.
 async fn run_write_seq(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     prepare_preallocated_blob(context, environment, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
@@ -242,7 +242,7 @@ async fn run_write_seq(
 /// Run `write_rand`.
 async fn run_write_rand(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     prepare_preallocated_blob(context, environment, PRIMARY_BLOB_NAME, cfg.file_size()).await?;
@@ -317,7 +317,7 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<ScenarioRep
 /// Run `read_write_append`.
 async fn run_read_write_append(
     cfg: &Config,
-    environment: &BenchmarkEnvironment,
+    environment: &Environment,
     context: &Context,
 ) -> Result<ScenarioReport, String> {
     let initial_size = cfg.file_size();

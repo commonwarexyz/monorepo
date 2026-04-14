@@ -8,8 +8,6 @@ use commonware_utils::hex;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process,
-    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 #[cfg(unix)]
@@ -18,22 +16,32 @@ use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 /// Default partition used by the standalone benchmark harness.
 pub(crate) const PARTITION: &str = "storage-bench";
 
-static NEXT_STORAGE_BENCH_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-/// Storage backend compiled into the current binary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Backend {
-    /// The blocking-file-descriptor storage backend used by the Tokio runtime.
-    #[cfg(not(feature = "iouring-storage"))]
-    Tokio,
-    /// The dedicated io_uring-loop storage backend.
-    #[cfg(feature = "iouring-storage")]
-    IoUring,
+/// Per-run benchmark directory and file helpers.
+#[derive(Debug)]
+pub(crate) struct Environment {
+    root: PathBuf,
 }
 
-impl Backend {
-    /// Stable backend name used in benchmark output.
-    pub(crate) const fn name(self) -> &'static str {
+impl Environment {
+    /// Create a fresh root directory for one benchmark run.
+    ///
+    /// The benchmark process creates only one environment, so a stable
+    /// operation-scoped directory is enough here. Any leftover directory from a
+    /// previous interrupted run is removed before the new benchmark starts.
+    pub(crate) fn new(operation: &str, base_root: &Path) -> std::io::Result<Self> {
+        fs::create_dir_all(base_root)?;
+        let root = base_root.join(format!("commonware_storage_bench_{operation}"));
+        let _ = fs::remove_dir_all(&root);
+        Ok(Self { root })
+    }
+
+    /// Return the root directory for this benchmark run.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Return the compiled storage backend name for this binary.
+    pub(crate) const fn backend(&self) -> &'static str {
         #[cfg(feature = "iouring-storage")]
         {
             "iouring"
@@ -44,56 +52,10 @@ impl Backend {
             "tokio"
         }
     }
-}
-
-/// Detect the storage backend selected for this binary.
-pub(crate) const fn detected_backend() -> Backend {
-    #[cfg(feature = "iouring-storage")]
-    {
-        Backend::IoUring
-    }
-
-    #[cfg(not(feature = "iouring-storage"))]
-    {
-        Backend::Tokio
-    }
-}
-
-/// Per-run benchmark directory and file helpers.
-#[derive(Clone, Debug)]
-pub(crate) struct BenchmarkEnvironment {
-    root: PathBuf,
-}
-
-impl BenchmarkEnvironment {
-    /// Create a fresh unique root directory for one benchmark run.
-    pub(crate) fn new(operation: &str, base_root: &Path) -> std::io::Result<Self> {
-        fs::create_dir_all(base_root)?;
-        let root = base_root.join(format!(
-            "commonware_storage_bench_{operation}_{}_{}",
-            process::id(),
-            NEXT_STORAGE_BENCH_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        Ok(Self { root })
-    }
-
-    /// Return the root directory for this benchmark run.
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
 
     /// Return the on-disk path of a blob.
     pub(crate) fn blob_path(&self, partition: &str, name: &[u8]) -> PathBuf {
         self.root.join(partition).join(hex(name))
-    }
-
-    /// Remove the benchmark root after the runtime has dropped its storage state.
-    pub(crate) fn finish(self) {
-        // The io_uring storage path owns a dedicated worker thread. Give it a
-        // brief chance to observe dropped handles before removing the
-        // directory.
-        std::thread::sleep(Duration::from_millis(10));
-        let _ = fs::remove_dir_all(self.root);
     }
 
     /// Force physical allocation for a blob that already has the desired size.
@@ -159,5 +121,15 @@ impl BenchmarkEnvironment {
     #[cfg(not(unix))]
     pub(crate) fn evict_blob_cache(&self, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+impl Drop for Environment {
+    fn drop(&mut self) {
+        // The io_uring storage path owns a dedicated worker thread. Give it a
+        // brief chance to observe dropped handles before removing the
+        // directory.
+        std::thread::sleep(Duration::from_millis(10));
+        let _ = fs::remove_dir_all(&self.root);
     }
 }

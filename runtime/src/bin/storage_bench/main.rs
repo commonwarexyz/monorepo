@@ -20,7 +20,7 @@ mod scenarios;
 
 use crate::{
     config::{Config, OutputFormat},
-    environment::BenchmarkEnvironment,
+    environment::Environment,
     report::{print_human_report, print_json_report},
     scenarios::run_benchmark,
 };
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let environment = match BenchmarkEnvironment::new(cfg.scenario.name(), &cfg.root) {
+    let environment = match Environment::new(cfg.scenario.name(), &cfg.root) {
         Ok(environment) => environment,
         Err(err) => {
             eprintln!("failed to create benchmark root: {err}");
@@ -54,23 +54,19 @@ fn main() -> ExitCode {
     if let Some(global_queue_interval) = cfg.global_queue_interval {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
     }
-    let report = match commonware_runtime::tokio::Runner::new(runtime_cfg).start({
-        let cfg = cfg.clone();
-        let environment = environment.clone();
-        move |context| async move { run_benchmark(&cfg, &environment, context).await }
-    }) {
+    let report = match commonware_runtime::tokio::Runner::new(runtime_cfg)
+        .start(|context| async { run_benchmark(&cfg, &environment, context).await })
+    {
         Ok(report) => report,
         Err(err) => {
             eprintln!("{err}");
-            environment.finish();
             return ExitCode::FAILURE;
         }
     };
-    environment.finish();
 
     match cfg.output {
-        OutputFormat::Human => print_human_report(&cfg, &report),
-        OutputFormat::Json => print_json_report(&cfg, &report),
+        OutputFormat::Human => print_human_report(&cfg, &environment, &report),
+        OutputFormat::Json => print_json_report(&cfg, &environment, &report),
     }
     ExitCode::SUCCESS
 }

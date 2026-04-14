@@ -1,6 +1,5 @@
 //! CLI and configuration types for `storage_bench`.
 
-use crate::environment::{detected_backend, Backend};
 use clap::{
     builder::{Styles, ValueParser},
     error::ErrorKind,
@@ -139,8 +138,6 @@ pub(crate) enum OutputFormat {
 /// Parsed and validated benchmark configuration.
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
-    /// Storage backend compiled into this benchmark binary.
-    pub(crate) backend: Backend,
     /// Scenario to run.
     pub(crate) scenario: Scenario,
     /// Time budget for the workload phase.
@@ -282,7 +279,6 @@ impl Config {
         )?;
 
         let cfg = Self {
-            backend: detected_backend(),
             scenario,
             duration: Duration::from_secs(duration_secs),
             io_size,
