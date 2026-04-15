@@ -1035,7 +1035,7 @@ mod tests {
         // after ring-size round-up.
         let mut registry = Registry::default();
         let cfg = Config {
-            size: (1 << 28) + 1,
+            size: (MAX_SUBMISSION_SEQUENCE_DOMAIN / 2) + 1,
             ..Default::default()
         };
         let _ = IoUringLoop::new(cfg, &mut registry);
