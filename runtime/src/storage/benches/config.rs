@@ -188,8 +188,9 @@ impl Config {
     /// proper formatting and color) and the process exits, matching clap's
     /// default behavior.
     pub fn parse() -> Self {
-        let cfg =
-            <Self as Parser>::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
+        // Filter out `--bench` which cargo passes to harness-less bench targets.
+        let args = std::env::args_os().filter(|a| a != "--bench");
+        let cfg = <Self as Parser>::try_parse_from(args).unwrap_or_else(|err| err.exit());
         if let Err(msg) = cfg.validate() {
             Self::command()
                 .error(ErrorKind::ValueValidation, msg)

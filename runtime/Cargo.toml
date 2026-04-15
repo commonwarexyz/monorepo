@@ -31,7 +31,7 @@ libc.workspace = true
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
-rand = { workspace = true, features = ["small_rng"] }
+rand.workspace = true
 rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
@@ -48,13 +48,16 @@ features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
-clap = { workspace = true, features = ["derive"] }
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+rand = { workspace = true, features = ["small_rng"] }
 
 [features]
 default = []
@@ -75,9 +78,10 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 [lib]
 bench = false
 
-[[bin]]
-name = "storage_bench"
-path = "src/bin/storage_bench/main.rs"
+[[bench]]
+name = "storage"
+harness = false
+path = "src/storage/benches/main.rs"
 
 [[bench]]
 name = "buffer_paged"

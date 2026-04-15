@@ -289,7 +289,7 @@ jobs:
     - name: Build utils
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
-      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --lib --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
     - name: Build consensus
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
     - name: Build storage

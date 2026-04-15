@@ -151,7 +151,7 @@ fi
 if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
     RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
     CARGO_TARGET_DIR="$target_dir" \
-    $CARGO_NIGHTLY doc "${pkg_args[@]}" --lib --no-deps 2>/dev/null; then
+    $CARGO_NIGHTLY doc "${pkg_args[@]}" --no-deps 2>/dev/null; then
     echo "Error: Could not generate rustdoc" >&2
     exit 1
 fi
