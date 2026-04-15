@@ -1239,7 +1239,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
-                ctx.clone(),
+                ctx.with_label("journal"),
                 journal_config("rewind-with-pruning", page_cache),
             )
             .await
@@ -1282,7 +1282,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
-                ctx.clone(),
+                ctx.with_label("journal"),
                 journal_config("rewind-no-match-pruned", page_cache),
             )
             .await
