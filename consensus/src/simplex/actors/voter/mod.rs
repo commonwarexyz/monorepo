@@ -7760,8 +7760,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) =
-                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -8029,8 +8028,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) =
-                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
