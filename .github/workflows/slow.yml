@@ -200,6 +200,10 @@ jobs:
       run: |
         cd runtime
         just miri iobuf:: --partition hash:${{matrix.partition}}/8
+    - name: Run miri tests for runtime::paged::append
+      run: |
+        cd runtime
+        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/8
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
