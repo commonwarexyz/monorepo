@@ -91,8 +91,10 @@ pub async fn prepare_blob<S: Storage>(
     let (blob, _) = storage.open(partition, name).await.str_err()?;
     blob.resize(file_size).await.str_err()?;
     blob.sync().await.str_err()?;
-    preallocate_blob(root, partition, name)
-        .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
+    if file_size > 0 {
+        preallocate_blob(root, partition, name)
+            .map_err(|err| format!("failed to preallocate {}: {err}", root.display()))?;
+    }
     Ok(blob)
 }
 
