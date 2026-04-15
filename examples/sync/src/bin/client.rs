@@ -347,6 +347,7 @@ where
                 max_outstanding_requests: config.max_outstanding_requests,
                 update_rx: Some(update_receiver),
                 finish_rx: None,
+                progress_tx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
             };
