@@ -1,4 +1,15 @@
-//! A vector type that guarantees at least one element.
+//! A vector that always contains at least one element.
+//!
+//! [`NonEmptyVec`] wraps a standard [`Vec`] with a non-empty invariant
+//! enforced at construction and maintained by all mutating operations.
+//! Methods that could leave the vector empty (like [`pop`](NonEmptyVec::pop)
+//! and [`remove`](NonEmptyVec::remove)) return `None` instead of removing
+//! the last element. Accessors like [`first`](NonEmptyVec::first) and
+//! [`last`](NonEmptyVec::last) return direct references rather than
+//! `Option`s.
+//!
+//! For arbitrary mutations, [`mutate`](NonEmptyVec::mutate) gives temporary
+//! access to the inner `Vec` and panics if the closure leaves it empty.
 
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
