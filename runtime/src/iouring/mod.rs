@@ -535,9 +535,12 @@ impl IoUringLoop {
                     // Pending submissions exist and staging stopped at capacity.
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
-                    // least one completion so capacity can open up. Arm the
-                    // eventfd wait so producer disconnect is still observed
-                    // promptly while blocked in `submit_and_wait`.
+                    // least one completion so capacity can open up.
+                    //
+                    // Keep the eventfd-backed wake path armed across this
+                    // blocking section so a later producer disconnect can
+                    // interrupt `submit_and_wait` instead of waiting for an
+                    // unrelated CQE or timeout.
                     let _arm = self.waker.arm(self.processed_seq);
                     self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                         .expect("unable to submit to ring");
@@ -562,12 +565,13 @@ impl IoUringLoop {
             //
             // If staging hit capacity, force a submit-and-wait cycle to open
             // space, even though the sequence snapshot looks idle here.
+            // Otherwise, arm the eventfd-backed blocking path. If
+            // `arm.should_block()` is true, we may enter `submit_and_wait`.
             //
-            // Otherwise, arm the blocking wake path. If the post-arm snapshot
-            // still looks idle, we may enter `submit_and_wait`. Any submission
-            // that arrives after `arm()` observes the wait target and rings
-            // eventfd, so the loop is woken instead of sleeping through newly
-            // published work.
+            // While the returned guard is live, any later submission or
+            // producer disconnect observes the armed eventfd target and wakes
+            // this blocking section instead of waiting for an unrelated CQE or
+            // timeout.
             let arm = self.waker.arm(self.processed_seq);
             if at_capacity || arm.should_block() {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
