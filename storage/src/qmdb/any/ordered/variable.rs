@@ -288,7 +288,7 @@ pub(crate) mod test {
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
         let page_cache = CacheRef::from_pooler(
-            context.clone(),
+            context.with_label("cache"),
             crate::qmdb::any::test::PAGE_SIZE,
             crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );

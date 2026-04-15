@@ -1339,7 +1339,7 @@ mod tests {
                         compression: None,
                         codec_config: (),
                         page_cache: CacheRef::from_pooler(
-                            context.clone(),
+                            context.with_label("cache"),
                             LARGE_PAGE_SIZE,
                             NZUsize!(10),
                         ),
@@ -2564,7 +2564,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2607,7 +2607,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2680,7 +2680,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2709,7 +2709,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2782,7 +2782,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2832,7 +2832,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2891,7 +2891,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2963,7 +2963,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),

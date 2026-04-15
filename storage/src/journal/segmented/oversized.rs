@@ -954,7 +954,7 @@ mod tests {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -1526,7 +1526,7 @@ mod tests {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -1819,7 +1819,7 @@ mod tests {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -2590,7 +2590,7 @@ mod tests {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
-                    context.clone(),
+                    context.with_label("cache"),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),

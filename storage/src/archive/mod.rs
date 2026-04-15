@@ -223,7 +223,7 @@ mod tests {
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test-key".into(),
             freezer_key_page_cache: CacheRef::from_pooler(
-                context.clone(),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),

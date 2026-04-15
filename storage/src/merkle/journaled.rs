@@ -3201,7 +3201,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr =
-            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(page_cache))
+            Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, test_config(page_cache))
                 .await
                 .unwrap();
 
@@ -3233,7 +3233,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr =
-            Journaled::<F, _, Digest>::init(context.clone(), &hasher, test_config(page_cache))
+            Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, test_config(page_cache))
                 .await
                 .unwrap();
 

@@ -73,19 +73,21 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let make_cfg = |ctx: &deterministic::Context, label: &str| JournalConfig {
+        let make_cfg = |page_cache: CacheRef| JournalConfig {
             partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::from_pooler(
-                ctx.with_label(label),
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
+            page_cache,
         };
 
-        let mut journal =
-            Journal::init(context.with_label("journal"), make_cfg(&context, "cache_0"))
+        let mut journal = Journal::init(
+            context.with_label("journal"),
+            make_cfg(CacheRef::from_pooler(
+                context.with_label("cache_0"),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            )),
+        )
                 .await
                 .unwrap();
 
@@ -169,7 +171,11 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("journal")
                             .with_attribute("instance", restarts),
-                        make_cfg(&context, &format!("cache_{restarts}")),
+                        make_cfg(CacheRef::from_pooler(
+                            context.with_label(&format!("cache_{restarts}")),
+                            PAGE_SIZE,
+                            NZUsize!(PAGE_CACHE_SIZE),
+                        )),
                     )
                     .await
                     .unwrap();

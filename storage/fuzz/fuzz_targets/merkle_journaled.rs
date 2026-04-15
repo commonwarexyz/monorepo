@@ -121,7 +121,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 NZUsize!(PAGE_CACHE_SIZE),
             );
             let mut merkle = Journaled::<F, _, _>::init(
-                context.clone(),
+                context.with_label("merkle"),
                 &hasher,
                 test_config(suffix, page_cache.clone()),
             )
