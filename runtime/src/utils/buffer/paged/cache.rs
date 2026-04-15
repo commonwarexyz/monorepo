@@ -272,6 +272,32 @@ impl CacheRef {
         original_len - buf.len()
     }
 
+    /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
+    ///
+    /// Each element of `ranges` is `(dest_slice, logical_offset)`. Returns the number of
+    /// ranges that were *fully* read from cache before encountering a miss. Ranges must be
+    /// sorted by offset and non-overlapping.
+    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut [(&mut [u8], u64)]) -> usize {
+        let page_cache = self.cache.read();
+        let mut fully_read = 0;
+        for (buf, logical_offset) in ranges.iter_mut() {
+            let mut remaining = buf.len();
+            let mut offset = *logical_offset;
+            let mut dst = 0;
+            while remaining > 0 {
+                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
+                if count == 0 {
+                    return fully_read;
+                }
+                offset += count as u64;
+                dst += count;
+                remaining -= count;
+            }
+            fully_read += 1;
+        }
+        fully_read
+    }
+
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
     /// will be read from the provided `blob` and cached for future reads.
     pub(super) async fn read<B: Blob>(

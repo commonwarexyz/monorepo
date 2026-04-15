@@ -1,8 +1,8 @@
 //! Synchronize state between a server and client.
 //!
 //! This example shows how to synchronize a client database to a remote server's database
-//! using [commonware_storage::qmdb::any], [commonware_storage::qmdb::current], or
-//! [commonware_storage::qmdb::immutable].
+//! using [commonware_storage::qmdb::any], [commonware_storage::qmdb::current],
+//! [commonware_storage::qmdb::immutable], or [commonware_storage::qmdb::keyless].
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 
@@ -15,7 +15,7 @@ pub mod error;
 pub use error::Error;
 pub mod databases;
 pub mod net;
-pub use databases::{any, current, immutable};
+pub use databases::{any, current, immutable, keyless};
 
 /// Returns the version of the crate.
 pub const fn crate_version() -> &'static str {

@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync an
-//! `any`, `current`, or `immutable` database.
+//! `any`, `current`, `immutable`, or `keyless` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -13,7 +13,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable,
+    immutable, keyless,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
@@ -540,6 +540,17 @@ where
     run_helper(context, config, database).await
 }
 
+/// Run the Keyless database server.
+async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = keyless::create_config(&context);
+    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
 /// Parse command line arguments and return configuration.
 fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
@@ -549,8 +560,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|current|immutable")
-                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
+                .value_name("any|current|immutable|keyless")
+                .help("Database type to use. Must be `any`, `current`, `immutable`, or `keyless`.")
                 .default_value("any"),
         )
         .arg(
@@ -683,6 +694,7 @@ fn main() {
             DatabaseType::Any => run_any(context, config).await,
             DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {
