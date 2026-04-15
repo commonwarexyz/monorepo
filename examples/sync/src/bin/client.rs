@@ -322,7 +322,9 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = keyless::create_config(&context);
+        let page_cache =
+            CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = keyless::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {

@@ -545,7 +545,8 @@ async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::e
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
-    let db_config = keyless::create_config(&context);
+    let page_cache = CacheRef::from_pooler(context.with_label("cache"), NZU16!(2048), NZUsize!(10));
+    let db_config = keyless::create_config(page_cache);
     let database = keyless::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await

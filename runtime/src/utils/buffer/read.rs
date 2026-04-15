@@ -29,7 +29,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
+///     let mut reader = Read::from_pooler(context.with_label("reader"), blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let header = reader.read(16).await.expect("unable to read data");
@@ -75,7 +75,7 @@ impl<B: Blob> Read<B> {
 
     /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
     pub fn from_pooler(
-        pooler: &impl BufferPooler,
+        pooler: impl BufferPooler,
         blob: B,
         blob_size: u64,
         buffer_size: NonZeroUsize,

@@ -127,7 +127,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     read_buffer = Some(Read::from_pooler(
-                        &context,
+                        context.with_label("reader"),
                         blob,
                         blob_size.min(size),
                         NZUsize!(buffer_size),
@@ -146,7 +146,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("cannot open context");
 
                     write_buffer = Some(Write::from_pooler(
-                        &context,
+                        context.with_label("writer"),
                         blob,
                         initial_size as u64,
                         NZUsize!(capacity),

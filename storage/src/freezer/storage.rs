@@ -488,7 +488,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
-        pooler: &impl BufferPooler,
+        pooler: impl BufferPooler,
         blob: &E::Blob,
         table_size: u32,
         table_resize_frequency: u8,
@@ -697,7 +697,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
-                    &context,
+                    context.with_label("recover_table"),
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -722,7 +722,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
-                    &context,
+                    context.with_label("recover_table"),
                     &table,
                     table_size,
                     config.table_resize_frequency,
