@@ -2287,7 +2287,9 @@ pub(crate) mod test {
             suffix,
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         );
-        super::init(context, cfg, None, |_, _| {}).await.unwrap()
+        super::init(context.with_label("db"), cfg, None, |_, _| {})
+            .await
+            .unwrap()
     }
 
     async fn commit_writes_mmb(
@@ -2308,7 +2310,7 @@ pub(crate) mod test {
     fn test_mmb_batch_crud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "crud").await;
+            let mut db = open_mmb_db(context.with_label("mmb_crud"), "crud").await;
 
             // Insert and read back.
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], None).await;
@@ -2340,7 +2342,7 @@ pub(crate) mod test {
     fn test_mmb_batch_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "empty").await;
+            let mut db = open_mmb_db(context.with_label("mmb_empty"), "empty").await;
             let root_before = db.root();
 
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
@@ -2358,7 +2360,7 @@ pub(crate) mod test {
     fn test_mmb_batch_metadata() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "meta").await;
+            let mut db = open_mmb_db(context.with_label("mmb_meta"), "meta").await;
 
             let metadata = val(42);
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
@@ -2376,7 +2378,7 @@ pub(crate) mod test {
     fn test_mmb_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db0"), "recovery").await;
+            let mut db = open_mmb_db(context.with_label("mmb_recovery0"), "recovery").await;
 
             commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(val(99))).await;
             commit_writes_mmb(&mut db, [(key(1), Some(val(1)))], None).await;
@@ -2387,7 +2389,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen and verify state.
-            let db = open_mmb_db(context.with_label("db1"), "recovery").await;
+            let db = open_mmb_db(context.with_label("mmb_recovery1"), "recovery").await;
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -2402,7 +2404,7 @@ pub(crate) mod test {
     fn test_mmb_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_mmb_db(context.with_label("db"), "prune").await;
+            let mut db = open_mmb_db(context.with_label("mmb_prune"), "prune").await;
 
             for i in 0u64..20 {
                 commit_writes_mmb(&mut db, [(key(i), Some(val(i)))], None).await;

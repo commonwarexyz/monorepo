@@ -208,7 +208,7 @@ mod tests {
             value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         };
-        prunable::Archive::init(context, cfg).await.unwrap()
+        prunable::Archive::init(context.with_label("archive"), cfg).await.unwrap()
     }
 
     async fn create_immutable(
@@ -238,7 +238,7 @@ mod tests {
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
         };
-        immutable::Archive::init(context, cfg).await.unwrap()
+        immutable::Archive::init(context.with_label("archive"), cfg).await.unwrap()
     }
 
     async fn test_put_get_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {

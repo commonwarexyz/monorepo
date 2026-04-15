@@ -1296,7 +1296,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
             .await
             .unwrap();
         // Build a test structure with 255 leaves
@@ -1726,7 +1726,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
             .await
             .unwrap();
         let mut elements = Vec::new();
@@ -1997,7 +1997,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context, &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
             .await
             .unwrap();
 

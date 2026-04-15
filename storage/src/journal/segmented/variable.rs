@@ -1181,7 +1181,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
-            let result = Journal::<_, u64>::init(context, cfg).await;
+            let result = Journal::<_, u64>::init(context.with_label("journal"), cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -1226,7 +1226,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.with_label("journal"), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1287,7 +1287,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.with_label("journal"), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1351,7 +1351,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.with_label("journal"), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1693,7 +1693,7 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();
@@ -1752,7 +1752,7 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();

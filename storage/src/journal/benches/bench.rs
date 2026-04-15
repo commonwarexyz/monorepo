@@ -58,7 +58,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
     };
-    FixedJournal::init(context, journal_config).await.unwrap()
+    FixedJournal::init(context.with_label("journal"), journal_config).await.unwrap()
 }
 
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
@@ -96,7 +96,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
     };
-    VariableJournal::init(context, journal_config)
+    VariableJournal::init(context.with_label("journal"), journal_config)
         .await
         .unwrap()
 }
