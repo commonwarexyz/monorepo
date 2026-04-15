@@ -267,9 +267,9 @@ macro_rules! dispatch_arm {
 /// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
 macro_rules! with_fixed_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use commonware_runtime::ThreadPooler as _;
+        use commonware_runtime::{Metrics as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.clone(),
+            $ctx.with_label("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
@@ -356,9 +356,9 @@ macro_rules! with_fixed_value_db {
 /// execute `$body`.
 macro_rules! with_var_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use commonware_runtime::ThreadPooler as _;
+        use commonware_runtime::{Metrics as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.clone(),
+            $ctx.with_label("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
