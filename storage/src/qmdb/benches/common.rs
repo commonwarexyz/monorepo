@@ -255,7 +255,7 @@ macro_rules! dispatch_arm {
     ($ctx:expr, $thread_pool:expr, $page_cache:expr, $db:ident, $body:expr, $DbType:ty, $cfg_fn:ident) => {{
         #[allow(unused_mut)]
         let mut $db = <$DbType>::init(
-            $ctx.clone(),
+            $ctx.with_label("db"),
             $crate::common::$cfg_fn($thread_pool.clone(), $page_cache.clone()),
         )
         .await
