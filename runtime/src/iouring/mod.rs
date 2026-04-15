@@ -266,7 +266,7 @@ impl Drop for HandleInner {
         // Wake the loop so shutdown observes disconnect promptly. This is an
         // out-of-band wake for channel closure, so do not publish a synthetic
         // submission sequence increment.
-        self.waker.notify();
+        self.waker.wake();
     }
 }
 

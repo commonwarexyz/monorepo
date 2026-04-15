@@ -7,6 +7,7 @@
 //!   blocking in `submit_and_wait`.
 //! - Producers wake only the currently armed wait target.
 //! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
+//! - Out-of-band wake requests use [`Waker::wake`].
 //! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
 //!
 //! The packed atomic state combines:
@@ -88,8 +89,8 @@ impl Drop for BlockGuard<'_> {
 ///
 /// Blocking follows an arm-and-recheck protocol:
 /// - The loop first verifies `submitted_seq == processed_seq`, then arms a wait target.
-/// - `blocking_snapshot()` returns the post-arm snapshot only when blocking still
-///   looks safe after that same atomic state transition.
+/// - The loop blocks only if the post-arm snapshot still looks idle after that
+///   same atomic state transition.
 /// - Submitters signal the currently armed wait target exactly once.
 /// - Out-of-band notifications latch one wake even while unarmed, so the next
 ///   arm-and-recheck cycle skips blocking once.
@@ -104,7 +105,7 @@ struct WakerInner {
 /// Internal hybrid futex/eventfd wake source for the io_uring loop.
 ///
 /// - Publish submissions from producers via [`Waker::publish`]
-/// - Wake without publishing via [`Waker::notify`]
+/// - Wake without publishing via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
@@ -203,22 +204,24 @@ impl Waker {
         }
     }
 
-    /// Atomically latch one pending wake and return the previous state.
+    /// Latch one pending wake and, if a target is currently armed, wake it.
     ///
-    /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch receives the
-    /// full pre-update state. Subsequent callers observe `None` until the loop
-    /// disarms and clears the bit.
-    fn latch_signal(&self) -> Option<u32> {
-        self.inner
-            .state
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                ((current & WAKE_SIGNALLED_BIT) == 0).then_some(current | WAKE_SIGNALLED_BIT)
-            })
-            .ok()
-    }
+    /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
+    /// wake. Subsequent callers do nothing until the loop disarms and clears
+    /// the bit.
+    pub(super) fn wake(&self) {
+        let Some(prev) =
+            self.inner
+                .state
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    ((current & WAKE_SIGNALLED_BIT) == 0).then_some(current | WAKE_SIGNALLED_BIT)
+                })
+                .ok()
+        else {
+            return;
+        };
 
-    /// Signal the currently armed wait target described by `waiting`.
-    fn signal_waiter(&self, waiting: u32) {
+        let waiting = prev & WAITING_MASK;
         assert_ne!(
             waiting, WAITING_MASK,
             "iouring wake state cannot wait on futex and eventfd simultaneously"
@@ -255,21 +258,7 @@ impl Waker {
             return;
         }
 
-        if let Some(prev) = self.latch_signal() {
-            self.signal_waiter(prev & WAITING_MASK);
-        }
-    }
-
-    /// Wake the loop without publishing a new submission.
-    ///
-    /// This is used for out-of-band notifications like producer disconnect.
-    ///
-    /// Unlike `publish()`, this also latches a pending wake while no wait
-    /// target is armed so the next arm-and-recheck cycle skips blocking once.
-    pub(super) fn notify(&self) {
-        if let Some(prev) = self.latch_signal() {
-            self.signal_waiter(prev & WAITING_MASK);
-        }
+        self.wake();
     }
 
     /// Return the current submitted sequence.
@@ -291,7 +280,24 @@ impl Waker {
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always disarms the wait bits before returning.
     pub(super) fn park_idle(&self, processed_seq: u32) {
-        if let Some(snapshot) = self.blocking_snapshot(WAITING_ON_FUTEX_BIT, processed_seq) {
+        // This transition only mutates the packed wake state. Tokio's channel
+        // synchronizes message and close visibility independently.
+        let prev = self
+            .inner
+            .state
+            .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
+        assert_eq!(
+            prev & WAITING_MASK,
+            0,
+            "iouring wait target should be disarmed before re-arming"
+        );
+        let snapshot = prev | WAITING_ON_FUTEX_BIT;
+
+        // Only block if the post-arm snapshot still looks idle. When that is
+        // true, futex-wait on the same packed state word that was just armed.
+        if (snapshot & WAKE_SIGNALLED_BIT) == 0
+            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
+        {
             self.wait_futex(snapshot);
         }
         self.disarm();
@@ -303,34 +309,24 @@ impl Waker {
     /// [`BlockGuard::should_block`] to decide whether the loop was still idle
     /// after arming.
     pub(super) fn arm(&self, processed_seq: u32) -> BlockGuard<'_> {
-        let should_block = self
-            .blocking_snapshot(WAITING_ON_EVENTFD_BIT, processed_seq)
-            .is_some();
-        BlockGuard {
-            waker: self,
-            should_block,
-        }
-    }
-
-    /// Set one wait target and return the post-update snapshot when it still
-    /// permits blocking.
-    fn blocking_snapshot(&self, wait_bit: u32, processed_seq: u32) -> Option<u32> {
         // This transition only mutates the packed wake state. Tokio's channel
         // synchronizes message and close visibility independently.
-        let prev = self.inner.state.fetch_or(wait_bit, Ordering::Relaxed);
+        let prev = self
+            .inner
+            .state
+            .fetch_or(WAITING_ON_EVENTFD_BIT, Ordering::Relaxed);
         assert_eq!(
             prev & WAITING_MASK,
             0,
             "iouring wait target should be disarmed before re-arming"
         );
-        let snapshot = prev | wait_bit;
-
-        // Only block if the post-arm snapshot still looks idle. When that is
-        // true, return the exact packed word so the idle path can futex-wait
-        // on the same state it just armed.
-        ((snapshot & WAKE_SIGNALLED_BIT) == 0
-            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq)
-            .then_some(snapshot)
+        let snapshot = prev | WAITING_ON_EVENTFD_BIT;
+        let should_block = (snapshot & WAKE_SIGNALLED_BIT) == 0
+            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
+        BlockGuard {
+            waker: self,
+            should_block,
+        }
     }
 
     /// Sleep on the packed state word with futex until it changes.
@@ -508,7 +504,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_park_idle_notify_keeps_sequence_stable() {
+    fn test_park_idle_wake_keeps_sequence_stable() {
         // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
         // not perturb the logical submission sequence.
         let waker = Waker::new().expect("eventfd creation should succeed");
@@ -525,7 +521,7 @@ pub(super) mod tests {
             {
                 std::hint::spin_loop();
             }
-            notifier.notify();
+            notifier.wake();
         });
 
         waker.park_idle(before);
@@ -534,23 +530,23 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_notify_without_idle_wait_keeps_sequence_stable() {
+    fn test_wake_without_idle_wait_keeps_sequence_stable() {
         // Verify out-of-band notifications without an idle wait do not perturb
         // submission sequence.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let before = waker.submitted();
-        waker.notify();
+        waker.wake();
         assert_eq!(waker.submitted(), before);
     }
 
     #[test]
-    fn test_notify_before_park_idle_skips_sleep() {
+    fn test_wake_before_park_idle_skips_sleep() {
         // Verify an out-of-band wake latched before idle arming makes the next
         // idle park return immediately instead of sleeping.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let before = waker.submitted();
 
-        waker.notify();
+        waker.wake();
         waker.park_idle(before);
 
         assert_eq!(waker.submitted(), before);
@@ -574,15 +570,15 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_notify_deduplicates_eventfd_wakes() {
+    fn test_wake_deduplicates_eventfd_wakes() {
         // Verify repeated out-of-band notifications while the same eventfd
         // wait is armed only queue one wake write and do not perturb sequence.
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         let arm = waker.arm(0);
         assert!(arm.should_block());
-        waker.notify();
-        waker.notify();
+        waker.wake();
+        waker.wake();
 
         assert_eq!(waker.submitted(), 0);
         assert_eq!(read_eventfd_count(&waker), 1);
