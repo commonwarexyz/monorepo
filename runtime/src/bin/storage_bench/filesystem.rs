@@ -6,6 +6,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
+#[cfg(target_os = "linux")]
 use commonware_utils::hex;
 use rand::Rng;
 use std::path::Path;
@@ -51,7 +52,7 @@ fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()>
 }
 
 #[cfg(not(target_os = "linux"))]
-fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
+const fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -75,7 +76,7 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
+pub const fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
