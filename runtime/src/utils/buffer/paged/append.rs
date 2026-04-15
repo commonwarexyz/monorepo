@@ -1162,6 +1162,70 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_read_many_into_scattered_cache_misses() {
+        // Exercises all three source paths in a single read_many_into call:
+        // tip buffer, page cache hit, and page cache miss (blob I/O).
+        // The tip holds a partial page so one item straddles the tip boundary.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            // Small cache: only 2 pages, so we can force eviction.
+            let cache_ref =
+                CacheRef::from_pooler(&context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write 3 pages of data and sync to disk.
+            let synced: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize * 3)
+                .collect();
+            append.append(&synced).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write a partial page that stays in the tip buffer. The item_size
+            // is chosen so the last item straddles the synced/tip boundary.
+            let item_size = 10;
+            let tip_len = PAGE_SIZE.get() as usize / 2;
+            let tip: Vec<u8> = (100u8..=255).cycle().take(tip_len).collect();
+            append.append(&tip).await.unwrap();
+
+            // Prime pages 0 and 2 into cache, leaving page 1 uncached.
+            let _ = append.read_at(0, item_size).await.unwrap();
+            let _ = append
+                .read_at(PAGE_SIZE.get() as u64 * 2, item_size)
+                .await
+                .unwrap();
+
+            // Offset that straddles the synced/tip boundary: starts in the last
+            // synced page, ends in the tip buffer.
+            let straddle_off = synced.len() as u64 - (item_size as u64 / 2);
+            let tip_off = synced.len() as u64 + item_size as u64;
+            let offsets = [
+                0u64,                       // page 0 (cached)
+                PAGE_SIZE.get() as u64,     // page 1 (not cached - blob I/O)
+                PAGE_SIZE.get() as u64 * 2, // page 2 (cached)
+                straddle_off,               // straddles synced/tip boundary
+                tip_off,                    // entirely in tip buffer
+            ];
+            let mut buf = vec![0u8; offsets.len() * item_size];
+            append
+                .read_many_into(&mut buf, &offsets, item_size)
+                .await
+                .unwrap();
+
+            let read: Vec<u8> = synced.iter().chain(tip.iter()).copied().collect();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * item_size..(i + 1) * item_size],
+                    &read[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_append_crc_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
