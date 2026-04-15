@@ -174,7 +174,7 @@ use timeout::{Tick, TimeoutWheel};
 mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
-use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+use waker::{Waker, MAX_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
 /// Packed `io_uring` `user_data` value.
 type UserData = u64;
@@ -461,8 +461,8 @@ impl IoUringLoop {
             .checked_next_power_of_two()
             .expect("ring size exceeds u32::MAX");
         assert!(
-            cfg.size < (1 << 29),
-            "rounded ring size must stay below 1<<29 to preserve the 29-bit wake sequence bound"
+            cfg.size < MAX_SUBMISSION_SEQUENCE_DOMAIN,
+            "rounded ring size must stay below the packed wake sequence domain"
         );
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
@@ -666,6 +666,13 @@ impl IoUringLoop {
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
+        //
+        // This check runs before every possible transition into the eventfd-backed
+        // blocking path. The fully idle futex path does not need the poll to be
+        // live, so an iteration that parks in futex may skip kernel entry
+        // entirely. If multishot termination was observed earlier, the next
+        // iteration that might block in `submit_and_wait` stages the rearm SQE
+        // here before entering the kernel again.
         if std::mem::take(&mut self.wake_rearm_needed) {
             self.waker.reinstall(&mut submission_queue);
         }
@@ -1017,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "rounded ring size must stay below 1<<29")]
+    #[should_panic(expected = "rounded ring size must stay below the packed wake sequence domain")]
     fn test_iouring_loop_rejects_sizes_that_exceed_wake_sequence_domain() {
         // The wake state reserves only 29 bits for the submission sequence, so
         // the bounded request channel must stay strictly below that domain even

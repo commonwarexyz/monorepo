@@ -51,6 +51,8 @@ const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Sequence domain used by the packed submission counter (state >> 3).
 pub(super) const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
+/// Maximum bounded queue size that preserves alias-free sequence comparisons.
+pub(super) const MAX_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK + 1;
 
 /// RAII guard covering a `submit_and_wait` blocking section.
 ///
@@ -487,7 +489,7 @@ pub(super) mod tests {
         drop(arm);
         assert_eq!(submitted_seq(&waker), 2);
         assert_eq!(
-            waker.inner.state.load(std::sync::atomic::Ordering::Acquire) & STATE_MASK,
+            waker.inner.state.load(std::sync::atomic::Ordering::Relaxed) & STATE_MASK,
             0
         );
 
@@ -509,7 +511,7 @@ pub(super) mod tests {
             while notifier
                 .inner
                 .state
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Relaxed)
                 & WAITING_ON_FUTEX_BIT
                 == 0
             {
