@@ -127,7 +127,8 @@ pub struct Waker {
 }
 
 impl Waker {
-    /// Create a non-blocking eventfd wake source.
+    /// Create a hybrid futex/eventfd wake source backed by a non-blocking
+    /// `eventfd`.
     pub fn new() -> Result<Self, std::io::Error> {
         // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -155,6 +156,7 @@ impl Waker {
             .inner
             .state
             .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Relaxed);
+
         if (prev & WAKE_SIGNALLED_BIT) != 0 {
             return;
         }
@@ -173,7 +175,8 @@ impl Waker {
         }
     }
 
-    /// Publish one submitted operation and optionally wake via `eventfd`.
+    /// Publish one submitted operation and optionally wake the currently armed
+    /// wait target.
     ///
     /// Callers must invoke this only after successfully enqueueing work into
     /// the MPSC channel. That ordering guarantees that when the loop observes
@@ -188,6 +191,7 @@ impl Waker {
             .inner
             .state
             .fetch_add(SUBMISSION_INCREMENT, Ordering::Relaxed);
+
         let waiting = prev & WAITING_MASK;
 
         // Fast path: the loop is not waiting, or another publisher already
@@ -211,17 +215,17 @@ impl Waker {
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always clears the current wait state before returning.
     pub fn park_idle(&self, processed_seq: u32) {
-        // This transition only mutates the packed wake state. Tokio's channel
-        // synchronizes message and close visibility independently.
         let prev = self
             .inner
             .state
             .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
+
         assert_eq!(
             prev & WAITING_MASK,
             0,
             "iouring wait target should be disarmed before re-arming"
         );
+
         let snapshot = prev | WAITING_ON_FUTEX_BIT;
 
         // Only block if the post-arm snapshot still looks idle. When that is
@@ -240,30 +244,31 @@ impl Waker {
     /// [`ArmGuard::should_block`] to decide whether the loop was still idle
     /// after arming.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
-        // This transition only mutates the packed wake state. Tokio's channel
-        // synchronizes message and close visibility independently.
         let prev = self
             .inner
             .state
             .fetch_or(WAITING_ON_EVENTFD_BIT, Ordering::Relaxed);
+
         assert_eq!(
             prev & WAITING_MASK,
             0,
             "iouring wait target should be disarmed before re-arming"
         );
+
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
         let should_block = (snapshot & WAKE_SIGNALLED_BIT) == 0
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
+
         ArmGuard {
             waker: self,
             should_block,
         }
     }
 
-    /// Drain eventfd readiness acknowledged by a wake CQE.
+    /// Drain readiness from the internal `eventfd` after a wake CQE.
     ///
-    /// This acknowledges kernel-visible wake readiness. Wait gating is tracked
-    /// separately in the packed `state` atomic and is managed by
+    /// This acknowledges kernel-visible `eventfd` readiness. Wait gating is
+    /// tracked separately in the packed `state` atomic and is managed by
     /// [`Waker::park_idle`] and [`Waker::arm`].
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
@@ -303,7 +308,7 @@ impl Waker {
         }
     }
 
-    /// Install the wake poll request into the SQ.
+    /// Install the internal `eventfd` multishot poll request into the SQ.
     ///
     /// This uses multishot poll and is called on startup and whenever a wake
     /// CQE indicates the previous multishot request is no longer active.
@@ -331,7 +336,11 @@ impl Waker {
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Relaxed);
     }
 
-    /// Wake the blocking path via eventfd.
+    /// Wake the loop while it is blocked in `submit_and_wait`.
+    ///
+    /// This writes to the internal `eventfd` monitored by the ring's multishot
+    /// poll request. The resulting wake CQE causes the loop to leave its
+    /// eventfd-backed blocking section and resume in userspace.
     fn eventfd_wake(&self) {
         let value: u64 = 1;
         loop {
@@ -366,7 +375,10 @@ impl Waker {
         }
     }
 
-    /// Wake one thread waiting on the idle path.
+    /// Wake one thread sleeping on the fully-idle futex path.
+    ///
+    /// This is used only when the loop has no active ring waiters and is
+    /// blocked in [`Waker::futex_wait`] on the packed wake-state word.
     fn futex_wake(&self) {
         loop {
             // SAFETY: `state` is a valid aligned futex word for the duration of
@@ -393,10 +405,15 @@ impl Waker {
     }
 
 
-    /// Sleep on the packed state word with futex until it changes.
+    /// Sleep on the packed wake-state word for the fully-idle path.
     ///
-    /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed". The
-    /// caller must pass the exact armed snapshot.
+    /// The caller must pass the exact post-arm snapshot from the same atomic
+    /// transition that set `WAITING_ON_FUTEX_BIT`. `FUTEX_WAIT` only blocks
+    /// while the word still equals that value, which closes the race between
+    /// arming idle sleep and a concurrent publish or out-of-band wake.
+    ///
+    /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed before
+    /// the kernel slept".
     fn futex_wait(&self, snapshot: u32) {
         loop {
             // This is only a same-word equality check before entering the
