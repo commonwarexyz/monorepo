@@ -174,8 +174,8 @@
 //! not need to be persisted; it is recomputed on startup from the pruned chunk count stored
 //! in metadata.
 //!
-//! The pruning lag is small: at most `3 * 2^(gh-1) - 2` ops beyond the chunk boundary
-//! (about 1.5 chunks for the default chunk size).
+//! The pruning lag is small: at most `2^(gh+1) - 1` ops beyond the chunk boundary
+//! (just under 2 chunks for the default chunk size).
 //!
 //! # Root structure
 //!

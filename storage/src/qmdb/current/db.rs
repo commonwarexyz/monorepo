@@ -321,60 +321,33 @@ where
     fn settled_bitmap_prune_loc(&self) -> Result<Location<F>, Error<F>> {
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let mut pruned_chunks = *self.any.inactivity_floor_loc / chunk_bits;
-        if pruned_chunks == 0 {
-            return Ok(Location::new(0));
-        }
 
         let ops_leaves = (*self.any.last_commit_loc)
             .checked_add(1)
             .ok_or(Error::DataCorrupted("ops size overflow"))?;
         let grafting_height = grafting::height::<N>();
 
-        loop {
-            if pruned_chunks == 0 {
-                return Ok(Location::new(0));
+        while pruned_chunks > 0 {
+            let required_ops =
+                Self::pair_absorption_threshold(pruned_chunks)?.unwrap_or_else(|| {
+                    let youngest_start = (pruned_chunks - 1) * chunk_bits;
+                    let pos = F::subtree_root_position(
+                        Location::<F>::new(youngest_start),
+                        grafting_height,
+                    );
+                    F::peak_birth_size(pos, grafting_height)
+                });
+
+            if ops_leaves >= required_ops {
+                break;
             }
-
-            let youngest = pruned_chunks - 1;
-            let chunk_start = youngest
-                .checked_shl(grafting_height)
-                .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-            let chunk_pos =
-                F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
-
-            // Condition 1: youngest chunk's height-gh subtree root is born.
-            let settled_after = F::peak_birth_size(chunk_pos, grafting_height);
-            if ops_leaves < settled_after {
-                pruned_chunks -= 1;
-                continue;
-            }
-
-            // Fast path: families without delayed merges (birth_size == chunk_end) need
-            // only condition 1. Return the inactivity floor unchanged.
-            let chunk_end = (youngest + 1)
-                .checked_shl(grafting_height)
-                .ok_or(Error::DataCorrupted("chunk end overflow"))?;
-            if settled_after <= chunk_end {
-                let settled_bits = pruned_chunks
-                    .checked_mul(chunk_bits)
-                    .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
-                return Ok(Location::new(settled_bits));
-            }
-
-            // Condition 2 (delayed-merge only): youngest chunk-pair's height-(gh+1)
-            // parent is born.
-            let absorbed_after = Self::pair_absorption_threshold(pruned_chunks)?
-                .expect("delayed-merge family must have absorption threshold");
-            if ops_leaves < absorbed_after {
-                pruned_chunks -= 1;
-                continue;
-            }
-
-            let settled_bits = pruned_chunks
-                .checked_mul(chunk_bits)
-                .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
-            return Ok(Location::new(settled_bits));
+            pruned_chunks -= 1;
         }
+
+        let settled_bits = pruned_chunks
+            .checked_mul(chunk_bits)
+            .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
+        Ok(Location::new(settled_bits))
     }
 
     /// Returns the minimum rewind target that keeps delayed-merge grafting queries valid

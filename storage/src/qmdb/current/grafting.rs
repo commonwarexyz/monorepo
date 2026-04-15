@@ -430,9 +430,9 @@ impl<
     /// (pinned peaks or retained nodes).
     ///
     /// Recursion depth is bounded by the height difference between the queried node and the
-    /// nearest available descendant (a pinned peak or retained node). In practice this is at
-    /// most 1 level above the pinned peaks because the settlement guard limits how far ahead
-    /// the ops tree can grow before bitmap pruning advances.
+    /// nearest available descendant (a pinned peak or retained node). In practice it remains
+    /// small because the settlement guard limits how far ahead the ops tree can grow before
+    /// bitmap pruning advances.
     ///
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
