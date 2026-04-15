@@ -195,7 +195,12 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(
+        &grafted_tree,
+        grafting::height::<N>(),
+        &any.log.merkle,
+        hasher.clone(),
+    );
     let partial = db::partial_chunk(&status);
     let grafted_root = db::compute_grafted_root(&hasher, &status, &storage).await?;
     let ops_root = any.log.root();
