@@ -170,7 +170,7 @@ where
                     subs.retain(|s| !s.is_closed());
                     !subs.is_empty()
                 });
-                let mailbox_message = if !self.mailbox_rx.is_closed() {
+                let mailbox_message = if !(self.mailbox_rx.is_closed() && self.mailbox_rx.is_empty()) {
                     Either::Left(self.mailbox_rx.recv())
                 } else {
                     Either::Right(future::pending())
