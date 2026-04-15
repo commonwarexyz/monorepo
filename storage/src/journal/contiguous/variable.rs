@@ -2619,7 +2619,7 @@ mod tests {
 
             // Create initial journal with data in multiple sections
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal"),
+                context.with_label("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2723,7 +2723,7 @@ mod tests {
 
             // Create initial journal with data exactly matching sync range
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal"),
+                context.with_label("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2907,7 +2907,7 @@ mod tests {
 
             // Create journal with data at section boundaries
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal"),
+                context.with_label("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2981,7 +2981,7 @@ mod tests {
 
             // Create journal with data in multiple sections
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal"),
+                context.with_label("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await

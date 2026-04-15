@@ -1345,10 +1345,14 @@ mod tests {
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let merkle_cfg = merkle_config("rewind", page_cache.clone());
             let journal_cfg = journal_config("rewind", page_cache);
-            let mut journal =
-                TestJournal::<F>::new(ctx, merkle_cfg, journal_cfg, |op| op.is_commit())
-                    .await
-                    .unwrap();
+            let mut journal = TestJournal::<F>::new(
+                ctx.with_label("journal"),
+                merkle_cfg,
+                journal_cfg,
+                |op| op.is_commit(),
+            )
+            .await
+            .unwrap();
 
             // Add operations with a commit at position 5 (in section 0: 0-6)
             for i in 0..5 {
