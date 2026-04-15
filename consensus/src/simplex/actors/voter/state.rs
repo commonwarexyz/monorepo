@@ -587,6 +587,16 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Takes all certification candidates and returns proposals ready for
     /// certification, along with whether the local participant is the leader
     /// of each view (used to short-circuit certification for own proposals).
+    ///
+    /// The `am_leader` flag is `true` only when the round's leader has been
+    /// set AND matches the local participant. A round's leader is always set
+    /// before we can propose into it (proposing requires `enter_view`, which
+    /// sets the leader), so `am_leader = true` provably implies we proposed
+    /// the block. If the leader is unknown for this view (e.g. notarization
+    /// arrived via resolver/replay before the prior view's certificate set
+    /// this view's leader), `am_leader` is `false`: we never entered the
+    /// view, so the proposal cannot be ours and the caller must fall back to
+    /// the automaton to certify.
     pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
         let me = self.scheme.me();

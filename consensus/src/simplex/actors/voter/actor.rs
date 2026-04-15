@@ -859,8 +859,18 @@ impl<
                     let view = round.view();
                     debug!(%view, "attempting certification");
                     let result = if am_leader {
-                        // Once we know the local participant led this view, reaching out to the
-                        // automaton is unnecessary.
+                        // We led this view, so the proposal is ours and certification is trivially
+                        // true. Skipping the automaton call avoids a redundant round-trip.
+                        //
+                        // INVARIANT: `am_leader` implies we proposed. To propose, we must have
+                        // entered the view (via `enter_view`), which always sets the round's
+                        // leader. So when `state::certify_candidates` reports `am_leader = true`,
+                        // we have provably proposed for this view. The converse case where the
+                        // round's leader is unknown (e.g. notarization arrived via resolver
+                        // before the prior view's certificate set this view's leader) is reported
+                        // as `am_leader = false` and falls through to `automaton.certify`, which
+                        // is correct: we never entered the view, so we never proposed and don't
+                        // hold the block locally.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;
