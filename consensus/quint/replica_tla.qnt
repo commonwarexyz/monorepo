@@ -1124,9 +1124,20 @@ module replica {
                     next_stored_finalize: store_finalize_votes.get(id),
                 }
             }
+            // Matches Rust construct_notarize (round.rs:481-482): self-vote even
+            // after seeing a notarization when a cert is first formed here.
+            val can_self_notarize_agg = and {
+                is_some(maybe_not_cert),
+                not(broadcast_notarize(id, view)),
+                not(broadcast_nullify(id, view)),
+            }
+            val self_vote_agg: NotarizeVote = { proposal: proposal, sig: sig_of(id) }
             all {
                 is_none(maybe_not_cert) or now_notarized,
-                store_notarize_votes' = store_notarize_votes.set(id, new_store_notarize),
+                store_notarize_votes' = store_notarize_votes.set(id,
+                    if (can_self_notarize_agg) new_store_notarize.union(Set(self_vote_agg))
+                    else new_store_notarize
+                ),
                 store_certificates' = match maybe_not_cert {
                     | Some(cert) => if (is_new_cert)
                         store_certificates.setBy(id, old => old.union(Set(Notarization(cert))))
@@ -1141,7 +1152,10 @@ module replica {
                         sent_certificates
                     | None => sent_certificates
                 },
-                sent_notarize_votes' = sent_notarize_votes,
+                sent_notarize_votes' = if (can_self_notarize_agg)
+                    sent_notarize_votes.union(Set(self_vote_agg))
+                  else
+                    sent_notarize_votes,
                 sent_nullify_votes' = effect.next_sent_nullify,
                 sent_finalize_votes' = effect.next_sent_finalize,
                 store_nullify_votes' = store_nullify_votes.set(id, effect.next_stored_nullify),
@@ -1352,7 +1366,6 @@ module replica {
             } else {
                 match (cert) {
                     | Notarization(n) => all {
-                        store_notarize_votes' = store_notarize_votes,
                         _add_notarization(id, n, not(seen_kind_and_view))
                     }
                     | Nullification(n) => all {
@@ -1493,6 +1506,13 @@ module replica {
             sent_nullify_votes, sent_finalize_votes,
             store_nullify_votes.get(id), store_finalize_votes.get(id)
         )
+        // Matches Rust construct_notarize (round.rs:481-482): self-vote even after
+        // seeing a notarization, "in case someone is recording our activity".
+        val can_self_notarize = and {
+            not(broadcast_notarize(id, notarization.proposal.view)),
+            not(broadcast_nullify(id, notarization.proposal.view)),
+        }
+        val self_vote: NotarizeVote = { proposal: notarization.proposal, sig: sig_of(id) }
         all {
             notarization.signatures.size() >= Q,
             store_certificates' = if (is_new_cert)
@@ -1503,9 +1523,16 @@ module replica {
                 sent_certificates.union(Set(cert_with_sender(cert, sig_of(id))))
               else
                 sent_certificates,
-            sent_notarize_votes' = sent_notarize_votes,
+            sent_notarize_votes' = if (can_self_notarize)
+                sent_notarize_votes.union(Set(self_vote))
+              else
+                sent_notarize_votes,
             sent_nullify_votes' = effect.next_sent_nullify,
             sent_finalize_votes' = effect.next_sent_finalize,
+            store_notarize_votes' = if (can_self_notarize)
+                store_notarize_votes.setBy(id, old => old.union(Set(self_vote)))
+              else
+                store_notarize_votes,
             store_nullify_votes' = store_nullify_votes.set(id, effect.next_stored_nullify),
             store_finalize_votes' = store_finalize_votes.set(id, effect.next_stored_finalize),
             replica_state' = replica_state.set(id, effect.next_self),

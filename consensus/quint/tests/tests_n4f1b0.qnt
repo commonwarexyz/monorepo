@@ -1062,6 +1062,88 @@ module tests {
         })
     }
 
+    // Replica n0 never receives the leader's (n3) notarize vote before the
+    // notarization cert arrives. Upon receiving the cert, n0 should self-vote
+    // notarize (matching Rust construct_notarize round.rs:481-482). Then n3's
+    // late vote arrives and is stored. Final store has all 4 signers.
+    run lateLeaderNotarizeSelfVoteTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: 3,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n3", 4 -> "n0", 5 -> "n1", 6 -> "n2"),
+            CERTIFY_ALL_TRUE
+        )
+        // Views 1-2: all replicas timeout and nullify
+        .then(on_timeout("n0", LeaderTimeoutKind))
+        .then(on_timeout("n1", LeaderTimeoutKind))
+        .then(on_timeout("n2", LeaderTimeoutKind))
+        .then(on_timeout("n3", LeaderTimeoutKind))
+        .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n1"))
+        .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
+        .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n0"))
+        .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n2"))
+        .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n0"))
+        .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n1"))
+        .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n0"))
+        .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n1"))
+        .then(all {
+            assert(CORRECT.forall(id => replica_state.get(id).view == 2)),
+            unchanged_all,
+        })
+        .then(on_timeout("n0", LeaderTimeoutKind))
+        .then(on_timeout("n1", LeaderTimeoutKind))
+        .then(on_timeout("n2", LeaderTimeoutKind))
+        .then(on_timeout("n3", LeaderTimeoutKind))
+        .then(replica_receives_nullify_vote("n0", 2, "n1"))
+        .then(replica_receives_nullify_vote("n0", 2, "n2"))
+        .then(replica_receives_nullify_vote("n1", 2, "n0"))
+        .then(replica_receives_nullify_vote("n1", 2, "n2"))
+        .then(replica_receives_nullify_vote("n2", 2, "n0"))
+        .then(replica_receives_nullify_vote("n2", 2, "n1"))
+        .then(replica_receives_nullify_vote("n3", 2, "n0"))
+        .then(replica_receives_nullify_vote("n3", 2, "n1"))
+        .then(all {
+            assert(CORRECT.forall(id => replica_state.get(id).view == 3)),
+            unchanged_all,
+        })
+        // View 3: n3 proposes. n0 does NOT receive n3's vote directly yet.
+        .then(propose("n3", proposal.payload, proposal.parent))
+        // n1 and n2 receive leader vote from n3 (proposal path, they self-vote)
+        .then(replica_receives_notarize_vote("n1", "val_b0", 3, GENESIS_VIEW, "n3"))
+        .then(replica_receives_notarize_vote("n2", "val_b0", 3, GENESIS_VIEW, "n3"))
+        // n0 receives non-leader votes from n1, n2 (aggregation, no proposal yet)
+        .then(replica_receives_notarize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n1"))
+        .then(replica_receives_notarize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n2"))
+        // n1 receives n2's vote -> notarization cert formed {n1, n2, n3} = Q
+        .then(replica_receives_notarize_vote("n1", "val_b0", 3, GENESIS_VIEW, "n2"))
+        // n0 receives notarization cert from n1 -> triggers self-vote
+        .then(on_certificate("n0", notarization(proposal, Set("n1", "n2", "n3"), "n1")))
+        .then(all {
+            // n0 self-voted notarize for view 3 upon receiving the cert
+            assert(sent_notarize_votes.exists(v => v.sig == "n0" and v.proposal.view == 3)),
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n0" and v.proposal.view == 3)),
+            // n0 stored n1 and n2's votes from earlier aggregation
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n1" and v.proposal.view == 3)),
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n2" and v.proposal.view == 3)),
+            unchanged_all,
+        })
+        // n3's late notarize arrives at n0
+        .then(replica_receives_notarize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n3"))
+        .then(all {
+            // All 4 signers in n0's store
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n0" and v.proposal.view == 3)),
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n1" and v.proposal.view == 3)),
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n2" and v.proposal.view == 3)),
+            assert(store_notarize_votes.get("n0").exists(v => v.sig == "n3" and v.proposal.view == 3)),
+            unchanged_all,
+        })
+        .expect(test_invariants)
+    }
+
     action unchanged_all = all {
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
