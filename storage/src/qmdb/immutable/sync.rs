@@ -205,7 +205,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_sync_config(&format!("sync-test-{seed}"), page_cache);
-        ImmutableSyncTest::init(context, config).await.unwrap()
+        ImmutableSyncTest::init(context.with_label("db"), config).await.unwrap()
     }
 
     /// Create n random Set operations using the default seed (0).

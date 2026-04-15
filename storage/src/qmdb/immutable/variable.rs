@@ -106,7 +106,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = config("partition", page_cache);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -148,7 +148,7 @@ mod tests {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = small_sections_config("partition", page_cache);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]

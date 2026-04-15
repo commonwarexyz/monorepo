@@ -275,7 +275,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_basic", page_cache);
-            let (writer, mut reader) = init(context, cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Enqueue from writer
             let pos = writer.enqueue(b"hello".to_vec()).await.unwrap();
@@ -299,7 +299,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_append_commit", page_cache);
-            let (writer, mut reader) = init(context, cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Append several items without committing
             for i in 0..5u8 {
@@ -335,7 +335,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_bulk", page_cache);
-            let (writer, mut reader) = init(context, cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             let range = writer
                 .enqueue_bulk((0..5u8).map(|i| vec![i]))
@@ -458,7 +458,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_try_recv", page_cache);
-            let (writer, mut reader) = init(context, cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // try_recv on empty queue returns None
             let result = reader.try_recv().await.unwrap();

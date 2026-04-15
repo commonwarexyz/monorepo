@@ -181,7 +181,7 @@ mod tests {
     async fn create_test_db(mut context: deterministic::Context) -> KeylessSyncTest {
         let seed = context.next_u64();
         let config = create_sync_config(&format!("sync-test-{seed}"), &context);
-        KeylessSyncTest::init(context, config).await.unwrap()
+        KeylessSyncTest::init(context.with_label("db"), config).await.unwrap()
     }
 
     /// Create n random Append operations using the default seed (0).

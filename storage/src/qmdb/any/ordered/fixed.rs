@@ -206,7 +206,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config("partition", page_cache);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
@@ -215,7 +215,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), page_cache);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -967,7 +967,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = fixed_db_config("fixed-bytes-partition", page_cache);
-        FixedDb::init(context, cfg).await.unwrap()
+        FixedDb::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

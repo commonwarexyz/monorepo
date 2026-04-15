@@ -81,7 +81,7 @@ mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = db_config("partition", page_cache);
-        TestDb::init(context, cfg).await.unwrap()
+        TestDb::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     fn reopen<F: crate::merkle::Family>() -> tests::Reopen<TestDb<F>> {

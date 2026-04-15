@@ -128,7 +128,7 @@ mod test {
             &partition_prefix,
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         );
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]

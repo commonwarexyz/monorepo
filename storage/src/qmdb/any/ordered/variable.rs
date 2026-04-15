@@ -212,7 +212,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_test_config(seed, page_cache);
-        AnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context.with_label("db"), config).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -293,7 +293,7 @@ pub(crate) mod test {
             crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
         let cfg = variable_db_config("fixed-bytes-var-partition", page_cache);
-        VariableDb::init(context, cfg).await.unwrap()
+        VariableDb::init(context.with_label("db"), cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
