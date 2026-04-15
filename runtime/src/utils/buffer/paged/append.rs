@@ -478,40 +478,30 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Iterate over requested offsets and copy items that overlap with the tip
-        // buffer directly into the output. Items fully or partially below the tip
-        // need cache/blob reads and are recorded as (slice, offset) pairs. Slices
-        // are built via raw pointer arithmetic since each item occupies a disjoint,
-        // item_size-aligned region of the output.
+        // Iterate over fixed-size output slots and copy items that overlap with the
+        // tip buffer directly into place. Items fully or partially below the tip
+        // need cache/blob reads and are recorded as (slice, offset) pairs.
+        // `chunks_exact_mut` yields disjoint per-item slots, so we never have to
+        // reborrow the parent buffer while cache/blob destinations remain live.
+        if item_size == 0 {
+            return Ok(());
+        }
         let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
-        for (i, &offset) in offsets.iter().enumerate() {
+        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
             let end = offset + item_size as u64;
 
             if end <= buffer.offset {
                 // Entirely below tip -- needs cache read.
-                // SAFETY: i * item_size < buf.len() because i < offsets.len() and
-                // buf.len() == offsets.len() * item_size.
-                let ptr = unsafe { buf.as_mut_ptr().add(i * item_size) };
-                // SAFETY: Each i is unique so the resulting slices are
-                // non-overlapping, and item_size keeps each within its slot.
-                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, item_size) };
-                cache_ranges.push((slice, offset));
+                cache_ranges.push((item_buf, offset));
             } else if offset >= buffer.offset {
                 // Entirely in tip buffer.
                 let src = (offset - buffer.offset) as usize;
-                let item_buf = &mut buf[i * item_size..(i + 1) * item_size];
                 item_buf.copy_from_slice(&buffer.as_ref()[src..src + item_size]);
             } else {
                 // Straddles tip boundary: copy suffix from tip, record prefix for cache.
                 let prefix_len = (buffer.offset - offset) as usize;
-                let item_suffix_buf = &mut buf[i * item_size + prefix_len..(i + 1) * item_size];
-                item_suffix_buf.copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
-                // SAFETY: i * item_size < buf.len() (same as above).
-                let ptr = unsafe { buf.as_mut_ptr().add(i * item_size) };
-                // SAFETY: Each i is unique so slices are non-overlapping,
-                // and prefix_len <= item_size keeps within the slot.
-                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, prefix_len) };
-                cache_ranges.push((slice, offset));
+                item_buf[prefix_len..].copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
+                cache_ranges.push((&mut item_buf[..prefix_len], offset));
             }
         }
 
