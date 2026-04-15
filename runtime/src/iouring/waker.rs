@@ -406,7 +406,6 @@ impl Waker {
         }
     }
 
-
     /// Sleep on the packed wake-state word for the fully-idle path.
     ///
     /// The caller must pass the exact post-arm snapshot from the same atomic
