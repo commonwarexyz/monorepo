@@ -18,7 +18,7 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand::Rng;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
 type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
@@ -57,6 +57,9 @@ where
 
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
+
+    /// Maximum number of operations to serve in a single response.
+    pub max_serve_ops: NonZeroU64,
 
     /// Send fetch requests with network priority.
     pub priority_requests: bool,
@@ -335,6 +338,10 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
+        if key.max_ops > self.config.max_serve_ops {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        }
         let (_cancel_tx, cancel_rx) = oneshot::channel();
         let result = database
             .get_operations(
@@ -429,6 +436,7 @@ mod tests {
             initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
+            max_serve_ops: NonZeroU64::new(16).unwrap(),
             priority_requests: false,
             priority_responses: false,
         }
@@ -521,6 +529,27 @@ mod tests {
                 .await
                 .expect("response should be available after attach");
             assert!(!payload.is_empty());
+        });
+    }
+
+    #[test]
+    fn produce_rejects_request_above_max_serve_ops() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.clone(), test_config(None));
+            let db = init_db(context.clone(), "resolver-unbounded-max-ops").await;
+            let op_count = db.read().await.bounds().await.end;
+            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+
+            let request = handler::Request {
+                op_count,
+                start_loc: Location::new(0),
+                max_ops: NonZeroU64::new(1_000).unwrap(),
+                include_pinned_nodes: false,
+            };
+            let (response_tx, response_rx) = oneshot::channel();
+            actor.handle_produce(request, response_tx).await;
+
+            assert!(response_rx.await.is_err());
         });
     }
 
