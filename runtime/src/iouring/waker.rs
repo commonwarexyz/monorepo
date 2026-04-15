@@ -145,67 +145,6 @@ impl Waker {
         })
     }
 
-    /// Wake the blocking path via eventfd.
-    fn eventfd_wake(&self) {
-        let value: u64 = 1;
-        loop {
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to an initialized 8-byte integer for the duration of the call.
-            let ret = unsafe {
-                libc::write(
-                    self.inner.wake_fd.as_raw_fd(),
-                    &value as *const u64 as *const libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                return;
-            }
-            assert_eq!(
-                ret, -1,
-                "eventfd write returned unexpected byte count: {ret}"
-            );
-            match std::io::Error::last_os_error().raw_os_error() {
-                // Retry if interrupted by a signal before completion.
-                Some(libc::EINTR) => continue,
-                // Non-blocking write would block because the eventfd
-                // counter is saturated. A wake is already queued, so no
-                // retry is needed.
-                Some(libc::EAGAIN) => return,
-                _ => {
-                    warn!("eventfd write failed");
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Wake one thread waiting on the idle path.
-    fn futex_wake(&self) {
-        loop {
-            // SAFETY: `state` is a valid aligned futex word for the duration of
-            // the syscall.
-            let ret = unsafe {
-                libc::syscall(
-                    libc::SYS_futex,
-                    self.inner.state.as_ptr(),
-                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                    1u32,
-                )
-            };
-            if ret >= 0 {
-                return;
-            }
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                _ => {
-                    warn!("futex wake failed");
-                    return;
-                }
-            }
-        }
-    }
-
     /// Latch one pending wake and, if a target is currently armed, wake it.
     ///
     /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
@@ -321,53 +260,6 @@ impl Waker {
         }
     }
 
-    /// Sleep on the packed state word with futex until it changes.
-    ///
-    /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed". The
-    /// caller must pass the exact armed snapshot.
-    fn futex_wait(&self, snapshot: u32) {
-        loop {
-            // This is only a same-word equality check before entering the
-            // syscall.
-            if self.inner.state.load(Ordering::Relaxed) != snapshot {
-                return;
-            }
-
-            // SAFETY: `state` is a valid aligned futex word for the duration of
-            // the syscall.
-            let ret = unsafe {
-                libc::syscall(
-                    libc::SYS_futex,
-                    self.inner.state.as_ptr(),
-                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-                    snapshot,
-                    std::ptr::null::<libc::timespec>(),
-                )
-            };
-            if ret == 0 {
-                return;
-            }
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => return,
-                _ => {
-                    warn!("futex wait failed");
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Disarm the current wait target after we resume running.
-    ///
-    /// Keeping wait bits clear while actively running avoids redundant futex
-    /// wakes and eventfd writes during bursts. This is done both after a real
-    /// wake and after a post-arm recheck decides not to block.
-    #[inline]
-    fn clear_wait(&self) {
-        self.inner.state.fetch_and(!STATE_MASK, Ordering::Relaxed);
-    }
-
     /// Drain eventfd readiness acknowledged by a wake CQE.
     ///
     /// This acknowledges kernel-visible wake readiness. Wait gating is tracked
@@ -426,6 +318,115 @@ impl Waker {
             submission_queue
                 .push(&wake_poll)
                 .expect("wake poll SQE should always fit in the ring");
+        }
+    }
+
+    /// Disarm the current wait target after we resume running.
+    ///
+    /// Keeping wait bits clear while actively running avoids redundant futex
+    /// wakes and eventfd writes during bursts. This is done both after a real
+    /// wake and after a post-arm recheck decides not to block.
+    #[inline]
+    fn clear_wait(&self) {
+        self.inner.state.fetch_and(!STATE_MASK, Ordering::Relaxed);
+    }
+
+    /// Wake the blocking path via eventfd.
+    fn eventfd_wake(&self) {
+        let value: u64 = 1;
+        loop {
+            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
+            // to an initialized 8-byte integer for the duration of the call.
+            let ret = unsafe {
+                libc::write(
+                    self.inner.wake_fd.as_raw_fd(),
+                    &value as *const u64 as *const libc::c_void,
+                    size_of::<u64>(),
+                )
+            };
+            if ret == size_of::<u64>() as isize {
+                return;
+            }
+            assert_eq!(
+                ret, -1,
+                "eventfd write returned unexpected byte count: {ret}"
+            );
+            match std::io::Error::last_os_error().raw_os_error() {
+                // Retry if interrupted by a signal before completion.
+                Some(libc::EINTR) => continue,
+                // Non-blocking write would block because the eventfd
+                // counter is saturated. A wake is already queued, so no
+                // retry is needed.
+                Some(libc::EAGAIN) => return,
+                _ => {
+                    warn!("eventfd write failed");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Wake one thread waiting on the idle path.
+    fn futex_wake(&self) {
+        loop {
+            // SAFETY: `state` is a valid aligned futex word for the duration of
+            // the syscall.
+            let ret = unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    self.inner.state.as_ptr(),
+                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                    1u32,
+                )
+            };
+            if ret >= 0 {
+                return;
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                _ => {
+                    warn!("futex wake failed");
+                    return;
+                }
+            }
+        }
+    }
+
+
+    /// Sleep on the packed state word with futex until it changes.
+    ///
+    /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed". The
+    /// caller must pass the exact armed snapshot.
+    fn futex_wait(&self, snapshot: u32) {
+        loop {
+            // This is only a same-word equality check before entering the
+            // syscall.
+            if self.inner.state.load(Ordering::Relaxed) != snapshot {
+                return;
+            }
+
+            // SAFETY: `state` is a valid aligned futex word for the duration of
+            // the syscall.
+            let ret = unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    self.inner.state.as_ptr(),
+                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                    snapshot,
+                    std::ptr::null::<libc::timespec>(),
+                )
+            };
+            if ret == 0 {
+                return;
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EAGAIN) => return,
+                _ => {
+                    warn!("futex wait failed");
+                    return;
+                }
+            }
         }
     }
 }
