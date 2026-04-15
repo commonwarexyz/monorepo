@@ -50,7 +50,10 @@
 //!   2) Advance timeouts.
 //!   3) Rarely rearm wake polling, then stage cancels, ready-queue requests,
 //!      and new inbound requests into SQ.
-//!   4) Submit and block in io_uring_enter until a CQE (data or wake) arrives.
+//!   4) If work is pending or active waiters remain, submit and possibly block in
+//!      io_uring_enter until a CQE (data or wake) arrives.
+//!   5) If the ring is fully idle, arm the shared wake word and sleep in futex
+//!      wait until a producer publishes work or latches an out-of-band wake.
 //! ```
 //!
 //! ## Work Tracking
@@ -104,8 +107,9 @@
 //! 1. Stops accepting new requests
 //! 2. Waits for all in-flight requests to complete or be cancelled
 //! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
-//! 4. Cleans up and exits. Dropping the last submitter signals the currently armed
-//!    wake target so shutdown is observed promptly even if the loop is blocked.
+//! 4. Cleans up and exits. Dropping the last submitter latches one wake and, if a
+//!    target is currently armed, signals it immediately so shutdown is observed
+//!    promptly whether the loop is already blocked or about to sleep.
 //!
 //! ## Liveness Model
 //!

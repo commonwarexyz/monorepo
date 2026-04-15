@@ -3,7 +3,7 @@
 //! This module implements the producer-to-loop wake protocol used by [`super::IoUringLoop`]:
 //! - Producers call [`Waker::publish`] after enqueueing work.
 //! - The loop calls [`Waker::park_idle`] when it is fully idle.
-//! - The loop acquires a [`BlockGuard`] from [`Waker::arm`] before
+//! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
 //!   blocking in `submit_and_wait`.
 //! - Producers wake only the currently armed wait target.
 //! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
@@ -56,12 +56,12 @@ pub(super) const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake if producers publish new work or the final handle disconnects.
-pub(super) struct BlockGuard<'a> {
+pub(super) struct ArmGuard<'a> {
     waker: &'a Waker,
     should_block: bool,
 }
 
-impl BlockGuard<'_> {
+impl ArmGuard<'_> {
     /// Return whether the loop was still idle after arming the blocking wake
     /// path and therefore may safely enter `submit_and_wait`.
     pub(super) const fn should_block(&self) -> bool {
@@ -69,9 +69,9 @@ impl BlockGuard<'_> {
     }
 }
 
-impl Drop for BlockGuard<'_> {
+impl Drop for ArmGuard<'_> {
     fn drop(&mut self) {
-        self.waker.disarm();
+        self.waker.clear_wait();
     }
 }
 
@@ -143,8 +143,8 @@ impl Waker {
         })
     }
 
-    /// Ring the eventfd doorbell.
-    fn ring(&self) {
+    /// Wake the blocking path via eventfd.
+    fn eventfd_wake(&self) {
         let value: u64 = 1;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -210,16 +210,13 @@ impl Waker {
     /// wake. Subsequent callers do nothing until the loop disarms and clears
     /// the bit.
     pub(super) fn wake(&self) {
-        let Some(prev) =
-            self.inner
-                .state
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    ((current & WAKE_SIGNALLED_BIT) == 0).then_some(current | WAKE_SIGNALLED_BIT)
-                })
-                .ok()
-        else {
+        let prev = self
+            .inner
+            .state
+            .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Relaxed);
+        if (prev & WAKE_SIGNALLED_BIT) != 0 {
             return;
-        };
+        }
 
         let waiting = prev & WAITING_MASK;
         assert_ne!(
@@ -230,12 +227,12 @@ impl Waker {
         match waiting {
             0 => {}
             WAITING_ON_FUTEX_BIT => self.futex_wake(),
-            WAITING_ON_EVENTFD_BIT => self.ring(),
+            WAITING_ON_EVENTFD_BIT => self.eventfd_wake(),
             _ => unreachable!("unexpected iouring wake target"),
         }
     }
 
-    /// Publish one submitted operation and optionally ring `eventfd`.
+    /// Publish one submitted operation and optionally wake via `eventfd`.
     ///
     /// Callers must invoke this only after successfully enqueueing work into
     /// the MPSC channel. That ordering guarantees that when the loop observes
@@ -261,24 +258,17 @@ impl Waker {
         self.wake();
     }
 
-    /// Return the current submitted sequence.
-    ///
-    /// The sequence domain is masked to 29 bits and compared against the
-    /// loop-local `processed_seq` in the same domain.
-    fn submitted(&self) -> u32 {
-        (self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
-    }
-
     /// Return whether producers have published work the loop has not yet
     /// drained from the channel.
     pub(super) fn pending(&self, processed_seq: u32) -> bool {
-        self.submitted() != processed_seq
+        ((self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK)
+            != processed_seq
     }
 
     /// Park on the idle path until the packed wake state changes.
     ///
     /// This method hides the arm-and-recheck futex sequence used when the ring
-    /// is fully idle. It always disarms the wait bits before returning.
+    /// is fully idle. It always clears the current wait state before returning.
     pub(super) fn park_idle(&self, processed_seq: u32) {
         // This transition only mutates the packed wake state. Tokio's channel
         // synchronizes message and close visibility independently.
@@ -298,17 +288,17 @@ impl Waker {
         if (snapshot & WAKE_SIGNALLED_BIT) == 0
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
         {
-            self.wait_futex(snapshot);
+            self.futex_wait(snapshot);
         }
-        self.disarm();
+        self.clear_wait();
     }
 
     /// Arm the blocking wake path used around `submit_and_wait`.
     ///
-    /// The returned guard automatically disarms the wait bits on drop. Call
-    /// [`BlockGuard::should_block`] to decide whether the loop was still idle
+    /// The returned guard automatically clears the current wait state on drop. Call
+    /// [`ArmGuard::should_block`] to decide whether the loop was still idle
     /// after arming.
-    pub(super) fn arm(&self, processed_seq: u32) -> BlockGuard<'_> {
+    pub(super) fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
         // This transition only mutates the packed wake state. Tokio's channel
         // synchronizes message and close visibility independently.
         let prev = self
@@ -323,7 +313,7 @@ impl Waker {
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
         let should_block = (snapshot & WAKE_SIGNALLED_BIT) == 0
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
-        BlockGuard {
+        ArmGuard {
             waker: self,
             should_block,
         }
@@ -333,7 +323,7 @@ impl Waker {
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed". The
     /// caller must pass the exact armed snapshot.
-    fn wait_futex(&self, snapshot: u32) {
+    fn futex_wait(&self, snapshot: u32) {
         loop {
             // This is only a same-word equality check before entering the
             // syscall.
@@ -372,7 +362,7 @@ impl Waker {
     /// wakes and eventfd writes during bursts. This is done both after a real
     /// wake and after a post-arm recheck decides not to block.
     #[inline]
-    fn disarm(&self) {
+    fn clear_wait(&self) {
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Relaxed);
     }
 
@@ -453,6 +443,10 @@ pub(super) mod tests {
         }
     }
 
+    fn submitted_seq(waker: &Waker) -> u32 {
+        (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
+    }
+
     fn read_eventfd_count(waker: &Waker) -> u64 {
         let mut value = 0u64;
         // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -474,24 +468,24 @@ pub(super) mod tests {
         // from the blocking wake state across the normal publish and
         // acknowledge flow.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        assert_eq!(waker.submitted(), 0);
+        assert_eq!(submitted_seq(&waker), 0);
 
         // Publish without an armed wait target only advances sequence.
         waker.publish();
-        assert_eq!(waker.submitted(), 1);
+        assert_eq!(submitted_seq(&waker), 1);
 
-        // Arm and publish should trigger a ring; acknowledge drains it.
+        // Arm and publish should trigger an eventfd wake; acknowledge drains it.
         let arm = waker.arm(1);
         assert!(arm.should_block());
         waker.publish();
-        assert_eq!(waker.submitted(), 2);
+        assert_eq!(submitted_seq(&waker), 2);
 
         // Acknowledge and guard drop are wake-gating operations and must not change
         // the submitted sequence domain.
         waker.acknowledge();
-        assert_eq!(waker.submitted(), 2);
+        assert_eq!(submitted_seq(&waker), 2);
         drop(arm);
-        assert_eq!(waker.submitted(), 2);
+        assert_eq!(submitted_seq(&waker), 2);
         assert_eq!(
             waker.inner.state.load(std::sync::atomic::Ordering::Acquire) & STATE_MASK,
             0
@@ -503,12 +497,12 @@ pub(super) mod tests {
         drop(arm);
     }
 
-    #[test]
-    fn test_park_idle_wake_keeps_sequence_stable() {
-        // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
-        // not perturb the logical submission sequence.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = waker.submitted();
+        #[test]
+        fn test_park_idle_wake_keeps_sequence_stable() {
+            // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
+            // not perturb the logical submission sequence.
+            let waker = Waker::new().expect("eventfd creation should succeed");
+        let before = submitted_seq(&waker);
         let notifier = waker.clone();
 
         let handle = std::thread::spawn(move || {
@@ -526,7 +520,7 @@ pub(super) mod tests {
 
         waker.park_idle(before);
         handle.join().expect("idle notifier thread panicked");
-        assert_eq!(waker.submitted(), before);
+        assert_eq!(submitted_seq(&waker), before);
     }
 
     #[test]
@@ -534,9 +528,9 @@ pub(super) mod tests {
         // Verify out-of-band notifications without an idle wait do not perturb
         // submission sequence.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = waker.submitted();
+        let before = submitted_seq(&waker);
         waker.wake();
-        assert_eq!(waker.submitted(), before);
+        assert_eq!(submitted_seq(&waker), before);
     }
 
     #[test]
@@ -544,12 +538,12 @@ pub(super) mod tests {
         // Verify an out-of-band wake latched before idle arming makes the next
         // idle park return immediately instead of sleeping.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = waker.submitted();
+        let before = submitted_seq(&waker);
 
         waker.wake();
         waker.park_idle(before);
 
-        assert_eq!(waker.submitted(), before);
+        assert_eq!(submitted_seq(&waker), before);
         assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
     }
 
@@ -564,7 +558,7 @@ pub(super) mod tests {
         waker.publish();
         waker.publish();
 
-        assert_eq!(waker.submitted(), 2);
+        assert_eq!(submitted_seq(&waker), 2);
         assert_eq!(read_eventfd_count(&waker), 1);
         drop(arm);
     }
@@ -580,26 +574,26 @@ pub(super) mod tests {
         waker.wake();
         waker.wake();
 
-        assert_eq!(waker.submitted(), 0);
+        assert_eq!(submitted_seq(&waker), 0);
         assert_eq!(read_eventfd_count(&waker), 1);
         drop(arm);
     }
 
     #[test]
-    fn test_ring_and_acknowledge_empty_paths_keep_sequence_stable() {
-        // Verify ringing and draining the eventfd does not perturb the
+    fn test_eventfd_wake_and_acknowledge_empty_paths_keep_sequence_stable() {
+        // Verify eventfd wake and drain do not perturb the
         // logical submission sequence, even when the counter is already empty.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = waker.submitted();
+        let before = submitted_seq(&waker);
 
         // Drive one normal wake cycle, then immediately drain again to hit the
         // non-blocking empty-read path.
-        waker.ring();
+        waker.eventfd_wake();
         waker.acknowledge();
         // Second acknowledge should take the non-blocking empty path.
         waker.acknowledge();
 
-        assert_eq!(waker.submitted(), before);
+        assert_eq!(submitted_seq(&waker), before);
     }
 
     #[test]
@@ -616,13 +610,13 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_ring_and_acknowledge_error_branches() {
+    fn test_eventfd_wake_and_acknowledge_error_branches() {
         // Verify the explicit EAGAIN and generic error branches leave the
         // logical submission sequence unchanged.
         let mut waker = Waker::new().expect("eventfd creation should succeed");
-        let before = waker.submitted();
+        let before = submitted_seq(&waker);
 
-        // Saturate the eventfd counter near its maximum so `ring` takes the
+        // Saturate the eventfd counter near its maximum so `eventfd_wake` takes the
         // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
         let fd = waker.inner.wake_fd.as_raw_fd();
         let value = u64::MAX - 1;
@@ -635,7 +629,7 @@ pub(super) mod tests {
             )
         };
         assert_eq!(wrote, size_of::<u64>() as isize);
-        waker.ring();
+        waker.eventfd_wake();
         waker.acknowledge();
 
         // Then close the descriptor so both helpers exercise their generic
@@ -643,7 +637,7 @@ pub(super) mod tests {
         // SAFETY: closing a valid fd is safe.
         let closed = unsafe { libc::close(fd) };
         assert_eq!(closed, 0);
-        waker.ring();
+        waker.eventfd_wake();
         waker.acknowledge();
 
         // Replace with a known-good fd so drop doesn't accidentally close a reused
@@ -661,6 +655,6 @@ pub(super) mod tests {
         std::mem::forget(old);
 
         // Direct eventfd read/write error paths should not perturb sequence tracking.
-        assert_eq!(waker.submitted(), before);
+        assert_eq!(submitted_seq(&waker), before);
     }
 }
