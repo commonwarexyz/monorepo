@@ -497,11 +497,11 @@ pub(super) mod tests {
         drop(arm);
     }
 
-        #[test]
-        fn test_park_idle_wake_keeps_sequence_stable() {
-            // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
-            // not perturb the logical submission sequence.
-            let waker = Waker::new().expect("eventfd creation should succeed");
+    #[test]
+    fn test_park_idle_wake_keeps_sequence_stable() {
+        // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
+        // not perturb the logical submission sequence.
+        let waker = Waker::new().expect("eventfd creation should succeed");
         let before = submitted_seq(&waker);
         let notifier = waker.clone();
 
