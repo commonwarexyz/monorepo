@@ -1465,9 +1465,10 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let mut journal = Journal::<_, Digest>::init(context.with_label("journal"), cfg.clone())
-                .await
-                .expect("failed to init");
+            let mut journal =
+                Journal::<_, Digest>::init(context.with_label("journal"), cfg.clone())
+                    .await
+                    .expect("failed to init");
 
             journal.append(0, &test_digest(0)).await.unwrap();
             journal.append(1, &test_digest(1)).await.unwrap();
@@ -1494,7 +1495,9 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).await.unwrap(), 1);
 
@@ -1515,7 +1518,9 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             for i in 0..5 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1548,7 +1553,9 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             for i in 0..10 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1599,7 +1606,9 @@ mod tests {
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             for i in 0..8 {
                 journal.append(0, &test_digest(i)).await.unwrap();
