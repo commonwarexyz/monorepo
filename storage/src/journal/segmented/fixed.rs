@@ -507,12 +507,10 @@ mod tests {
     fn test_segmented_fixed_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -532,15 +530,15 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             let items = {
                 let stream = journal
@@ -580,12 +578,10 @@ mod tests {
         // Test that replay with a non-zero start_position correctly skips items.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -606,15 +602,15 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
             {
@@ -858,12 +854,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create sections 1-5
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
             for section in 1u64..=5 {
@@ -881,15 +875,15 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
@@ -944,15 +938,15 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             let count = {
                 let stream = journal
@@ -979,12 +973,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create and populate journal
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -998,15 +990,15 @@ mod tests {
             drop(journal);
 
             // Reopen and verify data persisted
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             for i in 0u64..5 {
                 let item = journal.get(1, i).await.expect("failed to get");
@@ -1052,12 +1044,10 @@ mod tests {
         // Sections 1, 5, 10 should all be independent and accessible.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -1094,15 +1084,15 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             // Replay and verify all items in order
             {
@@ -1153,12 +1143,10 @@ mod tests {
         // Section 1 has data, section 2 is empty, section 3 has data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let mut journal = Journal::init(context.with_label("first"), test_cfg(first_cache))
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.with_label("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -1194,15 +1182,15 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
@@ -1302,15 +1290,15 @@ mod tests {
 
             // Reopen journal - should recover by truncating last page due to failed checksum, and
             // end up with a correct blob size due to partial-item trimming.
-            let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
-            let journal =
-                Journal::<_, Digest>::init(context.with_label("second"), test_cfg(second_cache))
-                    .await
-                    .expect("failed to re-init");
+            let second_ctx = context.with_label("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal = Journal::<_, Digest>::init(
+                second_ctx.with_label("journal"),
+                test_cfg(second_cache),
+            )
+            .await
+            .expect("failed to re-init");
 
             // Verify section now has only 2 items
             assert_eq!(journal.section_len(1).await.unwrap(), 2);
