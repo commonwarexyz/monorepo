@@ -33,7 +33,7 @@ pub type Operation = fixed::Operation<Value>;
 /// Create a database configuration for the keyless variant.
 pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
     let page_cache = buffer::paged::CacheRef::from_pooler(
-        &context.with_label("page_cache"),
+        context.with_label("page_cache"),
         NZU16!(2048),
         NZUsize!(10),
     );

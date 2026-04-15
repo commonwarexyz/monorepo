@@ -943,7 +943,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -967,7 +967,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -1000,7 +1000,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -1033,7 +1033,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -1070,7 +1070,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -1094,7 +1094,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );
@@ -1119,7 +1119,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(
-                &context.with_label("cache"),
+                context.with_label("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
             );

@@ -156,7 +156,7 @@ mod tests {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache =
-            CacheRef::from_pooler(&pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -926,7 +926,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let page_cache = CacheRef::from_pooler(
-                &context.with_label("page_cache"),
+                context.with_label("page_cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -966,7 +966,7 @@ mod tests {
             let upper_bound = bounds.end;
 
             let client_page_cache = CacheRef::from_pooler(
-                &context.with_label("client_page_cache"),
+                context.with_label("client_page_cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
