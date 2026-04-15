@@ -161,12 +161,23 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
-        let cfg = test_config(TEST_NAME, page_cache.clone());
-        let mut db = FixedDb::init(context.with_label("db"), cfg)
-            .await
-            .expect("Failed to init source db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context
+                .with_label("cache")
+                .with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(1),
+        );
+        let cfg = test_config(TEST_NAME, page_cache.clone());
+        let mut db = FixedDb::init(
+            context
+                .with_label("db")
+                .with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -260,6 +271,14 @@ fn fuzz(mut input: FuzzInput) {
                     pending_writes.clear();
                     drop(db);
 
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context
+                            .with_label("cache")
+                            .with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(1),
+                    );
                     let cfg = test_config(TEST_NAME, page_cache.clone());
                     db = FixedDb::init(
                         context
@@ -269,7 +288,6 @@ fn fuzz(mut input: FuzzInput) {
                     )
                     .await
                     .expect("Failed to init source db");
-                    restarts += 1;
                 }
             }
         }

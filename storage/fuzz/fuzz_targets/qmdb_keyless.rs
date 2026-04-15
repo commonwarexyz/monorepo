@@ -153,12 +153,23 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
-        let cfg = test_config(suffix, page_cache.clone());
-        let mut db: Db<F> = Db::init(context.with_label("db"), cfg)
-            .await
-            .expect("Failed to init keyless db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context
+                .with_label("cache")
+                .with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
+        let cfg = test_config(suffix, page_cache.clone());
+        let mut db: Db<F> = Db::init(
+            context
+                .with_label("db")
+                .with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init keyless db");
 
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
 
@@ -301,14 +312,23 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     pending_appends.clear();
                     drop(db);
 
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context
+                            .with_label("cache")
+                            .with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(PAGE_CACHE_SIZE),
+                    );
                     let cfg = test_config(suffix, page_cache.clone());
                     db = Db::init(
-                        context.with_label("db").with_attribute("instance", restarts),
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init keyless db");
-                    restarts += 1;
                 }
             }
         }

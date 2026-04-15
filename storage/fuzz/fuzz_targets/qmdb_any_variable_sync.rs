@@ -166,13 +166,23 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
-        let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
-        let mut db =
-            Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.with_label("db"), cfg)
-                .await
-                .expect("Failed to init source db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context
+                .with_label("cache")
+                .with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(1),
+        );
+        let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
+        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
+            context
+                .with_label("db")
+                .with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut historical_roots: BTreeMap<
             Location,
@@ -320,6 +330,14 @@ fn fuzz(input: FuzzInput) {
                     historical_roots.clear();
                     drop(db);
 
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context
+                            .with_label("cache")
+                            .with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(1),
+                    );
                     let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
                     db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
@@ -329,7 +347,6 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .expect("Failed to init source db");
-                    restarts += 1;
                 }
             }
         }
