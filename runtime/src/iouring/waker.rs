@@ -186,6 +186,7 @@ impl Waker {
     /// armed and no wake has yet been claimed for that epoch, this caller
     /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
     /// signals the armed wait target.
+    #[inline]
     pub fn publish(&self) {
         let prev = self
             .inner
@@ -205,6 +206,7 @@ impl Waker {
 
     /// Return whether producers have published work the loop has not yet
     /// drained from the channel.
+    #[inline]
     pub fn pending(&self, processed_seq: u32) -> bool {
         ((self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK)
             != processed_seq
