@@ -5,9 +5,13 @@
 //! manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
 //!
 //! Work is submitted via [Handle], which pushes [Request]s into an MPSC queue and signals
-//! an internal `eventfd` wake source. The event loop blocks in `io_uring_enter` and is woken by:
+//! an internal wake source. The event loop blocks either in userspace futex wait
+//! (when the ring is truly idle) or in `io_uring_enter` (when the ring has active
+//! waiters), and is woken by:
 //! - normal CQE progress in the ring
-//! - `eventfd` readiness when new work is queued or all submitters are dropped
+//! - futex wake when new work is queued while fully idle
+//! - `eventfd` readiness when new work is queued or all submitters are dropped while
+//!   blocked in `submit_and_wait`
 //!
 //! # Kernel Requirements
 //!
@@ -37,7 +41,8 @@
 //!   Client task -> Handle -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
 //!   Client task <- typed oneshot <- IoUringLoop <- CQE <- io_uring
 //!
-//! Wake path:
+//! Wake paths:
+//!   Handle --futex wake--> packed wake state --> IoUringLoop
 //!   Handle --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
 //!
 //! Loop behavior:
@@ -83,12 +88,15 @@
 //!
 //! ## Wake Handling
 //!
-//! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
-//! a multishot `PollAdd` on an internal `eventfd`.
+//! The wake path uses one shared atomic state word plus an internal `eventfd`.
 //! - [Handle::enqueue] increments an atomic submission sequence
-//! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE` is not set
+//! - When the loop has no waiters, it sleeps in futex wait on that shared word
+//! - When the loop blocks in `submit_and_wait`, it keeps a multishot `PollAdd`
+//!   on the internal `eventfd`
+//! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE`
+//!   is not set
 //! - The loop uses an arm-and-recheck sleep handshake (`submitted_seq` vs `processed_seq`)
-//! - Submitters ring `eventfd` only while sleep intent is armed
+//! - A dedicated signalled bit coalesces repeated wake attempts while a wait is armed
 //!
 //! ## Shutdown Process
 //!
@@ -96,8 +104,8 @@
 //! 1. Stops accepting new requests
 //! 2. Waits for all in-flight requests to complete or be cancelled
 //! 3. If `shutdown_timeout` is configured, abandons remaining requests after the timeout
-//! 4. Cleans up and exits. Dropping the last submitter signals `eventfd` so shutdown is observed
-//!    promptly even if the loop is blocked.
+//! 4. Cleans up and exits. Dropping the last submitter signals the currently armed
+//!    wake target so shutdown is observed promptly even if the loop is blocked.
 //!
 //! ## Liveness Model
 //!
@@ -256,9 +264,9 @@ impl Drop for HandleInner {
         drop(self.sender.take());
 
         // Wake the loop so shutdown observes disconnect promptly. This is an
-        // out-of-band wake for channel closure, so we ring directly rather
-        // than publish a synthetic submission.
-        self.waker.ring();
+        // out-of-band wake for channel closure, so do not publish a synthetic
+        // submission sequence increment.
+        self.waker.notify();
     }
 }
 
@@ -271,8 +279,8 @@ pub struct Handle {
 impl Handle {
     /// Enqueue a request for the io_uring loop.
     ///
-    /// On success, this publishes one submission and conditionally rings the loop's
-    /// `eventfd` wake source if sleep intent is armed.
+    /// On success, this publishes one submission and conditionally wakes the
+    /// loop if a futex or eventfd wait target is currently armed.
     async fn enqueue(&self, request: Request) -> Result<(), mpsc::error::SendError<Request>> {
         self.inner
             .sender
@@ -281,7 +289,7 @@ impl Handle {
             .send(request)
             .await?;
 
-        // Publish submission and ring eventfd only if loop sleep intent is armed.
+        // Publish submission and wake the armed wait target, if any.
         self.inner.waker.publish();
 
         Ok(())
@@ -428,7 +436,7 @@ pub(crate) struct IoUringLoop {
     timeout_wheel: TimeoutWheel,
     waker: Waker,
     wake_rearm_needed: bool,
-    processed_seq: u64,
+    processed_seq: u32,
 }
 
 impl IoUringLoop {
@@ -448,6 +456,10 @@ impl IoUringLoop {
             .size
             .checked_next_power_of_two()
             .expect("ring size exceeds u32::MAX");
+        assert!(
+            cfg.size < (1 << 29),
+            "rounded ring size must stay below 1<<29 to preserve the 29-bit wake sequence bound"
+        );
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
@@ -508,18 +520,21 @@ impl IoUringLoop {
             // Update pending operations metric.
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // If submissions are still pending, do not arm sleep.
+            // If submissions are still pending, do not arm idle sleep.
             //
-            // `submitted != processed_seq` means producers have published work we
+            // `pending(processed_seq)` means producers have published work we
             // have not yet drained. Sleep here could park with pending work and
-            // no guaranteed eventfd wake, because publish only rings after sleep
-            // intent is armed.
-            if self.waker.submitted() != self.processed_seq {
+            // no guaranteed wake, because publish only signals once a wait target
+            // is armed.
+            if self.waker.pending(self.processed_seq) {
                 if at_capacity {
                     // Pending submissions exist and staging stopped at capacity.
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
-                    // least one completion so capacity can open up.
+                    // least one completion so capacity can open up. Arm the
+                    // eventfd wait so producer disconnect is still observed
+                    // promptly while blocked in `submit_and_wait`.
+                    let _arm = self.waker.arm(self.processed_seq);
                     self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                         .expect("unable to submit to ring");
                 }
@@ -529,21 +544,31 @@ impl IoUringLoop {
 
             // No pending submissions are currently visible.
             //
-            // If staging hit capacity, force a submit and wait cycle to open
+            // If the ring is truly idle, avoid `io_uring_enter` entirely and
+            // wait on the shared wake state via futex until a producer changes
+            // it. This bypasses the eventfd wake path when there are no active
+            // waiters.
+            if self.waiters.is_empty() {
+                self.waker.park_idle(self.processed_seq);
+                continue;
+            }
+
+            // Otherwise, active waiters remain in the ring, so sleep by
+            // blocking in `submit_and_wait`.
+            //
+            // If staging hit capacity, force a submit-and-wait cycle to open
             // space, even though the sequence snapshot looks idle here.
             //
-            // Otherwise, arm sleep intent and capture a post-arm sequence
-            // snapshot from the same atomic operation. Block only if still idle.
-            // Any submission that arrives after `arm()` observes sleep intent
-            // and rings eventfd, so the loop is woken instead of sleeping
-            // through newly published work.
-            if at_capacity || self.waker.arm() == self.processed_seq {
+            // Otherwise, arm the blocking wake path. If the post-arm snapshot
+            // still looks idle, we may enter `submit_and_wait`. Any submission
+            // that arrives after `arm()` observes the wait target and rings
+            // eventfd, so the loop is woken instead of sleeping through newly
+            // published work.
+            let arm = self.waker.arm(self.processed_seq);
+            if at_capacity || arm.should_block() {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
-            // Disarm sleep intent as soon as we resume running. While disarmed,
-            // producers do not ring eventfd for each publish.
-            self.waker.disarm();
         }
     }
 
@@ -631,7 +656,7 @@ impl IoUringLoop {
     /// Returns whether staging ended at waiter or SQ capacity, or `None` if the
     /// producer channel disconnected.
     fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
-        let mut drained = 0u64;
+        let mut drained = 0u32;
         let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
@@ -985,6 +1010,20 @@ mod tests {
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
         assert_eq!(iouring.cfg.size, 1_024);
+    }
+
+    #[test]
+    #[should_panic(expected = "rounded ring size must stay below 1<<29")]
+    fn test_iouring_loop_rejects_sizes_that_exceed_wake_sequence_domain() {
+        // The wake state reserves only 29 bits for the submission sequence, so
+        // the bounded request channel must stay strictly below that domain even
+        // after ring-size round-up.
+        let mut registry = Registry::default();
+        let cfg = Config {
+            size: (1 << 28) + 1,
+            ..Default::default()
+        };
+        let _ = IoUringLoop::new(cfg, &mut registry);
     }
 
     #[test]
@@ -1635,6 +1674,24 @@ mod tests {
             drop(submitter);
             handle.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_idle_shutdown_wakes_futex_wait() {
+        // Verify dropping the last submitter wakes an otherwise idle loop that
+        // is sleeping on the futex-backed idle path.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let idle_waker = iouring.waker.clone();
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Wait until the loop has armed its futex-backed idle path before
+        // dropping the final submitter.
+        waker::tests::wait_until_futex_armed(&idle_waker);
+        drop(submitter);
+
+        handle.join().expect("io_uring loop thread panicked");
     }
 
     #[tokio::test]
