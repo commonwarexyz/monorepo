@@ -7830,4 +7830,457 @@ mod tests {
         failed_certification_replayed_after_restart(ed25519::fixture);
         failed_certification_replayed_after_restart(secp256r1::fixture);
     }
+
+    /// Tests that nullify votes and nullification certificates are correctly
+    /// replayed from the journal after a restart.
+    ///
+    /// 1. First run: follower times out, votes nullify, receives nullification
+    ///    certificate. All persisted to journal.
+    /// 2. Abort the voter.
+    /// 3. Second run: voter replays journal and processes Artifact::Nullify and
+    ///    Artifact::Nullification entries. The resolver receives the nullification
+    ///    and the voter re-enters the same view (since it was never finalized).
+    fn nullify_and_nullification_replayed_after_restart<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"nullify_nullification_replay".to_vec();
+        let partition = "nullify_nullification_replay".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let epoch = Epoch::new(333);
+
+            // First run: trigger timeout and nullification.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                certifier: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            // Advance to follower view 3.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Wait for the timeout-driven nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(n))
+                            if n.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected nullify vote for view {target_view}");
+                    },
+                }
+            }
+
+            // Send a nullification certificate for this view.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(epoch, target_view), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            // Wait for the voter to process the nullification (advances to next view).
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update {
+                            current, response, ..
+                        } = msg.unwrap()
+                        {
+                            response.send(None).unwrap();
+                            if current > target_view {
+                                break;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("timed out waiting for view advance after nullification");
+                    },
+                }
+            }
+
+            // Let journal sync.
+            context.sleep(Duration::from_millis(50)).await;
+            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+                if let batcher::Message::Update { response, .. } = msg {
+                    response.send(None).unwrap();
+                }
+            }
+
+            // Abort first voter.
+            handle.abort();
+
+            // Second run: replay should process Artifact::Nullify and
+            // Artifact::Nullification from journal.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                certifier: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) =
+                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Verify: resolver receives the replayed nullification.
+            let mut replayed_nullification = false;
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certificate(Certificate::Nullification(n))
+                            if n.view() == target_view =>
+                        {
+                            replayed_nullification = true;
+                        }
+                        _ => {}
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update {
+                            current, response, ..
+                        } = msg.unwrap()
+                        {
+                            response.send(None).unwrap();
+                            if current > target_view && replayed_nullification {
+                                break;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        if replayed_nullification {
+                            break;
+                        }
+                        panic!("timed out waiting for nullification replay");
+                    },
+                }
+            }
+
+            assert!(
+                replayed_nullification,
+                "resolver should receive nullification during replay for view {target_view}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_nullify_and_nullification_replayed_after_restart() {
+        nullify_and_nullification_replayed_after_restart(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        nullify_and_nullification_replayed_after_restart(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        nullify_and_nullification_replayed_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        nullify_and_nullification_replayed_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_and_nullification_replayed_after_restart(ed25519::fixture);
+        nullify_and_nullification_replayed_after_restart(secp256r1::fixture);
+    }
+
+    /// Tests that when the batcher signals a timeout reason on view update,
+    /// the voter immediately triggers a timeout for the current view.
+    ///
+    /// This covers the path where `batcher.update()` returns `Some(TimeoutReason)`
+    /// (e.g., because the leader is inactive or has already nullified the view).
+    fn batcher_update_triggers_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"batcher_update_timeout".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                certifier: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition: format!("batcher_timeout_test_{me}"),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(100),
+                certification_timeout: Duration::from_secs(100),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(10);
+            let resolver = resolver::Mailbox::new(resolver_sender);
+
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let batcher = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(batcher, resolver, vote_sender, certificate_sender);
+
+            // Consume initial Update.
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            // Advance to follower view 3 using finalization.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Certify view 3 to advance to view 4.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"batcher_timeout_view3"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Wait for the Update for view 4 and respond with a timeout reason
+            // to simulate batcher signaling that the leader should be skipped.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            response,
+                            ..
+                        } if current > target_view => {
+                            // Signal leader inactivity to trigger the timeout path.
+                            response.send(Some(TimeoutReason::Inactivity)).unwrap();
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => {
+                            response.send(None).unwrap();
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected Update for view > {target_view}");
+                    },
+                }
+            }
+
+            // The voter should emit a nullify vote for view 4 quickly (not
+            // after the 100s leader timeout) because the batcher signaled
+            // immediate timeout.
+            let next_view = target_view.next();
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == next_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => {
+                            response.send(None).unwrap();
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "expected nullify for view {next_view} triggered by batcher timeout"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_batcher_update_triggers_timeout() {
+        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinPk, _>);
+        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
+        batcher_update_triggers_timeout(ed25519::fixture);
+        batcher_update_triggers_timeout(secp256r1::fixture);
+    }
 }
