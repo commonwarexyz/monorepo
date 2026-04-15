@@ -585,6 +585,36 @@ pub mod tests {
     }
 
     #[test]
+    fn test_arm_after_sticky_wake_skips_blocking() {
+        // Verify a wake latched before arming makes the next blocking section
+        // skip `submit_and_wait`.
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        waker.wake();
+        let arm = waker.arm(0);
+        assert!(!arm.should_block());
+        drop(arm);
+
+        assert_eq!(submitted_seq(&waker), 0);
+        assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
+    }
+
+    #[test]
+    fn test_arm_after_publish_skips_blocking() {
+        // Verify arming with a stale processed sequence notices the newly
+        // published submission and skips blocking.
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        waker.publish();
+        let arm = waker.arm(0);
+        assert!(!arm.should_block());
+        drop(arm);
+
+        assert_eq!(submitted_seq(&waker), 1);
+        assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
+    }
+
+    #[test]
     fn test_wake_deduplicates_eventfd_wakes() {
         // Verify repeated out-of-band notifications while the same eventfd
         // wait is armed only queue one wake write and do not perturb sequence.
