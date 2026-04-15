@@ -27,7 +27,7 @@ use commonware_runtime::{deterministic, BufferPooler, Clock, Metrics, Runner as 
 use commonware_utils::{
     channel::{mpsc, oneshot},
     non_empty_range,
-    sync::AsyncRwLock,
+    sync::{AsyncRwLock, Mutex},
     NZU64,
 };
 use futures::{pin_mut, FutureExt};
@@ -36,7 +36,7 @@ use std::{
     num::NonZeroU64,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -1708,7 +1708,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
                     .await;
             }
 
-            let release = self.release_historical_gap.lock().unwrap().take();
+            let release = self.release_historical_gap.lock().take();
             if let Some(release) = release {
                 let _ = release.await;
             }
@@ -1731,7 +1731,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
                 return Ok(result);
             }
 
-            let release = self.release_boundary_retry.lock().unwrap().take();
+            let release = self.release_boundary_retry.lock().take();
             if let Some(release) = release {
                 let _ = release.await;
             }
