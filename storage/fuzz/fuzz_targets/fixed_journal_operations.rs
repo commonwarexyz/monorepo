@@ -172,7 +172,9 @@ fn fuzz(input: FuzzInput) {
                             .with_label("journal")
                             .with_attribute("instance", restarts),
                         make_cfg(CacheRef::from_pooler(
-                            context.with_label(&format!("cache_{restarts}")),
+                            context
+                                .with_label("cache")
+                                .with_attribute("instance", restarts),
                             PAGE_SIZE,
                             NZUsize!(PAGE_CACHE_SIZE),
                         )),

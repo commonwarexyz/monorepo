@@ -1644,14 +1644,13 @@ mod tests {
 
         // Prune the structure in increments of 50, simulating a partial write after each prune.
         for i in 0usize..200 {
-            let label = format!("iter_{i}");
             let iter_cache = CacheRef::from_pooler(
-                context.with_label(&format!("cache_{label}")),
+                context.with_label("cache").with_attribute("iteration", i),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let mut mmr = Journaled::<F, _, Digest>::init(
-                context.with_label(&label),
+                context.with_label("merkle").with_attribute("iteration", i),
                 &hasher,
                 test_config(iter_cache),
             )
