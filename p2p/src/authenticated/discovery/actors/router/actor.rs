@@ -86,7 +86,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        spawn_cell!(self.context, self.run(routing).await)
+        spawn_cell!(self.context, self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

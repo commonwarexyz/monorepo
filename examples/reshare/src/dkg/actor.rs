@@ -217,7 +217,7 @@ where
         // cryptographic operations.
         spawn_cell!(
             self.context,
-            self.run(output, share, orchestrator, dkg, callback).await
+            self.run(output, share, orchestrator, dkg, callback)
         )
     }
 
