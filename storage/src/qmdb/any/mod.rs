@@ -1187,17 +1187,18 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let pc = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc.clone()))
+                let page_cache =
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, page_cache.clone()))
                     .await
                     .unwrap();
                 $f(
                     ctx,
                     db,
                     |ctx| {
-                        let pc = pc.clone();
+                        let page_cache = page_cache.clone();
                         Box::pin(async move {
-                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc))
+                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, page_cache))
                                 .await
                                 .unwrap()
                         })
@@ -1215,8 +1216,9 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let pc = CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pc))
+                let page_cache =
+                    CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, page_cache))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;

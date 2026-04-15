@@ -2,7 +2,8 @@
 //! macros, and the common `gen_random_kv` helper.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::mmr::{journaled::Config as MmrConfig, Family},
@@ -66,7 +67,8 @@ pub type CurOVarVecDb = OCVariable<Family, Context, Digest, Vec<u8>, Sha256, Eig
 pub type KeylessDb = Keyless<Family, Context, Vec<u8>, Sha256>;
 
 pub async fn open_keyless_db(ctx: Context, page_cache: CacheRef) -> KeylessDb {
-    let cfg = keyless_cfg(&ctx, page_cache);
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
+    let cfg = keyless_cfg(thread_pool, page_cache);
     KeylessDb::init(ctx, cfg).await.unwrap()
 }
 
@@ -142,17 +144,13 @@ const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 
-fn mmr_cfg(
-    suffix: &str,
-    ctx: &(impl BufferPooler + ThreadPooler),
-    page_cache: CacheRef,
-) -> MmrConfig {
+fn mmr_cfg(suffix: &str, thread_pool: ThreadPool, page_cache: CacheRef) -> MmrConfig {
     MmrConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
+        thread_pool: Some(thread_pool),
         page_cache,
     }
 }
@@ -177,23 +175,17 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
     }
 }
 
-pub fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
-    page_cache: CacheRef,
-) -> AnyFixedConfig<EightCap> {
+pub fn any_fix_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> AnyFixedConfig<EightCap> {
     AnyFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_FIX, thread_pool, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
 }
 
-pub fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
-    page_cache: CacheRef,
-) -> CurrentFixedConfig<EightCap> {
+pub fn cur_fix_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> CurrentFixedConfig<EightCap> {
     CurrentFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_FIX, thread_pool, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
         translator: EightCap,
@@ -201,22 +193,22 @@ pub fn cur_fix_cfg(
 }
 
 pub fn any_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
     page_cache: CacheRef,
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, thread_pool, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
 }
 
 pub fn cur_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
     page_cache: CacheRef,
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, thread_pool, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
@@ -224,22 +216,22 @@ pub fn cur_var_digest_cfg(
 }
 
 pub fn any_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
     page_cache: CacheRef,
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, thread_pool, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }
 }
 
 pub fn cur_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
     page_cache: CacheRef,
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, thread_pool, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
@@ -247,11 +239,11 @@ pub fn cur_var_vec_cfg(
 }
 
 pub fn keyless_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
     page_cache: CacheRef,
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KeylessConfig {
-        merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
+        merkle: mmr_cfg(PARTITION_KEYLESS, thread_pool, page_cache.clone()),
         log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
@@ -260,11 +252,11 @@ pub fn keyless_cfg(
 
 /// Internal helper: construct a db, bind it, execute body.
 macro_rules! dispatch_arm {
-    ($ctx:expr, $page_cache:expr, $db:ident, $body:expr, $DbType:ty, $cfg_fn:ident) => {{
+    ($ctx:expr, $thread_pool:expr, $page_cache:expr, $db:ident, $body:expr, $DbType:ty, $cfg_fn:ident) => {{
         #[allow(unused_mut)]
         let mut $db = <$DbType>::init(
             $ctx.clone(),
-            $crate::common::$cfg_fn(&$ctx, $page_cache.clone()),
+            $crate::common::$cfg_fn($thread_pool.clone(), $page_cache.clone()),
         )
         .await
         .unwrap();
@@ -275,15 +267,18 @@ macro_rules! dispatch_arm {
 /// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
 macro_rules! with_fixed_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+        use commonware_runtime::{Metrics as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.clone(),
+            $ctx.with_label("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
+        let __thread_pool = $ctx.create_thread_pool($crate::common::THREADS).unwrap();
         use $crate::common::FixedValueVariant::*;
         match $variant {
             AnyUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -292,6 +287,7 @@ macro_rules! with_fixed_value_db {
             ),
             AnyOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -300,6 +296,7 @@ macro_rules! with_fixed_value_db {
             ),
             AnyUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -308,6 +305,7 @@ macro_rules! with_fixed_value_db {
             ),
             AnyOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -316,6 +314,7 @@ macro_rules! with_fixed_value_db {
             ),
             CurrentUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -324,6 +323,7 @@ macro_rules! with_fixed_value_db {
             ),
             CurrentOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -332,6 +332,7 @@ macro_rules! with_fixed_value_db {
             ),
             CurrentUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -340,6 +341,7 @@ macro_rules! with_fixed_value_db {
             ),
             CurrentOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -354,15 +356,18 @@ macro_rules! with_fixed_value_db {
 /// execute `$body`.
 macro_rules! with_var_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+        use commonware_runtime::{Metrics as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.clone(),
+            $ctx.with_label("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
+        let __thread_pool = $ctx.create_thread_pool($crate::common::THREADS).unwrap();
         use $crate::common::VarValueVariant::*;
         match $variant {
             AnyUnordered => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -371,6 +376,7 @@ macro_rules! with_var_value_db {
             ),
             AnyOrdered => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -379,6 +385,7 @@ macro_rules! with_var_value_db {
             ),
             CurrentUnordered => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,
@@ -387,6 +394,7 @@ macro_rules! with_var_value_db {
             ),
             CurrentOrdered => $crate::common::dispatch_arm!(
                 $ctx,
+                __thread_pool,
                 __page_cache,
                 $db,
                 $body,

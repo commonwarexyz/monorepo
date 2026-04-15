@@ -8,11 +8,12 @@
 
 use crate::common::{make_fixed_value, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    Metrics as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -255,84 +256,78 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
+fn merkle_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> journaled::Config {
     journaled::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: pc,
+        thread_pool: Some(thread_pool),
+        page_cache,
     }
 }
 
-fn fix_log_cfg(pc: CacheRef) -> FConfig {
+fn fix_log_cfg(page_cache: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
-        page_cache: pc,
+        page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
+fn var_log_cfg(page_cache: CacheRef) -> VConfig<((), ())> {
     VConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_section: ITEMS_PER_BLOB,
         compression: None,
         codec_config: ((), ()),
-        page_cache: pc,
+        page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
-}
-
-// -- DB constructors (eliminates repeated config boilerplate in match arms) --
-
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle_config: merkle_cfg(thread_pool, page_cache.clone()),
+        journal_config: fix_log_cfg(page_cache),
         translator: EightCap,
     }
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle_config: merkle_cfg(thread_pool, page_cache.clone()),
+        journal_config: var_log_cfg(page_cache),
         translator: EightCap,
     }
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle_config: merkle_cfg(thread_pool, page_cache.clone()),
+        journal_config: fix_log_cfg(page_cache),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ())> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle_config: merkle_cfg(thread_pool, page_cache.clone()),
+        journal_config: var_log_cfg(page_cache),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
@@ -439,7 +434,7 @@ macro_rules! variants {
         $(
             $entry:ident {
                 name: $name:literal,
-                init: |$ctx:ident| $init:expr,
+                init: |$ctx:ident, $tp:ident, $pc:ident| $init:expr,
             }
         )+
     ) => {
@@ -468,6 +463,8 @@ macro_rules! variants {
                     $(
                         Variant::$entry => {
                             let $ctx = $ctx_expr;
+                            let $pc = CacheRef::from_pooler($ctx.with_label("cache"), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
+                            let $tp = $ctx.create_thread_pool(THREADS).unwrap();
                             let $db_name = $init.await.unwrap();
                             $body
                         }
@@ -481,99 +478,99 @@ macro_rules! variants {
 variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
-        init: |ctx| AnyUFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyUFix::init(ctx.clone(), any_fix_cfg(thread_pool, page_cache)),
     }
     AnyVariable {
         name: "any::unordered::variable::mmr",
-        init: |ctx| AnyUVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyUVar::init(ctx.clone(), any_var_cfg(thread_pool, page_cache)),
     }
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
-        init: |ctx| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyUFixMmb::init(ctx.clone(), any_fix_cfg(thread_pool, page_cache)),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",
-        init: |ctx| AnyUVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyUVarMmb::init(ctx.clone(), any_var_cfg(thread_pool, page_cache)),
     }
     AnyOrderedFixed {
         name: "any::ordered::fixed::mmr",
-        init: |ctx| AnyOFix::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyOFix::init(ctx.clone(), any_fix_cfg(thread_pool, page_cache)),
     }
     AnyOrderedVariable {
         name: "any::ordered::variable::mmr",
-        init: |ctx| AnyOVar::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyOVar::init(ctx.clone(), any_var_cfg(thread_pool, page_cache)),
     }
     AnyOrderedFixedMmb {
         name: "any::ordered::fixed::mmb",
-        init: |ctx| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyOFixMmb::init(ctx.clone(), any_fix_cfg(thread_pool, page_cache)),
     }
     AnyOrderedVariableMmb {
         name: "any::ordered::variable::mmb",
-        init: |ctx| AnyOVarMmb::init(ctx.clone(), any_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| AnyOVarMmb::init(ctx.clone(), any_var_cfg(thread_pool, page_cache)),
     }
     CurrentFixed32 {
         name: "current::unordered::fixed::mmr chunk=32",
-        init: |ctx| CurUFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUFix32::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentVariable32 {
         name: "current::unordered::variable::mmr chunk=32",
-        init: |ctx| CurUVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUVar32::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
-        init: |ctx| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUFix32Mmb::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",
-        init: |ctx| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUVar32Mmb::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentFixed256 {
         name: "current::unordered::fixed::mmr chunk=256",
-        init: |ctx| CurUFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUFix256::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentVariable256 {
         name: "current::unordered::variable::mmr chunk=256",
-        init: |ctx| CurUVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUVar256::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentFixed256Mmb {
         name: "current::unordered::fixed::mmb chunk=256",
-        init: |ctx| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUFix256Mmb::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentVariable256Mmb {
         name: "current::unordered::variable::mmb chunk=256",
-        init: |ctx| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurUVar256Mmb::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedFixed32 {
         name: "current::ordered::fixed::mmr chunk=32",
-        init: |ctx| CurOFix32::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOFix32::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedVariable32 {
         name: "current::ordered::variable::mmr chunk=32",
-        init: |ctx| CurOVar32::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOVar32::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedFixed32Mmb {
         name: "current::ordered::fixed::mmb chunk=32",
-        init: |ctx| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOFix32Mmb::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedVariable32Mmb {
         name: "current::ordered::variable::mmb chunk=32",
-        init: |ctx| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOVar32Mmb::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedFixed256 {
         name: "current::ordered::fixed::mmr chunk=256",
-        init: |ctx| CurOFix256::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOFix256::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedVariable256 {
         name: "current::ordered::variable::mmr chunk=256",
-        init: |ctx| CurOVar256::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOVar256::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedFixed256Mmb {
         name: "current::ordered::fixed::mmb chunk=256",
-        init: |ctx| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOFix256Mmb::init(ctx.clone(), cur_fix_cfg(thread_pool, page_cache)),
     }
     CurrentOrderedVariable256Mmb {
         name: "current::ordered::variable::mmb chunk=256",
-        init: |ctx| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(&ctx)),
+        init: |ctx, thread_pool, page_cache| CurOVar256Mmb::init(ctx.clone(), cur_var_cfg(thread_pool, page_cache)),
     }
 }
 

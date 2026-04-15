@@ -429,7 +429,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
+    use commonware_runtime::{
+        deterministic, iobuf::BufferPool, mocks, BufferPooler, IoBuf, Runner, Spawner,
+    };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -473,10 +475,9 @@ mod tests {
         }
     }
 
-    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
+    fn create_channels(pool: BufferPool) -> Channels<PublicKey> {
         let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+        let messenger = router::Messenger::new(pool, router_mailbox);
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -549,7 +550,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.network_buffer_pool().clone());
 
             // Send a non-greeting message first (BitVec)
             let bit_vec = types::Payload::<PublicKey>::BitVec(types::BitVec {
@@ -648,7 +649,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.network_buffer_pool().clone());
 
             // Send first greeting (valid)
             let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
@@ -753,7 +754,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.network_buffer_pool().clone());
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
@@ -1007,7 +1008,7 @@ mod tests {
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());

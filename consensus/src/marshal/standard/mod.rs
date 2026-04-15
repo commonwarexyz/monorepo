@@ -1568,7 +1568,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("cache"), NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,
