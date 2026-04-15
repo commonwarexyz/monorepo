@@ -1,4 +1,4 @@
-//! Worker loops and helpers.
+//! Timed I/O loops and helpers.
 
 use crate::{config::SyncMode, report::Stats};
 use bytes::Buf;

@@ -2,7 +2,7 @@
 
 use crate::{
     config::{WriteShape, DEFAULT_IO_SIZE},
-    workers::ResultExt,
+    runner::ResultExt,
 };
 use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
@@ -102,16 +102,13 @@ pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io:
 }
 
 /// Create a fixed-size, preallocated blob. Returns the open blob handle.
-pub async fn prepare_blob<S>(
+pub async fn prepare_blob<S: Storage>(
     storage: &S,
     root: &Path,
     partition: &str,
     name: &[u8],
     file_size: u64,
-) -> Result<S::Blob, String>
-where
-    S: Storage,
-{
+) -> Result<S::Blob, String> {
     let (blob, _) = storage.open(partition, name).await.str_err()?;
     blob.resize(file_size).await.str_err()?;
     blob.sync().await.str_err()?;
@@ -123,17 +120,14 @@ where
 /// Create a fixed-size blob and fill it with random data.
 ///
 /// Returns the open blob handle so the caller can reuse it for the timed phase.
-pub async fn prepare_filled_blob<S>(
+pub async fn prepare_filled_blob<S: Storage>(
     rng: &mut impl Rng,
     storage: &S,
     root: &Path,
     partition: &str,
     name: &[u8],
     file_size: u64,
-) -> Result<S::Blob, String>
-where
-    S: Storage,
-{
+) -> Result<S::Blob, String> {
     let blob = prepare_blob(storage, root, partition, name, file_size).await?;
 
     let chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);

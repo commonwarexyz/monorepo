@@ -1,10 +1,10 @@
-//! Benchmark workload orchestration for `storage_bench`.
+//! Benchmark workload orchestration.
 
 use crate::{
     config::{CacheMode, Config, SyncMode, Workload},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::{Report, Stats},
-    workers::{
+    runner::{
         random_blocks, run_read_loop, run_write_loop, sequential_blocks, warm_read_loop, ResultExt,
     },
 };

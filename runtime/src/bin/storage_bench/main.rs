@@ -11,14 +11,14 @@
 mod config;
 mod filesystem;
 mod report;
-mod workers;
-mod workloads;
+mod runner;
+mod workload;
 
 use crate::{
     config::{Config, OutputFormat},
     filesystem::{cleanup_root, prepare_root},
-    workers::ResultExt,
-    workloads::run_benchmark,
+    runner::ResultExt,
+    workload::run_benchmark,
 };
 use commonware_runtime::{tokio, Runner as _};
 
