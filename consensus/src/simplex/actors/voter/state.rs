@@ -2072,14 +2072,12 @@ mod tests {
             assert_eq!(state.last_finalized(), stale_view);
 
             // The stale round still looks certifiable without the finalized-view filter.
-            assert!(
-                state
-                    .views
-                    .get_mut(&stale_view)
-                    .expect("stale round must exist")
-                    .try_certify()
-                    .is_some()
-            );
+            assert!(state
+                .views
+                .get_mut(&stale_view)
+                .expect("stale round must exist")
+                .try_certify()
+                .is_some());
 
             let expected_am_leader = state
                 .leader_index(live_view)
