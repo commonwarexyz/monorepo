@@ -1994,7 +1994,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2178,7 +2178,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             peers.clone(),
         )
@@ -2297,7 +2297,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2374,7 +2374,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2470,7 +2470,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2557,7 +2557,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2767,7 +2767,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2854,7 +2854,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -2932,7 +2932,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3027,7 +3027,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3092,7 +3092,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3180,7 +3180,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(3),
             participants.clone(),
         )
@@ -3293,7 +3293,7 @@ pub fn ancestry_stream<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3365,7 +3365,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3498,7 +3498,7 @@ pub fn init_processed_height<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
@@ -3587,7 +3587,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
-            context.with_label("network"),
+            context.clone(),
             NZUsize!(1),
             participants.clone(),
         )
