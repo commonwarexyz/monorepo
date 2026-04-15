@@ -9,6 +9,7 @@ members = [
     "consensus",
     "cryptography",
     "deployer",
+    "glue",
     "macros",
     "macros/impl",
     "math",

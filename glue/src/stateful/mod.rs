@@ -51,6 +51,16 @@
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
 //! partial progress survives timeouts.
+//!
+//! # Compatibility
+//!
+//! The [`Stateful`] application may be used with [`Deferred`] and [`coding::Marshaled`],
+//! but not with [`Inline`]. This is because [`Inline`] does not verify the correctness
+//! of the embedded context within the [`CertifiableBlock`].
+//!
+//! [`Deferred`]: commonware_consensus::marshal::standard::Deferred
+//! [`Inline`]: commonware_consensus::marshal::standard::Inline
+//! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
     marshal::ancestry::{AncestorStream, BlockProvider},
