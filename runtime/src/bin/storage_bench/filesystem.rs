@@ -21,9 +21,9 @@ const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 /// Create a fresh root directory for one benchmark run.
 ///
 /// Any leftover directory from a previous interrupted run is removed first.
-pub fn prepare_root(root: &Path, scenario: &str) -> std::io::Result<PathBuf> {
+pub fn prepare_root(root: &Path, workload: &str) -> std::io::Result<PathBuf> {
     fs::create_dir_all(root)?;
-    let root = root.join(format!("commonware_storage_bench_{scenario}"));
+    let root = root.join(format!("commonware_storage_bench_{workload}"));
     let _ = fs::remove_dir_all(&root);
     Ok(root)
 }

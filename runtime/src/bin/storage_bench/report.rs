@@ -119,7 +119,7 @@ pub struct Report {
 impl Report {
     /// Build a report from worker stats.
     ///
-    /// Pass `None` for the side that doesn't apply to this scenario.
+    /// Pass `None` for the side that doesn't apply to this workload.
     pub fn new(
         elapsed: Duration,
         read_workers: Option<Vec<Stats>>,
@@ -137,9 +137,9 @@ impl Report {
     /// Print a concise human-readable report.
     pub fn print_human(&self, cfg: &Config) {
         println!(
-            "backend={} scenario={} elapsed_s={:.3}",
+            "backend={} workload={} elapsed_s={:.3}",
             backend_name(),
-            cfg.scenario,
+            cfg.workload,
             self.elapsed.as_secs_f64(),
         );
         println!(
@@ -160,7 +160,7 @@ impl Report {
         if let Some(cache) = cfg.cache {
             println!("cache={cache}");
         }
-        if cfg.scenario.has_writes() {
+        if cfg.workload.has_writes() {
             println!(
                 "write_shape={} sync_every={}",
                 cfg.write_shape, cfg.sync_mode
@@ -180,7 +180,7 @@ impl Report {
     pub fn print_json(&self, cfg: &Config) {
         let json = json!({
             "backend": backend_name(),
-            "scenario": cfg.scenario.to_string(),
+            "workload": cfg.workload.to_string(),
             "duration_seconds": cfg.duration().as_secs(),
             "io_size": cfg.io_size,
             "inflight": cfg.inflight,
@@ -189,8 +189,8 @@ impl Report {
             "file_size": cfg.file_size,
             "root": cfg.root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
-            "write_shape": cfg.scenario.has_writes().then(|| cfg.write_shape.to_string()),
-            "sync_every": cfg.scenario.has_writes().then(|| cfg.sync_mode.to_string()),
+            "write_shape": cfg.workload.has_writes().then(|| cfg.write_shape.to_string()),
+            "sync_every": cfg.workload.has_writes().then(|| cfg.sync_mode.to_string()),
             "seed": cfg.seed,
             "elapsed_ns": self.elapsed.as_nanos() as u64,
             "read": self.read.as_ref().map(OperationReport::to_json),

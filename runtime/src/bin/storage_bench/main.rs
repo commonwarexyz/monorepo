@@ -24,9 +24,9 @@ use commonware_runtime::{tokio, Runner as _};
 
 fn main() -> Result<(), String> {
     let cfg = Config::parse();
-    let scenario = cfg.scenario.to_string();
+    let workload = cfg.workload.to_string();
 
-    let root = prepare_root(&cfg.root, &scenario).str_err()?;
+    let root = prepare_root(&cfg.root, &workload).str_err()?;
 
     let mut runtime_cfg = tokio::Config::default()
         .with_worker_threads(cfg.worker_threads)

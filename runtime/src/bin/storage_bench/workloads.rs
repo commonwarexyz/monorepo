@@ -1,7 +1,7 @@
 //! Benchmark workload orchestration for `storage_bench`.
 
 use crate::{
-    config::{CacheMode, Config, Scenario, SyncMode},
+    config::{CacheMode, Config, SyncMode, Workload},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::{Report, Stats},
     workers::{
@@ -25,20 +25,20 @@ use std::{
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
-/// Run the configured benchmark scenario and return the results.
+/// Run the configured benchmark workload and return the results.
 pub async fn run_benchmark(cfg: &Config, root: &Path, context: Context) -> Result<Report, String> {
-    let result = match cfg.scenario {
-        Scenario::ReadSeq | Scenario::ReadRand => run_read(cfg, root, &context).await,
-        Scenario::WriteSeq | Scenario::WriteRand => run_overwrite(cfg, root, &context).await,
-        Scenario::WriteAppend => run_write_append(cfg, &context).await,
-        Scenario::ReadWriteAppend => run_read_write_append(cfg, root, &context).await,
+    let result = match cfg.workload {
+        Workload::ReadSeq | Workload::ReadRand => run_read(cfg, root, &context).await,
+        Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, root, &context).await,
+        Workload::WriteAppend => run_write_append(cfg, &context).await,
+        Workload::ReadWriteAppend => run_read_write_append(cfg, root, &context).await,
     };
     let _ = context.remove("storage-bench", None).await;
     result
 }
 
 async fn run_read(cfg: &Config, root: &Path, context: &Context) -> Result<Report, String> {
-    let sequential = cfg.scenario == Scenario::ReadSeq;
+    let sequential = cfg.workload == Workload::ReadSeq;
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
@@ -93,7 +93,7 @@ async fn run_overwrite(cfg: &Config, root: &Path, context: &Context) -> Result<R
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let sequential = cfg.scenario == Scenario::WriteSeq;
+    let sequential = cfg.workload == Workload::WriteSeq;
     let workers = join_all((0..cfg.inflight).map(|wid| {
         let blob = blob.clone();
         let payload = payload.clone();
@@ -258,7 +258,7 @@ async fn warm_cache(
     let inflight = cfg.inflight as u64;
     match cfg.cache.expect("validated") {
         CacheMode::Warm => {
-            let sequential = cfg.scenario == Scenario::ReadSeq;
+            let sequential = cfg.workload == Workload::ReadSeq;
             let results = join_all((0..cfg.inflight).map(|wid| {
                 let blob = blob.clone();
                 async move {

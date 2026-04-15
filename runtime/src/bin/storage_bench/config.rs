@@ -6,9 +6,9 @@ use std::{fmt, path::PathBuf, time::Duration};
 /// Default logical I/O size used when the CLI does not override it.
 pub const DEFAULT_IO_SIZE: usize = 4 * 1024;
 
-/// Benchmark scenario to execute.
+/// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum Scenario {
+pub enum Workload {
     /// Sequential reads over a fixed-size file.
     #[value(name = "read_seq")]
     ReadSeq,
@@ -29,8 +29,8 @@ pub enum Scenario {
     ReadWriteAppend,
 }
 
-impl Scenario {
-    /// Whether the scenario benchmarks writes.
+impl Workload {
+    /// Whether the workload benchmarks writes.
     pub const fn has_writes(self) -> bool {
         matches!(
             self,
@@ -38,7 +38,7 @@ impl Scenario {
         )
     }
 
-    /// Whether the scenario benchmarks reads.
+    /// Whether the workload benchmarks reads.
     pub const fn has_reads(self) -> bool {
         matches!(self, Self::ReadSeq | Self::ReadRand | Self::ReadWriteAppend)
     }
@@ -100,7 +100,7 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Scenario, CacheMode, WriteShape, OutputFormat);
+display_value_enum!(Workload, CacheMode, WriteShape, OutputFormat);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -121,9 +121,9 @@ impl fmt::Display for SyncMode {
     styles = Styles::styled(),
 )]
 pub struct Config {
-    /// Scenario to execute.
+    /// Workload to execute.
     #[arg(long, value_enum)]
-    pub scenario: Scenario,
+    pub workload: Workload,
 
     /// Timed run duration in seconds.
     #[arg(long, default_value_t = 30, value_parser = value_parser!(u64).range(1..))]
@@ -133,7 +133,7 @@ pub struct Config {
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
 
-    /// Parallel worker count for steady-state scenarios.
+    /// Parallel worker count for steady-state workloads.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
@@ -157,11 +157,11 @@ pub struct Config {
     #[arg(long, default_value = "/tmp")]
     pub root: PathBuf,
 
-    /// Best-effort cache preparation for read-heavy scenarios.
+    /// Best-effort cache preparation for read-heavy workloads.
     #[arg(long, value_enum)]
     pub cache: Option<CacheMode>,
 
-    /// Write payload layout for write-heavy scenarios.
+    /// Write payload layout for write-heavy workloads.
     #[arg(long, value_enum, default_value = "contiguous")]
     pub write_shape: WriteShape,
 
@@ -217,8 +217,8 @@ impl Config {
             return Err("--global-queue-interval must be greater than zero".into());
         }
 
-        match self.scenario {
-            Scenario::WriteAppend => {
+        match self.workload {
+            Workload::WriteAppend => {
                 if self.file_size.is_some() {
                     return Err("--file-size is not used by write_append".into());
                 }
@@ -226,13 +226,13 @@ impl Config {
                     return Err("write_append only supports --inflight 1".into());
                 }
                 if self.cache.is_some() {
-                    return Err("--cache is only valid for read-heavy scenarios".into());
+                    return Err("--cache is only valid for read-heavy workloads".into());
                 }
             }
             _ => {
                 let file_size = self
                     .file_size
-                    .ok_or_else(|| "--file-size is required for this scenario".to_string())?;
+                    .ok_or_else(|| "--file-size is required for this workload".to_string())?;
                 let io_size = self.io_size as u64;
                 if file_size < io_size {
                     return Err("--file-size must be at least --io-size".into());
@@ -240,7 +240,7 @@ impl Config {
                 if !file_size.is_multiple_of(io_size) {
                     return Err("--file-size must be a multiple of --io-size".into());
                 }
-                if matches!(self.scenario, Scenario::WriteSeq | Scenario::WriteRand) {
+                if matches!(self.workload, Workload::WriteSeq | Workload::WriteRand) {
                     let total_blocks = file_size / io_size;
                     if total_blocks < self.inflight as u64 {
                         return Err(
@@ -252,20 +252,20 @@ impl Config {
             }
         }
 
-        if self.scenario.has_reads() {
+        if self.workload.has_reads() {
             if self.cache.is_none() {
-                return Err("--cache is required for read-heavy scenarios".into());
+                return Err("--cache is required for read-heavy workloads".into());
             }
         } else if self.cache.is_some() {
-            return Err("--cache is only valid for read-heavy scenarios".into());
+            return Err("--cache is only valid for read-heavy workloads".into());
         }
 
-        if !self.scenario.has_writes() {
+        if !self.workload.has_writes() {
             if self.write_shape != WriteShape::Contiguous {
-                return Err("--write-shape is only valid for write-heavy scenarios".into());
+                return Err("--write-shape is only valid for write-heavy workloads".into());
             }
             if self.sync_mode != SyncMode::End {
-                return Err("--sync-every is only valid for write-heavy scenarios".into());
+                return Err("--sync-every is only valid for write-heavy workloads".into());
             }
         }
 
