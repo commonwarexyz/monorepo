@@ -112,7 +112,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
         let cfg = test_config("fuzz-qmdb-unordered-pending-vs-committed-root", page_cache);
-        let mut db = Db::init(context.clone(), cfg)
+        let mut db = Db::init(context.with_label("db"), cfg)
             .await
             .expect("init unordered any db");
 

@@ -178,7 +178,7 @@ fn fuzz(input: FuzzInput) {
             write_buffer,
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+        let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
             .await
             .unwrap();
         let mut reference = ReferenceQueue::new();

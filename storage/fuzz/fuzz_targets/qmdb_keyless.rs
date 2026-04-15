@@ -155,7 +155,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
         let hasher = Standard::<Sha256>::new();
         let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = test_config(suffix, page_cache.clone());
-        let mut db: Db<F> = Db::init(context.clone(), cfg)
+        let mut db: Db<F> = Db::init(context.with_label("db"), cfg)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;

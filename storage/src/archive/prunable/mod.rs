@@ -337,7 +337,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.with_label("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -406,7 +406,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.with_label("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -469,7 +469,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.with_label("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -731,7 +731,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.with_label("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -772,7 +772,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.clone(), cfg)
+            let mut archive = Archive::init(context.with_label("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 

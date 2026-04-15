@@ -392,7 +392,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_basic", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -442,7 +442,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_batch", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_seq_ack", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -549,7 +549,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ooo_ack", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -592,7 +592,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_up_to", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -627,7 +627,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_up_to_existing", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -660,7 +660,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_up_to_coalesce", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -688,7 +688,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_up_to_errors", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -716,7 +716,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_skip_acked", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -753,7 +753,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_errors", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -780,7 +780,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_prune", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -811,7 +811,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_multi_prune", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -984,7 +984,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_reset", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -1017,7 +1017,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_reset_ack", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -1057,7 +1057,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_empty", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -1118,7 +1118,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_sparse", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -1151,7 +1151,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_coalesce", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 
@@ -1183,7 +1183,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_ack_up_to_past_read_pos", page_cache);
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), cfg)
                 .await
                 .unwrap();
 

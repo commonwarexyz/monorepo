@@ -115,7 +115,7 @@ fn fuzz(input: FuzzInput) {
             "fuzz-current-unordered-pending-vs-committed-root",
             page_cache,
         );
-        let mut db = Db::init(context.clone(), cfg)
+        let mut db = Db::init(context.with_label("db"), cfg)
             .await
             .expect("init current unordered db");
 

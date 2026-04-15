@@ -209,7 +209,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -397,7 +397,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -455,7 +455,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -609,7 +609,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -665,7 +665,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -727,7 +727,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 
@@ -784,7 +784,7 @@ mod tests {
                     PAGE_CACHE_SIZE,
                 ),
             };
-            let mut cache = Cache::init(context.clone(), cfg)
+            let mut cache = Cache::init(context.with_label("cache_db"), cfg)
                 .await
                 .expect("Failed to initialize cache");
 

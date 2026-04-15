@@ -360,7 +360,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_concurrent", page_cache);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Spawn writer task
             let writer_handle = context.with_label("writer").spawn(|_ctx| async move {
@@ -395,7 +395,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_select", page_cache);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Enqueue an item
             writer.enqueue(b"test".to_vec()).await.unwrap();
@@ -423,7 +423,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_writer_dropped", page_cache);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Enqueue items then drop writer
             writer.enqueue(b"item1".to_vec()).await.unwrap();
@@ -481,7 +481,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_multi_writer", page_cache);
-            let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
 
             // Clone writer for second task
             let writer2 = writer.clone();

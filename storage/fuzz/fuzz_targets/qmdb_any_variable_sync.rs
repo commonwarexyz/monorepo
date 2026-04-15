@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
         let hasher = Standard::<Sha256>::new();
         let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
         let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
-        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
+        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.with_label("db"), cfg)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;

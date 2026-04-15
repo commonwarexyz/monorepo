@@ -133,7 +133,7 @@ fn fuzz(data: FuzzInput) {
             translator: TwoCap,
         };
 
-        let mut db = Db::init(context.clone(), cfg)
+        let mut db = Db::init(context.with_label("db"), cfg)
             .await
             .expect("Failed to initialize Current database");
 

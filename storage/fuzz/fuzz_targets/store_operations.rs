@@ -118,7 +118,7 @@ fn fuzz(input: FuzzInput) {
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = test_config("store-fuzz-test", page_cache.clone());
-        let mut db = StoreDb::init(context.clone(), cfg)
+        let mut db = StoreDb::init(context.with_label("db"), cfg)
             .await
             .expect("Failed to init db");
         let mut restarts = 0usize;

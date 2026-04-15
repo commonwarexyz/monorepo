@@ -163,7 +163,7 @@ fn fuzz(mut input: FuzzInput) {
     runner.start(|context| async move {
         let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(1));
         let cfg = test_config(TEST_NAME, page_cache.clone());
-        let mut db = FixedDb::init(context.clone(), cfg)
+        let mut db = FixedDb::init(context.with_label("db"), cfg)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
