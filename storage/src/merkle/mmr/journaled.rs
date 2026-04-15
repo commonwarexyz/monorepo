@@ -66,7 +66,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journaled_mmr = Mmr::init(
-                context.clone(),
+                context.with_label("mmr"),
                 &Standard::<Sha256>::new(),
                 test_config(page_cache),
             )
@@ -287,10 +287,11 @@ mod tests {
             let hasher = Standard::<Sha256>::new();
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
+            let init_ctx = context.with_label("init");
             let init_cache =
-                CacheRef::from_pooler(context.with_label("init"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(init_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut mmr = Mmr::<_, Digest>::init(
-                context.with_label("init"),
+                init_ctx.with_label("mmr"),
                 &hasher,
                 test_config(init_cache),
             )
@@ -307,8 +308,9 @@ mod tests {
 
             // Build a reference MMR to 100 leaves to get valid pinned nodes for the
             // sync boundary.
+            let ref_ctx = context.with_label("ref");
             let ref_cache =
-                CacheRef::from_pooler(context.with_label("ref_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(ref_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let ref_cfg = Config {
                 journal_partition: "ref-journal".into(),
                 metadata_partition: "ref-metadata".into(),
@@ -317,7 +319,7 @@ mod tests {
                 thread_pool: None,
                 page_cache: ref_cache,
             };
-            let mut ref_mmr = Mmr::<_, Digest>::init(context.with_label("ref"), &hasher, ref_cfg)
+            let mut ref_mmr = Mmr::<_, Digest>::init(ref_ctx.with_label("mmr"), &hasher, ref_cfg)
                 .await
                 .unwrap();
             let mut batch = ref_mmr.new_batch();
@@ -336,14 +338,15 @@ mod tests {
 
             // init_sync with range starting beyond the existing data triggers the
             // "fresh start" path (clear_to_size).
+            let sync_ctx = context.with_label("sync");
             let sync_cache =
-                CacheRef::from_pooler(context.with_label("sync"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(sync_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(sync_cache),
                 range: Location::new(100)..Location::new(200),
                 pinned_nodes: Some(pinned),
             };
-            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+            let mut sync_mmr = Mmr::init_sync(sync_ctx.with_label("mmr"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
