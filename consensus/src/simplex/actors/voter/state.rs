@@ -2014,6 +2014,84 @@ mod tests {
     }
 
     #[test]
+    fn certify_candidates_skips_views_at_or_below_last_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let make_notarization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
+            };
+
+            let make_finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
+            };
+
+            let stale_view = View::new(2);
+            let live_view = View::new(3);
+
+            state.add_notarization(make_notarization(stale_view));
+            state.add_notarization(make_notarization(live_view));
+            state.add_finalization(make_finalization(stale_view));
+
+            // Reinsert a stale candidate to exercise the defensive finalized-view guard.
+            state.certification_candidates.insert(stale_view);
+            assert_eq!(state.last_finalized(), stale_view);
+
+            // The stale round still looks certifiable without the finalized-view filter.
+            assert!(
+                state
+                    .views
+                    .get_mut(&stale_view)
+                    .expect("stale round must exist")
+                    .try_certify()
+                    .is_some()
+            );
+
+            let expected_am_leader = state
+                .leader_index(live_view)
+                .is_some_and(|leader| state.is_me(leader));
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), live_view);
+            assert_eq!(candidates[0].1, expected_am_leader);
+        });
+    }
+
+    #[test]
     fn nullification_keeps_notarization_as_certification_candidate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
