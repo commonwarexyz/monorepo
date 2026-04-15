@@ -51,8 +51,9 @@ pub enum CacheMode {
     #[value(name = "warm")]
     Warm,
     /// Best-effort eviction with `posix_fadvise(..., DONTNEED)` before timing.
-    /// Only the first pass through the file is truly cold, subsequent passes
-    /// read from cache. Use a file larger than RAM for sustained cold reads.
+    /// Only the first pass through the file is truly cold: subsequent passes
+    /// read from cache. Use a large enough file or short enough duration that
+    /// the timed phase does not complete a full pass.
     #[value(name = "cold")]
     Cold,
 }
