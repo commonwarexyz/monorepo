@@ -80,10 +80,15 @@ fn fuzz(input: FuzzInput) {
             page_cache,
         };
 
+        let mut restarts = 0usize;
         let mut journal = Journal::init(
-            context.with_label("journal"),
+            context
+                .with_label("journal")
+                .with_attribute("instance", restarts),
             make_cfg(CacheRef::from_pooler(
-                context.with_label("cache_0"),
+                context
+                    .with_label("cache")
+                    .with_attribute("instance", restarts),
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             )),
@@ -94,8 +99,6 @@ fn fuzz(input: FuzzInput) {
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
         let mut oldest_retained_pos = 0u64;
-        let mut restarts = 0usize;
-
         for op in input.ops.iter() {
             match op {
                 JournalOperation::Append { value } => {
