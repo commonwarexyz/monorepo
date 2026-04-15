@@ -1,7 +1,6 @@
 //! Timed I/O loops and helpers.
 
 use crate::{config::SyncMode, report::Stats};
-use bytes::Buf;
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::time::Instant;
@@ -87,23 +86,24 @@ pub async fn run_read_loop(
 pub async fn run_write_loop(
     blob: impl Blob,
     deadline: Instant,
+    io_size: usize,
     payload: IoBufs,
     sync_mode: SyncMode,
-    mut next_offset: impl FnMut() -> u64,
+    mut next_block: impl FnMut() -> u64,
     mut after_write: impl FnMut(u64),
 ) -> Result<Stats, String> {
     let mut stats = Stats::default();
     let mut writes_since_sync = 0u64;
-    let payload_len = payload.remaining();
+    let io_size = io_size as u64;
     while should_continue(deadline, stats.ops) {
-        let offset = next_offset();
+        let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
         blob.write_at(offset, payload.clone()).await.str_err()?;
 
         // Record latency before sync so percentiles reflect pure write cost.
-        stats.record(payload_len as u64, started.map(|s| s.elapsed()));
+        stats.record(io_size, started.map(|s| s.elapsed()));
 
-        after_write(offset + payload_len as u64);
+        after_write(offset + io_size);
         writes_since_sync += 1;
         if let SyncMode::Every(every) = sync_mode {
             if writes_since_sync == every {

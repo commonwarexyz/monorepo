@@ -8,33 +8,11 @@ use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use commonware_utils::hex;
 use rand::Rng;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::Path;
 #[cfg(unix)]
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
-
-/// Create a fresh root directory for one benchmark run.
-///
-/// Any leftover directory from a previous interrupted run is removed first.
-pub fn prepare_root(root: &Path, workload: &str) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(root)?;
-    let root = root.join(format!("commonware_storage_bench_{workload}"));
-    let _ = fs::remove_dir_all(&root);
-    Ok(root)
-}
-
-/// Remove the benchmark root after the runtime has dropped its storage state.
-pub fn cleanup_root(root: &Path) {
-    // The io_uring backend owns a dedicated worker thread; give it a brief
-    // chance to observe dropped handles before removing the directory.
-    std::thread::sleep(Duration::from_millis(10));
-    let _ = fs::remove_dir_all(root);
-}
 
 pub const fn backend_name() -> &'static str {
     if cfg!(feature = "iouring-storage") {

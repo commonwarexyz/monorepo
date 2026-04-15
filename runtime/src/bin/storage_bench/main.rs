@@ -16,34 +16,27 @@ mod workload;
 
 use crate::{
     config::{Config, OutputFormat},
-    filesystem::{cleanup_root, prepare_root},
-    runner::ResultExt,
     workload::run_benchmark,
 };
 use commonware_runtime::{tokio, Runner as _};
 
 fn main() -> Result<(), String> {
     let cfg = Config::parse();
-    let workload = cfg.workload.to_string();
-
-    let root = prepare_root(&cfg.root, &workload).str_err()?;
 
     let mut runtime_cfg = tokio::Config::default()
         .with_worker_threads(cfg.worker_threads)
-        .with_storage_directory(root.clone());
+        .with_storage_directory(cfg.root.clone());
 
     if let Some(global_queue_interval) = cfg.global_queue_interval {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
     }
 
     let report = tokio::Runner::new(runtime_cfg)
-        .start(|context| async { run_benchmark(&cfg, &root, context).await });
-
-    cleanup_root(&root);
+        .start(|context| async { run_benchmark(&cfg, context).await })?;
 
     match cfg.output {
-        OutputFormat::Human => report?.print_human(&cfg),
-        OutputFormat::Json => report?.print_json(&cfg),
+        OutputFormat::Human => report.print_human(&cfg),
+        OutputFormat::Json => report.print_json(&cfg),
     }
     Ok(())
 }
