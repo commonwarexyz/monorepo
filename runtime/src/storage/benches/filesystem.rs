@@ -1,9 +1,6 @@
 //! Filesystem helpers.
 
-use crate::{
-    config::{WriteShape, DEFAULT_IO_SIZE},
-    runner::ResultExt,
-};
+use crate::{config::WriteShape, runner::ResultExt};
 use bytes::Bytes;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 #[cfg(target_os = "linux")]
@@ -111,10 +108,9 @@ pub async fn prepare_filled_blob<S: Storage>(
 ) -> Result<S::Blob, String> {
     let blob = prepare_blob(storage, root, partition, name, file_size).await?;
 
-    let chunk_size = DEFAULT_FILL_CHUNK_SIZE.max(DEFAULT_IO_SIZE);
     let mut offset = 0u64;
     while offset < file_size {
-        let len = ((file_size - offset) as usize).min(chunk_size);
+        let len = ((file_size - offset) as usize).min(DEFAULT_FILL_CHUNK_SIZE);
         let mut payload = vec![0u8; len];
         rng.fill_bytes(&mut payload);
         blob.write_at(offset, payload).await.str_err()?;

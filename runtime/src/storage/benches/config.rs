@@ -3,9 +3,6 @@
 use clap::{builder::Styles, error::ErrorKind, value_parser, CommandFactory, Parser, ValueEnum};
 use std::{fmt, path::PathBuf, time::Duration};
 
-/// Default logical I/O size used when the CLI does not override it.
-pub const DEFAULT_IO_SIZE: usize = 4 * 1024;
-
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Workload {
