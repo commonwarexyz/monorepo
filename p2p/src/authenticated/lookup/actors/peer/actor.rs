@@ -336,7 +336,8 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{
-        deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
+        deterministic, iobuf::BufferPool, mocks, BufferPooler, Error as RuntimeError, IoBuf,
+        IoBufs, Runner, Spawner,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
@@ -394,10 +395,9 @@ mod tests {
         }
     }
 
-    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
+    fn create_channels(pool: BufferPool) -> Channels<PublicKey> {
         let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+        let messenger = router::Messenger::new(pool, router_mailbox);
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -463,7 +463,7 @@ mod tests {
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
@@ -565,7 +565,7 @@ mod tests {
             let (peer_actor, peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
 
