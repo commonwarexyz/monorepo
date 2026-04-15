@@ -67,8 +67,6 @@ enum Event<Op, D: Digest, E> {
 pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
-    /// The location of the first operation in the batch.
-    pub start_loc: Location,
     /// The result of the fetch operation.
     pub result: Result<FetchResult<Op, D>, E>,
 }
@@ -313,16 +311,13 @@ where
             self.outstanding_requests.insert(
                 id,
                 start_loc,
+                target_size,
                 cancel_tx,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1), true, cancel_rx)
                         .await;
-                    IndexedFetchResult {
-                        id,
-                        start_loc,
-                        result,
-                    }
+                    IndexedFetchResult { id, result }
                 }),
             );
         }
@@ -364,16 +359,13 @@ where
             self.outstanding_requests.insert(
                 id,
                 gap_range.start,
+                target_size,
                 cancel_tx,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, gap_range.start, batch_size, false, cancel_rx)
                         .await;
-                    IndexedFetchResult {
-                        id,
-                        start_loc: gap_range.start,
-                        result,
-                    }
+                    IndexedFetchResult { id, result }
                 }),
             );
         }
@@ -561,6 +553,21 @@ where
         Ok(false)
     }
 
+    /// Returns whether this target needs pinned boundary nodes to reconstruct pruned state.
+    fn needs_pinned_boundary(&self) -> bool {
+        self.target.range.start() > Location::new(0)
+    }
+
+    /// Returns whether the current target has the boundary state needed for completion.
+    fn has_boundary_state(&self) -> bool {
+        !self.needs_pinned_boundary() || self.pinned_nodes.is_some()
+    }
+
+    /// Returns whether the journal and boundary state are both ready for completion.
+    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
+        Ok(self.is_at_target().await? && self.has_boundary_state())
+    }
+
     /// Handle the result of a fetch operation.
     ///
     /// Discards results for requests no longer tracked (removed by
@@ -574,11 +581,11 @@ where
         // Discard results for stale requests (removed by a target update).
         // Using the request ID prevents a stale future from consuming the
         // tracking entry of a fresh request at the same location.
-        if !self.outstanding_requests.remove(fetch_result.id) {
+        let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
-        }
+        };
 
-        let start_loc = fetch_result.start_loc;
+        let start_loc = request.start_loc;
         let FetchResult {
             proof,
             operations,
@@ -595,14 +602,19 @@ where
             return Ok(());
         }
 
-        // Look up the root to verify against using proof.leaves (the tree
-        // size the request was issued for). Fresh requests match the current
-        // target; retained requests match a historical root.
-        let is_current = proof.leaves == self.target.range.end();
+        if proof.leaves != request.target_size {
+            success_tx.send_lossy(false);
+            return Ok(());
+        }
+
+        // Look up the root to verify against using the tree size the request
+        // asked for. Fresh requests match the current target; retained
+        // requests match a historical root that was explicitly retained.
+        let is_current = request.target_size == self.target.range.end();
         let target_root = if is_current {
             &self.target.root
         } else {
-            let Some(root) = self.retained_roots.get(&proof.leaves) else {
+            let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
                 // penalizing the resolver — the data may be valid.
@@ -698,7 +710,7 @@ where
         self.drain_finish_requests()?;
 
         // Check if sync is complete
-        if self.is_at_target().await? {
+        if self.is_ready_to_complete().await? {
             self.report_reached_target().await;
 
             if self.finish_rx.is_some() && !self.finish_requested {
@@ -775,12 +787,11 @@ mod tests {
     /// Create a no-op fetch result future for testing request tracking.
     fn dummy_future(
         id: RequestId,
-        loc: u64,
-    ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send + Sync>>
+    {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
-                start_loc: Location::new(loc),
                 result: Ok(FetchResult {
                     proof: Proof {
                         leaves: Location::new(0),
@@ -800,8 +811,9 @@ mod tests {
         requests.insert(
             id,
             Location::new(loc),
+            Location::new(loc),
             oneshot::channel().0,
-            dummy_future(id, loc),
+            dummy_future(id),
         );
         id
     }
@@ -815,9 +827,9 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests.contains(&Location::new(10)));
 
-        assert!(requests.remove(id));
+        assert!(requests.remove(id).is_some());
         assert!(!requests.contains(&Location::new(10)));
-        assert!(!requests.remove(id));
+        assert!(requests.remove(id).is_none());
     }
 
     #[test]
@@ -884,11 +896,11 @@ mod tests {
         assert_eq!(requests.len(), 1);
 
         // Old ID is no longer tracked (superseded by insert)
-        assert!(!requests.remove(old_id));
+        assert!(requests.remove(old_id).is_none());
 
         // New ID is still tracked and by_location is intact
         assert!(requests.contains(&Location::new(10)));
-        assert!(requests.remove(new_id));
+        assert!(requests.remove(new_id).is_some());
         assert!(!requests.contains(&Location::new(10)));
     }
 
@@ -901,11 +913,11 @@ mod tests {
         requests.remove_before(Location::new(10));
 
         // Old ID at location 5 was discarded by remove_before
-        assert!(!requests.remove(old_id));
+        assert!(requests.remove(old_id).is_none());
 
         // New request at the same location gets a different ID
         let new_id = add(&mut requests, 5);
         assert_ne!(old_id, new_id);
-        assert!(requests.remove(new_id));
+        assert!(requests.remove(new_id).is_some());
     }
 }
