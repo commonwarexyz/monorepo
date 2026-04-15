@@ -27,7 +27,7 @@ where
                         PAGE_SIZE,
                         NZUsize!(CACHE_SIZE),
                     );
-                    let append = create_append(&ctx, &name, cache_ref).await;
+                    let append = create_append(ctx.with_label("append"), &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {
@@ -38,7 +38,7 @@ where
                     }
                     let elapsed = start.elapsed();
 
-                    destroy_append(&ctx, append, &name).await;
+                    destroy_append(ctx.with_label("destroy"), append, &name).await;
 
                     elapsed
                 })

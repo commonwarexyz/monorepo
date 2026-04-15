@@ -22,14 +22,14 @@ const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
 
 /// Create a new Append wrapper for benchmarking.
-async fn create_append<C: Storage>(ctx: &C, name: &[u8], cache_ref: CacheRef) -> Append<C::Blob> {
+async fn create_append<C: Storage>(ctx: C, name: &[u8], cache_ref: CacheRef) -> Append<C::Blob> {
     let (blob, size) = ctx.open("bench_partition", name).await.unwrap();
     Append::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
         .await
         .unwrap()
 }
 
-async fn destroy_append<C: Storage>(ctx: &C, append: Append<C::Blob>, name: &[u8]) {
+async fn destroy_append<C: Storage>(ctx: C, append: Append<C::Blob>, name: &[u8]) {
     drop(append);
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }

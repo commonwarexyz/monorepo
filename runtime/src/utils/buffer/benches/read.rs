@@ -33,14 +33,14 @@ where
                     );
 
                     // Setup: populate the blob
-                    let append = create_append(&ctx, &name, cache_ref.clone()).await;
+                    let append = create_append(ctx.with_label("setup"), &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
                     append.append(&data).await.unwrap();
                     append.sync().await.unwrap();
                     drop(append);
 
                     // Benchmark: random reads
-                    let append = create_append(&ctx, &name, cache_ref).await;
+                    let append = create_append(ctx.with_label("bench"), &name, cache_ref).await;
                     let mut buf = vec![0u8; read_size];
                     let max_offset = TOTAL_SIZE - read_size;
                     let mut rng = StdRng::seed_from_u64(42);
@@ -56,7 +56,7 @@ where
                     let elapsed = start.elapsed();
 
                     // Cleanup
-                    destroy_append(&ctx, append, &name).await;
+                    destroy_append(ctx.with_label("destroy"), append, &name).await;
 
                     elapsed
                 })
