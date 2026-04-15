@@ -1130,7 +1130,7 @@ pub mod tests {
             |ctx: Context, partition: String| async move {
                 let page_cache =
                     CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-                <$db>::init(ctx.clone(), $cfg::<OneCap>(&partition, page_cache))
+                <$db>::init(ctx.with_label("db"), $cfg::<OneCap>(&partition, page_cache))
                     .await
                     .unwrap()
             }
