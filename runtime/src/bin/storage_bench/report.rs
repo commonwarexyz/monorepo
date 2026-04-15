@@ -1,4 +1,4 @@
-//! Statistics collection and reporting for `storage_bench`.
+//! Statistics collection and reporting.
 
 use crate::{config::Config, filesystem::backend_name};
 use serde_json::json;
@@ -6,7 +6,7 @@ use std::time::Duration;
 
 /// Aggregated stats for one worker stream.
 #[derive(Default)]
-pub struct WorkerStats {
+pub struct Stats {
     /// Number of completed operations.
     pub ops: u64,
     /// Number of bytes transferred.
@@ -15,19 +15,15 @@ pub struct WorkerStats {
     pub latency_samples: Vec<Duration>,
 }
 
-impl WorkerStats {
-    /// Record one completed operation without storing a latency sample.
+impl Stats {
+    /// Record one completed operation, optionally with a latency sample.
     #[inline(always)]
-    pub const fn record(&mut self, bytes: u64) {
+    pub fn record(&mut self, bytes: u64, latency: Option<Duration>) {
         self.ops += 1;
         self.bytes += bytes;
-    }
-
-    /// Record one completed operation and retain a latency sample.
-    #[inline(always)]
-    pub fn record_latency_sample(&mut self, latency: Duration, bytes: u64) {
-        self.record(bytes);
-        self.latency_samples.push(latency);
+        if let Some(latency) = latency {
+            self.latency_samples.push(latency);
+        }
     }
 
     /// Merge another worker's stats into this accumulator.
@@ -58,8 +54,8 @@ struct OperationReport {
 
 impl OperationReport {
     /// Merge multiple workers and compute summary metrics.
-    fn new(workers: Vec<WorkerStats>, elapsed: Duration) -> Self {
-        let mut merged = WorkerStats::default();
+    fn new(workers: Vec<Stats>, elapsed: Duration) -> Self {
+        let mut merged = Stats::default();
         for w in workers {
             merged.merge(w);
         }
@@ -126,8 +122,8 @@ impl Report {
     /// Pass `None` for the side that doesn't apply to this scenario.
     pub fn new(
         elapsed: Duration,
-        read_workers: Option<Vec<WorkerStats>>,
-        write_workers: Option<Vec<WorkerStats>>,
+        read_workers: Option<Vec<Stats>>,
+        write_workers: Option<Vec<Stats>>,
         final_file_size: u64,
     ) -> Self {
         Self {

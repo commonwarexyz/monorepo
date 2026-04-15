@@ -3,15 +3,17 @@
 use crate::{
     config::{CacheMode, Config, Scenario, SyncMode},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
-    report::{Report, WorkerStats},
+    report::{Report, Stats},
     workers::{
-        build_worker_shards, next_random_block, run_frontier_read_worker, run_read_loop,
-        run_write_loop, sequential_blocks, warm_read_loop, worker_seed, ResultExt,
+        random_blocks, run_read_loop, run_write_loop, sequential_blocks, warm_read_loop, ResultExt,
     },
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
 use futures::future::join_all;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{
+    rngs::{SmallRng, StdRng},
+    Rng, SeedableRng,
+};
 use std::{
     path::Path,
     sync::{
@@ -49,29 +51,31 @@ async fn run_read(cfg: &Config, root: &Path, context: &Context) -> Result<Report
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let workers = collect_workers(
-        join_all((0..cfg.inflight).map(|wid| {
-            let blob = blob.clone();
-            async move {
-                if sequential {
-                    run_read_loop(
-                        blob,
-                        deadline,
-                        cfg.io_size,
-                        sequential_blocks(wid as u64 % total_blocks, inflight, total_blocks),
-                    )
-                    .await
-                } else {
-                    let mut state = worker_seed(cfg.seed, wid);
-                    run_read_loop(blob, deadline, cfg.io_size, || {
-                        next_random_block(&mut state, total_blocks)
-                    })
-                    .await
-                }
+    let workers = join_all((0..cfg.inflight).map(|wid| {
+        let blob = blob.clone();
+        async move {
+            if sequential {
+                run_read_loop(
+                    blob,
+                    deadline,
+                    cfg.io_size,
+                    sequential_blocks(wid as u64 % total_blocks, inflight, total_blocks),
+                )
+                .await
+            } else {
+                run_read_loop(
+                    blob,
+                    deadline,
+                    cfg.io_size,
+                    random_blocks(cfg.seed + wid as u64, total_blocks),
+                )
+                .await
             }
-        }))
-        .await,
-    )?;
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Report::new(start.elapsed(), Some(workers), None, file_size))
 }
@@ -89,58 +93,45 @@ async fn run_overwrite(cfg: &Config, root: &Path, context: &Context) -> Result<R
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let workers = if cfg.scenario == Scenario::WriteSeq {
-        collect_workers(
-            join_all((0..cfg.inflight).map(|wid| {
-                let blob = blob.clone();
-                let payload = payload.clone();
-                async move {
-                    let mut block = wid as u64 % total_blocks;
-                    run_write_loop(
-                        blob,
-                        deadline,
-                        payload,
-                        cfg.sync_mode,
-                        || {
-                            let offset = block * io_size;
-                            block = (block + inflight) % total_blocks;
-                            offset
-                        },
-                        |_| {},
-                    )
-                    .await
-                }
-            }))
-            .await,
-        )?
-    } else {
-        let shards = build_worker_shards(total_blocks, cfg.inflight)?;
-        collect_workers(
-            join_all(shards.into_iter().enumerate().map(|(wid, shard)| {
-                let blob = blob.clone();
-                let payload = payload.clone();
-                async move {
-                    let mut state = worker_seed(cfg.seed, wid);
-                    run_write_loop(
-                        blob,
-                        deadline,
-                        payload,
-                        cfg.sync_mode,
-                        || {
-                            let local = next_random_block(&mut state, shard.blocks);
-                            (shard.start_block + local) * io_size
-                        },
-                        |_| {},
-                    )
-                    .await
-                }
-            }))
-            .await,
-        )?
-    };
+    let sequential = cfg.scenario == Scenario::WriteSeq;
+    let workers = join_all((0..cfg.inflight).map(|wid| {
+        let blob = blob.clone();
+        let payload = payload.clone();
+        async move {
+            if sequential {
+                let mut blocks =
+                    sequential_blocks(wid as u64 % total_blocks, inflight, total_blocks);
+                run_write_loop(
+                    blob,
+                    deadline,
+                    payload,
+                    cfg.sync_mode,
+                    || blocks() * io_size,
+                    |_| {},
+                )
+                .await
+            } else {
+                let mut blocks = random_blocks(cfg.seed + wid as u64, total_blocks);
+                run_write_loop(
+                    blob,
+                    deadline,
+                    payload,
+                    cfg.sync_mode,
+                    || blocks() * io_size,
+                    |_| {},
+                )
+                .await
+            }
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
 
-    let elapsed = sync_and_elapsed(blob, start, cfg.sync_mode).await?;
-    Ok(Report::new(elapsed, None, Some(workers), file_size))
+    if cfg.sync_mode == SyncMode::End {
+        blob.sync().await.str_err()?;
+    }
+    Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
 }
 
 async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report, String> {
@@ -168,9 +159,11 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report, Str
     .await?;
 
     let final_file_size = stats.bytes;
-    let elapsed = sync_and_elapsed(blob, start, cfg.sync_mode).await?;
+    if cfg.sync_mode == SyncMode::End {
+        blob.sync().await.str_err()?;
+    }
     Ok(Report::new(
-        elapsed,
+        start.elapsed(),
         None,
         Some(vec![stats]),
         final_file_size,
@@ -231,24 +224,24 @@ async fn run_read_write_append(
         let blob = blob.clone();
         let visible_len = visible_len.clone();
         async move {
-            run_frontier_read_worker(
-                blob,
-                deadline,
-                cfg.io_size,
-                visible_len,
-                worker_seed(cfg.seed, wid),
-            )
-            .await
+            let mut rng = SmallRng::seed_from_u64(cfg.seed + wid as u64);
+            let random_blocks = || {
+                let total_blocks = visible_len.load(Ordering::Acquire) / io_size;
+                rng.gen_range(0..total_blocks)
+            };
+            run_read_loop(blob, deadline, cfg.io_size, random_blocks).await
         }
     }));
 
     let (write_result, read_results) = tokio::join!(writer, readers);
     let write_stats = write_result?;
-    let read_workers = collect_workers(read_results)?;
+    let read_workers: Vec<Stats> = read_results.into_iter().collect::<Result<_, _>>()?;
     let final_file_size = initial_size + write_stats.bytes;
-    let elapsed = sync_and_elapsed(blob, start, cfg.sync_mode).await?;
+    if cfg.sync_mode == SyncMode::End {
+        blob.sync().await.str_err()?;
+    }
     Ok(Report::new(
-        elapsed,
+        start.elapsed(),
         Some(read_workers),
         Some(vec![write_stats]),
         final_file_size,
@@ -280,10 +273,12 @@ async fn warm_cache(
                         .await
                     } else {
                         let warm_ops = total_blocks.saturating_mul(3).div_ceil(inflight).max(1);
-                        let mut state = worker_seed(cfg.seed, wid);
-                        warm_read_loop(blob, cfg.io_size, warm_ops, || {
-                            next_random_block(&mut state, total_blocks)
-                        })
+                        warm_read_loop(
+                            blob,
+                            cfg.io_size,
+                            warm_ops,
+                            random_blocks(cfg.seed + wid as u64, total_blocks),
+                        )
                         .await
                     }
                 }
@@ -299,21 +294,4 @@ async fn warm_cache(
         }
     }
     Ok(())
-}
-
-/// If `SyncMode::End`, flush and return the updated elapsed time.
-async fn sync_and_elapsed(
-    blob: RuntimeBlob,
-    start: Instant,
-    sync_mode: SyncMode,
-) -> Result<std::time::Duration, String> {
-    if sync_mode == SyncMode::End {
-        blob.sync().await.str_err()?;
-    }
-    Ok(start.elapsed())
-}
-
-/// Unwrap a vec of worker results, failing on the first error.
-fn collect_workers(results: Vec<Result<WorkerStats, String>>) -> Result<Vec<WorkerStats>, String> {
-    results.into_iter().collect()
 }

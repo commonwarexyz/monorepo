@@ -41,10 +41,9 @@ fn main() -> Result<(), String> {
 
     cleanup_root(&root);
 
-    let report = report?;
     match cfg.output {
-        OutputFormat::Human => report.print_human(&cfg),
-        OutputFormat::Json => report.print_json(&cfg),
+        OutputFormat::Human => report?.print_human(&cfg),
+        OutputFormat::Json => report?.print_json(&cfg),
     }
     Ok(())
 }
