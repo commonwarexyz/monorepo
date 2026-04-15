@@ -3323,7 +3323,10 @@ mod tests {
     fn test_read_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(10));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(10),
+            );
             let journal = Journal::<_, Digest>::init(context.with_label("j"), cfg)
                 .await
                 .unwrap();
@@ -3340,7 +3343,10 @@ mod tests {
         // All positions within one blob.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(10));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(10),
+            );
             let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
 
             for i in 0..5u64 {
@@ -3360,7 +3366,10 @@ mod tests {
         // Positions spanning multiple blobs (items_per_blob=3).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(3));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(3),
+            );
             let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
@@ -3381,7 +3390,10 @@ mod tests {
         // Read from positions that survive pruning.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(3));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(3),
+            );
             let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
@@ -3409,7 +3421,10 @@ mod tests {
     fn test_read_many_out_of_range() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(10));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(10),
+            );
             let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
 
             for i in 0..3u64 {
@@ -3429,7 +3444,10 @@ mod tests {
         // Verify batch read matches individual reads across blobs.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE), NZU64!(4));
+            let cfg = test_cfg(
+                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                NZU64!(4),
+            );
             let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {

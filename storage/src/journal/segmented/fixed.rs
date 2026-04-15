@@ -1489,7 +1489,11 @@ mod tests {
     fn test_get_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
             let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).await.unwrap(), 1);
@@ -1506,7 +1510,11 @@ mod tests {
     fn test_get_many_single_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
             let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
 
             for i in 0..5 {
@@ -1535,7 +1543,11 @@ mod tests {
         // Read a sparse subset of positions.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
             let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
 
             for i in 0..10 {
@@ -1560,7 +1572,11 @@ mod tests {
     fn test_get_many_bad_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
             let journal = Journal::<_, Digest>::init(context.clone(), cfg)
                 .await
                 .unwrap();
@@ -1578,7 +1594,11 @@ mod tests {
         // Verify batch read matches individual reads.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.with_label("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
             let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
 
             for i in 0..8 {

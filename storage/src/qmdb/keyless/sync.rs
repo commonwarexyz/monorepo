@@ -925,11 +925,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let page_cache = CacheRef::from_pooler(
-                context.with_label("page_cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let page_cache =
+                CacheRef::from_pooler(context.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let target_config = fixed::Config {
                 merkle: crate::merkle::journaled::Config {
                     journal_partition: format!("fixed-journal-target-{}", context.next_u64()),
