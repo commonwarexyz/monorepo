@@ -463,7 +463,14 @@ impl<B: Blob> Append<B> {
         offsets: &[u64],
         item_size: usize,
     ) -> Result<(), Error> {
-        debug_assert_eq!(buf.len(), offsets.len() * item_size);
+        assert_eq!(
+            buf.len(),
+            offsets
+                .len()
+                .checked_mul(item_size)
+                .expect("read_many_into buffer length overflow"),
+            "read_many_into requires buf.len() == offsets.len() * item_size"
+        );
         if offsets.is_empty() {
             return Ok(());
         }
@@ -1103,6 +1110,30 @@ mod tests {
             let mut buf = vec![0u8; 8];
             append.read_many_into(&mut buf, &[0], 8).await.unwrap();
             assert_eq!(&buf, &data);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
+    fn test_read_many_into_short_buffer_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
+
+            let offsets = [0u64, 4];
+            let mut buf = vec![0u8; 7];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
         });
     }
 
