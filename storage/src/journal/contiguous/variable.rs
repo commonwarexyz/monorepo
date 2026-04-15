@@ -1231,7 +1231,9 @@ mod tests {
             };
 
             // Initialize journal
-            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg).await.unwrap();
+            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             // Append 40 items across 4 sections (0-3)
             for i in 0..40u64 {
@@ -1371,7 +1373,9 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg).await.unwrap();
+            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             // Append items across 4 sections: [0-9], [10-19], [20-29], [30-39]
             for i in 0..40u64 {

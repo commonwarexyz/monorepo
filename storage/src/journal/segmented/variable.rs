@@ -1693,7 +1693,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();
@@ -1752,7 +1754,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();

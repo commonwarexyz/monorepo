@@ -149,9 +149,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 NZUsize!(PAGE_CACHE_SIZE),
             );
             let cfg = db_config(suffix, page_cache);
-            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(context.with_label("db"), cfg)
-                .await
-                .unwrap();
+            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(
+                context.with_label("db"),
+                cfg,
+            )
+            .await
+            .unwrap();
 
             let hasher = Standard::<Sha256>::new();
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();

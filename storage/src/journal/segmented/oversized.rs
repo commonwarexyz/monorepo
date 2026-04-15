@@ -554,7 +554,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             // Append entry with value
             let value: TestValue = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -704,7 +706,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             // Append to multiple sections
             for section in 1u64..=5 {
@@ -1975,7 +1979,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2018,7 +2024,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2797,7 +2805,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2828,7 +2838,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -3119,7 +3131,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -3152,7 +3166,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             oversized
                 .rewind(0, 0)
@@ -3179,7 +3195,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let result = oversized.rewind(0, 1).await;
             assert!(
@@ -3201,7 +3219,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let result = oversized.rewind_section(0, 1).await;
             assert!(
@@ -3223,7 +3243,9 @@ mod tests {
                 PAGE_CACHE_SIZE,
             ));
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.with_label("oversized"), cfg).await.expect("Failed to init");
+                Oversized::init(context.with_label("oversized"), cfg)
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [1; 16];
             oversized
