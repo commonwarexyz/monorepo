@@ -9,7 +9,7 @@ use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use commonware_utils::hex;
 use rand::Rng;
 use std::path::Path;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::{fs::OpenOptions, io, os::fd::AsRawFd};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
@@ -26,7 +26,7 @@ pub const fn backend_name() -> &'static str {
 ///
 /// Overwrite workloads call this so they measure the steady-state write path
 /// rather than first-write allocation behavior.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let path = root.join(partition).join(hex(name));
     let file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -50,7 +50,7 @@ fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()>
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
@@ -60,7 +60,7 @@ fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Re
 /// On Linux, `POSIX_FADV_DONTNEED` asks the kernel to discard cached pages
 /// for the file. The effect is per-inode, not per-fd, so reopening the file
 /// later does not undo it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let path = root.join(partition).join(hex(name));
     let file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -74,7 +74,7 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
