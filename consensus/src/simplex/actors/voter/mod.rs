@@ -236,7 +236,7 @@ mod tests {
             write_buffer: NZUsize!(10240),
             page_cache,
         };
-        let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
+        let (voter, mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
         let (resolver_sender, resolver_receiver) = mpsc::channel(8);
         let (batcher_sender, batcher_receiver) = mpsc::channel(16);
@@ -615,7 +615,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), voter_config);
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
@@ -1270,7 +1270,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -1460,7 +1460,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
@@ -2314,7 +2314,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
@@ -2531,7 +2531,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -2739,7 +2739,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -2915,7 +2915,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -3274,7 +3274,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
