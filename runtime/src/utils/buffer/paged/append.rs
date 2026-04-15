@@ -522,9 +522,9 @@ impl<B: Blob> Append<B> {
         }
 
         // Fast path: try page cache for all ranges in a single lock acquisition.
-        // Fully-cached ranges have their offset set to CacheRef::CACHED.
-        let all_cached = self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        if all_cached {
+        // Fully-cached ranges are removed from cache_ranges; only misses remain.
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if cache_ranges.is_empty() {
             return Ok(());
         }
 
@@ -532,7 +532,6 @@ impl<B: Blob> Append<B> {
         let blob_guard = self.blob_state.read().await;
         let mut reads = cache_ranges
             .iter_mut()
-            .filter(|(_, offset)| *offset != CacheRef::CACHED)
             .map(|(item_buf, offset)| {
                 self.cache_ref
                     .read(&blob_guard.blob, self.id, item_buf, *offset)

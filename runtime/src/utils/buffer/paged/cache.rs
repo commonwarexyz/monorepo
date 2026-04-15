@@ -167,9 +167,6 @@ pub struct CacheRef {
 }
 
 impl CacheRef {
-    /// Sentinel offset written into fully-cached ranges by [`read_cached_many`](Self::read_cached_many).
-    pub(super) const CACHED: u64 = u64::MAX;
-
     /// Create a shared page-cache handle backed by `pool`.
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
@@ -242,14 +239,13 @@ impl CacheRef {
 
     /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
-    /// Each element of `ranges` is `(dest_slice, logical_offset)`. All ranges are checked
-    /// against the cache. Fully-cached ranges have their data written to the destination
-    /// slice and their offset set to [`CACHED`](Self::CACHED). Returns `true` if every
-    /// range was fully served from cache.
-    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut [(&mut [u8], u64)]) -> bool {
+    /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have
+    /// their data written to the destination slice and are removed from `ranges`. Entries left
+    /// in `ranges` correspond to cache misses that the caller must read from the underlying
+    /// blob.
+    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
         let page_cache = self.cache.read();
-        let mut all_cached = true;
-        for (buf, logical_offset) in ranges.iter_mut() {
+        ranges.retain_mut(|(buf, logical_offset)| {
             let mut remaining = buf.len();
             let mut offset = *logical_offset;
             let mut dst = 0;
@@ -262,13 +258,10 @@ impl CacheRef {
                 dst += count;
                 remaining -= count;
             }
-            if remaining == 0 {
-                *logical_offset = Self::CACHED;
-            } else {
-                all_cached = false;
-            }
-        }
-        all_cached
+
+            // Keep cache misses in `ranges`; drop fully-cached entries.
+            remaining > 0
+        });
     }
 
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
@@ -1160,14 +1153,10 @@ mod tests {
         let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
         let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf0, 0), (&mut buf1, PAGE_SIZE_U64)];
 
-        let all_cached = cache_ref.read_cached_many(blob_id, &mut ranges);
+        cache_ref.read_cached_many(blob_id, &mut ranges);
 
-        // All ranges served from cache.
-        assert!(all_cached);
-
-        // Both offsets should be marked as CACHED.
-        assert_eq!(ranges[0].1, CacheRef::CACHED);
-        assert_eq!(ranges[1].1, CacheRef::CACHED);
+        // All ranges served from cache, so the vec is now empty.
+        assert!(ranges.is_empty());
         drop(ranges);
 
         // Buffers should contain the cached page data.
@@ -1186,11 +1175,9 @@ mod tests {
         let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
         let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf0, 0), (&mut buf1, PAGE_SIZE_U64)];
 
-        // Empty cache: both ranges should miss.
-        let all_cached = cache_ref.read_cached_many(blob_id, &mut ranges);
-        assert!(!all_cached);
-
-        // Offsets should be left unchanged (not marked as CACHED).
+        // Empty cache: both ranges should miss and remain in the vec unchanged.
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].1, 0);
         assert_eq!(ranges[1].1, PAGE_SIZE_U64);
     }
@@ -1222,17 +1209,12 @@ mod tests {
             (&mut buf2, PAGE_SIZE_U64 * 2),
         ];
 
-        let all_cached = cache_ref.read_cached_many(blob_id, &mut ranges);
+        cache_ref.read_cached_many(blob_id, &mut ranges);
 
-        // Not all cached because page 1 is missing.
-        assert!(!all_cached);
-
-        // Page 0: cached, offset marked as CACHED.
-        assert_eq!(ranges[0].1, CacheRef::CACHED);
-        // Page 1: miss, offset left unchanged.
-        assert_eq!(ranges[1].1, PAGE_SIZE_U64);
-        // Page 2: cached despite the earlier miss on page 1, offset marked.
-        assert_eq!(ranges[2].1, CacheRef::CACHED);
+        // Only the page 1 miss should remain (page 2 is still processed despite
+        // the earlier miss).
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].1, PAGE_SIZE_U64);
         drop(ranges);
 
         // Cached pages should have their data written to the buffers.
