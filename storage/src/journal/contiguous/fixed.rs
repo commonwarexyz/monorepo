@@ -1683,7 +1683,7 @@ mod tests {
                 CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ITEMS_PER_BLOB,
             );
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2714,11 +2714,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let initial_ctx = context.with_label("initial");
-            let first_cache = CacheRef::from_pooler(
-                initial_ctx.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_cache =
+                CacheRef::from_pooler(initial_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
                 initial_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(10)),
@@ -2775,11 +2772,8 @@ mod tests {
             drop(journal);
 
             let reopened_ctx = context.with_label("reopened");
-            let third_cache = CacheRef::from_pooler(
-                reopened_ctx.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let third_cache =
+                CacheRef::from_pooler(reopened_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
                 reopened_ctx.with_label("journal"),
                 test_cfg(third_cache, NZU64!(10)),
@@ -3218,11 +3212,8 @@ mod tests {
             // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
 
             let crash_ctx = context.with_label("crash_clear");
-            let crash_cache = CacheRef::from_pooler(
-                crash_ctx.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let crash_cache =
+                CacheRef::from_pooler(crash_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
                 crash_ctx.with_label("journal"),
                 test_cfg(crash_cache, NZU64!(5)),

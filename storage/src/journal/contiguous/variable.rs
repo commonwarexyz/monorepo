@@ -2618,10 +2618,12 @@ mod tests {
             };
 
             // Create initial journal with data in multiple sections
-            let journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("journal"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
             for i in 0..20u64 {
@@ -2720,10 +2722,12 @@ mod tests {
             };
 
             // Create initial journal with data exactly matching sync range
-            let journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("journal"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
             for i in 0..20u64 {
@@ -2902,10 +2906,12 @@ mod tests {
             };
 
             // Create journal with data at section boundaries
-            let journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("journal"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-24 (sections 0-4 with items_per_section=5)
             for i in 0..25u64 {
@@ -2974,10 +2980,12 @@ mod tests {
             };
 
             // Create journal with data in multiple sections
-            let journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("journal"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-14 (sections 0-2 with items_per_section=5)
             for i in 0..15u64 {

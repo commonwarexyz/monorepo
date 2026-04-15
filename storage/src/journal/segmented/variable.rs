@@ -1001,7 +1001,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1419,7 +1419,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("journal"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1574,7 +1574,7 @@ mod tests {
             drop(journal);
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("journal"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1878,7 +1878,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
 
             // Create sections 1-10 with data
             for section in 1u64..=10 {
@@ -1945,7 +1947,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
 
             // Append 5 items and record sizes after each
             let mut sizes = Vec::new();
@@ -1997,7 +2001,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
 
             // Create sections 5, 6, 7 (skip 1-4)
             for section in 5u64..=7 {
@@ -2107,7 +2113,9 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
 
             // Create sections 1, 2, 3
             for section in 1u64..=3 {
