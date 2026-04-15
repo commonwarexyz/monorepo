@@ -167,6 +167,9 @@ pub struct CacheRef {
 }
 
 impl CacheRef {
+    /// Sentinel offset written into fully-cached ranges by [`read_cached_many`](Self::read_cached_many).
+    pub(super) const CACHED: u64 = u64::MAX;
+
     /// Create a shared page-cache handle backed by `pool`.
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
@@ -239,12 +242,13 @@ impl CacheRef {
 
     /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
-    /// Each element of `ranges` is `(dest_slice, logical_offset)`. Returns the number of
-    /// ranges that were *fully* read from cache before encountering a miss. Ranges must be
-    /// sorted by offset and non-overlapping.
-    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut [(&mut [u8], u64)]) -> usize {
+    /// Each element of `ranges` is `(dest_slice, logical_offset)`. All ranges are checked
+    /// against the cache. Fully-cached ranges have their data written to the destination
+    /// slice and their offset set to [`CACHED`](Self::CACHED). Returns `true` if every
+    /// range was fully served from cache.
+    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut [(&mut [u8], u64)]) -> bool {
         let page_cache = self.cache.read();
-        let mut fully_read = 0;
+        let mut all_cached = true;
         for (buf, logical_offset) in ranges.iter_mut() {
             let mut remaining = buf.len();
             let mut offset = *logical_offset;
@@ -252,15 +256,19 @@ impl CacheRef {
             while remaining > 0 {
                 let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
                 if count == 0 {
-                    return fully_read;
+                    break;
                 }
                 offset += count as u64;
                 dst += count;
                 remaining -= count;
             }
-            fully_read += 1;
+            if remaining == 0 {
+                *logical_offset = Self::CACHED;
+            } else {
+                all_cached = false;
+            }
         }
-        fully_read
+        all_cached
     }
 
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
