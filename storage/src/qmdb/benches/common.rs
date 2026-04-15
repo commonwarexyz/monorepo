@@ -413,7 +413,9 @@ pub(crate) use with_var_value_db;
 macro_rules! dispatch_arm_with_cfg {
     ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg:expr) => {{
         #[allow(unused_mut)]
-        let mut $db = <$DbType>::init($ctx.with_label("db"), $cfg.clone()).await.unwrap();
+        let mut $db = <$DbType>::init($ctx.with_label("db"), $cfg.clone())
+            .await
+            .unwrap();
         $body
     }};
 }

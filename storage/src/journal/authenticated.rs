@@ -1144,10 +1144,12 @@ mod tests {
             let ctx = context.with_label("rewind_match");
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut journal =
-                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-match", page_cache))
-                    .await
-                    .unwrap();
+            let mut journal = ContiguousJournal::init(
+                ctx.with_label("journal"),
+                journal_config("rewind-match", page_cache),
+            )
+            .await
+            .unwrap();
 
             // Add operations where operation 3 is a commit
             for i in 0..3 {
@@ -1176,10 +1178,12 @@ mod tests {
             let ctx = context.with_label("rewind_multiple");
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut journal =
-                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-multiple", page_cache))
-                    .await
-                    .unwrap();
+            let mut journal = ContiguousJournal::init(
+                ctx.with_label("journal"),
+                journal_config("rewind-multiple", page_cache),
+            )
+            .await
+            .unwrap();
 
             // Add multiple commits
             journal.append(&create_operation::<F>(0)).await.unwrap();
@@ -1211,10 +1215,12 @@ mod tests {
             let ctx = context.with_label("rewind_no_match");
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut journal =
-                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-no-match", page_cache))
-                    .await
-                    .unwrap();
+            let mut journal = ContiguousJournal::init(
+                ctx.with_label("journal"),
+                journal_config("rewind-no-match", page_cache),
+            )
+            .await
+            .unwrap();
 
             // Add operations with no commits
             for i in 0..10 {
@@ -1316,10 +1322,12 @@ mod tests {
             let ctx = context.with_label("rewind_empty");
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut journal =
-                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-empty", page_cache))
-                    .await
-                    .unwrap();
+            let mut journal = ContiguousJournal::init(
+                ctx.with_label("journal"),
+                journal_config("rewind-empty", page_cache),
+            )
+            .await
+            .unwrap();
 
             // Rewind empty journal should be no-op
             let final_size = journal

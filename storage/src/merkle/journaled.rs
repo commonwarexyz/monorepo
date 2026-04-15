@@ -3200,10 +3200,13 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-        let mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, test_config(page_cache))
-                .await
-                .unwrap();
+        let mmr = Journaled::<F, _, Digest>::init(
+            context.with_label("merkle"),
+            &hasher,
+            test_config(page_cache),
+        )
+        .await
+        .unwrap();
 
         let _batch: UnmerkleizedBatch<F, Digest> = mmr.new_batch();
 
@@ -3232,10 +3235,13 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, test_config(page_cache))
-                .await
-                .unwrap();
+        let mut mmr = Journaled::<F, _, Digest>::init(
+            context.with_label("merkle"),
+            &hasher,
+            test_config(page_cache),
+        )
+        .await
+        .unwrap();
 
         // Add 50 elements and sync (flushes all nodes to journal, prunes mem).
         let mut batch = mmr.new_batch();

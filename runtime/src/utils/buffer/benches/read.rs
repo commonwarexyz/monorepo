@@ -33,7 +33,8 @@ where
                     );
 
                     // Setup: populate the blob
-                    let append = create_append(ctx.with_label("setup"), &name, cache_ref.clone()).await;
+                    let append =
+                        create_append(ctx.with_label("setup"), &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
                     append.append(&data).await.unwrap();
                     append.sync().await.unwrap();

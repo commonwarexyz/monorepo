@@ -88,8 +88,8 @@ fn fuzz(input: FuzzInput) {
                 NZUsize!(PAGE_CACHE_SIZE),
             )),
         )
-                .await
-                .unwrap();
+        .await
+        .unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
