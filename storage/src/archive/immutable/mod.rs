@@ -147,7 +147,7 @@ mod tests {
             // First initialization
             let first_ctx = context.with_label("first");
             let archive: Archive<_, Digest, i32> = Archive::init(
-                first_ctx.clone(),
+                first_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -179,7 +179,7 @@ mod tests {
             // Second initialization
             let second_ctx = context.with_label("second");
             let mut archive = Archive::init(
-                second_ctx.clone(),
+                second_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -220,7 +220,7 @@ mod tests {
             // Re-initialize archive (should load from checkpoint)
             let third_ctx = context.with_label("third");
             let archive = Archive::init(
-                third_ctx.clone(),
+                third_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -273,7 +273,7 @@ mod tests {
             // Initialize archive, sync without writing anything, then drop
             let first_ctx = context.with_label("first");
             let mut archive: Archive<_, Digest, i32> = Archive::init(
-                first_ctx.clone(),
+                first_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),
@@ -306,7 +306,7 @@ mod tests {
             // Re-initialize -- should not fail with SectionOutOfRange(0)
             let second_ctx = context.with_label("second");
             let mut archive: Archive<_, Digest, i32> = Archive::init(
-                second_ctx.clone(),
+                second_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),
@@ -343,7 +343,7 @@ mod tests {
             // Third init to verify persistence
             let third_ctx = context.with_label("third");
             let archive: Archive<_, Digest, i32> = Archive::init(
-                third_ctx.clone(),
+                third_ctx.with_label("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),

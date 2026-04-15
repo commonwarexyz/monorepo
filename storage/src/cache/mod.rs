@@ -529,7 +529,7 @@ mod tests {
             {
                 let first_ctx = context.with_label("first");
                 let mut cache = Cache::init(
-                    first_ctx.clone(),
+                    first_ctx.with_label("cache_db"),
                     Config {
                         partition: "test-partition".into(),
                         codec_config: (),
@@ -558,7 +558,7 @@ mod tests {
             {
                 let second_ctx = context.with_label("second");
                 let cache = Cache::<_, i32>::init(
-                    second_ctx.clone(),
+                    second_ctx.with_label("cache_db"),
                     Config {
                         partition: "test-partition".into(),
                         codec_config: (),

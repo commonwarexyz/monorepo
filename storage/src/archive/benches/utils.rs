@@ -69,7 +69,7 @@ impl Archive {
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive-bench-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        ctx.clone(),
+                        ctx.with_label("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),

@@ -1145,7 +1145,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-match", page_cache))
+                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-match", page_cache))
                     .await
                     .unwrap();
 
@@ -1177,7 +1177,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-multiple", page_cache))
+                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-multiple", page_cache))
                     .await
                     .unwrap();
 
@@ -1212,7 +1212,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-no-match", page_cache))
+                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-no-match", page_cache))
                     .await
                     .unwrap();
 
@@ -1317,7 +1317,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal =
-                ContiguousJournal::init(ctx.clone(), journal_config("rewind-empty", page_cache))
+                ContiguousJournal::init(ctx.with_label("journal"), journal_config("rewind-empty", page_cache))
                     .await
                     .unwrap();
 
