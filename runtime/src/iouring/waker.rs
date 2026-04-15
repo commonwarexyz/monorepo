@@ -33,7 +33,7 @@ use std::{
 use tracing::warn;
 
 /// Reserved `user_data` value for internal wake poll completions.
-pub(super) const WAKE_USER_DATA: UserData = UserData::MAX;
+pub const WAKE_USER_DATA: UserData = UserData::MAX;
 
 /// Number of low bits reserved for wake-state flags.
 const STATE_BITS: u32 = 3;
@@ -50,15 +50,15 @@ const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// Packed-state increment for one submitted operation (low bits are reserved).
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Sequence domain used by the packed submission counter (state >> 3).
-pub(super) const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
+pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
 /// Maximum bounded queue size that preserves alias-free sequence comparisons.
-pub(super) const MAX_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK + 1;
+pub const MAX_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK + 1;
 
-/// RAII guard covering a `submit_and_wait` blocking section.
+/// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake if producers publish new work or the final handle disconnects.
-pub(super) struct ArmGuard<'a> {
+pub struct ArmGuard<'a> {
     waker: &'a Waker,
     should_block: bool,
 }
@@ -66,7 +66,7 @@ pub(super) struct ArmGuard<'a> {
 impl ArmGuard<'_> {
     /// Return whether the loop was still idle after arming the blocking wake
     /// path and therefore may safely enter `submit_and_wait`.
-    pub(super) const fn should_block(&self) -> bool {
+    pub const fn should_block(&self) -> bool {
         self.should_block
     }
 }
@@ -122,13 +122,13 @@ struct WakerInner {
 /// Keeping these concerns separate makes the wake protocol explicit and avoids
 /// coupling correctness to exact eventfd coalescing behavior.
 #[derive(Clone)]
-pub(super) struct Waker {
+pub struct Waker {
     inner: Arc<WakerInner>,
 }
 
 impl Waker {
     /// Create a non-blocking eventfd wake source.
-    pub(super) fn new() -> Result<Self, std::io::Error> {
+    pub fn new() -> Result<Self, std::io::Error> {
         // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
@@ -211,7 +211,7 @@ impl Waker {
     /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
     /// wake. Subsequent callers do nothing until the loop disarms and clears
     /// the bit.
-    pub(super) fn wake(&self) {
+    pub fn wake(&self) {
         let prev = self
             .inner
             .state
@@ -244,7 +244,7 @@ impl Waker {
     /// armed and no wake has yet been claimed for that epoch, this caller
     /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
     /// signals the armed wait target.
-    pub(super) fn publish(&self) {
+    pub fn publish(&self) {
         let prev = self
             .inner
             .state
@@ -262,7 +262,7 @@ impl Waker {
 
     /// Return whether producers have published work the loop has not yet
     /// drained from the channel.
-    pub(super) fn pending(&self, processed_seq: u32) -> bool {
+    pub fn pending(&self, processed_seq: u32) -> bool {
         ((self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK)
             != processed_seq
     }
@@ -271,7 +271,7 @@ impl Waker {
     ///
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always clears the current wait state before returning.
-    pub(super) fn park_idle(&self, processed_seq: u32) {
+    pub fn park_idle(&self, processed_seq: u32) {
         // This transition only mutates the packed wake state. Tokio's channel
         // synchronizes message and close visibility independently.
         let prev = self
@@ -300,7 +300,7 @@ impl Waker {
     /// The returned guard automatically clears the current wait state on drop. Call
     /// [`ArmGuard::should_block`] to decide whether the loop was still idle
     /// after arming.
-    pub(super) fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
+    pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
         // This transition only mutates the packed wake state. Tokio's channel
         // synchronizes message and close visibility independently.
         let prev = self
@@ -376,7 +376,7 @@ impl Waker {
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
-    pub(super) fn acknowledge(&self) {
+    pub fn acknowledge(&self) {
         let mut value: u64 = 0;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -415,7 +415,7 @@ impl Waker {
     ///
     /// This uses multishot poll and is called on startup and whenever a wake
     /// CQE indicates the previous multishot request is no longer active.
-    pub(super) fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) {
+    pub fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) {
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
             .build()
@@ -431,7 +431,7 @@ impl Waker {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub mod tests {
     use super::*;
     use io_uring::IoUring;
     use std::{
@@ -439,7 +439,7 @@ pub(super) mod tests {
         os::fd::{AsRawFd, FromRawFd},
     };
 
-    pub(crate) fn wait_until_futex_armed(waker: &Waker) {
+    pub fn wait_until_futex_armed(waker: &Waker) {
         while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_FUTEX_BIT == 0 {
             std::hint::spin_loop();
         }
