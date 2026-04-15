@@ -1659,7 +1659,11 @@ pub mod tests {
                 context.with_label("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(
+                        context.with_label("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 ),
             )
             .await
@@ -1740,7 +1744,11 @@ pub mod tests {
                 context.with_label("reopen_small_delta"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(
+                        context.with_label("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 ),
             )
             .await
@@ -2205,7 +2213,11 @@ pub mod tests {
                 context.with_label("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(
+                        context.with_label("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 ),
             )
             .await
