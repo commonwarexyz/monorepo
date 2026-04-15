@@ -2484,7 +2484,7 @@ mod tests {
     /// `runtime_tasks_spawned` / `runtime_tasks_running`.
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
     where
-        R::Context: Clock + Spawner + Metrics,
+        R::Context: Spawner + Metrics + Clock,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;
@@ -2503,16 +2503,11 @@ mod tests {
 
             // handle.await resolves when the task's output is ready, but
             // the running-gauge decrement fires on task-struct drop which
-            // may lag slightly. Loop until the runtime finishes cleanup.
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer;
-            loop {
-                buffer = context.encode();
-                if buffer.contains(running_value) {
-                    break;
-                }
+            // may lag slightly. Yield to the executor so it can run cleanup.
+            while count_running_tasks(&context, "deferred_verify") > 0 {
                 context.sleep(Duration::from_millis(10)).await;
             }
+            let buffer = context.encode();
 
             // Count occurrences of each runtime task metric for our label. If
             // attributes were incorrectly folded into the task family key, we
@@ -2547,6 +2542,11 @@ mod tests {
             assert!(
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
             );
 
             // The per-round attribute must not surface on task metrics (the
@@ -2583,7 +2583,7 @@ mod tests {
     /// those entries nor create additional ones.
     fn test_metrics_spawn_scope_cardinality<R: Runner>(runner: R)
     where
-        R::Context: Clock + Spawner + Metrics,
+        R::Context: Spawner + Metrics + Clock,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;
@@ -2604,16 +2604,11 @@ mod tests {
 
             // handle.await resolves when the task's output is ready, but
             // the running-gauge decrement fires on task-struct drop which
-            // may lag slightly. Loop until the runtime finishes cleanup.
-            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
-            let mut buffer;
-            loop {
-                buffer = context.encode();
-                if buffer.contains(running_value) {
-                    break;
-                }
+            // may lag slightly. Yield to the executor so it can run cleanup.
+            while count_running_tasks(&context, "deferred_verify") > 0 {
                 context.sleep(Duration::from_millis(10)).await;
             }
+            let buffer = context.encode();
 
             let spawned_lines = buffer
                 .lines()
@@ -2644,6 +2639,11 @@ mod tests {
             assert!(
                 buffer.contains(&spawned_value),
                 "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
             );
         });
     }

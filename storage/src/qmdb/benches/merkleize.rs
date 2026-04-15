@@ -577,48 +577,39 @@ variants! {
     }
 }
 
-fn bench_merkleize(c: &mut Criterion) {
-    let runner = tokio::Runner::new(Config::default());
-    for num_keys in [10_000u64, 100_000, 1_000_000] {
-        for &variant in VARIANTS {
-            c.bench_function(
-                &format!(
-                    "{}/variant={} num_keys={num_keys}",
-                    module_path!(),
-                    variant.name(),
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<Context>();
-                        dispatch_variant!(ctx, variant, |db| {
-                            run_bench(db, num_keys, iters).await
-                        })
-                    });
-                },
-            );
-        }
+cfg_if::cfg_if! {
+    if #[cfg(not(full_bench))] {
+        const NUM_KEYS: [u64; 1] = [10_000];
+    } else {
+        const NUM_KEYS: [u64; 3] = [10_000, 100_000, 1_000_000];
     }
 }
 
-fn bench_chained_merkleize(c: &mut Criterion) {
+fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
-    for num_keys in [10_000u64, 100_000, 1_000_000] {
-        for &variant in VARIANTS {
-            c.bench_function(
-                &format!(
-                    "{}/chained variant={} num_keys={num_keys}",
-                    module_path!(),
-                    variant.name(),
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<Context>();
-                        dispatch_variant!(ctx, variant, |db| {
-                            run_chained_bench(db, num_keys, iters, |p| p.new_batch()).await
-                        })
-                    });
-                },
-            );
+    for chained in [false, true] {
+        for num_keys in NUM_KEYS {
+            for &variant in VARIANTS {
+                c.bench_function(
+                    &format!(
+                        "{}/variant={} num_keys={num_keys} chained={chained}",
+                        module_path!(),
+                        variant.name(),
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<Context>();
+                            dispatch_variant!(ctx, variant, |db| {
+                                if chained {
+                                    run_chained_bench(db, num_keys, iters, |p| p.new_batch()).await
+                                } else {
+                                    run_bench(db, num_keys, iters).await
+                                }
+                            })
+                        });
+                    },
+                );
+            }
         }
     }
 }
@@ -626,5 +617,5 @@ fn bench_chained_merkleize(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_merkleize, bench_chained_merkleize
+    targets = bench_merkleize
 }

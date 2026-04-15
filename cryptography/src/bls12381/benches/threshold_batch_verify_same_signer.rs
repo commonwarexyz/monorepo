@@ -9,26 +9,24 @@ use commonware_cryptography::{
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::hint::black_box;
 
-fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
+fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"benchmark";
-    let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
         for &n in &[5, 10, 20, 50, 100, 250, 500] {
             let t = N3f1::quorum(n);
-            let f = n - t;
-            for invalid in [0, f] {
+            for &msgs in &[10, 100] {
                 for concurrency in [1, 8] {
                     let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
-                            "{}/n={} t={} invalid={} conc={} mode={:?}",
+                            "{}/n={} t={} msgs={} conc={} mode={:?}",
                             module_path!(),
                             n,
                             t,
-                            invalid,
+                            msgs,
                             concurrency,
                             mode
                         ),
@@ -43,65 +41,50 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
                                     let (output, shares) =
                                         deal::<MinSig, _, N3f1>(&mut rng, mode, players)
                                             .expect("deal should succeed");
-                                    let signatures = shares
-                                        .values()
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(idx, s)| {
-                                            if idx < invalid as usize {
+                                    let signer = &shares.values()[0];
+                                    let index = signer.index;
+                                    let entries: Vec<_> = (0..msgs)
+                                        .map(|_| {
+                                            let mut msg = [0u8; 32];
+                                            rng.fill(&mut msg);
+                                            let sig =
                                                 primitives::ops::threshold::sign_message::<MinSig>(
-                                                    s, b"wrong", msg,
-                                                )
-                                            } else {
-                                                primitives::ops::threshold::sign_message::<MinSig>(
-                                                    s, namespace, msg,
-                                                )
-                                            }
+                                                    signer, namespace, &msg,
+                                                );
+                                            (namespace.to_vec(), msg.to_vec(), sig)
                                         })
-                                        .collect::<Vec<_>>();
-                                    (rng, output.public().clone(), signatures)
+                                        .collect();
+                                    (rng, output.public().clone(), index, entries)
                                 },
-                                |(mut rng, polynomial, mut signatures)| {
-                                    if invalid > 0 {
-                                        signatures.shuffle(&mut rng);
-                                    }
-
+                                |(mut rng, polynomial, index, entries)| {
+                                    let refs: Vec<_> = entries
+                                        .iter()
+                                        .map(|(ns, msg, sig)| {
+                                            (ns.as_slice(), msg.as_slice(), sig.clone())
+                                        })
+                                        .collect();
                                     let result = if concurrency > 1 {
                                         black_box(
-                                            primitives::ops::threshold::batch_verify_same_message::<
+                                            primitives::ops::threshold::batch_verify_same_signer::<
                                                 _,
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng,
-                                                &polynomial,
-                                                namespace,
-                                                msg,
-                                                &signatures,
-                                                &strategy,
+                                                &mut rng, &polynomial, index, &refs, &strategy
                                             ),
                                         )
                                     } else {
                                         black_box(
-                                            primitives::ops::threshold::batch_verify_same_message::<
+                                            primitives::ops::threshold::batch_verify_same_signer::<
                                                 _,
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng,
-                                                &polynomial,
-                                                namespace,
-                                                msg,
-                                                &signatures,
-                                                &Sequential,
+                                                &mut rng, &polynomial, index, &refs, &Sequential
                                             ),
                                         )
                                     };
-                                    if invalid == 0 {
-                                        assert!(result.is_ok());
-                                    } else {
-                                        assert!(result.is_err());
-                                    }
+                                    assert!(result.is_ok());
                                 },
                                 BatchSize::SmallInput,
                             );
@@ -116,5 +99,5 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_threshold_batch_verify_same_message
+    targets = bench_threshold_batch_verify_same_signer
 }
