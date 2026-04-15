@@ -5,7 +5,7 @@ use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as JournalConfig, Journal},
-    Reader,
+    Many, Mutable as _, Reader,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -15,10 +15,21 @@ use std::num::NonZeroU16;
 const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
 const MAX_OPERATIONS: usize = 50;
+const MAX_APPEND_MANY: u8 = 20;
+const MAX_READ_MANY: usize = 16;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
     let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
     Ok(v)
+}
+
+fn bounded_append_count(u: &mut Unstructured<'_>) -> Result<u8> {
+    u.int_in_range(0..=MAX_APPEND_MANY)
+}
+
+fn bounded_positions(u: &mut Unstructured<'_>) -> Result<Vec<u64>> {
+    let len = u.int_in_range(0..=MAX_READ_MANY)?;
+    (0..len).map(|_| u64::arbitrary(u)).collect()
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -45,10 +56,31 @@ enum JournalOperation {
     },
     Restart,
     Destroy,
+    ReadMany {
+        #[arbitrary(with = bounded_positions)]
+        positions: Vec<u64>,
+    },
     AppendMany {
+        #[arbitrary(with = bounded_append_count)]
         count: u8,
     },
+    AppendNested {
+        #[arbitrary(with = bounded_append_count)]
+        count_a: u8,
+        #[arbitrary(with = bounded_append_count)]
+        count_b: u8,
+    },
+    RewindTo {
+        keep_value: u64,
+    },
     MultipleSync,
+    TryReadSync {
+        pos: u64,
+    },
+    PruningBoundary,
+    InitAtSize {
+        size: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -100,6 +132,36 @@ fn fuzz(input: FuzzInput) {
                     let bounds = reader.bounds();
                     if bounds.contains(pos) {
                         reader.read(*pos).await.unwrap();
+                    }
+                }
+
+                JournalOperation::ReadMany { positions } => {
+                    let reader = journal.reader().await;
+                    let bounds = reader.bounds();
+                    // Map fuzz positions into valid, sorted, deduplicated positions
+                    let mut mapped: Vec<u64> = positions
+                        .iter()
+                        .filter_map(|p| {
+                            if bounds.is_empty() {
+                                return None;
+                            }
+                            let len = bounds.end - bounds.start;
+                            if len == 0 {
+                                return None;
+                            }
+                            Some(bounds.start + (*p % len))
+                        })
+                        .collect();
+                    mapped.sort_unstable();
+                    mapped.dedup();
+                    if !mapped.is_empty() {
+                        let batch = reader.read_many(&mapped).await.unwrap();
+                        assert_eq!(batch.len(), mapped.len());
+                        // Cross-check against individual reads
+                        for (i, &pos) in mapped.iter().enumerate() {
+                            let single = reader.read(pos).await.unwrap();
+                            assert_eq!(batch[i], single);
+                        }
                     }
                 }
 
@@ -177,11 +239,20 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::AppendMany { count } => {
-                    for _ in 0..*count {
-                        let digest = Sha256::hash(&next_value.to_be_bytes());
-                        journal.append(&digest).await.unwrap();
-                        next_value += 1;
-                        journal_size += 1;
+                    if *count == 0 {
+                        // Exercise the EmptyAppend error path
+                        let err = journal.append_many(Many::Flat(&[])).await;
+                        assert!(err.is_err());
+                    } else {
+                        let items: Vec<_> = (0..*count)
+                            .map(|_| {
+                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                next_value += 1;
+                                d
+                            })
+                            .collect();
+                        journal.append_many(Many::Flat(&items)).await.unwrap();
+                        journal_size += *count as u64;
                     }
                 }
 
@@ -189,6 +260,76 @@ fn fuzz(input: FuzzInput) {
                     journal.sync().await.unwrap();
                     journal.sync().await.unwrap();
                     journal.sync().await.unwrap();
+                }
+
+                JournalOperation::AppendNested { count_a, count_b } => {
+                    if *count_a == 0 && *count_b == 0 {
+                        let err = journal.append_many(Many::Nested(&[&[], &[]])).await;
+                        assert!(err.is_err());
+                    } else {
+                        let items_a: Vec<_> = (0..*count_a)
+                            .map(|_| {
+                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                next_value += 1;
+                                d
+                            })
+                            .collect();
+                        let items_b: Vec<_> = (0..*count_b)
+                            .map(|_| {
+                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                next_value += 1;
+                                d
+                            })
+                            .collect();
+                        let slices: &[&[_]] = &[&items_a, &items_b];
+                        journal.append_many(Many::Nested(slices)).await.unwrap();
+                        journal_size += *count_a as u64 + *count_b as u64;
+                    }
+                }
+
+                JournalOperation::RewindTo { keep_value } => {
+                    if journal_size > oldest_retained_pos {
+                        let target = Sha256::hash(&keep_value.to_be_bytes());
+                        let new_size = journal.rewind_to(|item| *item == target).await.unwrap();
+                        journal.sync().await.unwrap();
+                        journal_size = new_size;
+                        oldest_retained_pos = journal.reader().await.bounds().start;
+                    }
+                }
+
+                JournalOperation::TryReadSync { pos } => {
+                    let reader = journal.reader().await;
+                    let bounds = reader.bounds();
+                    if bounds.contains(pos) {
+                        // Cross-check: sync result must match async result
+                        if let Some(sync_val) = reader.try_read_sync(*pos) {
+                            let async_val = reader.read(*pos).await.unwrap();
+                            assert_eq!(sync_val, async_val);
+                        }
+                    }
+                }
+
+                JournalOperation::PruningBoundary => {
+                    let boundary = journal.pruning_boundary().await;
+                    assert_eq!(boundary, oldest_retained_pos);
+                }
+
+                JournalOperation::InitAtSize { size } => {
+                    // Cap to avoid excessive memory use
+                    let target_size = *size % 256;
+                    drop(journal);
+                    journal = Journal::init_at_size(
+                        context
+                            .with_label("journal")
+                            .with_attribute("instance", restarts),
+                        cfg.clone(),
+                        target_size,
+                    )
+                    .await
+                    .unwrap();
+                    restarts += 1;
+                    journal_size = journal.size().await;
+                    oldest_retained_pos = journal.reader().await.bounds().start;
                 }
             }
         }
