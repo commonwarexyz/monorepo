@@ -307,7 +307,12 @@ async fn prepare_cache(cfg: &Config, blob: &RuntimeBlob, total_blocks: u64) -> R
                     )
                     .await
                 } else {
-                    // Read ~3x the file size in random order.
+                    // 3 * total_blocks random reads across all workers:
+                    // each page has (1 - 1/total_blocks)^(3*total_blocks)
+                    // ~ e^-3 ~ 5% chance of being missed. Stragglers warm
+                    // in the first seconds of the timed phase. Only holds
+                    // when the file fits in RAM, otherwise the OS evicts
+                    // pages as fast as we warm them.
                     let warm_ops = total_blocks.saturating_mul(3).div_ceil(inflight).max(1);
                     warm_read_loop(
                         blob,
