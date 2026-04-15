@@ -911,14 +911,12 @@ mod tests {
     fn test_segmented_fixed_corruption_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache);
             let partition = first_cfg.partition.clone();
-            let mut journal = Journal::init(context.with_label("first"), first_cfg)
+            let mut journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to init");
 
@@ -1252,14 +1250,12 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache);
             let partition = first_cfg.partition.clone();
-            let mut journal = Journal::init(context.with_label("first"), first_cfg)
+            let mut journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to init");
 

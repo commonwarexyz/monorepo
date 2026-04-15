@@ -204,7 +204,9 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_test_config(seed, page_cache);
-        AnyTest::init(context.with_label("db"), config).await.unwrap()
+        AnyTest::init(context.with_label("db"), config)
+            .await
+            .unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.

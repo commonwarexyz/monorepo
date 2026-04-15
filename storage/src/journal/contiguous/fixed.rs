@@ -1370,14 +1370,12 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1495,14 +1493,12 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1564,14 +1560,12 @@ mod tests {
     fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(2));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             for i in 0u64..5 {
@@ -1624,14 +1618,12 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1752,14 +1744,12 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(3));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -1822,15 +1812,13 @@ mod tests {
     fn test_fixed_journal_recover_detects_oldest_section_too_short() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blobs_partition = blob_partition(&first_cfg);
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
                     .await
                     .expect("failed to initialize journal at size");
 
@@ -1871,14 +1859,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(10));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -1931,14 +1917,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(10));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -2074,16 +2058,15 @@ mod tests {
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let third_cache = CacheRef::from_pooler(
-                context.with_label("cache_third"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let third_ctx = context.with_label("third");
+            let third_cache =
+                CacheRef::from_pooler(third_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut third_cfg = test_cfg(third_cache, NZU64!(3));
             third_cfg.partition = "test-partition-2".into();
-            let journal: Journal<_, Digest> = Journal::init(context.with_label("third"), third_cfg)
-                .await
-                .expect("failed to re-initialize journal");
+            let journal: Journal<_, Digest> =
+                Journal::init(third_ctx.with_label("journal"), third_cfg)
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -2117,14 +2100,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: Context| async move {
             // Use a small items_per_blob to keep the test focused on a single blob
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(100));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(context.with_label("first"), first_cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -2209,11 +2190,9 @@ mod tests {
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
@@ -2222,7 +2201,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let journal = Journal::init(context.with_label("first"), cfg)
+            let journal = Journal::init(first_ctx.with_label("journal"), cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -2560,15 +2539,13 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Initialize at position 15
             let journal = Journal::<_, Digest>::init_at_size(
-                context.with_label("first"),
+                first_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 15,
             )
@@ -2620,15 +2597,13 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence_without_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Initialize at position 15
             let journal = Journal::<_, Digest>::init_at_size(
-                context.with_label("first"),
+                first_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 15,
             )
@@ -2738,13 +2713,14 @@ mod tests {
     fn test_fixed_journal_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let initial_ctx = context.with_label("initial");
             let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
+                initial_ctx.with_label("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let journal = Journal::init(
-                context.with_label("journal"),
+                initial_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(10)),
             )
             .await
@@ -2768,13 +2744,14 @@ mod tests {
 
             // Verify size persists after restart without writing any data
             drop(journal);
+            let after_clear_ctx = context.with_label("after_clear");
             let second_cache = CacheRef::from_pooler(
-                context.with_label("cache_second"),
+                after_clear_ctx.with_label("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let journal = Journal::<_, Digest>::init(
-                context.with_label("journal_after_clear"),
+                after_clear_ctx.with_label("journal"),
                 test_cfg(second_cache, NZU64!(10)),
             )
             .await
@@ -2797,13 +2774,14 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
+            let reopened_ctx = context.with_label("reopened");
             let third_cache = CacheRef::from_pooler(
-                context.with_label("cache_third"),
+                reopened_ctx.with_label("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let journal = Journal::<_, Digest>::init(
-                context.with_label("journal_reopened"),
+                reopened_ctx.with_label("journal"),
                 test_cfg(third_cache, NZU64!(10)),
             )
             .await
@@ -2863,16 +2841,14 @@ mod tests {
         // Old meta = None (aligned), new boundary = mid-section.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blobs_partition = blob_partition(&first_cfg);
             let metadata_partition = format!("{}-metadata", first_cfg.partition);
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
@@ -2910,13 +2886,11 @@ mod tests {
         // Old meta = Some(mid), new boundary = mid-section (same value).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init_at_size(
-                context.with_label("first"),
+                first_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 7,
             )
@@ -2951,13 +2925,11 @@ mod tests {
         // Old meta = Some(mid), new boundary = aligned.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init_at_size(
-                context.with_label("first"),
+                first_ctx.with_label("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 7,
             )
@@ -3128,18 +3100,16 @@ mod tests {
     fn test_fixed_journal_init_at_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blob_part = blob_partition(&first_cfg);
             let meta_part = format!("{}-metadata", first_cfg.partition);
 
             // Setup: Create a journal with some data and mid-section metadata
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
                     .await
                     .unwrap();
             for i in 0..5u64 {
@@ -3153,13 +3123,11 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
 
             // Recovery should see no blobs and return empty journal, ignoring metadata
-            let crash1_cache = CacheRef::from_pooler(
-                context.with_label("cache_crash1"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let crash1_ctx = context.with_label("crash1");
+            let crash1_cache =
+                CacheRef::from_pooler(crash1_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                context.with_label("crash1"),
+                crash1_ctx.with_label("journal"),
                 test_cfg(crash1_cache, NZU64!(5)),
             )
             .await
@@ -3197,13 +3165,11 @@ mod tests {
             blob.sync().await.unwrap(); // Ensure it exists
 
             // Recovery should warn "metadata ahead" and use blob state (0, 0)
-            let crash2_cache = CacheRef::from_pooler(
-                context.with_label("cache_crash2"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let crash2_ctx = context.with_label("crash2");
+            let crash2_cache =
+                CacheRef::from_pooler(crash2_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                context.with_label("crash2"),
+                crash2_ctx.with_label("journal"),
                 test_cfg(crash2_cache, NZU64!(5)),
             )
             .await
@@ -3222,18 +3188,16 @@ mod tests {
     fn test_fixed_journal_clear_to_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_cache = CacheRef::from_pooler(
-                context.with_label("cache_first"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let first_ctx = context.with_label("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blob_part = blob_partition(&first_cfg);
 
             // Setup: Init at 12 (Section 2, offset 2)
             // Metadata = 12
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), first_cfg, 12)
+                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 12)
                     .await
                     .unwrap();
             journal.sync().await.unwrap();
@@ -3253,13 +3217,14 @@ mod tests {
             // Blob is Section 0
             // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
 
+            let crash_ctx = context.with_label("crash_clear");
             let crash_cache = CacheRef::from_pooler(
-                context.with_label("cache_crash"),
+                crash_ctx.with_label("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let journal = Journal::<_, Digest>::init(
-                context.with_label("crash_clear"),
+                crash_ctx.with_label("journal"),
                 test_cfg(crash_cache, NZU64!(5)),
             )
             .await

@@ -547,7 +547,9 @@ mod test {
             },
             translator: TwoCap,
         };
-        TestStore::init(context.with_label("db"), cfg).await.unwrap()
+        TestStore::init(context.with_label("db"), cfg)
+            .await
+            .unwrap()
     }
 
     async fn apply_entries(
