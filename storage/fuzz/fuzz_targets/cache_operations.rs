@@ -264,9 +264,10 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Reinit => {
                     if cache_opt.is_none() {
-                        let cache = Cache::<_, u32>::init(context.with_label("cache_db"), cfg.clone())
-                            .await
-                            .expect("Failed to reinitialize cache");
+                        let cache =
+                            Cache::<_, u32>::init(context.with_label("cache_db"), cfg.clone())
+                                .await
+                                .expect("Failed to reinitialize cache");
 
                         pruned_min = None;
                         cache_opt = Some(cache);
