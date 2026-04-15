@@ -69,7 +69,7 @@ fn fuzz(input: FuzzInput) {
             table_replay_buffer: NZUsize!(64 * 1024),
             codec_config: (),
         };
-        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context.clone(), cfg.clone())
+        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context.with_label("freezer"), cfg.clone())
             .await
             .unwrap();
 

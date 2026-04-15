@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
         };
 
         let mut cache_opt = Some(
-            Cache::<_, u32>::init(context.clone(), cfg.clone())
+            Cache::<_, u32>::init(context.with_label("cache_db"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache"),
         );
@@ -264,7 +264,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Reinit => {
                     if cache_opt.is_none() {
-                        let cache = Cache::<_, u32>::init(context.clone(), cfg.clone())
+                        let cache = Cache::<_, u32>::init(context.with_label("cache_db"), cfg.clone())
                             .await
                             .expect("Failed to reinitialize cache");
 

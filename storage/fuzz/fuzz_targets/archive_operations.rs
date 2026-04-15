@@ -64,7 +64,7 @@ fn fuzz(data: FuzzInput) {
             codec_config: (),
         };
 
-        let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");
+        let mut archive = Archive::<_, _, Key, Value>::init(context.with_label("archive"), cfg.clone()).await.expect("init failed");
 
         // Keep a map of inserted items for verification
         let mut items = Vec::new();

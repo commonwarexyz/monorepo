@@ -81,7 +81,7 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),
         };
-        let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await.expect("failed to init ordinal"));
+        let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.with_label("ordinal"), cfg.clone()).await.expect("failed to init ordinal"));
         let mut restarts = 0usize;
 
         // Run operations
