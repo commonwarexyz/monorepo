@@ -757,8 +757,8 @@ impl IoUringLoop {
                     // ring size stays below half the packed sequence domain, so
                     // that delta is directional: producers are genuinely ahead.
                     // Tokio's bounded MPSC also guarantees `try_recv()` returns
-                    // `Disconnected` only when the channel is closed AND empty.
-                    // We keep a canary test to lock in those semantics.
+                    // `Disconnected` only when the channel is closed AND empty
+                    // (we keep a canary test to lock in those semantics).
                     self.receiver.try_recv().expect(
                         "published-ahead sequence observed after acquire, but channel had no request",
                     )
