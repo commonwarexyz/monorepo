@@ -168,6 +168,10 @@ where
     /// Pinned MMR nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
+    /// Whether persisted local state already matches the current target and can be
+    /// rebuilt without fetching fresh boundary pins.
+    local_target_state_available: bool,
+
     /// Historical roots from previous sync targets, keyed by tree size
     /// (target.range.end()). Each tree size maps to a unique root because
     /// the MMR is append-only and validate_update rejects unchanged roots.
@@ -267,10 +271,22 @@ where
         )
         .await?;
 
+        let local_target_state_available = if config.target.range.start() > Location::new(0) {
+            DB::has_local_target_state(
+                config.context.with_label("local_target_probe"),
+                &config.db_config,
+                &config.target,
+            )
+            .await
+        } else {
+            false
+        };
+
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
+            local_target_state_available,
             retained_roots: HashMap::new(),
             retained_roots_order: VecDeque::new(),
             max_retained_roots: config.max_retained_roots,
@@ -390,6 +406,7 @@ where
             .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
+        self.local_target_state_available = false;
 
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
@@ -560,7 +577,9 @@ where
 
     /// Returns whether the current target has the boundary state needed for completion.
     fn has_boundary_state(&self) -> bool {
-        !self.needs_pinned_boundary() || self.pinned_nodes.is_some()
+        !self.needs_pinned_boundary()
+            || self.pinned_nodes.is_some()
+            || self.local_target_state_available
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
