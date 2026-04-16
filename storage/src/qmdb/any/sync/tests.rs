@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    merkle::{mmr, mmr::Location},
+    merkle::{self, Location},
     qmdb::{
         self,
         any::traits::DbAny,
@@ -46,40 +46,56 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 /// Type alias for the journal type of a harness.
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
+/// Type alias for the merkle family used by a harness.
+pub(crate) type FamilyOf<H> = <DbOf<H> as qmdb::sync::Database>::Family;
+
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
+    type Family: merkle::Family;
+
     fn destroy(
         self,
-    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<crate::mmr::Family>>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible for the concrete MMR type used in tests.
+// Implement Destructible once for the generic journaled Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
-    async fn destroy(self) -> Result<(), qmdb::Error<crate::mmr::Family>> {
+impl<F: merkle::Family> Destructible
+    for crate::merkle::journaled::Journaled<F, deterministic::Context, Digest>
+{
+    type Family = F;
+
+    async fn destroy(self) -> Result<(), qmdb::Error<F>> {
         self.destroy().await.map_err(qmdb::Error::Merkle)
     }
 }
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Mmr: Destructible + Send;
+    type Merkle: Destructible<Family = Self::Family> + Send;
 
-    /// Get the MMR and journal from the database
-    fn into_log_components(self) -> (Self::Mmr, Self::Journal);
+    /// Get the Merkle structure and journal from the database.
+    fn into_log_components(self) -> (Self::Merkle, Self::Journal);
 
     /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
         &self,
-        loc: Location,
+        loc: Location<Self::Family>,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
 /// Harness for sync tests.
 pub(crate) trait SyncTestHarness: Sized + 'static {
+    /// The merkle family the database under test uses.
+    type Family: merkle::Family;
+
     /// The database type being tested.
-    type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest, Config: Clone>
-        + DbAny<mmr::Family, Key = Digest, Digest = Digest>;
+    type Db: qmdb::sync::Database<
+            Family = Self::Family,
+            Context = deterministic::Context,
+            Digest = Digest,
+            Config: Clone,
+        > + DbAny<Self::Family, Key = Digest, Digest = Digest>;
 
     /// Return the root the sync engine targets.
     fn sync_target_root(db: &Self::Db) -> Digest;
@@ -113,7 +129,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -130,6 +146,7 @@ where
             target: Target {
                 root: Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(0), Location::new(10)),
+                canonical_root: None,
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -158,13 +175,14 @@ where
 /// Test that resolver failure is handled correctly
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
 where
-    resolver::tests::FailResolver<OpOf<H>, Digest>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = resolver::tests::FailResolver::<OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -173,6 +191,7 @@ where
             target: Target {
                 root: target_root,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
+                canonical_root: None,
             },
             resolver,
             apply_batch_size: 2,
@@ -193,7 +212,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -225,6 +244,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, target_op_count),
+                canonical_root: None,
             },
             context: client_context.clone(),
             resolver: target_db.clone(),
@@ -276,8 +296,8 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -308,6 +328,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -342,8 +363,8 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -384,6 +405,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: client_context.with_label("sync"),
             resolver: target_db.clone(),
@@ -437,8 +459,9 @@ where
 /// Uses FailResolver to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    resolver::tests::FailResolver<OpOf<H>, Digest>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -480,13 +503,14 @@ where
         // sync_db should never ask the resolver for operations
         // because it is already complete. Use a resolver that always fails
         // to ensure that it's not being used.
-        let resolver = resolver::tests::FailResolver::<OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: client_context.with_label("sync"),
             resolver,
@@ -525,7 +549,7 @@ where
 /// Test that the client fails to sync if the lower bound is decreased via target update.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -552,6 +576,7 @@ where
             target: Target {
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                canonical_root: None,
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -571,6 +596,7 @@ where
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound.checked_add(1).unwrap()
                 ),
+                canonical_root: None,
             })
             .await
             .unwrap();
@@ -594,7 +620,7 @@ where
 /// Test that the client fails to sync if the upper bound is decreased via target update.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -621,6 +647,7 @@ where
             target: Target {
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                canonical_root: None,
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -640,6 +667,7 @@ where
                     initial_lower_bound,
                     initial_upper_bound.checked_sub(1).unwrap()
                 ),
+                canonical_root: None,
             })
             .await
             .unwrap();
@@ -663,7 +691,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -704,6 +732,7 @@ where
                 target: Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -719,6 +748,7 @@ where
                 .send(Target {
                     root: new_sync_root,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -748,7 +778,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -776,6 +806,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -796,6 +827,7 @@ where
                 // Dummy target update
                 root: Digest::from([2u8; 32]),
                 range: non_empty_range!(lower_bound + 1, upper_bound + 1),
+                canonical_root: None,
             })
             .await;
 
@@ -817,7 +849,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -831,6 +863,7 @@ where
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end
             ),
+            canonical_root: None,
         };
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
@@ -839,6 +872,7 @@ where
         let updated_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
+            canonical_root: None,
         };
         let updated_verification_root = target_db.root();
 
@@ -920,7 +954,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -933,6 +967,7 @@ where
         let target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(lower_bound, upper_bound),
+            canonical_root: None,
         };
         let verification_root = target_db.root();
 
@@ -983,7 +1018,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1005,6 +1040,7 @@ where
             target: Target {
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -1032,7 +1068,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1055,6 +1091,7 @@ where
             target: Target {
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -1086,7 +1123,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1116,6 +1154,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 target: Target {
                     root: initial_sync_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
@@ -1160,6 +1199,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 .send(Target {
                     root: new_sync_root,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -1197,7 +1237,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1225,6 +1265,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: client_context.clone(),
             resolver: target_db.clone(),
@@ -1271,7 +1312,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1293,6 +1334,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: context.with_label("client"),
             resolver: target_db.clone(),
@@ -1353,6 +1395,8 @@ where
             db_config,
             journal,
             Some(pinned_nodes),
+            None,
+            None,
             sync_lower_bound..sync_upper_bound,
             1024,
         )
@@ -1429,6 +1473,8 @@ where
             sync_db_config,
             journal,
             Some(pinned_nodes),
+            None,
+            None,
             sync_lower_bound..sync_upper_bound,
             1024,
         )
@@ -1491,6 +1537,8 @@ where
             new_db_config,
             journal,
             Some(pinned_nodes),
+            None,
+            None,
             lower_bound..upper_bound,
             1024,
         )
@@ -1536,6 +1584,8 @@ where
             new_db_config,
             journal,
             None,
+            None,
+            None,
             Location::new(0)..Location::new(1),
             1024,
         )
@@ -1567,19 +1617,23 @@ struct CorruptFirstPinnedNodesResolver<R> {
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<R> {
+impl<R> Resolver for CorruptFirstPinnedNodesResolver<R>
+where
+    R: Resolver<Digest = Digest>,
+{
+    type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
     async fn get_operations(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
             .get_operations(
@@ -1610,7 +1664,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
 /// succeeds on retry when the resolver returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1642,6 +1696,7 @@ where
             target: Target {
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
+                canonical_root: None,
             },
             context: context.with_label("client"),
             resolver,
@@ -1672,6 +1727,7 @@ mod harnesses {
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -1729,6 +1785,7 @@ mod harnesses {
     pub struct OrderedVariableHarness;
 
     impl SyncTestHarness for OrderedVariableHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -1793,6 +1850,7 @@ mod harnesses {
     pub struct UnorderedFixedHarness;
 
     impl SyncTestHarness for UnorderedFixedHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -1850,6 +1908,7 @@ mod harnesses {
     pub struct UnorderedVariableHarness;
 
     impl SyncTestHarness for UnorderedVariableHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {

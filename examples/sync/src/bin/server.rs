@@ -173,6 +173,7 @@ where
         target: Target {
             root,
             range: non_empty_range!(inactivity_floor, size),
+            canonical_root: None,
         },
     };
 

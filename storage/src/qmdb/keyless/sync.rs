@@ -27,11 +27,12 @@ where
     V: ValueEncoding + Codec,
     C: Mutable<Item = Operation<V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<V>>,
+        + sync::Journal<mmr::Family, Context = E, Op = Operation<V>>,
     C::Config: Clone + Send,
     H: Hasher,
     Operation<V>: EncodeShared,
 {
+    type Family = mmr::Family;
     type Op = Operation<V>;
     type Journal = C;
     type Hasher = H;
@@ -59,6 +60,10 @@ where
         config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
+        // `keyless` does not distinguish between ops and canonical roots and does not use
+        // overlay state; ignore both fields entirely.
+        _overlay_state: Option<crate::qmdb::current::sync::CurrentOverlayState<Self::Digest>>,
+        _canonical_root: Option<Self::Digest>,
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error<mmr::Family>> {
@@ -226,13 +231,14 @@ mod tests {
     fn test_sync_resolver_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let resolver = FailResolver::<VariableOp, sha256::Digest>::new();
+            let resolver = FailResolver::<mmr::Family, VariableOp, sha256::Digest>::new();
             let db_config = create_sync_config(&context.next_u64().to_string(), &context);
             let config = Config {
                 context: context.with_label("client"),
                 target: Target {
                     root: sha256::Digest::from([0; 32]),
                     range: non_empty_range!(Location::new(0), Location::new(5)),
+                    canonical_root: None,
                 },
                 resolver,
                 apply_batch_size: 2,
@@ -280,6 +286,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
+                    canonical_root: None,
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -343,6 +350,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
+                    canonical_root: None,
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -390,6 +398,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
+                    canonical_root: None,
                 },
                 context: client_context.clone(),
                 resolver: target_db.clone(),
@@ -466,6 +475,7 @@ mod tests {
                     target: Target {
                         root: initial_root,
                         range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                        canonical_root: None,
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(2),
@@ -493,6 +503,7 @@ mod tests {
                 .send(Target {
                     root: final_root,
                     range: non_empty_range!(initial_lower_bound, final_upper_bound),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -539,6 +550,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
+                    canonical_root: None,
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -597,6 +609,7 @@ mod tests {
                 target: Target {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
+                    canonical_root: None,
                 },
                 context: context.with_label("sync"),
                 resolver: target_db.clone(),
@@ -651,6 +664,7 @@ mod tests {
                 target: Target {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
+                    canonical_root: None,
                 },
                 context: context.with_label("sync"),
                 resolver: resolver.clone(),
@@ -697,6 +711,7 @@ mod tests {
                 target: Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -715,6 +730,7 @@ mod tests {
                         initial_lower_bound.checked_sub(1).unwrap(),
                         initial_upper_bound
                     ),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -755,6 +771,7 @@ mod tests {
                 target: Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -770,6 +787,7 @@ mod tests {
                 .send(Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -827,6 +845,7 @@ mod tests {
                 target: Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -841,6 +860,7 @@ mod tests {
                 .send(Target {
                     root: final_root,
                     range: non_empty_range!(final_lower_bound, final_upper_bound),
+                    canonical_root: None,
                 })
                 .await
                 .unwrap();
@@ -881,6 +901,7 @@ mod tests {
                 target: Target {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
+                    canonical_root: None,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -897,6 +918,7 @@ mod tests {
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
                     range: non_empty_range!(lower_bound + 1, upper_bound + 1),
+                    canonical_root: None,
                 })
                 .await;
 
@@ -994,6 +1016,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(lower_bound, upper_bound),
+                    canonical_root: None,
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),

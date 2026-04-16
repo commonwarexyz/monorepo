@@ -107,6 +107,7 @@ macro_rules! impl_sync_database {
             T: Translator,
             $($($where_extra)+)?
         {
+            type Family = mmr::Family;
             type Context = E;
             type Op = $op<mmr::Family, K, V>;
             type Journal = $journal;
@@ -119,6 +120,12 @@ macro_rules! impl_sync_database {
                 config: Self::Config,
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
+                // `any` does not distinguish between ops and canonical roots and does not
+                // use overlay state; ignore both fields entirely.
+                _overlay_state: Option<
+                    crate::qmdb::current::sync::CurrentOverlayState<Self::Digest>,
+                >,
+                _canonical_root: Option<Self::Digest>,
                 range: Range<Location>,
                 apply_batch_size: usize,
             ) -> Result<Self, qmdb::Error<mmr::Family>> {

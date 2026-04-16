@@ -1,9 +1,5 @@
-#[cfg(feature = "arbitrary")]
-use crate::merkle::mmr::Family;
-#[cfg(feature = "arbitrary")]
-use crate::merkle::Family as _;
 use crate::{
-    merkle::mmr::Location,
+    merkle::{Family, Location},
     qmdb::sync::{self, error::EngineError},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -11,67 +7,112 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::range::NonEmptyRange;
 
-/// Target state to sync to
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target<D: Digest> {
-    /// The root digest we're syncing to
+/// Target state to sync to.
+///
+/// `root` is the **ops root** that the sync engine verifies streaming batches against.
+///
+/// `canonical_root` is a separate, optional trust anchor used by databases whose canonical
+/// commitment is not the ops root alone (currently [crate::qmdb::current]). When set, the
+/// receiver must verify that the rebuilt database's canonical root matches this value;
+/// the ops-root proof chain does **not** authenticate grafted overlay state on its own, so
+/// a trusted `canonical_root` is load-bearing for pruned `current` sync. Databases that do
+/// not distinguish between ops and canonical roots (`any`, `immutable`, `keyless`) set this
+/// to `None` and the engine ignores it for them.
+///
+/// `PartialEq`, `Eq`, and `Clone` are implemented manually so they do not require
+/// `F: PartialEq + Clone`; the family `F` is a zero-sized marker.
+#[derive(Debug)]
+pub struct Target<F: Family, D: Digest> {
+    /// The ops root the sync engine verifies streaming batches against.
     pub root: D,
     /// Range of operations to sync
-    pub range: NonEmptyRange<Location>,
+    pub range: NonEmptyRange<Location<F>>,
+    /// Optional canonical root that authenticates database-level state (e.g. grafted
+    /// overlay) that is not covered by the ops-root proof chain. See the type-level docs.
+    pub canonical_root: Option<D>,
 }
 
-impl<D: Digest> Write for Target<D> {
+impl<F: Family, D: Digest> Clone for Target<F, D> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            range: self.range.clone(),
+            canonical_root: self.canonical_root,
+        }
+    }
+}
+
+impl<F: Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.range == other.range
+            && self.canonical_root == other.canonical_root
+    }
+}
+
+impl<F: Family, D: Digest> Eq for Target<F, D> {}
+
+impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
         self.range.write(buf);
+        self.canonical_root.write(buf);
     }
 }
 
-impl<D: Digest> EncodeSize for Target<D> {
+impl<F: Family, D: Digest> EncodeSize for Target<F, D> {
     fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.range.encode_size()
+        self.root.encode_size() + self.range.encode_size() + self.canonical_root.encode_size()
     }
 }
 
-impl<D: Digest> Read for Target<D> {
+impl<F: Family, D: Digest> Read for Target<F, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let range = NonEmptyRange::<Location>::read(buf)?;
+        let range = NonEmptyRange::<Location<F>>::read(buf)?;
         if !range.start().is_valid() || !range.end().is_valid() {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
                 "range bounds out of valid range",
             ));
         }
-        Ok(Self { root, range })
+        let canonical_root = Option::<D>::read(buf)?;
+        Ok(Self {
+            root,
+            range,
+            canonical_root,
+        })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Target<D>
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let root = u.arbitrary()?;
-        let max_loc = Family::MAX_LEAVES;
+        let canonical_root = u.arbitrary()?;
+        let max_loc = F::MAX_LEAVES;
         let lower = u.int_in_range(0..=*max_loc - 1)?;
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+            canonical_root,
         })
     }
 }
 
 /// Validate a target update against the current target
-pub fn validate_update<U, D>(
-    old_target: &Target<D>,
-    new_target: &Target<D>,
-) -> Result<(), sync::Error<U, D>>
+pub fn validate_update<F, U, D>(
+    old_target: &Target<F, D>,
+    new_target: &Target<F, D>,
+) -> Result<(), sync::Error<F, U, D>>
 where
+    F: Family,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
@@ -105,15 +146,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::mmr::Family as MmrFamily;
     use commonware_cryptography::sha256;
     use commonware_utils::non_empty_range;
     use rstest::rstest;
     use std::io::Cursor;
 
-    fn target(root: sha256::Digest, start: u64, end: u64) -> Target<sha256::Digest> {
+    fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
         Target {
             root,
             range: non_empty_range!(Location::new(start), Location::new(end)),
+            canonical_root: None,
         }
     }
 
@@ -143,12 +186,12 @@ mod tests {
         // Manually encode root + two Locations to bypass the Range write panic
         let mut buffer = Vec::new();
         sha256::Digest::from([42; 32]).write(&mut buffer);
-        Location::new(100).write(&mut buffer); // start
-        Location::new(50).write(&mut buffer); // end (< start = invalid)
+        Location::<MmrFamily>::new(100).write(&mut buffer); // start
+        Location::<MmrFamily>::new(50).write(&mut buffer); // end (< start = invalid)
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
-            Target::<sha256::Digest>::read(&mut cursor),
+            Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("Range", "start must be <= end"))
         ));
 
@@ -156,16 +199,16 @@ mod tests {
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
         root.write(&mut buffer);
-        (Location::new(100)..Location::new(100)).write(&mut buffer);
+        (Location::<MmrFamily>::new(100)..Location::<MmrFamily>::new(100)).write(&mut buffer);
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
-            Target::<sha256::Digest>::read(&mut cursor),
+            Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
         ));
     }
 
-    type TestError = sync::Error<std::io::Error, sha256::Digest>;
+    type TestError = sync::Error<MmrFamily, std::io::Error, sha256::Digest>;
 
     #[rstest]
     #[case::valid_update(
@@ -200,8 +243,8 @@ mod tests {
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged))
     )]
     fn test_validate_update(
-        #[case] old_target: Target<sha256::Digest>,
-        #[case] new_target: Target<sha256::Digest>,
+        #[case] old_target: Target<MmrFamily, sha256::Digest>,
+        #[case] new_target: Target<MmrFamily, sha256::Digest>,
         #[case] expected: Result<(), TestError>,
     ) {
         let result = validate_update(&old_target, &new_target);
@@ -246,7 +289,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Target<sha256::Digest>>,
+            CodecConformance<Target<MmrFamily, sha256::Digest>>,
         }
     }
 }
