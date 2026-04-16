@@ -116,12 +116,9 @@ where
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
-    ///
-    /// Returns `true` if the message was enqueued, `false` if the shard engine
-    /// has shut down.
-    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) -> bool {
+    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         let msg = Message::Proposed { block, round };
-        self.sender.send_lossy(msg).await
+        self.sender.send_lossy(msg).await;
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

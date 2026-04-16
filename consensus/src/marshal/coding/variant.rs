@@ -15,7 +15,6 @@ use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
-use tracing::warn;
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -101,13 +100,6 @@ where
     }
 
     async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
-        let commitment = block.commitment();
-        if !self.proposed(round, block).await {
-            warn!(
-                ?round,
-                ?commitment,
-                "shards engine unavailable; block persisted but not broadcast"
-            );
-        }
+        self.proposed(round, block).await;
     }
 }
