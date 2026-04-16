@@ -173,7 +173,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         for (channel, (rate, sender)) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(
                 rate,
-                self.context.child("channel_rate_limiter").with_attribute("idx", channel),
+                self.context
+                    .child("channel_rate_limiter")
+                    .with_attribute("idx", channel),
             );
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
@@ -191,64 +193,63 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             .map_err(Error::SendFailed)?;
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> =
-            self.context.child("sender").spawn({
-                let peer = peer.clone();
-                let mut tracker = tracker.clone();
-                let mailbox = self.mailbox.clone();
-                let rate_limits = rate_limits.clone();
-                move |context| async move {
-                    // Set the initial deadline to now to start gossiping immediately
-                    let mut deadline = context.current();
+        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+            let peer = peer.clone();
+            let mut tracker = tracker.clone();
+            let mailbox = self.mailbox.clone();
+            let rate_limits = rate_limits.clone();
+            move |context| async move {
+                // Set the initial deadline to now to start gossiping immediately
+                let mut deadline = context.current();
 
-                    // Enter into the main loop
-                    let mut batch = Vec::with_capacity(self.send_batch_size);
-                    let (control, high, low) = &mut (self.control, self.high, self.low);
-                    select_loop! {
-                        context,
-                        on_stopped => {},
-                        _ = context.sleep_until(deadline) => {
-                            // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone());
+                // Enter into the main loop
+                let mut batch = Vec::with_capacity(self.send_batch_size);
+                let (control, high, low) = &mut (self.control, self.high, self.low);
+                select_loop! {
+                    context,
+                    on_stopped => {},
+                    _ = context.sleep_until(deadline) => {
+                        // Get latest bitset from tracker (also used as ping)
+                        tracker.construct(peer.clone(), mailbox.clone());
 
-                            // Reset ticker
-                            deadline = context.current() + self.gossip_bit_vec_frequency;
-                        },
-                        // Await any outbound message (control, high, or low), then
-                        // drain already-queued messages into a single runtime write.
-                        // Priority order: control > high > low.
-                        msg = recv_prioritized(control, high, low) => {
-                            let (metric, payload) = match msg {
-                                Prioritized::Closed => return Err(Error::PeerDisconnected),
-                                Prioritized::Control(msg) => {
-                                    Self::prepare_control(&peer, msg, &pool)?
-                                }
-                                Prioritized::Data(encoded) => {
-                                    Self::prepare_data(&peer, encoded, &rate_limits)
-                                }
-                            };
-                            Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
-                            Self::extend_send_many(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                control,
-                                &pool,
-                                high,
-                                low,
-                                &rate_limits,
-                                &self.sent_messages,
-                            )?;
-                            conn_sender
-                                .send_many(batch.drain(..))
-                                .await
-                                .map_err(Error::SendFailed)?;
-                        },
-                    }
-
-                    Ok(())
+                        // Reset ticker
+                        deadline = context.current() + self.gossip_bit_vec_frequency;
+                    },
+                    // Await any outbound message (control, high, or low), then
+                    // drain already-queued messages into a single runtime write.
+                    // Priority order: control > high > low.
+                    msg = recv_prioritized(control, high, low) => {
+                        let (metric, payload) = match msg {
+                            Prioritized::Closed => return Err(Error::PeerDisconnected),
+                            Prioritized::Control(msg) => {
+                                Self::prepare_control(&peer, msg, &pool)?
+                            }
+                            Prioritized::Data(encoded) => {
+                                Self::prepare_data(&peer, encoded, &rate_limits)
+                            }
+                        };
+                        Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
+                        Self::extend_send_many(
+                            &peer,
+                            self.send_batch_size,
+                            &mut batch,
+                            control,
+                            &pool,
+                            high,
+                            low,
+                            &rate_limits,
+                            &self.sent_messages,
+                        )?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
+                    },
                 }
-            });
+
+                Ok(())
+            }
+        });
         let mut receive_handler: Handle<Result<(), Error>> =
             self.context.child("receiver").spawn(move |context| async move {
                 // Use half the gossip frequency for rate limiting to allow for timing
@@ -431,8 +432,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{
-        deterministic, iobuf::BufferPool, mocks, BufferPooler, IoBuf, Runner, Spawner,
-        Supervisor,
+        deterministic, iobuf::BufferPool, mocks, BufferPooler, IoBuf, Runner, Spawner, Supervisor,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};

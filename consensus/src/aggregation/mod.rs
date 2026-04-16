@@ -102,7 +102,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Supervisor, Quota, Runner, Spawner,
+        Clock, Quota, Runner, Spawner, Supervisor,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
@@ -334,8 +334,7 @@ mod tests {
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validator"),
@@ -382,8 +381,7 @@ mod tests {
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validator"),
@@ -443,18 +441,17 @@ mod tests {
                 async move {
                     let epoch = Epoch::new(111);
 
-                    let (oracle, mut registrations) = initialize_simulation(
-                        context.child("simulation"),
-                        &fixture,
-                        RELIABLE_LINK,
-                    )
-                    .await;
+                    let (oracle, mut registrations) =
+                        initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                            .await;
 
                     // Create a shared reporter
                     //
                     // We rely on replay to populate this reporter with a contiguous history of certificates.
-                    let (reporter, mut reporter_mailbox) =
-                        mocks::Reporter::new(context.child("aggregation"), fixture.verifier.clone());
+                    let (reporter, mut reporter_mailbox) = mocks::Reporter::new(
+                        context.child("aggregation"),
+                        fixture.verifier.clone(),
+                    );
                     context.child("reporter").spawn(|_| reporter.run());
 
                     // Spawn validator engines
@@ -601,12 +598,9 @@ mod tests {
                 let epoch = Epoch::new(111);
 
                 // Set up simulated network
-                let (oracle, mut registrations) = initialize_simulation(
-                    context.child("simulation"),
-                    &fixture,
-                    RELIABLE_LINK,
-                )
-                .await;
+                let (oracle, mut registrations) =
+                    initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                        .await;
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
@@ -615,8 +609,7 @@ mod tests {
 
                 // Start validator engines with Skip strategy for skip_height
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context =
-                        context.child(&format!("participant_{participant}"));
+                    let validator_context = context.child(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -691,12 +684,9 @@ mod tests {
                 let epoch = Epoch::new(111);
 
                 // Set up simulated network
-                let (oracle, mut registrations) = initialize_simulation(
-                    context.child("simulation"),
-                    &fixture,
-                    RELIABLE_LINK,
-                )
-                .await;
+                let (oracle, mut registrations) =
+                    initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                        .await;
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
@@ -705,8 +695,7 @@ mod tests {
 
                 // Start validator engines with Correct strategy (will sign everything now)
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context =
-                        context.child(&format!("participant_{participant}"));
+                    let validator_context = context.child(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -809,8 +798,7 @@ mod tests {
             };
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, degraded_link)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, degraded_link).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validator"),
@@ -922,8 +910,7 @@ mod tests {
             fixture.schemes.truncate(4);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validator"),
@@ -970,8 +957,7 @@ mod tests {
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validator"),

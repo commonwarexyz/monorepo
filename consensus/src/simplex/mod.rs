@@ -433,8 +433,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Supervisor, Observer, Quota,
-        Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Observer, Quota,
+        Runner, Spawner, Supervisor,
     };
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -734,7 +734,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1154,9 +1155,12 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle =
-                    start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                        .await;
+                let mut oracle = start_test_network_with_peers(
+                    context.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
 
                 // Link all validators
@@ -1199,11 +1203,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -1330,7 +1331,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1502,10 +1504,8 @@ mod tests {
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Sometimes,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(me.clone());
             let page_cache =
@@ -1589,7 +1589,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1822,7 +1823,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2001,7 +2003,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2083,18 +2086,14 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (_, mut monitor) = reporter.subscribe().await;
-                finalizers.push(
-                    context
-                        .child("finalizer")
-                        .spawn(move |context| async move {
-                            select! {
-                                _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.recv() => {
-                                    panic!("engine should not notarize or finalize anything");
-                                },
-                            }
-                        }),
-                );
+                finalizers.push(context.child("finalizer").spawn(move |context| async move {
+                    select! {
+                        _timeout = context.sleep(Duration::from_secs(60)) => {},
+                        _done = monitor.recv() => {
+                            panic!("engine should not notarize or finalize anything");
+                        },
+                    }
+                }));
             }
             join_all(finalizers).await;
 
@@ -2204,7 +2203,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2308,18 +2308,14 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (_, mut monitor) = reporter.subscribe().await;
-                finalizers.push(
-                    context
-                        .child("finalizer")
-                        .spawn(move |context| async move {
-                            select! {
-                                _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.recv() => {
-                                    panic!("engine should not notarize or finalize anything");
-                                },
-                            }
-                        }),
-                );
+                finalizers.push(context.child("finalizer").spawn(move |context| async move {
+                    select! {
+                        _timeout = context.sleep(Duration::from_secs(60)) => {},
+                        _done = monitor.recv() => {
+                            panic!("engine should not notarize or finalize anything");
+                        },
+                    }
+                }));
             }
             join_all(finalizers).await;
 
@@ -2397,7 +2393,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2643,7 +2640,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2679,10 +2677,7 @@ mod tests {
                     };
 
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
-                        mocks::conflicter::Conflicter::new(
-                            context.child("byzantine_engine"),
-                            cfg,
-                        );
+                        mocks::conflicter::Conflicter::new(context.child("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -2701,11 +2696,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -2839,7 +2831,8 @@ mod tests {
                 .collect();
 
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2996,8 +2989,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
@@ -3188,7 +3185,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3246,11 +3244,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3350,7 +3345,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3412,11 +3408,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3502,10 +3495,8 @@ mod tests {
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Sometimes,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(validator.clone());
             let page_cache =
@@ -3677,7 +3668,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3734,11 +3726,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3838,7 +3827,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3892,11 +3882,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4012,7 +3999,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4067,11 +4055,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4164,7 +4149,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4337,7 +4323,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4367,10 +4354,8 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Sometimes,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(participants[0].clone());
             let page_cache =
@@ -4425,13 +4410,13 @@ mod tests {
 
             // Shutdown engine and ensure children stop
             let running_after = if graceful {
-                let metrics_context = context.child("metrics_observer");
+                let observer_context = context.child("observer");
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
                 assert!(
                     result.is_ok(),
                     "graceful shutdown should complete: {result:?}"
                 );
-                count_running_tasks(&metrics_context, "engine")
+                count_running_tasks(&observer_context, "engine")
             } else {
                 handle.abort();
                 let _ = handle.await; // ensure parent tear-down runs
@@ -4540,8 +4525,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4564,10 +4553,8 @@ mod tests {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                 };
-                let mock_reporter = mocks::reporter::Reporter::new(
-                    context.child("mock_reporter"),
-                    reporter_config,
-                );
+                let mock_reporter =
+                    mocks::reporter::Reporter::new(context.child("mock_reporter"), reporter_config);
 
                 // Wrap with `AttributableReporter`
                 let attributable_reporter = scheme::reporter::AttributableReporter::new(
@@ -4769,8 +4756,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
@@ -4950,11 +4941,8 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -4978,8 +4966,7 @@ mod tests {
                         page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine =
-                        Engine::new(context.child(&format!("engine_{}", *validator)), cfg);
+                    let engine = Engine::new(context.child(&format!("engine_{}", *validator)), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -5057,13 +5044,15 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for reporter in honest_reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.child("resume_finalizer").spawn(
-                        move |_| async move {
-                            while latest < target {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        },
-                    ));
+                    finalizers.push(
+                        context
+                            .child("resume_finalizer")
+                            .spawn(move |_| async move {
+                                while latest < target {
+                                    latest = monitor.recv().await.expect("event missing");
+                                }
+                            }),
+                    );
                 }
                 join_all(finalizers).await;
             }
@@ -5110,7 +5099,8 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5258,7 +5248,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5379,8 +5370,7 @@ mod tests {
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
-                let context =
-                    context.child(&format!("validator_{}_restarted_{}", *validator, i));
+                let context = context.child(&format!("validator_{}_restarted_{}", *validator, i));
 
                 // Start engine
                 let (pending, recovered, resolver) =
@@ -5948,10 +5938,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.child("reporter"),
-                        reporter_config,
-                    );
+                    let reporter =
+                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -5970,11 +5958,8 @@ mod tests {
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
-                    let page_cache = CacheRef::from_pooler(
-                        context.child("cache"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    );
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),

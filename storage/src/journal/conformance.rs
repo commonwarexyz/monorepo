@@ -70,10 +70,9 @@ impl Conformance for ContiguousVariable {
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let journal =
-                variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                    .await
-                    .unwrap();
+            let journal = variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                .await
+                .unwrap();
 
             let mut data_to_write =
                 vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
@@ -195,12 +194,10 @@ impl Conformance for SegmentedVariable {
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let mut journal = segmented_variable::Journal::<_, Vec<u8>>::init(
-                context.child("journal"),
-                config,
-            )
-            .await
-            .unwrap();
+            let mut journal =
+                segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                    .await
+                    .unwrap();
 
             // Write variable-size items across multiple sections
             let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);

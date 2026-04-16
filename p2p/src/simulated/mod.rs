@@ -249,16 +249,14 @@ mod tests {
                     .unwrap();
                 agents.insert(pk, sender);
                 let agent_sender = seen_sender.clone();
-                context
-                    .child("agent_receiver")
-                    .spawn(move |_| async move {
-                        for _ in 0..size {
-                            receiver.recv().await.unwrap();
-                        }
-                        agent_sender.send(i).await.unwrap();
+                context.child("agent_receiver").spawn(move |_| async move {
+                    for _ in 0..size {
+                        receiver.recv().await.unwrap();
+                    }
+                    agent_sender.send(i).await.unwrap();
 
-                        // Exiting early here tests the case where the recipient end of an agent is dropped
-                    });
+                    // Exiting early here tests the case where the recipient end of an agent is dropped
+                });
             }
             track_peers(&oracle, agents.keys().cloned()).await;
 
@@ -3290,9 +3288,12 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) =
-                Network::new_with_peers(network_context.child("simulated"), cfg, [pk1.clone(), pk2.clone()])
-                    .await;
+            let (network, oracle) = Network::new_with_peers(
+                network_context.child("simulated"),
+                cfg,
+                [pk1.clone(), pk2.clone()],
+            )
+            .await;
             network.start();
 
             // Register with a very restrictive quota: 1 message per second
@@ -3369,9 +3370,12 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            let (network, oracle) =
-                Network::new_with_peers(network_context.child("simulated"), cfg, [pk1.clone(), pk2.clone()])
-                    .await;
+            let (network, oracle) = Network::new_with_peers(
+                network_context.child("simulated"),
+                cfg,
+                [pk1.clone(), pk2.clone()],
+            )
+            .await;
             let handle = network.start();
             let mut manager = oracle.manager();
 

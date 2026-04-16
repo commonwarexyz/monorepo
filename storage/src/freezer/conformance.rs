@@ -36,12 +36,10 @@ impl Conformance for Freezer {
                 table_replay_buffer: WRITE_BUFFER,
                 codec_config: (),
             };
-            let mut freezer = super::Freezer::<_, FixedBytes<64>, i32>::init(
-                context.child("freezer"),
-                config,
-            )
-            .await
-            .unwrap();
+            let mut freezer =
+                super::Freezer::<_, FixedBytes<64>, i32>::init(context.child("freezer"), config)
+                    .await
+                    .unwrap();
 
             // Insert random key-value pairs to trigger resizes
             for i in 0..64 {

@@ -96,7 +96,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Supervisor, Quota, Runner, Spawner,
+        Clock, Quota, Runner, Spawner, Supervisor,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
@@ -363,8 +363,7 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validators"),
@@ -502,8 +501,7 @@ mod tests {
 
             // Configure the network
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
             let mut reporters = spawn_validator_engines(
                 context.child("validators"),
                 &fixture,
@@ -571,8 +569,7 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
             let delayed_link = Link {
                 latency: Duration::from_millis(50),
                 jitter: Duration::from_millis(40),
@@ -693,8 +690,7 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let reporters = spawn_validator_engines(
                 context.child("validators"),
@@ -742,8 +738,7 @@ mod tests {
 
             // Setup network
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let mut reporters = BTreeMap::new();
 
@@ -1069,8 +1064,7 @@ mod tests {
             };
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
-                    .await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             // Update to delayed links
             link_participants(

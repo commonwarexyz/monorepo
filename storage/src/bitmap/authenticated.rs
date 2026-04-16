@@ -815,14 +815,10 @@ mod tests {
             {
                 // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
-                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                    context.child("bitmap2"),
-                    "test2",
-                    None,
-                    &hasher,
-                )
-                .await
-                .unwrap();
+                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                    TestMerkleizedBitMap::init(context.child("bitmap2"), "test2", None, &hasher)
+                        .await
+                        .unwrap();
                 let mut dirty = bitmap.into_dirty();
                 dirty.push_chunk(&test_chunk);
                 dirty.push_chunk(&test_chunk);
@@ -832,14 +828,10 @@ mod tests {
             }
             {
                 // Repeat build again using push_byte this time.
-                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
-                    context.child("bitmap3"),
-                    "test3",
-                    None,
-                    &hasher,
-                )
-                .await
-                .unwrap();
+                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                    TestMerkleizedBitMap::init(context.child("bitmap3"), "test3", None, &hasher)
+                        .await
+                        .unwrap();
                 let mut dirty = bitmap.into_dirty();
                 dirty.push_chunk(&test_chunk);
                 for b in test_chunk {

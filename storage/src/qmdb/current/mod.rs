@@ -679,8 +679,7 @@ pub mod tests {
             // Create two databases that are identical other than how they are pruned.
             let mut db_no_pruning: C =
                 open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
-            let mut db_pruning: C =
-                open_db(context.child("pruning"), "pruning-test".into()).await;
+            let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
 
             // Apply identical operations to both databases, but only prune one.
             // Accumulate writes between commits.
@@ -905,8 +904,7 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db: C =
-                open_db(context.child("db"), "stale-side-effect-free".into()).await;
+            let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
@@ -1428,11 +1426,7 @@ pub mod tests {
                 context.child("reopen"),
                 variable_config::<OneCap>(
                     partition,
-                    CacheRef::from_pooler(
-                        context.child("reopen_cfg"),
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    CacheRef::from_pooler(context.child("reopen_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
             )
             .await

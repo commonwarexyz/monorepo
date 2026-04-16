@@ -462,9 +462,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.child("first"), cfg)
-                .await
-                .unwrap();
+            let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -517,9 +515,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.child("first"), cfg)
-                .await
-                .unwrap();
+            let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -575,9 +571,7 @@ mod tests {
                     partition: "test".into(),
                     codec_config: ((0..).into(), ()),
                 };
-                let mut metadata = Metadata::init(context.child("first"), cfg)
-                    .await
-                    .unwrap();
+                let mut metadata = Metadata::init(context.child("first"), cfg).await.unwrap();
 
                 // Put a key
                 metadata.put(key.clone(), hello.clone());
@@ -619,7 +613,9 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.child("metadata"), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.child("metadata"), cfg)
+                .await
+                .unwrap();
 
             // Create a value that exceeds u32::MAX bytes
             let value = vec![0u8; (u32::MAX as usize) + 1];
@@ -640,7 +636,9 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.child("metadata"), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.child("metadata"), cfg)
+                .await
+                .unwrap();
 
             // Put initial keys
             for i in 0..100 {
@@ -1054,9 +1052,10 @@ mod tests {
                 partition: "test-determinism".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Perform a series of deterministic operations
             for i in 0..num_operations {

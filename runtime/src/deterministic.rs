@@ -2199,14 +2199,16 @@ mod tests {
             });
 
             // Wait for a delay sampled after the external send occurs
-            let second = context.child("sample_after_send").spawn(move |context| async move {
-                second_rx.pace(&context, first_wait).await.unwrap();
-                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
-                assert!(elapsed_real >= first_wait);
-                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
-                assert!(elapsed_sim >= first_wait);
-                results_tx.send(2).await.unwrap();
-            });
+            let second = context
+                .child("sample_after_send")
+                .spawn(move |context| async move {
+                    second_rx.pace(&context, first_wait).await.unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real >= first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim >= first_wait);
+                    results_tx.send(2).await.unwrap();
+                });
 
             // Wait for both tasks to complete
             second.await.unwrap();

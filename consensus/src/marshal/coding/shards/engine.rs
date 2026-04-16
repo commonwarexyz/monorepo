@@ -161,9 +161,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{histogram::HistogramExt, status::GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -592,7 +591,10 @@ where
             return Ok(None);
         }
         // Attempt to reconstruct the encoded blob
-        let start = self.context.current();
+        let decode_duration = self
+            .metrics
+            .erasure_decode_duration
+            .start(self.context.as_ref());
         let blob = C::decode(
             &commitment.config(),
             &commitment.root(),
@@ -600,9 +602,7 @@ where
             &self.strategy,
         )
         .map_err(Error::Coding)?;
-        self.metrics
-            .erasure_decode_duration
-            .observe_between(start, self.context.current());
+        decode_duration.observe_now(self.context.as_ref());
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =

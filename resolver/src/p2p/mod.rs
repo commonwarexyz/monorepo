@@ -93,7 +93,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Provider, TrackedPeers,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Observer, Supervisor, Quota, Runner};
+    use commonware_runtime::{
+        count_running_tasks, deterministic, Clock, Observer, Quota, Runner, Supervisor,
+    };
     use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 

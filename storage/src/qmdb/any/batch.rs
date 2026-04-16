@@ -1745,9 +1745,7 @@ mod tests {
                 super::tests::PAGE_CACHE_SIZE,
             );
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", page_cache);
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
@@ -1864,9 +1862,7 @@ mod tests {
                 "batch-collision-regression",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -2028,9 +2024,7 @@ mod tests {
                 "seq-commit-basic",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             // Seed an initial key.
             let seed = db
@@ -2101,9 +2095,7 @@ mod tests {
                 "seq-commit-base-old-loc",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
             let key = colliding_digest(0x10, 0);
@@ -2179,9 +2171,7 @@ mod tests {
                 "fork-after-commit",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             // Seed.
             let seed = db
@@ -2264,9 +2254,7 @@ mod tests {
                 "ff-cross",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             // Grandparent: 2 keys.
             let grandparent = db
@@ -2337,9 +2325,7 @@ mod tests {
                 "recreate-deleted-collision",
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let mut db = TestDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = TestDb::init(context.child("db"), config).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
             let k0 = colliding_digest(0xAA, 0);

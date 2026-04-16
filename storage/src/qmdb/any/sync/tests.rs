@@ -269,8 +269,7 @@ where
 
         // Reopen and verify state persisted
         drop(synced_db);
-        let reopened_db =
-            H::init_db_with_config(client_context.child("reopened"), db_config).await;
+        let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
         assert_eq!(reopened_db.bounds().await.end, final_op_count);
         assert_eq!(
             reopened_db.inactivity_floor_loc().await,
@@ -477,8 +476,7 @@ where
             crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
         let target_config = H::config(&context.next_u64().to_string(), target_cache);
-        let mut target_db =
-            H::init_db_with_config(context.child("target"), target_config).await;
+        let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
         let sync_cache = CacheRef::from_pooler(
             context.child("sync_cache"),
             crate::qmdb::any::test::PAGE_SIZE,
@@ -486,7 +484,8 @@ where
         );
         let sync_config = H::config(&context.next_u64().to_string(), sync_cache);
         let client_context = context.child("client");
-        let mut sync_db = H::init_db_with_config(client_context.child("sync"), sync_config.clone()).await;
+        let mut sync_db =
+            H::init_db_with_config(client_context.child("sync"), sync_config.clone()).await;
 
         // Apply the same operations to both databases
         target_db = H::apply_ops(target_db, target_ops.clone()).await;
@@ -1332,8 +1331,7 @@ where
 
         // Re-open the database
         drop(synced_db);
-        let reopened_db =
-            H::init_db_with_config(client_context.child("reopened"), db_config).await;
+        let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
 
         // Verify the state is unchanged
         assert_eq!(reopened_db.root(), expected_root);

@@ -2021,9 +2021,10 @@ mod tests {
             };
 
             // Initialize at position 10 (exactly at section 1 boundary with items_per_section=5)
-            let journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             // Size should be 10
             let bounds = journal.bounds().await;
@@ -2104,10 +2105,9 @@ mod tests {
             };
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                .await
+                .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -2162,10 +2162,9 @@ mod tests {
             };
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                .await
+                .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 15);
@@ -2211,10 +2210,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section, 7 % 5 = 2)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 3 items at positions 7, 8, 9 (fills rest of section 1)
             for i in 0..3u64 {
@@ -2271,10 +2269,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 8 items: positions 7-14 (section 1: 3 items, section 2: 5 items)
             for i in 0..8u64 {
@@ -2398,10 +2395,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 3 items
             for i in 0..3u64 {
@@ -2449,10 +2445,9 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal =
-                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append a few items at positions 7..9
             for i in 0..3u64 {
@@ -2489,9 +2484,10 @@ mod tests {
             };
 
             // Initialize at a large position (position 1000)
-            let journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 1000)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 1000);
@@ -2525,9 +2521,10 @@ mod tests {
             };
 
             // Initialize at position 20
-            let journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 20)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 20)
+                    .await
+                    .unwrap();
 
             // Append items 20-29
             for i in 0..10u64 {
@@ -2577,10 +2574,13 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let journal =
-                Journal::init_sync(context.child("journal"), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with sync boundaries");
+            let journal = Journal::init_sync(
+                context.child("journal"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, lower_bound);
@@ -2797,12 +2797,10 @@ mod tests {
             };
 
             // Create initial journal with data beyond sync range
-            let journal = Journal::<deterministic::Context, u64>::init(
-                context.child("initial"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let journal =
+                Journal::<deterministic::Context, u64>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2847,12 +2845,10 @@ mod tests {
             };
 
             // Create initial journal with stale data
-            let journal = Journal::<deterministic::Context, u64>::init(
-                context.child("first"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let journal =
+                Journal::<deterministic::Context, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {

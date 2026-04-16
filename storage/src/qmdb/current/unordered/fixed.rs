@@ -121,9 +121,7 @@ pub mod test {
             &partition_prefix,
             CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         );
-        CurrentTest::init(context.child("db"), cfg)
-            .await
-            .unwrap()
+        CurrentTest::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]

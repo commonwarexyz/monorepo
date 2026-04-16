@@ -209,12 +209,9 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_test_config(seed, page_cache);
-        AnyTest::init(context.child("db"), config)
-            .await
-            .unwrap()
+        AnyTest::init(context.child("db"), config).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -295,9 +292,7 @@ pub(crate) mod test {
             crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
         let cfg = variable_db_config("fixed-bytes-var-partition", page_cache);
-        VariableDb::init(context.child("db"), cfg)
-            .await
-            .unwrap()
+        VariableDb::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

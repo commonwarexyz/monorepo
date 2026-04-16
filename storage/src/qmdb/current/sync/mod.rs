@@ -211,11 +211,9 @@ where
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
-        context.child("metadata"),
-        &metadata_partition,
-    )
-    .await?;
+    let (metadata, _, _) =
+        db::init_metadata::<Family, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
+            .await?;
 
     let current_db = db::Db {
         any,

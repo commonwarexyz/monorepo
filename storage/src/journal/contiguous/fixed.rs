@@ -392,8 +392,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut journal =
-            SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
+        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
@@ -624,8 +623,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
         let mut metadata =
             Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
-        let mut journal =
-            SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
+        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
 
         // Clear blobs before updating metadata.
         // This ordering is critical for crash safety:
@@ -1092,8 +1090,7 @@ mod tests {
                 .expect("Failed to write new blob");
             new_blob.sync().await.expect("Failed to sync new blob");
 
-            let result =
-                Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -2063,10 +2060,9 @@ mod tests {
                 CacheRef::from_pooler(third_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut third_cfg = test_cfg(third_cache, NZU64!(3));
             third_cfg.partition = "test-partition-2".into();
-            let journal: Journal<_, Digest> =
-                Journal::init(third_ctx.child("journal"), third_cfg)
-                    .await
-                    .expect("failed to re-initialize journal");
+            let journal: Journal<_, Digest> = Journal::init(third_ctx.child("journal"), third_cfg)
+                .await
+                .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -2449,9 +2445,10 @@ mod tests {
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 0)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 0)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 0);
@@ -2477,9 +2474,10 @@ mod tests {
             );
 
             // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 10);
@@ -2510,9 +2508,10 @@ mod tests {
             );
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 7);
@@ -2651,9 +2650,10 @@ mod tests {
             );
 
             // Initialize at a large position (position 1000)
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 1000)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 1000);
@@ -2678,9 +2678,10 @@ mod tests {
             );
 
             // Initialize at position 20
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 20)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 20)
+                    .await
+                    .unwrap();
 
             // Append items 20-29
             for i in 0..10u64 {
@@ -2742,11 +2743,8 @@ mod tests {
             // Verify size persists after restart without writing any data
             drop(journal);
             let after_clear_ctx = context.child("after_clear");
-            let second_cache = CacheRef::from_pooler(
-                after_clear_ctx.child("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let second_cache =
+                CacheRef::from_pooler(after_clear_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
                 after_clear_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(10)),
@@ -2996,9 +2994,10 @@ mod tests {
 
             // Initialize at position 7 (mid-section with items_per_blob=5)
             // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append 13 items (positions 7-19), spanning sections 1, 2, 3
             for i in 0..13u64 {
@@ -3064,9 +3063,10 @@ mod tests {
                 NZU64!(5),
             );
 
-            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             // Append a few items (positions 10, 11, 12)
             for i in 0..3u64 {

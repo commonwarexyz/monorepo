@@ -89,8 +89,7 @@ mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = db_config("partition", page_cache);
         TestDb::init(context.child("db"), cfg).await.unwrap()
     }

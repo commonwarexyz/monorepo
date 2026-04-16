@@ -79,7 +79,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Supervisor, Observer, Quota, Runner,
+        buffer::paged::CacheRef, deterministic, Clock, Observer, Quota, Runner, Supervisor,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -224,8 +224,7 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
         let items_per_section = NonZeroU64::new(10).unwrap();
@@ -345,8 +344,7 @@ mod tests {
             .await
             .expect("failed to sync cache metadata");
 
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.child("seed_notarized"),
@@ -383,9 +381,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -466,9 +467,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -567,9 +571,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -645,9 +652,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -750,9 +760,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(3), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let recovering_validator = participants[0].clone();
@@ -912,11 +925,8 @@ mod tests {
 
             // Write a block into the cache.
             {
-                let page_cache = CacheRef::from_pooler(
-                    context.child("write_cache"),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                );
+                let page_cache =
+                    CacheRef::from_pooler(context.child("write_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
                     context.child("manager"),
                     make_cfg(page_cache),
@@ -1103,7 +1113,8 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
 
                 // Non-boundary propose should drop the response because mock app cannot build.
                 let non_boundary_context = Ctx {
@@ -1186,7 +1197,8 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
 
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
                 let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
@@ -1324,7 +1336,8 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-                let mut wrapper = Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("standard"), mock_app, marshal.clone());
 
                 // Test case 1: non-contiguous height.
                 // Malformed block: parent is genesis but height skips from 0 to 2.
@@ -1720,9 +1733,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("standard"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("standard"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let validator = participants[0].clone();
             let application = Application::<B>::manual_ack();

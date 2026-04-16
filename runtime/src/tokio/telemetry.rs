@@ -85,44 +85,42 @@ pub fn init(
 
     // Expose metrics over HTTP
     if let Some(cfg) = metrics {
-        context
-            .child("server")
-            .spawn(move |context| async move {
-                // Create a tokio listener for the metrics server.
-                //
-                // We explicitly avoid using a runtime `Listener` because
-                // it will track bandwidth used for metrics and apply a policy
-                // for read/write timeouts fit for a p2p network.
-                let listener = TcpListener::bind(cfg)
-                    .await
-                    .expect("Failed to bind metrics server");
+        context.child("server").spawn(move |context| async move {
+            // Create a tokio listener for the metrics server.
+            //
+            // We explicitly avoid using a runtime `Listener` because
+            // it will track bandwidth used for metrics and apply a policy
+            // for read/write timeouts fit for a p2p network.
+            let listener = TcpListener::bind(cfg)
+                .await
+                .expect("Failed to bind metrics server");
 
-                // Wrap the context in an Arc so axum's `Extension` (which
-                // requires `Clone`) can share it across request handlers
-                // without cloning the underlying context.
-                let shared = Arc::new(context);
+            // Wrap the context in an Arc so axum's `Extension` (which
+            // requires `Clone`) can share it across request handlers
+            // without cloning the underlying context.
+            let shared = Arc::new(context);
 
-                // Create a router for the metrics server
-                let app = Router::new()
-                    .route(
-                        "/metrics",
-                        get(|Extension(ctx): Extension<Arc<Context>>| async move {
-                            Response::builder()
-                                .status(StatusCode::OK)
-                                .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
-                                .body(Body::from(ctx.encode()))
-                                .expect("Failed to create response")
-                        }),
-                    )
-                    .layer(Extension(shared));
+            // Create a router for the metrics server
+            let app = Router::new()
+                .route(
+                    "/metrics",
+                    get(|Extension(ctx): Extension<Arc<Context>>| async move {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
+                            .body(Body::from(ctx.encode()))
+                            .expect("Failed to create response")
+                    }),
+                )
+                .layer(Extension(shared));
 
-                // Serve the metrics over HTTP.
-                //
-                // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to specify
-                // it to do otherwise). These tasks will not be tracked like metrics spawned using `Spawner`.
-                serve(listener, app.into_make_service())
-                    .await
-                    .expect("Could not serve metrics");
-            });
+            // Serve the metrics over HTTP.
+            //
+            // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to specify
+            // it to do otherwise). These tasks will not be tracked like metrics spawned using `Spawner`.
+            serve(listener, app.into_make_service())
+                .await
+                .expect("Could not serve metrics");
+        });
     }
 }

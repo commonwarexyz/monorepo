@@ -5,9 +5,7 @@ use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Spawner,
-};
+use commonware_runtime::{iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Spawner};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
     futures::Pool,

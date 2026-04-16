@@ -340,11 +340,9 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log = Journal::<E, Operation<crate::mmr::Family, K, V>>::init(
-            context.child("log"),
-            cfg.log,
-        )
-        .await?;
+        let mut log =
+            Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
+                .await?;
 
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
@@ -547,9 +545,7 @@ mod test {
             },
             translator: TwoCap,
         };
-        TestStore::init(context.child("db"), cfg)
-            .await
-            .unwrap()
+        TestStore::init(context.child("db"), cfg).await.unwrap()
     }
 
     async fn apply_entries(

@@ -35,7 +35,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Supervisor, Quota, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Supervisor,
+};
 use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
@@ -351,8 +353,7 @@ impl TestHarness for StandardHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1117,8 +1118,7 @@ impl TestHarness for CodingHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1503,9 +1503,12 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.child("harness"), NZUsize!(3), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("harness"),
+            NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
@@ -1639,9 +1642,12 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.child("harness"), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("harness"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
@@ -1732,9 +1738,12 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.child("harness"), NZUsize!(1), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("harness"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
 
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
@@ -1832,9 +1841,12 @@ pub fn sync_height_floor<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle =
-            setup_network_with_participants(context.child("harness"), NZUsize!(3), participants.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("harness"),
+            NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
@@ -2002,8 +2014,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         let validator = participants[0].clone();
         let partition_prefix = format!("prune-test-{}", validator.clone());
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let init_marshal = |ctx: deterministic::Context| {
             let validator = validator.clone();
@@ -2177,15 +2188,11 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-        let mut oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            peers.clone(),
-        )
-        .await;
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
 
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
             context.child("victim"),
             &oracle,

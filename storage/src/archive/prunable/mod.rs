@@ -244,11 +244,8 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let first_context = context.child("first");
-            let key_page_cache = CacheRef::from_pooler(
-                first_context.child("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let key_page_cache =
+                CacheRef::from_pooler(first_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
@@ -281,11 +278,8 @@ mod tests {
             // Initialize the archive again without compression.
             // Index journal replay succeeds (no compression), but value reads will fail.
             let second_context = context.child("second");
-            let key_page_cache = CacheRef::from_pooler(
-                second_context.child("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let key_page_cache =
+                CacheRef::from_pooler(second_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
@@ -546,11 +540,8 @@ mod tests {
             // Initialize the archive
             let items_per_section = 256u64;
             let init1_context = context.child("init1");
-            let key_page_cache = CacheRef::from_pooler(
-                init1_context.child("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let key_page_cache =
+                CacheRef::from_pooler(init1_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
@@ -613,11 +604,8 @@ mod tests {
 
             // Reinitialize the archive
             let init2_context = context.child("init2");
-            let key_page_cache = CacheRef::from_pooler(
-                init2_context.child("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let key_page_cache =
+                CacheRef::from_pooler(init2_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),

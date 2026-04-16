@@ -96,9 +96,7 @@ mod tests {
             let page_cache =
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config(page_cache);
-            let mut mmr = Mmr::init(context.child("mmr"), &hasher, cfg)
-                .await
-                .unwrap();
+            let mut mmr = Mmr::init(context.child("mmr"), &hasher, cfg).await.unwrap();
 
             let mut c_hasher = Sha256::new();
             let mut batch = mmr.new_batch();
@@ -290,13 +288,10 @@ mod tests {
             let init_ctx = context.child("init");
             let init_cache =
                 CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut mmr = Mmr::<_, Digest>::init(
-                init_ctx.child("mmr"),
-                &hasher,
-                test_config(init_cache),
-            )
-            .await
-            .unwrap();
+            let mut mmr =
+                Mmr::<_, Digest>::init(init_ctx.child("mmr"), &hasher, test_config(init_cache))
+                    .await
+                    .unwrap();
             let mut batch = mmr.new_batch();
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));

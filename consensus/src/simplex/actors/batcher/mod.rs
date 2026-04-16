@@ -72,7 +72,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Supervisor, Observer, Quota, Runner};
+    use commonware_runtime::{deterministic, Clock, Observer, Quota, Runner, Supervisor};
     use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex, NZUsize};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
@@ -699,7 +699,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -707,8 +708,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -884,15 +884,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1126,15 +1126,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1355,15 +1355,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1535,15 +1535,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -1765,15 +1765,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let relay = MockRelay::new();
@@ -2793,15 +2793,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3063,15 +3063,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3192,15 +3192,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3320,7 +3320,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3328,8 +3329,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
@@ -3767,15 +3767,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -3979,15 +3979,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
+            let oracle =
+                start_test_network_with_peers(context.child("batcher"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {

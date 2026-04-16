@@ -1693,9 +1693,7 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();
@@ -1754,9 +1752,7 @@ mod tests {
                 ),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).await.unwrap();
@@ -2692,10 +2688,9 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal: Journal<_, u64> =
-                Journal::init(context.child("journal"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize journal");
+            let mut journal: Journal<_, u64> = Journal::init(context.child("journal"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
 
             // Append items across multiple sections
             for section in 0..5u64 {

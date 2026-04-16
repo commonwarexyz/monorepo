@@ -82,7 +82,8 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Supervisor, Observer, Quota, Runner,
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Observer, Quota, Runner,
+        Supervisor,
     };
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
@@ -216,8 +217,7 @@ mod tests {
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.start();
 
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let voter_cfg = Config {
             scheme: signing.clone(),
             elector,
@@ -334,7 +334,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), false).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), false)
+                    .await;
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -356,10 +357,8 @@ mod tests {
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Sometimes,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let page_cache =
                 CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -569,7 +568,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -844,7 +844,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -965,7 +966,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1101,7 +1103,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1226,7 +1229,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1234,8 +1238,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1402,7 +1405,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1436,8 +1440,7 @@ mod tests {
                 scheme: leader_scheme.clone(),
                 elector: elector_config.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize voter actor
             let page_cache =
@@ -1616,7 +1619,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock
             let elector = L::default();
@@ -1625,8 +1629,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1735,11 +1738,8 @@ mod tests {
             handle.abort();
 
             // Initialize voter actor
-            let page_cache = CacheRef::from_pooler(
-                context.child("cache_restarted"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -2047,7 +2047,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2147,7 +2148,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2262,7 +2264,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2273,8 +2276,7 @@ mod tests {
                 scheme: signing.clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -2482,7 +2484,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2493,8 +2496,7 @@ mod tests {
                 scheme: signing.clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -2689,7 +2691,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2700,8 +2703,7 @@ mod tests {
                 scheme: signing.clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -2866,7 +2868,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -2876,8 +2879,7 @@ mod tests {
                 scheme: signing.clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -3077,7 +3079,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3225,7 +3228,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3236,8 +3240,7 @@ mod tests {
                 scheme: signing.clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -3517,7 +3520,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3529,8 +3533,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let me = participants[0].clone();
 
@@ -3689,11 +3692,8 @@ mod tests {
                 mocks::application::Application::new(context.child("app2"), app_cfg);
             actor.start();
 
-            let page_cache = CacheRef::from_pooler(
-                context.child("cache_restarted"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4496,7 +4496,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4518,10 +4519,8 @@ mod tests {
                 certify_latency: (2_000.0, 0.0), // 2 seconds
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
 
             let page_cache =
@@ -4692,7 +4691,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4714,10 +4714,8 @@ mod tests {
                 certify_latency: (2_000.0, 0.0), // 2 seconds
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
 
             let page_cache =
@@ -4866,7 +4864,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4973,7 +4972,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5095,7 +5095,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5250,7 +5251,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5830,7 +5832,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -6171,7 +6174,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -6726,7 +6730,8 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true)
+                    .await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));

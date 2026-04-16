@@ -1,6 +1,9 @@
 //! Metrics for the shard engine.
 
-use commonware_runtime::{telemetry::metrics::histogram::Buckets, Metrics as MetricsTrait};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Metrics as MetricsTrait,
+};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -24,7 +27,7 @@ impl Peer {
 /// Metrics for the shard engine.
 pub struct ShardMetrics {
     /// Histogram of erasure decoding duration in seconds.
-    pub erasure_decode_duration: Histogram,
+    pub erasure_decode_duration: histogram::Timed,
     /// Number of blocks in the reconstructed blocks cache.
     pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
@@ -78,7 +81,7 @@ impl ShardMetrics {
         );
 
         Self {
-            erasure_decode_duration,
+            erasure_decode_duration: histogram::Timed::new(erasure_decode_duration),
             reconstructed_blocks_cache_count,
             reconstruction_states_count,
             shards_received,

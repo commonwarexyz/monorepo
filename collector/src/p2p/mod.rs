@@ -60,7 +60,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Recipients, Sender as _,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Supervisor, Quota, Runner};
+    use commonware_runtime::{
+        count_running_tasks, deterministic, Clock, Quota, Runner, Supervisor,
+    };
     use commonware_utils::{ordered::Set, NZUsize, NZU32};
     use std::time::Duration;
 

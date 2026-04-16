@@ -146,7 +146,9 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{
         channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64,
     };
@@ -202,8 +204,7 @@ mod tests {
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_sync_config(&format!("sync-test-{seed}"), page_cache);
         ImmutableSyncTest::init(context.child("db"), config)
             .await
@@ -512,11 +513,7 @@ mod tests {
                     context: context.child("client"),
                     db_config: create_sync_config(
                         &format!("update_test_{}", context.next_u64()),
-                        CacheRef::from_pooler(
-                            context.child("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                     ),
                     target: Target {
                         root: initial_root,

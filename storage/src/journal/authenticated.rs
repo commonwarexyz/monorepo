@@ -878,8 +878,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> TestJournal<F> {
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let merkle_cfg = merkle_config(suffix, page_cache.clone());
         let journal_cfg = journal_config(suffix, page_cache);
         TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |op: &TestOp<F>| {
@@ -931,8 +930,7 @@ mod tests {
         StandardHasher<Sha256>,
     ) {
         let hasher = StandardHasher::new();
-        let page_cache =
-            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let merkle = Journaled::<F, _, Digest>::init(
             context.child("mmr"),
             &hasher,
@@ -940,12 +938,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let journal = ContiguousJournal::init(
-            context.child("journal"),
-            journal_config(suffix, page_cache),
-        )
-        .await
-        .unwrap();
+        let journal =
+            ContiguousJournal::init(context.child("journal"), journal_config(suffix, page_cache))
+                .await
+                .unwrap();
         (merkle, journal, hasher)
     }
 
@@ -1096,8 +1092,7 @@ mod tests {
     async fn test_align_with_mismatched_committed_ops_inner<F: Family + PartialEq>(
         context: Context,
     ) {
-        let mut journal =
-            create_empty_journal::<F>(context.child("first"), "mismatched").await;
+        let mut journal = create_empty_journal::<F>(context.child("first"), "mismatched").await;
 
         // Add 20 uncommitted operations
         for i in 0..20 {
@@ -1142,8 +1137,7 @@ mod tests {
         // Test 1: Matching operation is kept
         {
             let ctx = context.child("rewind_match");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-match", page_cache),
@@ -1176,8 +1170,7 @@ mod tests {
         // Test 2: Last matching operation is chosen when multiple match
         {
             let ctx = context.child("rewind_multiple");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-multiple", page_cache),
@@ -1213,8 +1206,7 @@ mod tests {
         // Test 3: Rewind to pruning boundary when no match
         {
             let ctx = context.child("rewind_no_match");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-no-match", page_cache),
@@ -1236,8 +1228,7 @@ mod tests {
         // Test 4: Rewind with existing pruning boundary
         {
             let ctx = context.child("rewind_with_pruning");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-with-pruning", page_cache),
@@ -1279,8 +1270,7 @@ mod tests {
         // Test 5: Rewind with no matches after pruning boundary
         {
             let ctx = context.child("rewind_no_match_pruned");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-no-match-pruned", page_cache),
@@ -1320,8 +1310,7 @@ mod tests {
         // Test 6: Empty journal
         {
             let ctx = context.child("rewind_empty");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut journal = ContiguousJournal::init(
                 ctx.child("journal"),
                 journal_config("rewind-empty", page_cache),
@@ -1341,8 +1330,7 @@ mod tests {
         // Test 7: Position based authenticated journal rewind.
         {
             let ctx = context.child("rewind_auth");
-            let page_cache =
-                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let merkle_cfg = merkle_config("rewind", page_cache.clone());
             let journal_cfg = journal_config("rewind", page_cache);
             let mut journal =
@@ -1587,8 +1575,7 @@ mod tests {
 
     /// Verify that sync() persists operations.
     async fn test_sync_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal =
-            create_empty_journal::<F>(context.child("first"), "close_pending").await;
+        let mut journal = create_empty_journal::<F>(context.child("first"), "close_pending").await;
 
         // Add 20 operations
         let expected_ops: Vec<_> = (0..20).map(|i| create_operation::<F>(i as u8)).collect();
@@ -1611,8 +1598,7 @@ mod tests {
 
         // Reopen and verify the operations persisted
         drop(journal);
-        let journal =
-            create_empty_journal::<F>(context.child("second"), "close_pending").await;
+        let journal = create_empty_journal::<F>(context.child("second"), "close_pending").await;
         assert_eq!(journal.size().await, 21);
 
         // Verify all operations can be read back
@@ -1755,8 +1741,7 @@ mod tests {
         journal.destroy().await.unwrap();
 
         // Test no pruning
-        let journal =
-            create_journal_with_ops::<F>(context.child("no_prune"), "oldest", 100).await;
+        let journal = create_journal_with_ops::<F>(context.child("no_prune"), "oldest", 100).await;
         let bounds = journal.reader().await.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(bounds.start, 0);
@@ -2162,8 +2147,7 @@ mod tests {
         assert!(stream.next().await.is_none());
 
         // Test replaying all operations
-        let journal =
-            create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
+        let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
         let reader = journal.reader().await;
         let stream = reader.replay(NZUsize!(100), 0).await.unwrap();
         futures::pin_mut!(stream);
