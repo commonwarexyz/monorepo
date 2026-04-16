@@ -742,7 +742,7 @@ mod tests {
             // Create parent block at height 1
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            marshal
+            let _ = marshal
                 .clone()
                 .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
                 .await;
@@ -756,7 +756,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a.clone()).await;
+            let _ = marshal.clone().proposed(round_a, block_a.clone()).await;
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -767,7 +767,7 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let commitment_b = block_b.digest();
-            marshal.clone().proposed(round_b, block_b.clone()).await;
+            let _ = marshal.clone().proposed(round_b, block_b.clone()).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -874,7 +874,7 @@ mod tests {
             let parent =
                 B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
-            marshal
+            let _ = marshal
                 .clone()
                 .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
                 .await;
@@ -893,7 +893,7 @@ mod tests {
                 2000,
             );
             let block_commitment = block.digest();
-            marshal
+            let _ = marshal
                 .clone()
                 .proposed(unsupported_round, block.clone())
                 .await;
@@ -963,7 +963,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_commitment = parent.digest();
-            marshal
+            let _ = marshal
                 .clone()
                 .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
                 .await;
@@ -977,7 +977,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
             let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a).await;
+            let _ = marshal.clone().proposed(round_a, block_a).await;
 
             context.sleep(Duration::from_millis(10)).await;
 

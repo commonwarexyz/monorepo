@@ -629,7 +629,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            marshal.clone().proposed(parent_round, parent).await;
+            let _ = marshal.clone().proposed(parent_round, parent).await;
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -640,7 +640,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            marshal.clone().proposed(round, block).await;
+            let _ = marshal.clone().proposed(round, block).await;
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -707,7 +707,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            marshal.clone().proposed(parent_round, parent).await;
+            let _ = marshal.clone().proposed(parent_round, parent).await;
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -718,7 +718,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            marshal.clone().proposed(round, block).await;
+            let _ = marshal.clone().proposed(round, block).await;
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;

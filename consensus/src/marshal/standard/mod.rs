@@ -412,10 +412,10 @@ mod tests {
             )
             .await
             .mailbox;
-            peer_mailbox
+            let _ = peer_mailbox
                 .proposed(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
                 .await;
-            peer_mailbox
+            let _ = peer_mailbox
                 .proposed(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
                 .await;
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -505,13 +505,13 @@ mod tests {
             )
             .await
             .mailbox;
-            peer_mailbox
+            let _ = peer_mailbox
                 .proposed(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
                 .await;
-            peer_mailbox
+            let _ = peer_mailbox
                 .proposed(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
                 .await;
-            peer_mailbox
+            let _ = peer_mailbox
                 .proposed(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
                 .await;
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -691,7 +691,7 @@ mod tests {
             .await
             .mailbox;
             for (i, block) in blocks.iter().enumerate() {
-                peer_mailbox
+                let _ = peer_mailbox
                     .proposed(
                         Round::new(Epoch::zero(), View::new(block.height().get())),
                         (*block).clone(),
@@ -1120,7 +1120,7 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                marshal
+                let _ = marshal
                     .clone()
                     .proposed(boundary_round, boundary_block.clone())
                     .await;
@@ -1190,7 +1190,7 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                marshal
+                let _ = marshal
                     .clone()
                     .proposed(boundary_round, boundary_block)
                     .await;
@@ -1227,7 +1227,7 @@ mod tests {
                     1000,
                 );
                 let non_boundary_digest = non_boundary_block.digest();
-                marshal
+                let _ = marshal
                     .clone()
                     .proposed(non_boundary_round, non_boundary_block)
                     .await;
@@ -1330,7 +1330,7 @@ mod tests {
                     200,
                 );
                 let malformed_digest = malformed_block.digest();
-                marshal
+                let _ = marshal
                     .clone()
                     .proposed(malformed_round, malformed_block)
                     .await;
@@ -1371,7 +1371,7 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                marshal.clone().proposed(parent_round, parent).await;
+                let _ = marshal.clone().proposed(parent_round, parent).await;
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -1386,7 +1386,7 @@ mod tests {
                     400,
                 );
                 let mismatched_digest = mismatched_block.digest();
-                marshal
+                let _ = marshal
                     .clone()
                     .proposed(mismatch_round, mismatched_block)
                     .await;
@@ -1462,7 +1462,7 @@ mod tests {
                 };
                 let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-                marshal.clone().proposed(parent_round, parent).await;
+                let _ = marshal.clone().proposed(parent_round, parent).await;
 
                 // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
@@ -1473,7 +1473,7 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
                 let digest = block.digest();
-                marshal.clone().proposed(round, block).await;
+                let _ = marshal.clone().proposed(round, block).await;
 
                 context.sleep(Duration::from_millis(10)).await;
 
