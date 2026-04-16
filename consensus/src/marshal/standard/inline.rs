@@ -380,7 +380,7 @@ where
                 // - Re-proposals skip normal parent/height checks because:
                 //   1) the block was already verified when originally proposed
                 //   2) parent-child checks would fail by construction when parent == block
-                let block = match precheck_epoch_and_reproposal(
+                let Some(decision) = precheck_epoch_and_reproposal(
                     &epocher,
                     &mut marshal,
                     &context,
@@ -388,19 +388,15 @@ where
                     block,
                 )
                 .await
-                {
+                else {
+                    return;
+                };
+                let block = match decision {
                     Decision::Complete(valid) => {
-                        // `Complete` means either an immediate reject or a valid
-                        // re-proposal accepted without further ancestry checks.
                         tx.send_lossy(valid);
                         return;
                     }
                     Decision::Continue(block) => block,
-                    Decision::Aborted => {
-                        // Persistence not confirmed (marshal shut down). Exit
-                        // silently rather than signal a verdict to consensus.
-                        return;
-                    }
                 };
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then

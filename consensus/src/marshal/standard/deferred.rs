@@ -451,7 +451,7 @@ where
                 // Re-proposals return early and skip normal parent/height checks
                 // because they were already verified when originally proposed and
                 // parent-child checks would fail by construction when parent == block.
-                let block = match precheck_epoch_and_reproposal(
+                let Some(decision) = precheck_epoch_and_reproposal(
                     &marshaled.epocher,
                     &mut marshal,
                     &context,
@@ -459,7 +459,10 @@ where
                     block,
                 )
                 .await
-                {
+                else {
+                    return;
+                };
+                let block = match decision {
                     Decision::Complete(valid) => {
                         if valid {
                             // Valid re-proposal. Create a completed verification task for `certify`.
@@ -468,17 +471,10 @@ where
                             task_tx.send_lossy(true);
                             marshaled.verification_tasks.insert(round, digest, task_rx);
                         }
-                        // `Complete` means either immediate rejection or successful
-                        // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
                         return;
                     }
                     Decision::Continue(block) => block,
-                    Decision::Aborted => {
-                        // Persistence not confirmed (marshal shut down). Exit
-                        // silently rather than signal a verdict to consensus.
-                        return;
-                    }
                 };
 
                 // Before casting a notarize vote, ensure the block's embedded context matches

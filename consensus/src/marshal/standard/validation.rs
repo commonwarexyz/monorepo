@@ -53,12 +53,13 @@ where
 ///
 /// - `Complete(valid)`: verification can terminate immediately with `valid`.
 /// - `Continue(block)`: full parent + application verification should continue.
-/// - `Aborted`: persistence could not be confirmed (marshal actor gone) and
-///   the caller MUST exit silently rather than signal a verdict to consensus.
+///
+/// The function returns `Option<Decision<B>>`: `None` means the marshal actor
+/// shut down during persistence and the caller must exit silently (consistent
+/// with the `Option<bool>` convention used by [`verify_with_parent`]).
 pub(super) enum Decision<B> {
     Complete(bool),
     Continue(B),
-    Aborted,
 }
 
 /// Performs shared pre-checks used by both inline and deferred verification paths.
@@ -75,7 +76,7 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,
-) -> Decision<B>
+) -> Option<Decision<B>>
 where
     ES: Epocher,
     S: Scheme,
@@ -87,7 +88,7 @@ where
             height = %block.height(),
             "block height not in expected epoch"
         );
-        return Decision::Complete(false);
+        return Some(Decision::Complete(false));
     }
 
     // Re-proposals are signaled by `digest == context.parent.1`.
@@ -100,20 +101,16 @@ where
                 height = %block.height(),
                 "re-proposal is not at epoch boundary"
             );
-            return Decision::Complete(false);
+            return Some(Decision::Complete(false));
         }
 
         if !marshal.verified(context.round, block).await {
-            debug!(
-                round = ?context.round,
-                "marshal unavailable during re-proposal verified ack; aborting verify"
-            );
-            return Decision::Aborted;
+            return None;
         }
-        return Decision::Complete(true);
+        return Some(Decision::Complete(true));
     }
 
-    Decision::Continue(block)
+    Some(Decision::Continue(block))
 }
 
 /// Runs the shared non-reproposal verification flow.
