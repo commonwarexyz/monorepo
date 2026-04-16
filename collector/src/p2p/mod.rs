@@ -862,12 +862,11 @@ mod tests {
         Vec<Mailbox<PublicKey, Request>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let engine_context = context.child("engine");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
         for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
-            let ctx = engine_context.child(&format!("peer_{idx}"));
+            let ctx = context.child(&format!("peer_{idx}")).child("engine");
             let (mon, _) = MockMonitor::new();
             let (handler, _) = MockHandler::new(true);
             let (engine, mailbox) = Engine::new(
@@ -900,7 +899,7 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(context.child("engines"), &oracle, schemes, connections);
+                spawn_engines_with_handles(context.child("peers"), &oracle, schemes, connections);
 
             // Abort all engines immediately
             for handle in handles {
@@ -933,13 +932,13 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(context.child("engines"), &oracle, schemes, connections);
+                spawn_engines_with_handles(context.child("peers"), &oracle, schemes, connections);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
 
             // Count running tasks under the engine prefix
-            let running_before = count_running_tasks(&context, "engines_engine");
+            let running_before = count_running_tasks(&context, "peers");
             assert!(
                 running_before > 0,
                 "at least one engine task should be running"
@@ -960,7 +959,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify all engine tasks are stopped
-            let running_after = count_running_tasks(&context, "engines_engine");
+            let running_after = count_running_tasks(&context, "peers");
             assert_eq!(
                 running_after, 0,
                 "all engine tasks should be stopped, but {running_after} still running"
