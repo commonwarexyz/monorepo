@@ -417,7 +417,7 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            certifier,
+            should_certify,
         };
         let (actor, application) =
             mocks::application::Application::new(context.with_label("app"), application_cfg);
