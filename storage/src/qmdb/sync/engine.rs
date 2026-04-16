@@ -649,9 +649,15 @@ where
 
         // Verify the proof. Pinned nodes are only extracted from proofs
         // for the current root because the database needs them for the
-        // latest tree size.
+        // latest tree size. When local state already satisfies the boundary
+        // (pins are available in on-disk metadata), we must not demand
+        // pinned nodes from the proof: an empty pinned set would fail
+        // `verify_proof_and_pinned_nodes` against the expected
+        // `nodes_to_pin(range.start)` count, causing an infinite retry loop
+        // whenever a gap request happens to land at `range.start`.
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
+            && !self.local_target_state_available
             && start_loc == self.target.range.start();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
