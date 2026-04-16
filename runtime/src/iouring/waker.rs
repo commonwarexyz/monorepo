@@ -299,8 +299,8 @@ impl Waker {
 
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
         let wake_latched = (snapshot & WAKE_SIGNALLED_BIT) != 0;
-        let still_idle = !wake_latched
-            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
+        let still_idle =
+            !wake_latched && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
 
         ArmGuard {
             waker: self,
