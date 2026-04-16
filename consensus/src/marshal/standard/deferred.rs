@@ -619,12 +619,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> bool {
         match plan {
             Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
                     warn!("missing block to broadcast");
-                    return;
+                    return false;
                 };
                 if block.digest() != digest {
                     warn!(
@@ -633,7 +633,7 @@ where
                         height = %block.height(),
                         "skipping requested broadcast of block with mismatched digest"
                     );
-                    return;
+                    return false;
                 };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
@@ -641,11 +641,13 @@ where
                         ?digest,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
-                    return;
+                    return false;
                 }
+                true
             }
             Plan::Forward { round, peers } => {
                 self.marshal.forward(round, digest, peers).await;
+                true
             }
         }
     }
@@ -734,10 +736,12 @@ mod tests {
             // Create parent block at height 1
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal
-                .clone()
-                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
+                    .await
+            );
 
             // Block A at view 5 (height 2)
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -866,10 +870,12 @@ mod tests {
             let parent =
                 B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
-            assert!(marshal
-                .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
+                    .await
+            );
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let unsupported_round = Round::new(Epoch::new(1), View::new(20));
@@ -885,10 +891,12 @@ mod tests {
                 2000,
             );
             let block_commitment = block.digest();
-            assert!(marshal
-                .clone()
-                .proposed(unsupported_round, block.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .proposed(unsupported_round, block.clone())
+                    .await
+            );
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -955,10 +963,12 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_commitment = parent.digest();
-            assert!(marshal
-                .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
+                    .await
+            );
 
             // Build a block with context A (embedded in the block).
             let round_a = Round::new(Epoch::zero(), View::new(2));

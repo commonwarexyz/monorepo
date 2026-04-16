@@ -923,10 +923,7 @@ mod tests {
 
         // Proposal should be restored as verified (we are the leader).
         assert_eq!(round.proposal.proposal(), Some(&proposal));
-        assert_eq!(
-            round.proposal.status(),
-            ProposalStatus::Verified(true)
-        );
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified(true));
         assert!(round.broadcast_notarize);
 
         // No verification request should be emitted.
@@ -948,7 +945,10 @@ mod tests {
 
         let (candidate, is_local) = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(is_local, "local notarize replay should restore local certification");
+        assert!(
+            is_local,
+            "local notarize replay should restore local certification"
+        );
     }
 
     #[test]
@@ -1070,7 +1070,10 @@ mod tests {
 
         let (candidate, is_local) = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(is_local, "locally proposed payload should carry local certify permission");
+        assert!(
+            is_local,
+            "locally proposed payload should carry local certify permission"
+        );
     }
 
     #[test]

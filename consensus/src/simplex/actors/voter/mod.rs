@@ -97,6 +97,33 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    #[derive(Clone, Default)]
+    struct FailingRelay {
+        proposes: Arc<Mutex<Vec<Sha256Digest>>>,
+    }
+
+    impl FailingRelay {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl crate::Relay for FailingRelay {
+        type Digest = Sha256Digest;
+        type PublicKey = PublicKey;
+        type Plan = Plan<PublicKey>;
+
+        async fn broadcast(&mut self, payload: Sha256Digest, plan: Self::Plan) -> bool {
+            match plan {
+                Plan::Propose => {
+                    self.proposes.lock().push(payload);
+                    false
+                }
+                Plan::Forward { .. } => true,
+            }
+        }
+    }
+
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
         peers: I,
@@ -117,6 +144,151 @@ mod tests {
         .await;
         network.start();
         oracle
+    }
+
+    fn propose_broadcast_failure_stops_before_notarize<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let namespace = b"propose_broadcast_failure_stops_before_notarize".to_vec();
+        let partition = "propose_broadcast_failure_stops_before_notarize".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, 5);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let app_relay = Arc::new(mocks::relay::Relay::new());
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: app_relay,
+                me: me.clone(),
+                propose_latency: (0.0, 0.0),
+                verify_latency: (0.0, 0.0),
+                certify_latency: (0.0, 0.0),
+                certifier: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let relay = FailingRelay::new();
+            let propose_attempts = relay.proposes.clone();
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay,
+                reporter,
+                partition,
+                epoch: Epoch::new(4),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    leader,
+                    response,
+                    ..
+                } => {
+                    assert_eq!(current, View::new(1));
+                    let _ = leader;
+                    response.send(None).unwrap();
+                }
+                _ => panic!("unexpected initial batcher message"),
+            }
+
+            select! {
+                result = handle => {
+                    result.expect("voter should stop cleanly after failed propose broadcast");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("timed out waiting for voter to stop after failed propose broadcast");
+                }
+            }
+
+            assert_eq!(
+                propose_attempts.lock().len(),
+                1,
+                "expected exactly one failed propose broadcast attempt"
+            );
+
+            while let Some(message) = batcher_receiver.recv().now_or_never().flatten() {
+                match message {
+                    batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                        panic!(
+                            "unexpected notarize for view {} after failed propose broadcast",
+                            notarize.view()
+                        );
+                    }
+                    batcher::Message::Update { response, .. } => {
+                        response.send(None).unwrap();
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_propose_broadcast_failure_stops_before_notarize() {
+        propose_broadcast_failure_stops_before_notarize::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        propose_broadcast_failure_stops_before_notarize::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        propose_broadcast_failure_stops_before_notarize::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        propose_broadcast_failure_stops_before_notarize::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        propose_broadcast_failure_stops_before_notarize::<_, _>(ed25519::fixture);
+        propose_broadcast_failure_stops_before_notarize::<_, _>(secp256r1::fixture);
     }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(

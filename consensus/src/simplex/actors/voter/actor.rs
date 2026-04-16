@@ -828,6 +828,7 @@ impl<
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
+        let mut stopped_after_broadcast_failure = false;
         select_loop! {
             self.context,
             on_start => {
@@ -886,14 +887,6 @@ impl<
             },
             on_stopped => {
                 debug!("context shutdown, stopping voter");
-
-                // Sync and drop journal
-                self.journal
-                    .take()
-                    .unwrap()
-                    .sync_all()
-                    .await
-                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
@@ -933,7 +926,14 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal
-                self.relay.broadcast(proposed, Plan::Propose).await;
+                if !self.relay.broadcast(proposed, Plan::Propose).await {
+                    warn!(
+                        round = ?context.round,
+                        "failed to broadcast proposed payload, stopping voter"
+                    );
+                    stopped_after_broadcast_failure = true;
+                    break;
+                }
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter
@@ -1104,6 +1104,12 @@ impl<
                     }
                 }
             },
+        }
+        if stopped_after_broadcast_failure {
+            debug!("stopped voter after failed proposal broadcast");
+        }
+        if let Some(journal) = self.journal.take() {
+            journal.sync_all().await.expect("unable to sync journal");
         }
     }
 }

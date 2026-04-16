@@ -636,12 +636,7 @@ where
                 }
 
                 let success = tx.send_lossy(commitment);
-                debug!(
-                    ?round,
-                    ?commitment,
-                    success,
-                    "proposed new block"
-                );
+                debug!(?round, ?commitment, success, "proposed new block");
             });
         rx
     }
@@ -971,12 +966,12 @@ where
     type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
-    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> bool {
         match plan {
             Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
                     warn!("missing block to broadcast");
-                    return;
+                    return false;
                 };
                 if block.commitment() != commitment {
                     warn!(
@@ -985,7 +980,7 @@ where
                         height = %block.height(),
                         "skipping requested broadcast of block with mismatched commitment"
                     );
-                    return;
+                    return false;
                 };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
@@ -993,14 +988,16 @@ where
                         ?commitment,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
-                    return;
+                    return false;
                 }
+                true
             }
             Plan::Forward { .. } => {
                 // Coding variant does not support targeted forwarding;
                 // peers reconstruct blocks from erasure-coded shards.
                 //
                 // TODO(#3389): Support checked data forwarding for PhasedScheme.
+                true
             }
         }
     }

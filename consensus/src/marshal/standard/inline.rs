@@ -381,14 +381,9 @@ where
                 // - Re-proposals skip normal parent/height checks because:
                 //   1) the block was already verified when originally proposed
                 //   2) parent-child checks would fail by construction when parent == block
-                let Some(decision) = precheck_epoch_and_reproposal(
-                    &epocher,
-                    &mut marshal,
-                    &context,
-                    digest,
-                    block,
-                )
-                .await
+                let Some(decision) =
+                    precheck_epoch_and_reproposal(&epocher, &mut marshal, &context, digest, block)
+                        .await
                 else {
                     return;
                 };
@@ -482,12 +477,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> bool {
         match plan {
             Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
                     warn!("missing block to broadcast");
-                    return;
+                    return false;
                 };
                 if block.digest() != digest {
                     warn!(
@@ -496,7 +491,7 @@ where
                         height = %block.height(),
                         "skipping requested broadcast of block with mismatched digest"
                     );
-                    return;
+                    return false;
                 };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
@@ -504,11 +499,13 @@ where
                         ?digest,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
-                    return;
+                    return false;
                 }
+                true
             }
             Plan::Forward { round, peers } => {
                 self.marshal.forward(round, digest, peers).await;
+                true
             }
         }
     }
