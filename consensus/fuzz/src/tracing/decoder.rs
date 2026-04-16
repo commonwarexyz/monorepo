@@ -910,6 +910,7 @@ pub fn decode_itf(
         entries,
         required_containers: 0,
         reporter_states,
+        expected_state: Some(expected.clone()),
     };
 
     Ok((trace_data, expected))

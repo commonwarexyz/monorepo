@@ -1021,7 +1021,7 @@ fn cert_to_quint(cert: &CertItem) -> String {
 }
 
 /// Maps block hashes to val_b0, val_b1, ... in order of first appearance.
-fn build_block_map(trace_data: &TraceData) -> Vec<(String, String)> {
+pub fn build_block_map(trace_data: &TraceData) -> Vec<(String, String)> {
     let mut map = Vec::new();
     let mut seen = HashMap::new();
     let mut record_hash = |hash: String| {

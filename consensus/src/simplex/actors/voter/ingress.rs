@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         metrics::TimeoutReason,
-        types::{Certificate, Proposal},
+        types::{Certificate, Proposal, Vote},
     },
     types::View,
 };
@@ -19,6 +19,16 @@ pub enum Message<S: Scheme, D: Digest> {
     /// The boolean indicates if the certificate came from the resolver.
     /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
     Verified(Certificate<S, D>, bool),
+    /// Directly inject a proposal as if this node built it (leader path).
+    ///
+    /// Used by the replayer to set the proposer's internal state without
+    /// triggering the automaton's propose() or relay broadcast.
+    #[cfg(any(test, feature = "mocks"))]
+    Proposed(Proposal<D>),
+    /// Replay a vote that this node constructed, setting the voter's
+    /// broadcast flags (via state.replay) and forwarding to the batcher.
+    #[cfg(any(test, feature = "mocks"))]
+    Replayed(Vote<S, D>),
 }
 
 #[derive(Clone)]
@@ -54,5 +64,20 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         self.sender
             .send_lossy(Message::Verified(certificate, true))
             .await;
+    }
+
+    /// Inject a proposal as if this node built it (leader path).
+    #[cfg(any(test, feature = "mocks"))]
+    pub async fn proposed(&mut self, proposal: Proposal<D>) {
+        self.sender
+            .send_lossy(Message::Proposed(proposal))
+            .await;
+    }
+
+    /// Replay a vote this node constructed, setting broadcast flags and
+    /// forwarding to the batcher.
+    #[cfg(any(test, feature = "mocks"))]
+    pub async fn replayed(&mut self, vote: Vote<S, D>) {
+        self.sender.send_lossy(Message::Replayed(vote)).await;
     }
 }

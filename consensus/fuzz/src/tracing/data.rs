@@ -1,4 +1,5 @@
 use super::sniffer::TraceEntry;
+use crate::replayer::compare::ExpectedState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,4 +41,6 @@ pub struct TraceData {
     pub required_containers: u64,
     #[serde(default)]
     pub reporter_states: BTreeMap<String, ReporterReplicaStateData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_state: Option<ExpectedState>,
 }

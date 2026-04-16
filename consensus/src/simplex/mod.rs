@@ -777,6 +777,9 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "mocks")))]
+pub use actors::voter;
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
 

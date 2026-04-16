@@ -1,33 +1,44 @@
+pub mod automaton;
 pub mod compare;
 pub mod injected;
 pub mod messages;
 
 use crate::{
     invariants,
-    tracing::{data::TraceData, sniffer::TraceEntry},
+    tracing::{
+        data::TraceData,
+        encoder::{build_action_items, build_block_map, ActionItem, EncoderConfig},
+    },
     types::ReplayedReplicaState,
 };
+use automaton::ReplayAutomaton;
 use commonware_consensus::{
     simplex::{
         config,
         config::ForwardingPolicy,
         elector::RoundRobin,
-        mocks::{application, relay, reporter},
+        mocks::reporter,
         scheme::ed25519,
-        Engine,
+        types::{Finalize, Nullify, Vote},
+        voter, Engine,
     },
-    types::{Delta, Epoch as EpochType},
+    types::{Delta, Epoch as EpochType, Round, View},
 };
 use commonware_cryptography::{
-    certificate::mocks::Fixture, sha256::Sha256 as Sha256Hasher, Sha256,
+    certificate::mocks::Fixture,
+    sha256::{Digest as Sha256Digest, Sha256 as Sha256Hasher},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU16};
 use injected::{channel, NullBlocker, NullSender, PendingReceiver};
+use messages::{
+    construct_cert_from_item, construct_finalize_vote, construct_notarize_vote,
+    construct_nullify_vote, digest_from_block_hex, make_proposal,
+};
 use std::{
+    collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
 
@@ -37,6 +48,10 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 /// Replays a trace by injecting messages into isolated engines and extracting
 /// observable state from reporters.
+///
+/// Uses `build_action_items` to normalize the trace into causal `ActionItem`s,
+/// then processes each action: proposals are injected via the voter's `Proposed`
+/// hook, votes and certificates are injected via network channels.
 ///
 /// `faults_override` overrides the trace's `faults` field, controlling how
 /// many leading nodes are skipped as Byzantine. Pass `Some(0)` to replay on
@@ -60,17 +75,24 @@ pub fn replay_trace(
             ..
         } = ed25519::fixture(&mut context, NAMESPACE, n as u32);
 
-        // Create injectors and receivers for each correct node
+        // Build block map and reverse map (val_bN -> hex hash)
+        let block_map = build_block_map(trace);
+        let block_map_rev: HashMap<String, String> = block_map
+            .iter()
+            .map(|(hex, name)| (name.clone(), hex.clone()))
+            .collect();
+
+        // Create injectors, voter mailboxes, and reporters for each correct node
         let correct_start = faults;
         let mut vote_injectors = Vec::new();
         let mut cert_injectors = Vec::new();
+        let mut voter_mailboxes: Vec<voter::Mailbox<ed25519::Scheme, Sha256Digest>> = Vec::new();
         let mut reporters = Vec::new();
+        let mut automatons = Vec::new();
 
-        let relay = Arc::new(relay::Relay::new());
         let elector = RoundRobin::<Sha256Hasher>::default();
 
         for i in correct_start..n {
-            let validator = participants[i].clone();
             let ctx = context.with_label(&format!("validator_n{i}"));
 
             // Vote channel: injected receiver, null sender
@@ -96,26 +118,17 @@ pub fn replay_trace(
             let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
 
-            let app_cfg = application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                application::Application::new(ctx.with_label("application"), app_cfg);
-            actor.start();
+            // ReplayAutomaton instead of full application
+            let automaton = ReplayAutomaton::new();
+            automatons.push(automaton.clone());
 
             // Engine
             let engine_cfg = config::Config {
                 blocker: NullBlocker,
                 scheme: schemes[i].clone(),
                 elector: elector.clone(),
-                automaton: application.clone(),
-                relay: application.clone(),
+                automaton: automaton.clone(),
+                relay: automaton,
                 reporter: reporter.clone(),
                 partition: format!("replayer_n{i}"),
                 mailbox_size: 1024,
@@ -134,6 +147,7 @@ pub fn replay_trace(
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
+            voter_mailboxes.push(engine.voter_mailbox());
             engine.start(
                 (NullSender, vote_rx),
                 (NullSender, cert_rx),
@@ -141,44 +155,187 @@ pub fn replay_trace(
             );
         }
 
-        // Replay trace entries
-        for entry in &trace.entries {
-            // Skip self-votes: the engine generates its own votes internally
-            // via constructed(), so injecting them again causes duplicates.
-            if let TraceEntry::Vote {
-                sender, receiver, ..
-            } = entry
-            {
-                if sender == receiver {
-                    continue;
+        // Build normalized action items from the trace
+        let cfg = EncoderConfig {
+            n,
+            faults,
+            epoch,
+            max_view: trace.max_view,
+            required_containers: 0,
+        };
+        let actions = build_action_items(trace, &cfg);
+
+        // Replay action items
+        for action in &actions {
+            match action {
+                ActionItem::Propose {
+                    leader,
+                    view,
+                    payload,
+                    parent_view,
+                } => {
+                    let leader_idx = parse_node_id(leader);
+                    let block_hex = block_map_rev
+                        .get(payload)
+                        .expect("unknown block name in propose");
+
+                    // Register the digest in the automaton so verify() succeeds
+                    let digest = digest_from_block_hex(block_hex);
+                    // Register in ALL automatons (any node may need to verify)
+                    for auto in &automatons {
+                        auto.register(digest);
+                    }
+
+                    // If the leader is a correct node, inject via Proposed hook
+                    if leader_idx >= faults {
+                        let correct_idx = leader_idx - faults;
+                        let proposal =
+                            make_proposal(epoch, *view, *parent_view, block_hex);
+                        voter_mailboxes[correct_idx].proposed(proposal).await;
+                    }
                 }
-            }
-
-            let receiver_id = match entry {
-                TraceEntry::Vote { receiver, .. } => receiver,
-                TraceEntry::Certificate { receiver, .. } => receiver,
-            };
-
-            // Parse receiver index
-            let receiver_idx = receiver_id
-                .strip_prefix('n')
-                .and_then(|s| s.parse::<usize>().ok())
-                .expect("invalid receiver id");
-
-            // Skip entries for Byzantine nodes
-            if receiver_idx < faults {
-                continue;
-            }
-
-            // Map to correct node index (0-based in our injector arrays)
-            let correct_idx = receiver_idx - faults;
-
-            let msg = messages::construct_message(entry, &schemes, &participants, epoch);
-
-            if msg.is_certificate {
-                cert_injectors[correct_idx].inject(msg.sender_pk, msg.payload);
-            } else {
-                vote_injectors[correct_idx].inject(msg.sender_pk, msg.payload);
+                ActionItem::OnNotarize {
+                    receiver,
+                    view,
+                    parent_view,
+                    payload,
+                    sig,
+                } => {
+                    let block_hex = block_map_rev
+                        .get(payload)
+                        .expect("unknown block name in on_notarize");
+                    let msg = construct_notarize_vote(
+                        receiver,
+                        sig,
+                        *view,
+                        *parent_view,
+                        block_hex,
+                        &schemes,
+                        &participants,
+                        epoch,
+                    );
+                    if msg.receiver_idx >= faults {
+                        let correct_idx = msg.receiver_idx - faults;
+                        vote_injectors[correct_idx]
+                            .inject(msg.sender_pk, msg.payload);
+                    }
+                }
+                ActionItem::OnNullify {
+                    receiver,
+                    view,
+                    sig,
+                } => {
+                    // Skip self-deliveries; sender-local state is driven
+                    // by SendNullifyVote instead (sets broadcast_nullify flag).
+                    if receiver == sig {
+                        continue;
+                    }
+                    let msg = construct_nullify_vote(
+                        receiver,
+                        sig,
+                        *view,
+                        &schemes,
+                        &participants,
+                        epoch,
+                    );
+                    if msg.receiver_idx >= faults {
+                        let correct_idx = msg.receiver_idx - faults;
+                        vote_injectors[correct_idx]
+                            .inject(msg.sender_pk, msg.payload);
+                    }
+                }
+                ActionItem::OnFinalize {
+                    receiver,
+                    view,
+                    parent_view,
+                    payload,
+                    sig,
+                } => {
+                    // Skip self-deliveries; sender-local state is driven
+                    // by SendFinalizeVote instead (sets broadcast_finalize flag).
+                    if receiver == sig {
+                        continue;
+                    }
+                    let block_hex = block_map_rev
+                        .get(payload)
+                        .expect("unknown block name in on_finalize");
+                    let msg = construct_finalize_vote(
+                        receiver,
+                        sig,
+                        *view,
+                        *parent_view,
+                        block_hex,
+                        &schemes,
+                        &participants,
+                        epoch,
+                    );
+                    if msg.receiver_idx >= faults {
+                        let correct_idx = msg.receiver_idx - faults;
+                        vote_injectors[correct_idx]
+                            .inject(msg.sender_pk, msg.payload);
+                    }
+                }
+                ActionItem::OnCertificate { receiver, cert } => {
+                    let msg = construct_cert_from_item(
+                        receiver,
+                        cert,
+                        &block_map_rev,
+                        &schemes,
+                        &participants,
+                        epoch,
+                    );
+                    if msg.receiver_idx >= faults {
+                        let correct_idx = msg.receiver_idx - faults;
+                        cert_injectors[correct_idx]
+                            .inject(msg.sender_pk, msg.payload);
+                    }
+                }
+                ActionItem::SendNullifyVote { view, sig } => {
+                    let signer_idx = parse_node_id(sig);
+                    if signer_idx >= faults {
+                        let correct_idx = signer_idx - faults;
+                        let round = Round::new(
+                            EpochType::new(epoch),
+                            View::new(*view),
+                        );
+                        let nullify = Nullify::<ed25519::Scheme>::sign::<Sha256Digest>(
+                            &schemes[signer_idx],
+                            round,
+                        )
+                        .expect("signing must succeed");
+                        voter_mailboxes[correct_idx]
+                            .replayed(Vote::Nullify(nullify))
+                            .await;
+                    }
+                }
+                ActionItem::SendFinalizeVote {
+                    view,
+                    parent_view,
+                    payload,
+                    sig,
+                } => {
+                    let signer_idx = parse_node_id(sig);
+                    if signer_idx >= faults {
+                        let correct_idx = signer_idx - faults;
+                        let block_hex = block_map_rev
+                            .get(payload)
+                            .expect("unknown block name in send_finalize_vote");
+                        let proposal =
+                            make_proposal(epoch, *view, *parent_view, block_hex);
+                        let finalize = Finalize::<ed25519::Scheme, Sha256Digest>::sign(
+                            &schemes[signer_idx],
+                            proposal,
+                        )
+                        .expect("signing must succeed");
+                        voter_mailboxes[correct_idx]
+                            .replayed(Vote::Finalize(finalize))
+                            .await;
+                    }
+                }
+                // Notarize sends and certificate sends are no-ops for the replayer.
+                // Notarize local state is already set by the Proposed hook.
+                ActionItem::SendNotarizeVote { .. }
+                | ActionItem::SendCertificate { .. } => {}
             }
 
             // Yield to let the engine process the message
@@ -191,6 +348,12 @@ pub fn replay_trace(
         // Extract observable state
         invariants::extract_replayed(&reporters, n)
     })
+}
+
+fn parse_node_id(id: &str) -> usize {
+    id.strip_prefix('n')
+        .and_then(|s| s.parse().ok())
+        .expect("invalid node id")
 }
 
 /// Replays a trace and runs invariant checks on the extracted state.

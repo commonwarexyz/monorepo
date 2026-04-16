@@ -439,8 +439,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Replays a journaled artifact into the appropriate round during recovery.
-    pub fn replay(&mut self, artifact: &Artifact<S, D>) {
-        self.create_round(artifact.view()).replay(artifact);
+    pub fn replay(&mut self, artifact: &Artifact<S, D>) -> bool {
+        self.create_round(artifact.view()).replay(artifact)
     }
 
     /// Returns the leader index for `view` if we already entered it.

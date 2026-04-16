@@ -11,11 +11,11 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
 MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
-MBF_TRACE_STATIC_MAX_VIEWS ?= 4
+MBF_TRACE_STATIC_MAX_VIEWS ?= 3
 MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
 MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
 
-.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen mbf_prepare_validated_seeds
+.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen mbf_prepare_validated_seeds mbf_augment_seeds_from_fuzz
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
@@ -31,8 +31,9 @@ replay_mutated_traces:
 		exit 1; \
 	fi; \
 	failed=0; total=0; \
-	for f in $(MUTATED_TRACES_DIR)/*.json; do \
+	for f in $$(find $(MUTATED_TRACES_DIR) -name "*.json" -not -path "*/.*"); do \
 		[ -f "$$f" ] || continue; \
+		case "$$f" in *_expected.json) continue;; esac; \
 		total=$$((total + 1)); \
 		echo "=== Replaying $$f ==="; \
 		if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
@@ -89,10 +90,11 @@ mbf_live_watch:
 		mkdir -p "$$dir" "$$seen_dir" "$$failed_dir"; \
 		echo "watching $$dir for new traces..."; \
 		while true; do \
-			for f in "$$dir"/*.json; do \
+			for f in $$(find "$$dir" -name "*.json" -not -path "*/.*" 2>/dev/null); do \
 				[ -f "$$f" ] || continue; \
+				case "$$f" in *_expected.json) continue;; esac; \
 				mkdir -p "$$seen_dir" "$$failed_dir"; \
-				hash=$$(basename "$$f" .json); \
+				hash=$$(echo "$$f" | shasum | cut -d" " -f1); \
 				[ -f "$$seen_dir/$$hash" ] && continue; \
 				echo "=== Replaying $$f ==="; \
 				if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
@@ -187,26 +189,120 @@ mbf_live_trace_static_gen:
 			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)"; \
 	'
 
+# Generates static honest traces concurrently with Quint validation.
+# The static generator writes raw (unvalidated) traces into a staging
+# directory, while validate_trace_corpus (in APPEND mode) repeatedly
+# picks up new traces, validates them through replica.qnt, and writes
+# accepted traces with expected_state embedded to
+# $(MBF_VALIDATED_SEEDS_FOLDER).
+#
+# Set VALIDATE_INTERVAL to override the validation poll interval in
+# seconds (default 5).
+VALIDATE_INTERVAL ?= 5
 mbf_prepare_validated_seeds:
 	@bash -eu -o pipefail -c '\
 		tmp=$$(mktemp -d); \
-		trap "rm -rf $$tmp" EXIT INT TERM; \
 		static_dir="$$tmp/static_generated"; \
 		dst="$(MBF_VALIDATED_SEEDS_FOLDER)"; \
 		mkdir -p "$$static_dir"; \
-		echo "generating static seeds into $$static_dir"; \
+		rm -rf "$$dst"; \
+		mkdir -p "$$dst"; \
+		gen=""; \
+		cleanup() { \
+			if [ -n "$$gen" ]; then \
+				kill $$gen 2>/dev/null || true; \
+				wait $$gen 2>/dev/null || true; \
+			fi; \
+			rm -rf "$$tmp"; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		echo "generating static seeds into $$static_dir (concurrent validation into $$dst)"; \
 		cargo run -p commonware-consensus-fuzz --bin generate_small_honest_traces -- \
 			"$$static_dir" \
 			--max-views "$(MBF_TRACE_STATIC_MAX_VIEWS)" \
-			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)"; \
-		echo "validating fixtures + existing corpus + generated corpus into $$dst"; \
-		MODEL_FAULTS=$(MBF_FAULTS) \
-		cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
-			"$$dst" \
-			"../fuzz/src/tracing/tests/fixtures/honest" \
-			"$(MUTATION_SEEDS_FOLDER)" \
-			"$$static_dir"; \
+			--max-containers "$(MBF_TRACE_STATIC_MAX_CONTAINERS)" & \
+		gen=$$!; \
+		while kill -0 $$gen 2>/dev/null; do \
+			sleep $(VALIDATE_INTERVAL); \
+			if [ -n "$$(ls -A "$$static_dir" 2>/dev/null)" ]; then \
+				env APPEND=1 MODEL_FAULTS=$(MBF_FAULTS) \
+					cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
+						"$$dst" \
+						"../fuzz/src/tracing/tests/fixtures/honest" \
+						"$(MUTATION_SEEDS_FOLDER)" \
+						"$$static_dir" || true; \
+			fi; \
+		done; \
+		wait $$gen || { echo "static generator failed"; exit 1; }; \
+		gen=""; \
+		echo "generator finished, running final validation pass..."; \
+		env APPEND=1 MODEL_FAULTS=$(MBF_FAULTS) \
+			cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
+				"$$dst" \
+				"../fuzz/src/tracing/tests/fixtures/honest" \
+				"$(MUTATION_SEEDS_FOLDER)" \
+				"$$static_dir"; \
+		if [ -z "$$(find "$$dst" -name "*.json" -not -path "*/.*" 2>/dev/null | head -n1)" ]; then \
+			echo "no validated traces produced in $$dst"; \
+			exit 1; \
+		fi; \
 		echo "validated seed corpus written to $$dst"; \
 		echo "use it with: make mbf_live_fuzz MUTATION_SEEDS_FOLDER=$$dst"; \
 	'
-	
+
+# Runs the simplex_ed25519_quint_honest libfuzzer target concurrently with
+# Quint validation. The fuzzer writes traces into
+# $(FUZZ_TRACES_ROOT)/<target>_<strategy>/, and validate_trace_corpus
+# (in APPEND mode) repeatedly picks them up, validates them through
+# replica.qnt, and appends accepted traces with expected_state embedded
+# into $(MBF_VALIDATED_SEEDS_FOLDER) (i.e., the existing seed pool is
+# augmented in place).
+#
+# Set FUZZ_RUNS to bound the fuzz run (default -1 = infinite), e.g.:
+#   make mbf_augment_seeds_from_fuzz FUZZ_RUNS=10000
+mbf_augment_seeds_from_fuzz:
+	@bash -eu -o pipefail -c '\
+		target="$(MBF_TRACE_GEN_TARGET)"; \
+		src="$(FUZZ_TRACES_ROOT)/$${target}_$(TRACE_SELECTION_STRATEGY)"; \
+		dst="$(MBF_VALIDATED_SEEDS_FOLDER)"; \
+		rm -rf "$$src"; \
+		mkdir -p "$$src" "$$dst"; \
+		fuzz=""; \
+		cleanup() { \
+			if [ -n "$$fuzz" ]; then \
+				kill $$fuzz 2>/dev/null || true; \
+				wait $$fuzz 2>/dev/null || true; \
+			fi; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		echo "starting fuzz target $$target (FUZZ_RUNS=$(FUZZ_RUNS))"; \
+		echo "appending validated traces to $$dst (poll every $(VALIDATE_INTERVAL)s)"; \
+		env TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+			MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
+			MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+			cargo +nightly fuzz run "$$target" -- -runs=$(FUZZ_RUNS) & \
+		fuzz=$$!; \
+		before=$$(find "$$dst" -name "*.json" -not -path "*/.*" 2>/dev/null | wc -l); \
+		while kill -0 $$fuzz 2>/dev/null; do \
+			sleep $(VALIDATE_INTERVAL); \
+			if [ -n "$$(ls -A "$$src" 2>/dev/null)" ]; then \
+				env APPEND=1 MODEL_FAULTS=$(MBF_FAULTS) \
+					cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
+						"$$dst" "$$src" || true; \
+			fi; \
+		done; \
+		wait $$fuzz || true; \
+		fuzz=""; \
+		echo "fuzz finished, running final validation pass..."; \
+		env APPEND=1 MODEL_FAULTS=$(MBF_FAULTS) \
+			cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
+				"$$dst" "$$src"; \
+		after=$$(find "$$dst" -name "*.json" -not -path "*/.*" 2>/dev/null | wc -l); \
+		if [ "$$after" -le "$$before" ]; then \
+			echo "no new validated traces produced (before=$$before after=$$after)"; \
+			exit 1; \
+		fi; \
+		echo "augmented seed corpus at $$dst (before=$$before after=$$after)"; \
+		echo "use it with: make mbf_live_fuzz MUTATION_SEEDS_FOLDER=$$dst"; \
+	'
+

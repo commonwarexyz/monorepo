@@ -22,8 +22,8 @@
 //!      [`TlcClient`], and count fingerprints (`response.keys`) that
 //!      are not in the cumulative `states_map`.
 //!   5. If the trace produced new fingerprints, validate it against
-//!      both `replica.qnt` and `replica_tla.qnt`. Only traces that pass
-//!      the dual-model check are persisted under
+//!      `replica.qnt`. Only traces that pass the model check are
+//!      persisted under
 //!      `consensus/fuzz/artifacts/mutated_traces/` and used to push
 //!      `mut_per_trace * new_states` mutated descendants back onto the
 //!      queue.
@@ -284,22 +284,6 @@ fn trace_cache_key(trace: &TraceData) -> Option<String> {
     serde_json::to_vec(trace)
         .ok()
         .map(|bytes| sha256_hex(&bytes))
-}
-
-fn is_dual_model_valid(trace: &TraceData, validation_cache: &mut HashMap<String, bool>) -> bool {
-    let key = trace_cache_key(trace);
-    if let Some(key) = key.as_ref() {
-        if let Some(valid) = validation_cache.get(key) {
-            return *valid;
-        }
-    }
-
-    let label = key.as_deref().unwrap_or("trace");
-    let valid = quint_model::validate_trace_dual(trace, label).is_ok();
-    if let Some(key) = key {
-        validation_cache.insert(key, valid);
-    }
-    valid
 }
 
 fn next_candidate_trace(
@@ -1158,7 +1142,7 @@ pub fn run() {
         seed_dir.display(),
         faults_override.map_or("inherit".to_string(), |f| f.to_string())
     );
-    let mut validation_cache: HashMap<String, bool> = HashMap::new();
+    let mut rejection_cache: HashSet<String> = HashSet::new();
     let mut base_seeds = filter_seeds_for_faults(load_seeds(&seed_dir), faults_override)
         .into_iter()
         .map(|trace| with_faults_override(trace, faults_override))
@@ -1355,9 +1339,10 @@ pub fn run() {
             continue;
         }
 
-        if !is_dual_model_valid(&trace, &mut validation_cache) {
+        let label = trace_cache_key(&trace).unwrap_or_else(|| format!("iter_{iter}"));
+        if rejection_cache.contains(&label) {
             println!(
-                "[iter {iter}] tlc=ok-model-rejected (keys={}, new={}, q={}, traces={}, states={})",
+                "[iter {iter}] tlc=ok-model-rejected-cached (keys={}, new={}, q={}, traces={}, states={})",
                 response.keys.len(),
                 num_new_states,
                 queue.len(),
@@ -1366,10 +1351,26 @@ pub fn run() {
             );
             continue;
         }
+        let expected = match quint_model::validate_and_extract_expected(&trace, &label) {
+            Ok(exp) => exp,
+            Err(_) => {
+                rejection_cache.insert(label);
+                println!(
+                    "[iter {iter}] tlc=ok-model-rejected (keys={}, new={}, q={}, traces={}, states={})",
+                    response.keys.len(),
+                    num_new_states,
+                    queue.len(),
+                    traces_map.len(),
+                    states_map.len(),
+                );
+                continue;
+            }
+        };
 
         // Override faults in persisted traces if requested (e.g. the TLC
         // model validates all-correct behaviour so faults=0 is appropriate).
-        let trace = with_faults_override(trace, faults_override);
+        let mut trace = with_faults_override(trace, faults_override);
+        trace.expected_state = expected;
 
         // Persist the keeper as pretty JSON named by sha1 of its bytes.
         // (Mirrors `TLCStateGuider.recordTrace`.)
@@ -1461,6 +1462,7 @@ mod tests {
             max_view: 2,
             required_containers: 1,
             reporter_states: Default::default(),
+            expected_state: None,
             entries: vec![
                 vote(
                     "n1",

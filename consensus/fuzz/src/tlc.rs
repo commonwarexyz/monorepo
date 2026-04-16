@@ -361,7 +361,7 @@ mod tests {
         );
     }
 
-    fn start_server(port: u16) -> TlcServerGuard {
+    fn try_start_server(port: u16) -> Option<TlcServerGuard> {
         // `scripts/tlc.sh run` does `cd $TLC_BUILD_DIR && exec java ...`,
         // so the spawned bash process is replaced in place by the JVM and
         // `Child::kill()` later sends SIGKILL straight to the JVM.
@@ -374,7 +374,7 @@ mod tests {
             .spawn()
             .expect("failed to spawn scripts/tlc.sh run");
 
-        let guard = TlcServerGuard { child };
+        let mut guard = TlcServerGuard { child };
 
         // Poll /health until the JVM finishes parsing the spec and the HTTP
         // server is up. The JVM cold-start typically takes ~10s.
@@ -383,7 +383,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if Instant::now() > deadline {
-                panic!("TLC server on port {port} did not become ready within 60s");
+                // Server did not start in time (port may have been stolen).
+                // Kill the child and signal failure so the caller can retry.
+                let _ = guard.child.kill();
+                let _ = guard.child.wait();
+                std::mem::forget(guard); // prevent double-kill in Drop
+                return None;
             }
             let ready = client
                 .get(&url)
@@ -397,7 +402,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
         }
 
-        guard
+        Some(guard)
+    }
+
+    /// Starts a TLC server, retrying with fresh ports if the ephemeral port
+    /// is stolen between allocation and JVM bind.
+    fn start_server() -> (u16, TlcServerGuard) {
+        for attempt in 0..3 {
+            let port = find_free_port();
+            eprintln!("TLC server attempt {}: trying port {port}", attempt + 1);
+            if let Some(guard) = try_start_server(port) {
+                return (port, guard);
+            }
+            eprintln!("TLC server did not start on port {port}, retrying...");
+        }
+        panic!("TLC server failed to start after 3 attempts");
     }
 
     /// Replays every honest unit fixture against a freshly-spawned
@@ -411,8 +430,7 @@ mod tests {
         require_jar();
         ensure_compiled();
 
-        let port = find_free_port();
-        let _server = start_server(port);
+        let (port, _server) = start_server();
         let url = format!("http://localhost:{port}/execute");
         let client = TlcClient::new(&url);
 

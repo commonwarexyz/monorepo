@@ -2,15 +2,49 @@ use super::{
     data::TraceData,
     sniffer::{TraceEntry, TracedCert, TracedVote},
 };
+use commonware_cryptography::{sha256::Sha256, Hasher};
 use serde_json::to_string;
 use sha1::{Digest, Sha1};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, sync::LazyLock};
 
 const N: usize = 4;
 const FAULTS: usize = 0;
 const Q: usize = 3;
 const REPLICAS: [&str; N] = ["n0", "n1", "n2", "n3"];
-const PAYLOADS: [&str; 3] = ["val_b0", "val_b1", "val_b2"];
+
+/// Number of distinct payloads cycled through by `payload_for_view`.
+const NUM_PAYLOADS: usize = 3;
+
+/// Returns true if the hex digest is certifiable, matching
+/// `Certifier::Sometimes`: `last_byte % 11 < 9`.
+fn is_certifiable(hex: &str) -> bool {
+    if hex.len() >= 2 {
+        let last_two = &hex[hex.len() - 2..];
+        let last_byte = u8::from_str_radix(last_two, 16).unwrap_or(0);
+        (last_byte % 11) < 9
+    } else {
+        true
+    }
+}
+
+fn alias_to_hex(name: &str) -> String {
+    let hash = Sha256::hash(name.as_bytes());
+    let bytes: &[u8] = hash.as_ref();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Canonical hex digests for block payloads. Computed from Quint alias names
+/// ("val_b0", "val_b1", "val_b2") via SHA-256, matching `decoder::block_to_hex`.
+static PAYLOAD_HEXES: LazyLock<[String; NUM_PAYLOADS]> = LazyLock::new(|| {
+    let hexes = std::array::from_fn(|i| alias_to_hex(&format!("val_b{i}")));
+    for (i, hex) in hexes.iter().enumerate() {
+        assert!(
+            is_certifiable(hex),
+            "val_b{i} is not certifiable — update NUM_PAYLOADS or aliases"
+        );
+    }
+    hexes
+});
 
 #[derive(Clone, Copy, Debug)]
 pub struct SmallHonestTraceConfig {
@@ -59,7 +93,7 @@ fn leader_for_view(epoch: u64, view: u64) -> String {
 }
 
 fn payload_for_view(view: u64) -> String {
-    PAYLOADS[((view - 1) as usize) % PAYLOADS.len()].to_string()
+    PAYLOAD_HEXES[((view - 1) as usize) % PAYLOAD_HEXES.len()].clone()
 }
 
 fn append_vote_broadcast(entries: &mut Vec<TraceEntry>, sender: &str, vote: TracedVote) {
@@ -196,7 +230,6 @@ fn propose_extension(
         .collect();
     let mut entries = Vec::new();
     let mut notarizers = vec![leader.clone()];
-    let mut nullifiers = Vec::new();
 
     append_vote_broadcast(
         &mut entries,
@@ -204,6 +237,8 @@ fn propose_extension(
         make_notarize(view, parent, &leader, &payload),
     );
 
+    // Followers in the mask notarize; followers outside do nothing (they
+    // received the proposal but haven't acted yet in this extension).
     for (idx, follower) in followers.iter().enumerate() {
         if follower_notarizers_mask & (1 << idx) != 0 {
             notarizers.push(follower.clone());
@@ -212,25 +247,7 @@ fn propose_extension(
                 follower,
                 make_notarize(view, parent, follower, &payload),
             );
-        } else {
-            nullifiers.push(follower.clone());
-            append_vote_broadcast(&mut entries, follower, make_nullify(view, follower));
         }
-    }
-
-    if nullifiers.len() >= Q {
-        let sender = cert_sender(&nullifiers);
-        append_certificate_broadcast(
-            &mut entries,
-            &sender,
-            make_nullification_cert(view, &nullifiers, &sender),
-        );
-        return ViewExtension {
-            entries,
-            next_parent: parent,
-            finalized_delta: 0,
-            advances_view: true,
-        };
     }
 
     if notarizers.len() >= Q {
@@ -292,6 +309,7 @@ fn trace_data_for_state(state: &SearchState, cfg: &SmallHonestTraceConfig) -> Tr
         entries: state.entries.clone(),
         required_containers: state.finalized_containers,
         reporter_states: BTreeMap::new(),
+        expected_state: None,
     }
 }
 
@@ -351,18 +369,23 @@ pub fn generate_small_honest_traces(cfg: SmallHonestTraceConfig) -> Vec<TraceDat
     seen.into_values().collect()
 }
 
+/// Writes generated traces as raw (unvalidated) JSON to `output_dir`.
+/// Validation is performed downstream by `validate_trace_corpus`, which
+/// runs the traces through `replica.qnt` and embeds the expected state.
 pub fn write_small_honest_traces(
     traces: &[TraceData],
     output_dir: &Path,
 ) -> Result<usize, std::io::Error> {
     fs::create_dir_all(output_dir)?;
+    let mut written = 0usize;
     for trace in traces {
         let json = serde_json::to_string_pretty(trace).expect("pretty trace serialization");
         let digest = Sha1::digest(json.as_bytes());
         let name = format!("{:x}.json", digest);
         fs::write(output_dir.join(name), json)?;
+        written += 1;
     }
-    Ok(traces.len())
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -533,5 +556,102 @@ mod tests {
         }
 
         assert!(found);
+    }
+
+    fn extract_block_ids(trace: &crate::tracing::data::TraceData) -> Vec<String> {
+        let mut blocks = Vec::new();
+        for entry in &trace.entries {
+            let block = match entry {
+                TraceEntry::Vote {
+                    vote: TracedVote::Notarize { block, .. },
+                    ..
+                }
+                | TraceEntry::Vote {
+                    vote: TracedVote::Finalize { block, .. },
+                    ..
+                }
+                | TraceEntry::Certificate {
+                    cert: TracedCert::Notarization { block, .. },
+                    ..
+                }
+                | TraceEntry::Certificate {
+                    cert: TracedCert::Finalization { block, .. },
+                    ..
+                } => Some(block.as_str()),
+                _ => None,
+            };
+            if let Some(b) = block {
+                blocks.push(b.to_string());
+            }
+        }
+        blocks
+    }
+
+    #[test]
+    fn static_trace_payloads_are_hex() {
+        let cfg = SmallHonestTraceConfig::default();
+        let traces = generate_small_honest_traces(cfg);
+        assert!(!traces.is_empty());
+
+        for (i, trace) in traces.iter().enumerate() {
+            for block in extract_block_ids(trace) {
+                assert_eq!(
+                    block.len(),
+                    64,
+                    "trace {i}: block ID must be 64 hex chars, got {} chars: {block:?}",
+                    block.len()
+                );
+                assert!(
+                    block.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "trace {i}: block ID contains non-hex chars: {block:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn static_trace_replay_matches_expected() {
+        let cfg = SmallHonestTraceConfig {
+            max_views: 2,
+            max_containers: 2,
+            epoch: 0,
+        };
+        let traces = generate_small_honest_traces(cfg);
+
+        // Pick one trace with at least one finalization to exercise the comparison.
+        let trace = traces
+            .iter()
+            .find(|t| {
+                t.entries.iter().any(|e| {
+                    matches!(
+                        e,
+                        TraceEntry::Certificate {
+                            cert: TracedCert::Finalization { .. },
+                            ..
+                        }
+                    )
+                })
+            })
+            .expect("need at least one trace with a finalization");
+
+        let mut trace = trace.clone();
+        let label = "static_replay_test";
+        let expected = crate::quint_model::validate_and_extract_expected(&trace, label)
+            .expect("quint validation must succeed")
+            .expect("expected state must be present");
+
+        trace.expected_state = Some(expected.clone());
+
+        let states = crate::replayer::replay_and_check(&trace, Some(0));
+        let mismatches = crate::replayer::compare::compare(&expected, &states, 0);
+        assert!(
+            mismatches.is_empty(),
+            "static trace replay mismatch:\n{}",
+            mismatches
+                .iter()
+                .map(|m| format!("  - {m}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

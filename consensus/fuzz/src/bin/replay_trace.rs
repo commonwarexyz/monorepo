@@ -8,7 +8,19 @@ use commonware_consensus_fuzz::{
     replayer::{self, compare},
     tracing::data::TraceData,
 };
-use std::{env, fs, process};
+use std::{env, fs, path::Path, process};
+
+fn load_expected_from_path(path: &str) -> compare::ExpectedState {
+    let expected_json = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error reading {path}: {e}");
+        process::exit(1);
+    });
+
+    serde_json::from_str(&expected_json).unwrap_or_else(|e| {
+        eprintln!("Error parsing {path}: {e}");
+        process::exit(1);
+    })
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -66,20 +78,30 @@ fn main() {
         }
     }
 
-    // If expected state is provided, compare
-    if args.len() == 3 {
-        let expected_path = &args[2];
-        let expected_json = fs::read_to_string(expected_path).unwrap_or_else(|e| {
-            eprintln!("Error reading {expected_path}: {e}");
-            process::exit(1);
-        });
+    let expected = if args.len() == 3 {
+        Some(load_expected_from_path(&args[2]))
+    } else {
+        let trace_path = Path::new(trace_path);
+        let sidecar = trace_path.with_file_name(format!(
+            "{}_expected.json",
+            trace_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("trace")
+        ));
 
-        let expected: compare::ExpectedState =
-            serde_json::from_str(&expected_json).unwrap_or_else(|e| {
-                eprintln!("Error parsing {expected_path}: {e}");
-                process::exit(1);
-            });
+        if sidecar.is_file() {
+            Some(load_expected_from_path(
+                sidecar.to_str().expect("utf8 expected sidecar path"),
+            ))
+        } else if let Some(ref expected) = trace.expected_state {
+            Some(expected.clone())
+        } else {
+            None
+        }
+    };
 
+    if let Some(expected) = expected {
         let mismatches = compare::compare(&expected, &states, trace.faults);
         if mismatches.is_empty() {
             println!("State comparison: MATCH");
@@ -90,5 +112,7 @@ fn main() {
             }
             process::exit(1);
         }
+    } else {
+        println!("State comparison: skipped (no expected state provided or embedded)");
     }
 }

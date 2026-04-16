@@ -1,5 +1,6 @@
-//! Validates a set of trace corpus directories against both Quint models
-//! and writes the accepted traces to a destination directory.
+//! Validates a set of trace corpus directories against `replica.qnt`,
+//! embeds the Quint-derived expected state, and writes accepted traces
+//! to a destination directory.
 //!
 //! Usage:
 //!   cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
@@ -7,6 +8,9 @@
 //!
 //! Environment:
 //!   * `MODEL_FAULTS` - optional faults override applied before validation
+//!   * `APPEND`       - if set, do not clear `<dest_dir>` and skip source
+//!                      files whose corresponding output already exists
+//!                      (enables incremental/concurrent runs)
 
 use commonware_consensus_fuzz::{
     quint_model, trace_mutator::find_json_files, tracing::data::TraceData,
@@ -80,6 +84,10 @@ fn main() {
     let dest_dir = PathBuf::from(&args[1]);
     let src_dirs: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
     let faults_override = env::var("MODEL_FAULTS").ok().and_then(|s| s.parse().ok());
+    // When APPEND is set, do not clear the destination, and skip any source
+    // file whose corresponding output already exists. This enables
+    // incremental/concurrent runs alongside a fuzzer.
+    let append = env::var("APPEND").is_ok();
 
     if src_dirs.iter().any(|src| src == &dest_dir) {
         eprintln!(
@@ -89,7 +97,7 @@ fn main() {
         process::exit(1);
     }
 
-    if dest_dir.exists() {
+    if dest_dir.exists() && !append {
         fs::remove_dir_all(&dest_dir).unwrap_or_else(|e| {
             eprintln!("failed to clear {}: {e}", dest_dir.display());
             process::exit(1);
@@ -130,16 +138,24 @@ fn main() {
                     accepted
                 );
             }
+            let rel = path.strip_prefix(src).unwrap_or(path);
+            let out = dest_dir.join(&prefix).join(rel);
+            if append && out.exists() {
+                continue;
+            }
             let Some(trace) = load_trace(path, faults_override) else {
                 continue;
             };
 
             let label = path.display().to_string();
-            if quint_model::validate_trace_dual(&trace, &label).is_ok() {
-                let rel = path.strip_prefix(src).unwrap_or(path);
-                let out = dest_dir.join(&prefix).join(rel);
-                write_trace(&out, &trace);
-                accepted += 1;
+            match quint_model::validate_and_extract_expected(&trace, &label) {
+                Ok(expected) => {
+                    let mut trace = trace;
+                    trace.expected_state = expected;
+                    write_trace(&out, &trace);
+                    accepted += 1;
+                }
+                Err(_) => {}
             }
 
             if files.len() >= 10 && ((idx + 1) % 10 == 0 || idx + 1 == files.len()) {
@@ -161,9 +177,10 @@ fn main() {
         dest_dir.display()
     );
 
-    if accepted == 0 {
+    // In append mode, an empty pass is fine (no new files to validate).
+    if accepted == 0 && !append {
         eprintln!(
-            "no dual-valid traces found across {} source dirs ({} missing)",
+            "no model-valid traces found across {} source dirs ({} missing)",
             src_dirs.len(),
             skipped_missing
         );

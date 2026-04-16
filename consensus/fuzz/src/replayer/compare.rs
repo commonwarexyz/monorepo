@@ -1,4 +1,7 @@
-use crate::types::ReplayedReplicaState;
+use crate::{
+    tracing::data::ReporterReplicaStateData,
+    types::ReplayedReplicaState,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -44,6 +47,45 @@ pub struct ExpectedNodeState {
 pub struct ExpectedState {
     /// Per correct node expected state, keyed by node ID (e.g. "n1", "n2").
     pub nodes: BTreeMap<String, ExpectedNodeState>,
+}
+
+/// Builds an expected state from embedded reporter-like trace state.
+pub fn expected_from_reporter_states(
+    reporter_states: &BTreeMap<String, ReporterReplicaStateData>,
+) -> ExpectedState {
+    let nodes = reporter_states
+        .iter()
+        .map(|(node, state)| {
+            (
+                node.clone(),
+                ExpectedNodeState {
+                    notarizations: state
+                        .notarizations
+                        .iter()
+                        .map(|(view, proposal)| (*view, proposal.payload.clone()))
+                        .collect(),
+                    nullifications: state.nullifications.clone(),
+                    finalizations: state
+                        .finalizations
+                        .iter()
+                        .map(|(view, proposal)| (*view, proposal.payload.clone()))
+                        .collect(),
+                    notarization_signature_counts: state.notarization_signature_counts.clone(),
+                    nullification_signature_counts: state.nullification_signature_counts.clone(),
+                    finalization_signature_counts: state.finalization_signature_counts.clone(),
+                    last_finalized: state.max_finalized_view,
+                    committed_sequence: Vec::new(),
+                    certified: state.certified.clone(),
+                    successful_certifications: state.successful_certifications.clone(),
+                    notarize_signers: state.notarize_signers.clone(),
+                    nullify_signers: state.nullify_signers.clone(),
+                    finalize_signers: state.finalize_signers.clone(),
+                },
+            )
+        })
+        .collect();
+
+    ExpectedState { nodes }
 }
 
 /// A single mismatch between expected and actual state.
@@ -469,7 +511,10 @@ impl std::fmt::Display for Mismatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Finalization, Notarization, ReplayedReplicaState};
+    use crate::{
+        tracing::data::{ReporterReplicaStateData, TraceProposalData},
+        types::{Finalization, Notarization, ReplayedReplicaState},
+    };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use std::collections::{HashMap, HashSet};
 
@@ -539,5 +584,49 @@ mod tests {
         assert!(mismatches
             .iter()
             .any(|m| matches!(m, Mismatch::CertifiedViewsMismatch { .. })));
+    }
+
+    #[test]
+    fn expected_from_reporter_states_converts_embedded_trace_state() {
+        let reporter_states = BTreeMap::from([(
+            "n1".to_string(),
+            ReporterReplicaStateData {
+                notarizations: BTreeMap::from([(
+                    3,
+                    TraceProposalData {
+                        view: 3,
+                        parent: 2,
+                        payload: "aa".repeat(32),
+                    },
+                )]),
+                notarization_signature_counts: BTreeMap::from([(3, Some(3))]),
+                nullifications: BTreeSet::from([4]),
+                nullification_signature_counts: BTreeMap::from([(4, Some(3))]),
+                finalizations: BTreeMap::from([(
+                    5,
+                    TraceProposalData {
+                        view: 5,
+                        parent: 4,
+                        payload: "bb".repeat(32),
+                    },
+                )]),
+                finalization_signature_counts: BTreeMap::from([(5, Some(3))]),
+                certified: BTreeSet::from([3, 4, 5]),
+                successful_certifications: BTreeSet::from([3, 5]),
+                notarize_signers: BTreeMap::from([(3, BTreeSet::from(["n1".to_string()]))]),
+                nullify_signers: BTreeMap::from([(4, BTreeSet::from(["n1".to_string()]))]),
+                finalize_signers: BTreeMap::from([(5, BTreeSet::from(["n1".to_string()]))]),
+                max_finalized_view: 5,
+            },
+        )]);
+
+        let expected = expected_from_reporter_states(&reporter_states);
+        let node = expected.nodes.get("n1").expect("missing node");
+        assert_eq!(node.notarizations.get(&3), Some(&"aa".repeat(32)));
+        assert!(node.nullifications.contains(&4));
+        assert_eq!(node.finalizations.get(&5), Some(&"bb".repeat(32)));
+        assert_eq!(node.last_finalized, 5);
+        assert_eq!(node.certified, BTreeSet::from([3, 4, 5]));
+        assert_eq!(node.successful_certifications, BTreeSet::from([3, 5]));
     }
 }

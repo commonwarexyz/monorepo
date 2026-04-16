@@ -663,7 +663,7 @@ fn persist_trace_if_selected(
     true
 }
 
-fn encode_reporter_states(
+pub fn encode_reporter_states(
     replayed: Vec<ReplayedReplicaState>,
     faults: usize,
 ) -> BTreeMap<String, ReporterReplicaStateData> {
@@ -1201,6 +1201,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             entries: trace.structured.clone(),
             required_containers: tracing_input.required_containers,
             reporter_states,
+            expected_state: None,
         };
 
         persist_trace_if_selected("simplex_ed25519_quint_twins", &hash_hex, &trace_data, false);
@@ -1446,6 +1447,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
+            expected_state: None,
         };
 
         persist_trace_if_selected(
@@ -1620,6 +1622,7 @@ async fn build_honest_trace_data(
         entries: filtered,
         required_containers: tracing_input.required_containers,
         reporter_states,
+        expected_state: None,
     }
 }
 
@@ -1765,6 +1768,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
+            expected_state: None,
         };
 
         persist_trace_if_selected(

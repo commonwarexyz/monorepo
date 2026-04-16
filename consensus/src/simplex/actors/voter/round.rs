@@ -525,7 +525,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn replay(&mut self, artifact: &Artifact<S, D>) {
+    pub fn replay(&mut self, artifact: &Artifact<S, D>) -> bool {
         match artifact {
             Artifact::Notarize(notarize) => {
                 assert!(
@@ -536,34 +536,47 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // While we may not be the leader here, we still call
                 // built because the effect is the same (there is a proposal
                 // and it is verified).
+                let changed = !self.broadcast_notarize;
                 self.proposal.built(notarize.proposal.clone());
                 self.broadcast_notarize = true;
+                changed
             }
             Artifact::Nullify(nullify) => {
                 assert!(
                     self.is_signer(nullify.signer()),
                     "replaying nullify from another signer"
                 );
+                let changed = !self.broadcast_nullify;
                 self.broadcast_nullify = true;
+                changed
             }
             Artifact::Finalize(finalize) => {
                 assert!(
                     self.is_signer(finalize.signer()),
                     "replaying finalize from another signer"
                 );
+                let changed = !self.broadcast_finalize;
                 self.broadcast_finalize = true;
+                changed
             }
             Artifact::Notarization(_) => {
+                let changed = !self.broadcast_notarization;
                 self.broadcast_notarization = true;
+                changed
             }
             Artifact::Nullification(_) => {
+                let changed = !self.broadcast_nullification;
                 self.broadcast_nullification = true;
+                changed
             }
             Artifact::Finalization(_) => {
+                let changed = !self.broadcast_finalization;
                 self.broadcast_finalization = true;
+                changed
             }
             Artifact::Certification(_, success) => {
                 self.certified(*success);
+                true
             }
         }
     }
@@ -903,6 +916,25 @@ mod tests {
 
         // Check that construct_nullify returns None
         assert!(round.construct_nullify().is_none());
+    }
+
+    #[test]
+    fn replay_finalize_is_idempotent() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+        let finalize_local = Finalize::sign(&local_scheme, proposal).expect("finalize");
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+
+        assert!(round.replay(&Artifact::Finalize(finalize_local.clone())));
+        assert!(!round.replay(&Artifact::Finalize(finalize_local)));
     }
 
     #[test]

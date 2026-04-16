@@ -128,6 +128,12 @@ impl<
         }
     }
 
+    /// Returns a clone of the voter mailbox for direct message injection.
+    #[cfg(any(test, feature = "mocks"))]
+    pub fn voter_mailbox(&self) -> voter::Mailbox<S, D> {
+        self.voter_mailbox.clone()
+    }
+
     /// Start the `simplex` consensus engine.
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
