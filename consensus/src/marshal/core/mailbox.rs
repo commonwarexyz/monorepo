@@ -13,22 +13,6 @@ use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     vec::NonEmptyVec,
 };
-use std::fmt;
-
-/// Returned by [Mailbox::verified] / [Mailbox::proposed] when the marshal actor
-/// is no longer running (typical during graceful shutdown). Callers MUST
-/// treat this as "persistence not confirmed" and avoid signaling consensus
-/// that the block is good for voting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MarshalUnavailable;
-
-impl fmt::Display for MarshalUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("marshal actor unavailable; persistence not confirmed")
-    }
-}
-
-impl std::error::Error for MarshalUnavailable {}
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -314,41 +298,31 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Requests that a proposed block is sent to peers, awaiting the actor's
     /// confirmation that the block has been durably persisted before returning.
     ///
-    /// This is a safety boundary: callers may rely on `Ok(())` meaning the
-    /// block exists on disk. They MUST NOT proceed past `Err(_)` to a place
-    /// where they would vote on the block, since persistence was not
-    /// confirmed.
-    ///
-    /// Returns `Err(MarshalUnavailable)` if the marshal actor has shut down
-    /// (typical during graceful shutdown, where the spawned task should just
-    /// exit silently).
+    /// Returns `true` once the actor has completed `put_sync`. Returns `false`
+    /// if the marshal actor has shut down before acknowledging (typical during
+    /// graceful shutdown). Callers MUST NOT proceed to vote when this returns
+    /// `false` -- the block is not durably stored.
     #[must_use = "callers must not proceed to vote on an unpersisted block"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> Result<(), MarshalUnavailable> {
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Proposed { round, block, ack })
             .await
-            .map(|()| ())
-            .ok_or(MarshalUnavailable)
+            .is_some()
     }
 
     /// Notifies the actor that a block has been verified, awaiting the actor's
     /// confirmation that the block has been durably persisted before returning.
     ///
-    /// This is a safety boundary: callers may rely on `Ok(())` meaning the
-    /// block exists on disk. They MUST NOT proceed past `Err(_)` to a place
-    /// where they would resolve consensus's certify task as true (which
-    /// would drive a finalize vote) since persistence was not confirmed.
-    ///
-    /// Returns `Err(MarshalUnavailable)` if the marshal actor has shut down
-    /// (typical during graceful shutdown, where the spawned task should just
-    /// exit silently).
+    /// Returns `true` once the actor has completed `put_sync`. Returns `false`
+    /// if the marshal actor has shut down before acknowledging. Callers MUST
+    /// NOT proceed to resolve consensus's certify task as `true` (which would
+    /// drive a finalize vote) when this returns `false`.
     #[must_use = "callers must not proceed to certify true on an unpersisted block"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> Result<(), MarshalUnavailable> {
+    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
             .await
-            .map(|()| ())
-            .ok_or(MarshalUnavailable)
+            .is_some()
     }
 
     /// Sets the sync starting point (advances if higher than current).

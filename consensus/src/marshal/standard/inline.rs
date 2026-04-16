@@ -501,7 +501,7 @@ where
                     );
                     return;
                 }
-                if self.marshal.proposed(round, block).await.is_err() {
+                if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?digest,

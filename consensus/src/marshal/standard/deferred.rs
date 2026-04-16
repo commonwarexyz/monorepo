@@ -589,7 +589,7 @@ where
                     // twice for the same block. That function is idempotent, so this is safe.
                     // If marshal is gone, do not signal certify-true: the block was not durably
                     // stored.
-                    if marshaled.marshal.verified(round, block).await.is_err() {
+                    if !marshaled.marshal.verified(round, block).await {
                         debug!(
                             ?round,
                             "marshal unavailable during certify re-proposal verified ack; \
@@ -644,7 +644,7 @@ where
                     height = %block.height(),
                     "requested broadcast of built block"
                 );
-                if self.marshal.proposed(round, block).await.is_err() {
+                if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?digest,

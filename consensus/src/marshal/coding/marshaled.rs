@@ -429,7 +429,7 @@ where
                     // actor is gone, do NOT signal certify-true: the block was
                     // not durably stored and consensus must not finalize-vote
                     // on it.
-                    if marshal.verified(round, block).await.is_err() {
+                    if !marshal.verified(round, block).await {
                         debug!(
                             ?round,
                             "marshal unavailable during verified ack; skipping certify resolution"
@@ -771,7 +771,7 @@ where
                     // verification task for `certify`. If marshal is gone, do
                     // not signal certify-true: the block was not durably
                     // stored.
-                    if marshal.verified(round, block).await.is_err() {
+                    if !marshal.verified(round, block).await {
                         debug!(
                             ?round,
                             "marshal unavailable during re-proposal verified ack; \
@@ -917,7 +917,7 @@ where
                     // `marshal.verified` twice for the same block. That function is
                     // idempotent, so this is safe. If marshal is gone, do not
                     // signal certify-true: the block was not durably stored.
-                    if marshaled.marshal.verified(round, block).await.is_err() {
+                    if !marshaled.marshal.verified(round, block).await {
                         debug!(
                             ?round,
                             "marshal unavailable during certify re-proposal verified ack; \
@@ -1000,7 +1000,7 @@ where
                 // If marshal is unavailable (graceful shutdown), log and
                 // skip: consensus is also being torn down and the local vote
                 // for this proposal must not proceed without persistence.
-                if self.marshal.proposed(round, block).await.is_err() {
+                if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?commitment,

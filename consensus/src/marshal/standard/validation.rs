@@ -103,7 +103,7 @@ where
             return Decision::Complete(false);
         }
 
-        if marshal.verified(context.round, block).await.is_err() {
+        if !marshal.verified(context.round, block).await {
             debug!(
                 round = ?context.round,
                 "marshal unavailable during re-proposal verified ack; aborting verify"
@@ -208,7 +208,7 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid && marshal.verified(context.round, block).await.is_err() {
+    if application_valid && !marshal.verified(context.round, block).await {
         debug!(
             round = ?context.round,
             "marshal unavailable during verified ack; aborting verify"
