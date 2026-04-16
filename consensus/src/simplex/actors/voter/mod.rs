@@ -4459,15 +4459,15 @@ mod tests {
         no_self_verify_after_restart(secp256r1::fixture);
     }
 
-    /// When the voter is the leader of a view and that view's notarization is
-    /// resolved (e.g. assembled locally from peer votes), it must not ask the
-    /// automaton to certify its own proposal: the leader already produced and
-    /// verified the payload locally.
+    /// When the voter is the leader of a view and later reconstructs a
+    /// notarization for the proposal it built locally, it must not ask the
+    /// automaton to certify that same proposal again.
     ///
-    /// This is enforced in `actor::run` where we short-circuit `automaton.certify`
-    /// for leader-owned views. The test asserts the end-to-end live invariant: a
-    /// `Finalize` is emitted for the leader-owned view (proving certification
-    /// completed) without ever invoking the certify observer for that view.
+    /// This is enforced in `actor::run` by short-circuiting certification only
+    /// when the round carries explicit local proposal evidence, not merely
+    /// because `leader == me`. The test asserts the end-to-end invariant on the
+    /// live path: a `Finalize` is emitted for the leader-owned view without the
+    /// certify observer firing for that view.
     fn no_self_certify_when_proposing<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4621,8 +4621,8 @@ mod tests {
                 }
             }
 
-            // Assert the live invariant: the certify observer never fired for the
-            // leader-owned view.
+            // Assert the live invariant: the certify observer never fired for
+            // the leader-owned proposal we built ourselves.
             let certified = certify_calls.lock();
             assert!(
                 !certified.contains(&target_view),
@@ -4642,13 +4642,12 @@ mod tests {
     }
 
     /// Restart analogue of `no_self_certify_when_proposing`: after the voter has
-    /// proposed and journaled a local notarize as leader, restarting must not
-    /// cause it to consult the automaton when certifying its own proposal once
-    /// the corresponding notarization is resolved post-restart.
+    /// proposed and journaled a local notarize as leader, restarting must
+    /// recover that local proposal evidence and continue to bypass automaton
+    /// certification once the corresponding notarization is resolved.
     ///
-    /// Replay of the journaled local notarize restores the leader's proposal as
-    /// `Verified`; the leader-owned short-circuit in `actor::run` then bypasses
-    /// the automaton when certification runs.
+    /// The replayed local notarize is what distinguishes this case from merely
+    /// observing a leader-owned proposal certificate during catch-up.
     fn no_self_certify_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4861,8 +4860,8 @@ mod tests {
                 .resolved(Certificate::Notarization(notarization))
                 .await;
 
-            // A finalize for the leader-owned view proves the voter certified its
-            // own proposal post-restart without consulting the automaton.
+            // A finalize for the leader-owned view proves the voter recovered
+            // the local certification shortcut after replay.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -4884,8 +4883,8 @@ mod tests {
             }
 
             // Assert the restart invariant: certify did not fire for the
-            // leader-owned view whose journaled notarize replay should have
-            // restored the slot's proposal state.
+            // leader-owned view whose journaled local notarize replay restored
+            // the local proposal evidence.
             let certified = certify_calls.lock();
             assert!(
                 !certified.contains(&target_view),

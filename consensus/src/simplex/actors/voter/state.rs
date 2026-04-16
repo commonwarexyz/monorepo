@@ -585,25 +585,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Takes all certification candidates and returns proposals ready for
-    /// certification, along with whether the local participant is the leader
-    /// of each view (used to short-circuit certification for own proposals).
+    /// certification, along with whether the proposal was built locally.
     ///
-    /// The `am_leader` flag is `true` only when the round's leader has been
-    /// set AND matches the local participant. The leader for view V is set
-    /// by processing V-1's notarization (`add_notarization(V-1)` calls
-    /// `set_leader(V, ...)`). In normal operation this precedes entering V
-    /// and proposing, so `am_leader = true` means we proposed the block.
-    ///
-    /// During catch-up, `am_leader` can be `true` for a view we never
-    /// entered: if V-1's notarization set V's leader before V's notarization
-    /// added V as a candidate. A notarization where we are the elected
-    /// leader can only exist if we (or a clone holding our key) proposed,
-    /// so accepting the network's 2f+1 commitment is correct. If V's
-    /// notarization arrives without V-1's, the leader is unknown and
-    /// `am_leader` is `false`, falling through to the automaton.
+    /// Certification may be inferred only when we have explicit evidence that we
+    /// proposed this exact payload for the round, either in the current process
+    /// or via replay of our durable local vote. Leader identity alone is not
+    /// sufficient during catch-up and recovery.
     pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
-        let me = self.scheme.me();
         candidates
             .into_iter()
             .filter_map(|view| {
@@ -611,11 +600,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     return None;
                 }
                 let round = self.views.get_mut(&view)?;
-                let am_leader = round
-                    .leader()
-                    .is_some_and(|leader| me.is_some_and(|me| me == leader.idx));
-                let proposal = round.try_certify()?;
-                Some((proposal, am_leader))
+                let candidate = round.try_certify()?;
+                Some(candidate)
             })
             .collect()
     }
@@ -1787,7 +1773,9 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
 
             let epoch = Epoch::new(2);
             let view = View::new(2);
@@ -1832,6 +1820,76 @@ mod tests {
 
             // No verification request should be emitted (leader-owned).
             assert!(state.try_verify().is_none());
+
+            let notarization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), view);
+            assert!(candidates[0].1);
+        });
+    }
+
+    #[test]
+    fn certify_candidates_do_not_short_circuit_leader_owned_recovered_proposals() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let epoch = Epoch::new(2);
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, view),
+                View::new(1),
+                Sha256Digest::from([43u8; 32]),
+            );
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            assert!(state.enter_view(view));
+            state.set_leader(view, None);
+            assert_eq!(state.leader_index(view), Some(Participant::new(0)));
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_none());
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0, proposal);
+            assert!(
+                !candidates[0].1,
+                "leader-owned recovered proposal must not inherit local certification"
+            );
         });
     }
 
@@ -1964,6 +2022,7 @@ mod tests {
             // All 6 views should be candidates
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 6);
+            assert!(candidates.iter().all(|(_, is_local)| !is_local));
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
             for i in [3u64, 4, 5, 7] {
@@ -2004,6 +2063,7 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), View::new(9));
+            assert!(!candidates[0].1);
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
@@ -2014,6 +2074,7 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), View::new(10));
+            assert!(!candidates[0].1);
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -2024,6 +2085,7 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), View::new(11));
+            assert!(!candidates[0].1);
         });
     }
 
@@ -2093,13 +2155,10 @@ mod tests {
                 .try_certify()
                 .is_some());
 
-            let expected_am_leader = state
-                .leader_index(live_view)
-                .is_some_and(|leader| state.is_me(leader));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), live_view);
-            assert_eq!(candidates[0].1, expected_am_leader);
+            assert!(!candidates[0].1);
         });
     }
 
@@ -2155,6 +2214,7 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), view);
+            assert!(!candidates[0].1);
         });
     }
 
@@ -2199,6 +2259,7 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), view);
+            assert!(!candidates[0].1);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());

@@ -854,31 +854,16 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for (proposal, am_leader) in self.state.certify_candidates() {
+                for (proposal, is_local) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let result = if am_leader {
-                        // The elected leader of this view is us, so certification is
-                        // trivially true. Skipping the automaton avoids a redundant
-                        // round-trip.
-                        //
-                        // `am_leader` can only be `true` when the round's leader has
-                        // been set AND matches the local participant. The leader for
-                        // view V is set by processing V-1's notarization (which calls
-                        // `set_leader(V, ...)`). In normal operation this happens
-                        // before we enter V and propose, so `am_leader = true` means
-                        // we proposed.
-                        //
-                        // During catch-up (resolver delivers notarizations out of
-                        // order), `am_leader` can also be `true` for a view we never
-                        // entered -- if V-1's notarization arrived and set V's leader
-                        // before V's notarization added V as a candidate. A
-                        // notarization for our view can only exist if we (or a clone
-                        // holding our key) proposed, so accepting the network's 2f+1
-                        // commitment is safe. If V's notarization arrives without
-                        // V-1's, the leader is unknown, `am_leader = false`, and we
-                        // correctly fall through to the automaton.
+                    let result = if is_local {
+                        // Locally proposed payloads are certifiable-by-construction
+                        // for their proposer. We only apply this shortcut when we
+                        // have explicit local evidence for the exact proposal,
+                        // either from this process or from replaying our durable
+                        // local notarize vote.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;

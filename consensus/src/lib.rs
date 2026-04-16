@@ -99,6 +99,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// If it is possible to generate a payload, the Digest should be returned over the provided
         /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
         /// takes too long, the consensus engine may drop the provided proposal.
+        ///
+        /// For [`CertifiableAutomaton`] implementations, returning a payload from
+        /// `propose` also commits the local proposer to certifying that same
+        /// `(round, payload)` if it later becomes notarized. Consensus engines
+        /// may therefore treat durable local evidence of proposal construction
+        /// (for example replay of a local vote on a leader-owned round) as
+        /// sufficient to bypass a later `certify` callback for that exact
+        /// proposal.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -144,6 +152,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// This is particularly useful for applications that employ erasure coding, which
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        /// Payloads produced locally by [`Automaton::propose`] are the exception:
+        /// the proposer must treat them as certifiable-by-construction for that
+        /// same round, allowing consensus to skip `certify` once it has durable
+        /// local evidence that the proposal originated here.
         ///
         /// Like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
