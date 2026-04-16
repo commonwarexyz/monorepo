@@ -527,7 +527,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        let _ = handle.mailbox.proposed(round, block.clone()).await;
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -536,7 +536,7 @@ impl TestHarness for StandardHarness {
         block: &B,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        let _ = handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -682,7 +682,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        let _ = handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
 
@@ -1315,7 +1315,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        let _ = handle.mailbox.proposed(round, block.clone()).await;
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -1324,7 +1324,7 @@ impl TestHarness for CodingHarness {
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        let _ = handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
     fn make_finalization(
@@ -1487,7 +1487,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        let _ = handle.mailbox.verified(round, block.clone()).await;
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
 
