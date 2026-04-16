@@ -1596,6 +1596,140 @@ mod tests {
         });
     }
 
+    /// Regression: a validator must not vote finalize on a block that is not
+    /// durably persisted. `certify` resolves true ⟹ block is on disk for
+    /// this validator. We assert this by aborting the marshal actor the
+    /// instant `certify` returns true; without the persist-before-certify
+    /// fix, the actor may have only had the `Verified` message enqueued (not
+    /// processed), and the block is lost on restart even though the validator
+    /// would have proceeded to broadcast a finalize vote.
+    #[test_traced("WARN")]
+    fn test_marshaled_certify_persists_block_before_resolving() {
+        for seed in 0u64..16 {
+            certify_persists_block_before_resolving_at(seed);
+        }
+    }
+
+    fn certify_persists_block_before_resolving_at(seed: u64) {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+            let actor_handle = setup.actor_handle;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            // Push parent (height 1) and child (height 2) into the shards
+            // engine. These are reconstructable but NOT durably persisted.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx.clone(), parent.digest(), Height::new(2), 200);
+            let coded_child = CodedBlock::new(child.clone(), coding_config, &Sequential);
+            let child_commitment = coded_child.commitment();
+            let child_digest = coded_child.digest();
+            shards.clone().proposed(child_round, coded_child).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Optimistic verify - returns shard validity (true).
+            let shard_validity = marshaled
+                .verify(child_ctx, child_commitment)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(shard_validity, "shard validity should pass");
+
+            // Certify - this is the safety gate before finalize voting.
+            let certify_result = marshaled
+                .certify(child_round, child_commitment)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(certify_result, "certify should succeed");
+
+            // CRITICAL: abort the marshal actor synchronously, with no
+            // intervening await. If certify returned true but the actor had
+            // only enqueued (not processed) the `Verified` message, this
+            // abort kills the actor before persistence completes.
+            actor_handle.abort();
+            drop(marshaled);
+            drop(marshal);
+            drop(shards);
+
+            // Restart from the same partition. The block must be durably
+            // persisted - otherwise the validator would have voted finalize
+            // for a block it cannot serve from local storage.
+            let setup2 = CodingHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            let post_restart = marshal2.get_block(&child_digest).await;
+            assert!(
+                post_restart.is_some(),
+                "certify resolved true ⟹ block must be durably persisted"
+            );
+        });
+    }
+
     /// Regression: a proposer must be able to recover its own block after a
     /// crash that occurs between `Marshaled::propose()` + `Relay::broadcast(Plan::Propose)`
     /// and any verify-driven persistence. Without persisting on the broadcast
@@ -1626,6 +1760,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
+            let actor_handle = setup.actor_handle;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -1684,9 +1819,11 @@ mod tests {
             assert_eq!(commitment, expected_commitment);
             marshaled.broadcast(commitment, Plan::Propose).await;
 
-            // Crash immediately. `broadcast` already awaited the actor's
-            // persistence ack via `marshal.proposed`, so no extra sleep is
-            // needed - the block must be on disk by now.
+            // CRITICAL: abort the marshal actor synchronously so it cannot
+            // drain pending messages. `broadcast` must have already awaited
+            // the actor's persistence ack via `marshal.proposed`, so no extra
+            // sleep is needed - the block must be on disk by now.
+            actor_handle.abort();
             drop(marshaled);
             drop(marshal);
             drop(shards);

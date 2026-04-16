@@ -486,13 +486,14 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        actor.start(application.clone(), buffer, resolver);
+        let actor_handle = actor.start(application.clone(), buffer, resolver);
 
         ValidatorSetup {
             application,
             mailbox,
             extra: (),
             height,
+            actor_handle,
         }
     }
 
@@ -704,6 +705,7 @@ impl TestHarness for InlineHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -729,6 +731,7 @@ impl TestHarness for InlineHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -890,6 +893,7 @@ impl TestHarness for DeferredHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -915,6 +919,7 @@ impl TestHarness for DeferredHarness {
             mailbox: setup.mailbox,
             extra: setup.extra,
             height: setup.height,
+            actor_handle: setup.actor_handle,
         }
     }
 
@@ -1254,13 +1259,14 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        actor.start(application.clone(), shard_mailbox.clone(), resolver);
+        let actor_handle = actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         ValidatorSetup {
             application,
             mailbox,
             extra: shard_mailbox,
             height,
+            actor_handle,
         }
     }
 
