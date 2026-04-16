@@ -225,7 +225,6 @@ stability_scope!(BETA {
         /// Only [`SpawnBuilder::spawn`] is available on the returned builder, so
         /// further tree-edge or identity operations (e.g. `child`, `with_attribute`)
         /// must appear before `shared`.
-        #[must_use]
         fn shared(self, blocking: bool) -> SpawnBuilder<Self>
         where
             Self: Sized,
@@ -241,7 +240,6 @@ stability_scope!(BETA {
         ///
         /// This is not the default behavior. See [`Spawner::shared`] for more
         /// information.
-        #[must_use]
         fn dedicated(self) -> SpawnBuilder<Self>
         where
             Self: Sized,
@@ -348,7 +346,7 @@ stability_scope!(BETA {
 
     impl<S: Spawner> SpawnBuilder<S> {
         #[doc(hidden)]
-        pub fn new(inner: S, execution: Execution) -> Self {
+        pub const fn new(inner: S, execution: Execution) -> Self {
             Self { inner, execution }
         }
 
