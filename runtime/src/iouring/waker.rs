@@ -645,6 +645,51 @@ pub mod tests {
     }
 
     #[test]
+    fn test_publish_after_futex_arm_rejects_stale_snapshot() {
+        // Verify the futex idle path tolerates a publish that lands after
+        // WAITING_ON_FUTEX_BIT is armed but before the armed thread commits to
+        // a stable futex wait on that snapshot.
+        //
+        // This models the race that `park_idle()` closes:
+        // 1. idle path arms WAITING_ON_FUTEX_BIT and computes a snapshot
+        // 2. producer publishes, changing the packed state word
+        // 3. a futex wait on the stale snapshot must return immediately
+        let waker = Waker::new().expect("eventfd creation should succeed");
+        let before = submitted_seq(&waker);
+
+        // Manually split `park_idle()` into "arm" and "wait" so the publish
+        // can be injected exactly between those two steps.
+        let prev = waker
+            .inner
+            .state
+            .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
+        assert_eq!(prev & WAITING_MASK, 0);
+        let snapshot = prev | WAITING_ON_FUTEX_BIT;
+
+        // This publish changes the packed word after arming, so a futex wait
+        // on the stale snapshot must now return immediately.
+        waker.publish();
+        assert_eq!(
+            submitted_seq(&waker),
+            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
+        );
+
+        // If the stale snapshot were incorrectly accepted, this call could
+        // block indefinitely. Returning here proves the userspace equality
+        // check / futex EAGAIN path rejected the outdated snapshot.
+        waker.futex_wait(snapshot);
+        waker.clear_wait();
+
+        // The publish should remain visible and the wait bits should be fully
+        // cleared on exit, matching `park_idle()`'s contract.
+        assert_eq!(
+            submitted_seq(&waker),
+            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
+        );
+        assert_eq!(state_bits(&waker), 0);
+    }
+
+    #[test]
     fn test_publish_deduplicates_eventfd_wakes() {
         // Verify repeated publishes while the same eventfd wait is armed only
         // queue one wake write, while still advancing the sequence each time.

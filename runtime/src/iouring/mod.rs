@@ -769,12 +769,17 @@ impl IoUringLoop {
                     }
 
                     // `pending()`'s acquire load observed a published-ahead
-                    // sequence delta after the empty observation. The rounded
-                    // ring size stays below half the packed sequence domain, so
-                    // that delta is directional: producers are genuinely ahead.
-                    // Tokio's bounded MPSC also guarantees `try_recv()` returns
-                    // `Disconnected` only when the channel is closed AND empty
-                    // (we keep a canary test to lock in those semantics).
+                    // sequence delta after the empty observation. Producers
+                    // execute `send().await` before `publish()`, and that
+                    // release/acquire edge makes the corresponding enqueue
+                    // visible here before the second `try_recv()`.
+                    //
+                    // The rounded ring size stays below half the packed
+                    // sequence domain, so the observed delta is directional:
+                    // producers are genuinely ahead. Tokio's bounded MPSC also
+                    // guarantees `try_recv()` returns `Disconnected` only when
+                    // the channel is closed AND empty (we keep canaries for
+                    // both assumptions below).
                     self.receiver.try_recv().expect(
                         "published-ahead sequence observed after acquire, but channel had no request",
                     )
@@ -1103,6 +1108,49 @@ mod tests {
         assert_eq!(receiver.try_recv(), Ok(41));
         assert_eq!(receiver.try_recv(), Ok(42));
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pending_recheck_after_empty_observes_published_request() {
+        // Lock in the stronger post-`pending()` recheck assumption used by the
+        // `expect(...)` in `fill_submission_queue()`: once the consumer sees
+        // a published-ahead sequence after an `Empty` observation, the second
+        // `try_recv()` must observe the corresponding request rather than
+        // returning `Empty` again.
+        //
+        // This is the minimal shape of that race:
+        // 1. consumer sees the channel as empty
+        // 2. producer enqueues one item and then publishes it
+        // 3. consumer notices the published-ahead sequence
+        // 4. consumer's second `try_recv()` must now observe the item
+        let (sender, mut receiver) = mpsc::channel(1);
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        // Start from the same state as the real loop's slow path: the first
+        // receive attempt found no immediately visible work.
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+
+        let publish_waker = waker.clone();
+        let submit = tokio::spawn(async move {
+            // Match the real producer protocol exactly: enqueue first, then
+            // publish the sequence increment that `pending()` observes.
+            sender
+                .send(7u8)
+                .await
+                .expect("send should succeed before publish");
+            publish_waker.publish();
+        });
+
+        // Poll until the acquire/release pair says producers are ahead. The
+        // real loop would take the `expect(...)` path at this point.
+        while !waker.pending(0) {
+            tokio::task::yield_now().await;
+        }
+
+        // Once `pending()` is true for `processed_seq = 0`, the second receive
+        // must see the request rather than report `Empty` again.
+        assert_eq!(receiver.try_recv(), Ok(7));
+        submit.await.expect("sender task should finish");
     }
 
     #[test]
@@ -2015,6 +2063,94 @@ mod tests {
             .expect("blocking recv should succeed");
         assert_eq!(read1, 1);
 
+        drop(pipe_right1);
+        drop(pipe_right2);
+        drop(submitter);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_deferred_wake_reinstall_survives_idle_futex_path() {
+        // Simulate a prior wake CQE that terminated multishot delivery by
+        // seeding `wake_rearm_needed = true`, then verify an idle futex pass
+        // can defer the reinstall until the next non-idle submission without
+        // losing later eventfd-based wakeups.
+        let cfg = Config {
+            size: 2,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+        let idle_waker = iouring.waker.clone();
+        let eventfd_waker = iouring.waker.clone();
+        iouring.wake_rearm_needed = true;
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // With no work yet, the loop stages the reinstall SQE but then parks
+        // on the fully idle futex path instead of entering the kernel.
+        waker::tests::wait_until_futex_armed(&idle_waker);
+
+        let (pipe_left1, pipe_right1) = UnixStream::pair().unwrap();
+        let (tx1, rx1) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left1.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx1,
+            }))
+            .await
+            .unwrap();
+
+        // This first request wakes the futex-idle loop. The subsequent
+        // non-idle iteration must submit both the deferred reinstall SQE and
+        // the recv SQE before blocking on the eventfd-backed path again.
+        waker::tests::wait_until_eventfd_armed(&eventfd_waker);
+
+        let (pipe_left2, pipe_right2) = UnixStream::pair().unwrap();
+        (&pipe_right2).write_all(&[5]).unwrap();
+        let (tx2, rx2) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left2.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx2,
+            }))
+            .await
+            .unwrap();
+
+        // The second recv can only complete promptly if the deferred reinstall
+        // became live before the loop re-entered `submit_and_wait`.
+        let (_, read2) = tokio::time::timeout(Duration::from_secs(2), rx2)
+            .await
+            .expect("deferred-reinstall recv timed out")
+            .expect("missing deferred-reinstall recv completion")
+            .expect("deferred-reinstall recv should succeed");
+        assert_eq!(read2, 1);
+
+        // Finish the original blocking recv as well. This keeps the test
+        // focused on the deferred-reinstall wake path rather than on shutdown
+        // abandonment behavior for the first waiter.
+        (&pipe_right1).write_all(&[3]).unwrap();
+        let (_, read1) = tokio::time::timeout(Duration::from_secs(2), rx1)
+            .await
+            .expect("blocking recv timed out")
+            .expect("missing blocking recv completion")
+            .expect("blocking recv should succeed");
+        assert_eq!(read1, 1);
+
+        // With both logical requests completed, shutdown should now be a
+        // trivial clean exit rather than a second source of liveness in this
+        // test.
         drop(pipe_right1);
         drop(pipe_right2);
         drop(submitter);
