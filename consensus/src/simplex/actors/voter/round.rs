@@ -542,6 +542,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // the local certification shortcut from this replay; follower
                 // rounds also journal local notarize votes over other leaders'
                 // proposals.
+                //
+                // This relies on journal replay remaining append-ordered. By the
+                // time we replay a local vote for round `v`, the earlier
+                // certificate for `v - 1` has already replayed and seeded this
+                // round's leader.
                 if self
                     .leader
                     .as_ref()
