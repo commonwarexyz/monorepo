@@ -510,6 +510,12 @@ pub mod tests {
         }
     }
 
+    pub fn wait_until_eventfd_armed(waker: &Waker) {
+        while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_EVENTFD_BIT == 0 {
+            std::hint::spin_loop();
+        }
+    }
+
     fn state_bits(waker: &Waker) -> u32 {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
     }

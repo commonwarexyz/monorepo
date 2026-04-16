@@ -470,15 +470,31 @@ enum FillResult {
 }
 
 impl FillResult {
-    /// Derive the staging result from waiter-table and submission-queue fullness.
+    /// Derive the staging outcome from the current fill state.
+    ///
+    /// Waiter saturation dominates submission-queue saturation: once the
+    /// waiter table is full, the loop cannot admit more work until completions
+    /// arrive, regardless of remaining SQ capacity. That same waiter-full path
+    /// is also where shutdown needs extra normalization, because a closed and
+    /// drained request channel should transition directly to `Disconnected`
+    /// instead of blocking forever on waiter pressure alone.
     #[inline]
-    const fn from_capacities(waiters_full: bool, submission_queue_full: bool) -> Self {
-        // Waiter pressure dominates SQ pressure: when the waiter table is full
-        // the loop must wait for completions before it can admit more work,
-        // while SQ pressure alone only forces a submit.
-        if waiters_full {
+    fn from_fill_state(
+        waiters: &Waiters,
+        submission_queue: &SubmissionQueue<'_>,
+        receiver: &mpsc::Receiver<Request>,
+    ) -> Self {
+        // Check waiter pressure first because it dominates SQ pressure and is
+        // the only case that needs shutdown normalization.
+        if waiters.is_full() {
+            // A waiter-full loop that also has no remaining producers and no
+            // buffered requests must enter shutdown drain rather than sleeping
+            // for completions forever.
+            if receiver.is_closed() && receiver.is_empty() {
+                return Self::Disconnected;
+            }
             Self::AtWaiterCapacity
-        } else if submission_queue_full {
+        } else if submission_queue.is_full() {
             Self::AtSubmissionQueueCapacity
         } else {
             Self::Drained
@@ -726,13 +742,13 @@ impl IoUringLoop {
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
         if self.stage_cancellations(&mut submission_queue) {
-            return FillResult::from_capacities(self.waiters.is_full(), true);
+            return FillResult::from_fill_state(&self.waiters, &submission_queue, &self.receiver);
         }
 
         // Requeued work already owns waiter capacity, so restage it before
         // admitting fresh channel requests.
         if self.stage_ready_requests(&mut submission_queue) {
-            return FillResult::from_capacities(self.waiters.is_full(), true);
+            return FillResult::from_fill_state(&self.waiters, &submission_queue, &self.receiver);
         }
 
         // Stage operations until the channel is empty, waiter capacity is hit,
@@ -783,7 +799,7 @@ impl IoUringLoop {
             }
         }
 
-        FillResult::from_capacities(self.waiters.is_full(), submission_queue.is_full())
+        FillResult::from_fill_state(&self.waiters, &submission_queue, &self.receiver)
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
@@ -2032,6 +2048,127 @@ mod tests {
         // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
         assert!(matches!(err, RecvError { .. }));
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_timeout_when_waiters_full_and_channel_empty() {
+        // Verify shutdown is still observed when waiter pressure prevents the
+        // fill pass from touching the receiver at all.
+        let cfg = Config {
+            size: 1,
+            shutdown_timeout: Some(Duration::from_millis(50)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let eventfd_waker = iouring.waker.clone();
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (pipe_left, pipe_right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 0,
+                len: 8,
+                exact: false,
+                deadline: None,
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
+        // Wait until the full waiter table forces the loop onto the
+        // eventfd-backed blocking path before closing the final handle.
+        waker::tests::wait_until_eventfd_armed(&eventfd_waker);
+        drop(submitter);
+
+        let err = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("shutdown abandonment timed out")
+            .unwrap_err();
+        assert!(matches!(err, RecvError { .. }));
+
+        drop(pipe_right);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_drains_buffered_request_behind_full_waiter_capacity() {
+        // Verify shutdown starts only after the closed producer side is also
+        // drained, so buffered requests behind waiter pressure still complete.
+        let cfg = Config {
+            size: 1,
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let eventfd_waker = iouring.waker.clone();
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let (pipe_left1, pipe_right1) = UnixStream::pair().unwrap();
+        let (tx1, rx1) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left1.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx1,
+            }))
+            .await
+            .unwrap();
+
+        // Wait until the loop is blocked with the sole waiter slot occupied.
+        waker::tests::wait_until_eventfd_armed(&eventfd_waker);
+
+        let (pipe_left2, pipe_right2) = UnixStream::pair().unwrap();
+        (&pipe_right2).write_all(&[7]).unwrap();
+        let (tx2, rx2) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left2.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx2,
+            }))
+            .await
+            .unwrap();
+
+        // Close the channel while the second request is still buffered behind
+        // the full waiter table.
+        drop(submitter);
+
+        // Release the in-flight waiter so the buffered request can be admitted.
+        (&pipe_right1).write_all(&[3]).unwrap();
+
+        let result1 = tokio::time::timeout(Duration::from_secs(2), rx1)
+            .await
+            .expect("first recv timed out")
+            .expect("missing first recv completion");
+        let result2 = tokio::time::timeout(Duration::from_secs(2), rx2)
+            .await
+            .expect("buffered recv timed out")
+            .expect("missing buffered recv completion");
+
+        let (_, read1) = result1.expect("first recv should succeed");
+        let (_, read2) = result2.expect("buffered recv should succeed");
+        assert_eq!(read1, 1);
+        assert_eq!(read2, 1);
+
+        drop(pipe_right1);
+        drop(pipe_right2);
         handle.join().unwrap();
     }
 
