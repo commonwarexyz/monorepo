@@ -141,16 +141,27 @@ macro_rules! impl_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Digest>,
             ) -> bool {
-                let config = config.clone();
-                let target = target.clone();
-                let Ok(db) = Self::init(context, config).await else {
-                    return false;
-                };
-                let bounds = db.bounds().await;
-                let lower_bound = db.inactivity_floor_loc();
-                lower_bound == target.range.start()
-                    && bounds.end == target.range.end()
-                    && <Self as qmdb::sync::Database>::root(&db) == target.root
+                // Read-only peek: compute the persisted ops MMR root without
+                // opening the full database or replaying the operations log.
+                // Avoids the O(N) snapshot rebuild and all disk mutations that
+                // `Self::init` would perform.
+                let hasher = StandardHasher::<H>::new();
+                let peek = journaled::Mmr::<_, H::Digest>::peek_root(
+                    context.with_label("local_target_probe"),
+                    config.merkle_config.clone(),
+                    &hasher,
+                )
+                .await;
+                // Only (journal_leaves, root) are checked. The merkle pruning
+                // boundary is blob-aligned and can lag behind the db's
+                // inactivity floor, but the MMR root is a cryptographic commitment
+                // to every leaf, so matching size + root implies matching last-op
+                // (and therefore matching inactivity floor).
+                matches!(
+                    peek,
+                    Ok(Some((_, journal_leaves, root)))
+                        if journal_leaves == target.range.end() && root == target.root
+                )
             }
 
             fn root(&self) -> Self::Digest {
