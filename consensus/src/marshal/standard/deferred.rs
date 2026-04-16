@@ -684,12 +684,13 @@ mod tests {
                 default_leader, make_raw_block, setup_network_with_participants, Ctx,
                 StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
-            verifying::MockVerifyingApp,
+            verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
+    use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
         sha256::Sha256,
@@ -697,7 +698,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
     use std::time::Duration;
 
     #[test_traced("INFO")]
@@ -1007,27 +1008,19 @@ mod tests {
         })
     }
 
-    /// Regression: a validator must not vote finalize on a block that is not
-    /// durably persisted. `certify` resolves true ⟹ block is on disk.
+    /// Regression: `certify` resolving true drives the finalize vote, so it must imply
+    /// the block is durably persisted. In deferred mode `verify()` spawns the
+    /// `deferred_verify` background task and `certify()` returns that same receiver; the
+    /// persistence ack happens inside `verify_with_parent` after `app.verify` returns.
     ///
-    /// To exercise the race we have to seed the parent and child via the
-    /// buffered broadcast layer (in-memory only) instead of `marshal.proposed`,
-    /// which already persists. Otherwise `marshal.verified` is just a no-op
-    /// re-write and the test cannot catch the pre-fix race.
+    /// The gated app holds `app.verify()` open until the test releases it, so we can
+    /// abort the marshal actor deterministically after the optimistic path has run but
+    /// before the persistence-ack path runs. With the ack in place `verified()` returns
+    /// false once the actor is gone, `verify_with_parent` returns `None`, and the tx is
+    /// dropped unresolved; we assert the certify receiver errors.
     #[test_traced("WARN")]
-    fn test_certify_persists_block_before_resolving() {
-        for seed in 0u64..16 {
-            certify_persists_block_before_resolving_at(seed);
-        }
-    }
-
-    fn certify_persists_block_before_resolving_at(seed: u64) {
-        use commonware_broadcast::Broadcaster;
-        let runner = deterministic::Runner::new(
-            deterministic::Config::new()
-                .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(60))),
-        );
+    fn test_deferred_certify_does_not_bypass_failed_verify_persistence() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
@@ -1049,11 +1042,11 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let buffer = setup.extra;
-            let actor_handle = setup.actor_handle;
+            let marshal_actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-
+            let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
+                GatedVerifyingApp::new(genesis.clone());
             let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
@@ -1061,77 +1054,54 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            // Build parent (height 1) and child (height 2). Seed both into
-            // the buffered broadcast cache (in-memory only), bypassing
-            // `marshal.proposed` which would already persist them.
+            // Seed parent and child via the buffer (in-memory only) so
+            // `deferred_verify` can fetch them without going through the
+            // persisted marshal path.
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = Ctx {
                 round: child_round,
-                leader: me.clone(),
+                leader: me,
                 parent: (View::new(1), parent_digest),
             };
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            // Broadcast to no peers - this only inserts into the local
-            // buffer cache (mirrors the pre-fix in-memory-only state).
             buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
                 .await
                 .await
                 .expect("buffer broadcast for parent should ack");
             buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
                 .await
                 .await
                 .expect("buffer broadcast for child should ack");
 
-            // Optimistic verify: returns true after parent/child fetch from
-            // the buffer + ancestry validation + app verify.
-            let optimistic = marshaled
-                .verify(child_ctx, child_digest)
+            // Kick off the optimistic verify, which spawns `deferred_verify`.
+            // Its gated `app.verify` blocks until we release it, giving us a
+            // deterministic window to abort the marshal actor.
+            let _optimistic_rx = marshaled.verify(child_ctx, child_digest).await;
+            let certify_rx = marshaled.certify(child_round, child_digest).await;
+            verify_started
                 .await
-                .await
-                .expect("verify result missing");
-            assert!(optimistic, "optimistic verify should pass");
+                .expect("verify should reach application before marshal abort");
+            marshal_actor_handle.abort();
+            release_verify.send_lossy(());
 
-            // Certify - this is the safety gate before finalize voting.
-            let certify_result = marshaled
-                .certify(child_round, child_digest)
-                .await
-                .await
-                .expect("certify result missing");
-            assert!(certify_result, "certify should succeed");
-
-            // CRITICAL: abort the marshal actor synchronously, with no
-            // intervening await. If certify returned true but the actor had
-            // only enqueued (not processed) the `Verified` message, this
-            // abort kills the actor before persistence completes.
-            actor_handle.abort();
-            drop(marshaled);
-            drop(marshal);
-            drop(buffer);
-
-            // Restart from the same partition. The block must be durably
-            // persisted - otherwise the validator would have voted finalize
-            // for a block it cannot serve from local storage.
-            let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal2 = setup2.mailbox;
-
-            let post_restart = marshal2.get_block(&child_digest).await;
-            assert!(
-                post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted (seed={seed})"
-            );
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "certify must not resolve after marshal.verified loses its persistence ack"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should terminate after marshal abort");
+                },
+            }
         });
     }
 }

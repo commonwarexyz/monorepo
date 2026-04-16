@@ -559,7 +559,6 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
-        sync::Mutex,
         NZUsize,
     };
     use rand::Rng;
@@ -861,8 +860,8 @@ mod tests {
     #[derive(Clone)]
     struct GatedVerifyingApp {
         genesis: B,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        started: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<std::sync::Mutex<Option<oneshot::Receiver<()>>>>,
     }
 
     impl GatedVerifyingApp {
@@ -872,8 +871,8 @@ mod tests {
             (
                 Self {
                     genesis,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
+                    started: Arc::new(std::sync::Mutex::new(Some(started_tx))),
+                    release: Arc::new(std::sync::Mutex::new(Some(release_rx))),
                 },
                 started_rx,
                 release_tx,
@@ -905,12 +904,13 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
         ) -> bool {
-            if let Some(started) = self.started.lock().take() {
+            if let Some(started) = self.started.lock().unwrap().take() {
                 started.send_lossy(());
             }
             let release = self
                 .release
                 .lock()
+                .unwrap()
                 .take()
                 .expect("release receiver missing");
             let _ = release.await;

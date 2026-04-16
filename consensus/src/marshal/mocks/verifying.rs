@@ -9,6 +9,11 @@ use crate::{
     CertifiableBlock, Epochable,
 };
 use commonware_runtime::deterministic;
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    sync::Mutex,
+};
+use std::{marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `VerifyingApplication` for testing.
 ///
@@ -90,5 +95,82 @@ where
         _ancestry: AncestorStream<A, Self::Block>,
     ) -> bool {
         self.verify_result
+    }
+}
+
+/// A verifying mock application whose `verify()` signals `started` on entry and
+/// blocks until `release` is received. Used to deterministically control when
+/// the application verdict races with marshal shutdown.
+#[derive(Clone)]
+pub struct GatedVerifyingApp<B, S> {
+    genesis: B,
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B, S> GatedVerifyingApp<B, S> {
+    /// Returns the gated app, a `started` receiver fired when `verify()` is entered,
+    /// and a `release` sender that unblocks `verify()` once signaled.
+    pub fn new(genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        (
+            Self {
+                genesis,
+                started: Arc::new(Mutex::new(Some(started_tx))),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+                _phantom: PhantomData,
+            },
+            started_rx,
+            release_tx,
+        )
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for GatedVerifyingApp<B, S>
+where
+    B: CertifiableBlock + Clone + Send + Sync + 'static,
+    B::Context: Epochable + Clone + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+
+    async fn genesis(&mut self) -> Self::Block {
+        self.genesis.clone()
+    }
+
+    async fn propose<A: BlockProvider<Block = Self::Block>>(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _ancestry: AncestorStream<A, Self::Block>,
+    ) -> Option<Self::Block> {
+        None
+    }
+}
+
+impl<B, S> crate::VerifyingApplication<deterministic::Context> for GatedVerifyingApp<B, S>
+where
+    B: CertifiableBlock + Clone + Send + Sync + 'static,
+    B::Context: Epochable + Clone + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+{
+    async fn verify<A: BlockProvider<Block = Self::Block>>(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _ancestry: AncestorStream<A, Self::Block>,
+    ) -> bool {
+        if let Some(started) = self.started.lock().take() {
+            started.send_lossy(());
+        }
+        let release = self
+            .release
+            .lock()
+            .take()
+            .expect("release receiver missing");
+        let _ = release.await;
+        true
     }
 }

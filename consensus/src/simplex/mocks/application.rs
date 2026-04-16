@@ -134,7 +134,8 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// How the mock application should respond to certify requests.
+/// Predicate to determine whether a payload should be certified.
+/// Returning true means certify, false means reject.
 pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
