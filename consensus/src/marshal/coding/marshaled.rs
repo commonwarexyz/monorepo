@@ -627,6 +627,14 @@ where
                 erasure_timer.observe();
 
                 let commitment = coded_block.commitment();
+
+                // Persist before returning the commitment to consensus. Once
+                // consensus receives it, the proposer will vote, so the block
+                // must be on disk before that point.
+                if !marshal.verified(consensus_context.round, coded_block.clone()).await {
+                    return;
+                }
+
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, coded_block));

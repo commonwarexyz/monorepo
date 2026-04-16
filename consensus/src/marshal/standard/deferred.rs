@@ -393,6 +393,14 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
+
+                // Persist before returning the digest to consensus. Once
+                // consensus receives the digest it will vote, so the block
+                // must be on disk before that point.
+                if !marshal.verified(consensus_context.round, built_block.clone()).await {
+                    return;
+                }
+
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, built_block));
@@ -646,6 +654,7 @@ where
                         ?digest,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
+                    return;
                 }
             }
             Plan::Forward { round, peers } => {
