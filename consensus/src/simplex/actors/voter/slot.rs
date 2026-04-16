@@ -66,7 +66,7 @@ where
     }
 
     /// Returns whether the current proposal was built locally and remains usable.
-    pub fn is_local(&self) -> bool {
+    pub const fn is_local(&self) -> bool {
         matches!(self.status, Status::Verified(true))
     }
 

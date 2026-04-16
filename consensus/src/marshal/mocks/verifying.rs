@@ -20,10 +20,10 @@ use commonware_runtime::deterministic;
 pub struct MockVerifyingApp<B, S> {
     /// The genesis block to return.
     pub genesis: B,
-    /// The result returned by `verify`.
-    pub verify_result: bool,
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
     pub propose_result: Option<B>,
+    /// The result returned by `verify`.
+    pub verify_result: bool,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -32,8 +32,8 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn new(genesis: B) -> Self {
         Self {
             genesis,
-            verify_result: true,
             propose_result: None,
+            verify_result: true,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -42,8 +42,8 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_verify_result(genesis: B, verify_result: bool) -> Self {
         Self {
             genesis,
-            verify_result,
             propose_result: None,
+            verify_result,
             _phantom: std::marker::PhantomData,
         }
     }

@@ -141,8 +141,8 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    available_blocks: AvailableBlocks<B::Digest>,
     last_built: LastBuilt<B>,
+    available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed<E>,
 }
@@ -177,8 +177,8 @@ where
             application,
             marshal,
             epocher,
-            available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             last_built: Arc::new(Mutex::new(None)),
+            available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
         }
     }
@@ -363,7 +363,6 @@ where
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                // If block can be fetched, mark it as available.
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
@@ -372,7 +371,6 @@ where
                 else {
                     return;
                 };
-                available_blocks.lock().insert((context.round, digest));
 
                 // Shared pre-checks:
                 // - Blocks are invalid if they are not in the expected epoch and are
@@ -413,6 +411,9 @@ where
                     Some(valid) => valid,
                     None => return,
                 };
+                if application_valid {
+                    available_blocks.lock().insert((context.round, digest));
+                }
                 tx.send_lossy(application_valid);
             });
         rx
@@ -555,9 +556,12 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{
+        channel::{fallible::OneshotExt, oneshot},
+        NZUsize,
+    };
     use rand::Rng;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
@@ -624,7 +628,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.clone().proposed(parent_round, parent).await);
+            assert!(marshal.proposed(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -635,7 +639,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.clone().proposed(round, block).await);
+            assert!(marshal.proposed(round, block).await);
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -702,7 +706,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.clone().proposed(parent_round, parent).await);
+            assert!(marshal.proposed(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -713,7 +717,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.clone().proposed(round, block).await);
+            assert!(marshal.proposed(round, block).await);
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;
@@ -849,6 +853,162 @@ mod tests {
                 post_restart.is_some(),
                 "verify resolved true ⟹ block must be durably persisted (seed={seed})"
             );
+        });
+    }
+
+    #[derive(Clone)]
+    struct GatedVerifyingApp {
+        genesis: B,
+        started: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<std::sync::Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl GatedVerifyingApp {
+        fn new(genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    genesis,
+                    started: Arc::new(std::sync::Mutex::new(Some(started_tx))),
+                    release: Arc::new(std::sync::Mutex::new(Some(release_rx))),
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    impl crate::Application<deterministic::Context> for GatedVerifyingApp {
+        type Block = B;
+        type Context = Ctx;
+        type SigningScheme = S;
+
+        async fn genesis(&mut self) -> Self::Block {
+            self.genesis.clone()
+        }
+
+        async fn propose<A: crate::marshal::ancestry::BlockProvider<Block = Self::Block>>(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
+        ) -> Option<Self::Block> {
+            None
+        }
+    }
+
+    impl crate::VerifyingApplication<deterministic::Context> for GatedVerifyingApp {
+        async fn verify<A: crate::marshal::ancestry::BlockProvider<Block = Self::Block>>(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
+        ) -> bool {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                started.send_lossy(());
+            }
+            let release = self
+                .release
+                .lock()
+                .unwrap()
+                .take()
+                .expect("release receiver missing");
+            let _ = release.await;
+            true
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_inline_certify_does_not_bypass_failed_verify_persistence() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            use commonware_broadcast::Broadcaster;
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+            let marshal_actor_handle = setup.actor_handle;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let (mock_app, verify_started, release_verify) =
+                GatedVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = Ctx {
+                round: child_round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
+            let child_digest = child.digest();
+
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                .await
+                .await
+                .expect("buffer broadcast for parent should ack");
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                .await
+                .await
+                .expect("buffer broadcast for child should ack");
+
+            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            verify_started
+                .await
+                .expect("verify should reach application before marshal abort");
+            marshal_actor_handle.abort();
+            release_verify.send_lossy(());
+
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "verify must not resolve after marshal.verified loses its persistence ack"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should terminate after marshal abort");
+                },
+            }
+
+            let certify_rx = inline.certify(child_round, child_digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "certify must not bypass failed verify persistence via stale availability"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should terminate after marshal abort");
+                },
+            }
         });
     }
 }

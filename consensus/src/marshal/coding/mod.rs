@@ -1640,7 +1640,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
-            let actor_handle = setup.actor_handle;
+            let marshal_actor_handle = setup.actor_handle;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -1703,11 +1703,9 @@ mod tests {
                 .expect("certify result missing");
             assert!(certify_result, "certify should succeed");
 
-            // CRITICAL: abort the marshal actor synchronously, with no
-            // intervening await. If certify returned true but the actor had
-            // only enqueued (not processed) the `Verified` message, this
-            // abort kills the actor before persistence completes.
-            actor_handle.abort();
+            // Abort marshal immediately after certify returns to prove the
+            // block is already persisted at that point.
+            marshal_actor_handle.abort();
             drop(marshaled);
             drop(marshal);
             drop(shards);
@@ -1762,7 +1760,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
-            let actor_handle = setup.actor_handle;
+            let marshal_actor_handle = setup.actor_handle;
 
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
@@ -1824,11 +1822,9 @@ mod tests {
             assert_eq!(commitment, expected_commitment);
             marshaled.broadcast(commitment, Plan::Propose).await;
 
-            // CRITICAL: abort the marshal actor synchronously so it cannot
-            // drain pending messages. `broadcast` must have already awaited
-            // the actor's persistence ack via `marshal.proposed`, so no extra
-            // sleep is needed - the block must be on disk by now.
-            actor_handle.abort();
+            // Abort marshal immediately after broadcast returns; the propose
+            // path must already have persisted the block.
+            marshal_actor_handle.abort();
             drop(marshaled);
             drop(marshal);
             drop(shards);

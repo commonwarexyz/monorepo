@@ -166,7 +166,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub verify_latency: Latency,
     pub certify_latency: Latency,
 
-    pub certifier: Certifier<H::Digest>,
+    pub should_certify: Certifier<H::Digest>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -186,7 +186,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     drop_verifications: bool,
-    certifier: Certifier<H::Digest>,
+    should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -236,7 +236,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 fail_verification: false,
                 drop_proposals: false,
                 drop_verifications: false,
-                certifier: cfg.certifier,
+                should_certify: cfg.should_certify,
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
@@ -374,7 +374,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Use configured predicate to determine certification
-        match &self.certifier {
+        match &self.should_certify {
             Certifier::Always => Some(true),
             Certifier::Custom(func) => Some(func(round, payload)),
             Certifier::Cancel | Certifier::Pending => None,
@@ -450,7 +450,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
-                        } else if matches!(self.certifier, Certifier::Pending) {
+                        } else if matches!(self.should_certify, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.
                             // This simulates a certify that hangs indefinitely (e.g.,
                             // block never arrives for reconstruction).

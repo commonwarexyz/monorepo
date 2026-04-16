@@ -1885,9 +1885,10 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0, proposal);
+            let (candidate, is_local) = &candidates[0];
+            assert_eq!(*candidate, proposal);
             assert!(
-                !candidates[0].1,
+                !*is_local,
                 "leader-owned recovered proposal must not inherit local certification"
             );
         });

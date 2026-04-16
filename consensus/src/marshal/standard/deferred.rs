@@ -146,8 +146,8 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
     last_built: LastBuilt<B>,
+    verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Timed<E>,
 }
@@ -182,8 +182,8 @@ where
             application,
             marshal,
             epocher,
-            verification_tasks: VerificationTasks::new(),
             last_built: Arc::new(Mutex::new(None)),
+            verification_tasks: VerificationTasks::new(),
 
             build_duration,
         }
@@ -393,7 +393,6 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
-
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, built_block));
@@ -466,7 +465,8 @@ where
                 let block = match decision {
                     Decision::Complete(valid) => {
                         if valid {
-                            // Valid re-proposal. Create a completed verification task for `certify`.
+                            // A valid re-proposal needs no further ancestry validation, but
+                            // `certify` still expects a completed verification task.
                             let round = context.round;
                             let (task_tx, task_rx) = oneshot::channel();
                             task_tx.send_lossy(true);
@@ -643,6 +643,7 @@ where
                     );
                     return false;
                 }
+                debug!(?round, ?digest, "requested broadcast of built block");
                 true
             }
             Plan::Forward { round, peers } => {

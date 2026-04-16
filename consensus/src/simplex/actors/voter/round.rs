@@ -477,7 +477,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns a proposal candidate for notarization if we're ready to vote.
     ///
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
-    pub fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
+    pub const fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
         // Ensure we haven't already broadcast a notarize vote or nullify vote.
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;

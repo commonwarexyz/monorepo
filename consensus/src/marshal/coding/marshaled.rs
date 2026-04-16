@@ -183,9 +183,9 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
+    last_built: LastBuilt<CodedBlock<B, C, H>>,
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
-    last_built: LastBuilt<CodedBlock<B, C, H>>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,
@@ -629,7 +629,6 @@ where
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
-
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((round, coded_block));
@@ -990,6 +989,7 @@ where
                     );
                     return false;
                 }
+                debug!(?round, ?commitment, "requested broadcast of built block");
                 true
             }
             Plan::Forward { .. } => {
