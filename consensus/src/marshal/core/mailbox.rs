@@ -323,11 +323,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// (typical during graceful shutdown, where the spawned task should just
     /// exit silently).
     #[must_use = "callers must not proceed to vote on an unpersisted block"]
-    pub async fn proposed(
-        &self,
-        round: Round,
-        block: V::Block,
-    ) -> Result<(), MarshalUnavailable> {
+    pub async fn proposed(&self, round: Round, block: V::Block) -> Result<(), MarshalUnavailable> {
         self.sender
             .request(|ack| Message::Proposed { round, block, ack })
             .await
@@ -347,11 +343,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// (typical during graceful shutdown, where the spawned task should just
     /// exit silently).
     #[must_use = "callers must not proceed to certify true on an unpersisted block"]
-    pub async fn verified(
-        &self,
-        round: Round,
-        block: V::Block,
-    ) -> Result<(), MarshalUnavailable> {
+    pub async fn verified(&self, round: Round, block: V::Block) -> Result<(), MarshalUnavailable> {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
             .await

@@ -79,7 +79,9 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan},
+        simplex::{
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan,
+        },
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton, CertifiableBlock, Relay,
     };
@@ -1787,16 +1789,19 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::zero(), genesis_parent_commitment),
             };
-            let block_to_propose =
-                make_coding_block(propose_context.clone(), genesis.digest(), Height::new(1), 100);
+            let block_to_propose = make_coding_block(
+                propose_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
             let block_digest = block_to_propose.digest();
-            let expected_commitment =
-                CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
-                    block_to_propose.clone(),
-                    coding_config,
-                    &Sequential,
-                )
-                .commitment();
+            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                block_to_propose.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
 
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new(genesis).with_propose_result(block_to_propose);
