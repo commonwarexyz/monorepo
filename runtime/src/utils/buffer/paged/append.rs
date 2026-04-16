@@ -24,6 +24,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -462,7 +463,14 @@ impl<B: Blob> Append<B> {
         offsets: &[u64],
         item_size: usize,
     ) -> Result<(), Error> {
-        debug_assert_eq!(buf.len(), offsets.len() * item_size);
+        assert_eq!(
+            buf.len(),
+            offsets
+                .len()
+                .checked_mul(item_size)
+                .expect("read_many_into buffer length overflow"),
+            "read_many_into requires buf.len() == offsets.len() * item_size"
+        );
         if offsets.is_empty() {
             return Ok(());
         }
@@ -477,66 +485,59 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Resolve tip-buffer overlap for all items, tracking which indices need cache reads.
-        // cache_indices stores (item_index, byte_len, offset) for items needing cache reads.
-        let mut cache_indices: Vec<(usize, usize, u64)> = Vec::new();
-        for (i, &offset) in offsets.iter().enumerate() {
-            let item_buf = &mut buf[i * item_size..(i + 1) * item_size];
+        // Iterate over fixed-size output slots and copy items that overlap with the
+        // tip buffer directly into place. Items fully or partially below the tip
+        // need cache/blob reads and are recorded as (slice, offset) pairs.
+        // `chunks_exact_mut` yields disjoint per-item slots, so we never have to
+        // reborrow the parent buffer while cache/blob destinations remain live.
+        if item_size == 0 {
+            return Ok(());
+        }
+        let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
+        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
             let end = offset + item_size as u64;
 
             if end <= buffer.offset {
                 // Entirely below tip -- needs cache read.
-                cache_indices.push((i, item_size, offset));
+                cache_ranges.push((item_buf, offset));
             } else if offset >= buffer.offset {
                 // Entirely in tip buffer.
                 let src = (offset - buffer.offset) as usize;
                 item_buf.copy_from_slice(&buffer.as_ref()[src..src + item_size]);
             } else {
-                // Straddles tip boundary.
+                // Straddles tip boundary: copy suffix from tip, record prefix for cache.
                 let prefix_len = (buffer.offset - offset) as usize;
                 item_buf[prefix_len..].copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
-                cache_indices.push((i, prefix_len, offset));
+                cache_ranges.push((&mut item_buf[..prefix_len], offset));
             }
         }
 
         drop(buffer);
 
-        if cache_indices.is_empty() {
+        if cache_ranges.is_empty() {
             return Ok(());
         }
-
-        // Build mutable slices for the cache read. We split buf into non-overlapping
-        // sub-slices using raw pointer arithmetic (items are at fixed strides).
-        // SAFETY: Each (index, len) pair refers to a disjoint region of buf since
-        // indices are unique and item_size-aligned.
-        let mut cache_ranges: Vec<(&mut [u8], u64)> = cache_indices
-            .iter()
-            .map(|&(idx, len, offset)| {
-                let start = idx * item_size;
-                // SAFETY: start < buf.len() because idx < offsets.len() and
-                // buf.len() == offsets.len() * item_size.
-                let ptr = unsafe { buf.as_mut_ptr().add(start) };
-                // SAFETY: Each idx is unique so the resulting slices are
-                // non-overlapping, and len <= item_size keeps each within its slot.
-                let slice = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-                (slice, offset)
-            })
-            .collect();
 
         // Fast path: try page cache for all ranges in a single lock acquisition.
-        let fully_cached = self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-
-        if fully_cached == cache_ranges.len() {
+        // Fully-cached ranges are removed from cache_ranges; only misses remain.
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if cache_ranges.is_empty() {
             return Ok(());
         }
 
-        // Slow path: cache miss on some ranges. Fall back to per-range reads.
+        // Slow path: read only the ranges that had cache misses, concurrently.
         let blob_guard = self.blob_state.read().await;
-        for (item_buf, offset) in &mut cache_ranges[fully_cached..] {
-            self.cache_ref
-                .read(&blob_guard.blob, self.id, item_buf, *offset)
-                .await?;
+        let mut reads = cache_ranges
+            .iter_mut()
+            .map(|(item_buf, offset)| {
+                self.cache_ref
+                    .read(&blob_guard.blob, self.id, item_buf, *offset)
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = reads.next().await {
+            result?;
         }
+
         Ok(())
     }
 
@@ -1112,6 +1113,30 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
+    fn test_read_many_into_short_buffer_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
+
+            let offsets = [0u64, 4];
+            let mut buf = vec![0u8; 7];
+            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_read_many_into_matches_read_at() {
         // Verify read_many_into returns the same bytes as individual read_at calls.
@@ -1151,6 +1176,70 @@ mod tests {
                     &batch_buf[i * item_size..(i + 1) * item_size],
                     single.as_ref(),
                     "mismatch at offset {off}",
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_scattered_cache_misses() {
+        // Exercises all three source paths in a single read_many_into call:
+        // tip buffer, page cache hit, and page cache miss (blob I/O).
+        // The tip holds a partial page so one item straddles the tip boundary.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            // Small cache: only 2 pages, so we can force eviction.
+            let cache_ref =
+                CacheRef::from_pooler(&context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write 3 pages of data and sync to disk.
+            let synced: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize * 3)
+                .collect();
+            append.append(&synced).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write a partial page that stays in the tip buffer. The item_size
+            // is chosen so the last item straddles the synced/tip boundary.
+            let item_size = 10;
+            let tip_len = PAGE_SIZE.get() as usize / 2;
+            let tip: Vec<u8> = (100u8..=255).cycle().take(tip_len).collect();
+            append.append(&tip).await.unwrap();
+
+            // Prime pages 0 and 2 into cache, leaving page 1 uncached.
+            let _ = append.read_at(0, item_size).await.unwrap();
+            let _ = append
+                .read_at(PAGE_SIZE.get() as u64 * 2, item_size)
+                .await
+                .unwrap();
+
+            // Offset that straddles the synced/tip boundary: starts in the last
+            // synced page, ends in the tip buffer.
+            let straddle_off = synced.len() as u64 - (item_size as u64 / 2);
+            let tip_off = synced.len() as u64 + item_size as u64;
+            let offsets = [
+                0u64,                       // page 0 (cached)
+                PAGE_SIZE.get() as u64,     // page 1 (not cached - blob I/O)
+                PAGE_SIZE.get() as u64 * 2, // page 2 (cached)
+                straddle_off,               // straddles synced/tip boundary
+                tip_off,                    // entirely in tip buffer
+            ];
+            let mut buf = vec![0u8; offsets.len() * item_size];
+            append
+                .read_many_into(&mut buf, &offsets, item_size)
+                .await
+                .unwrap();
+
+            let read: Vec<u8> = synced.iter().chain(tip.iter()).copied().collect();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * item_size..(i + 1) * item_size],
+                    &read[off as usize..off as usize + item_size],
                 );
             }
         });
