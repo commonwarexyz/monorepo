@@ -398,6 +398,7 @@ where
                 //
                 // The helper returns `None` when work should stop early (for example,
                 // receiver closed or parent unavailable).
+                let round = context.round;
                 let application_valid = match verify_with_parent(
                     runtime_context,
                     context,
@@ -412,7 +413,7 @@ where
                     None => return,
                 };
                 if application_valid {
-                    available_blocks.lock().insert((context.round, digest));
+                    available_blocks.lock().insert((round, digest));
                 }
                 tx.send_lossy(application_valid);
             });
