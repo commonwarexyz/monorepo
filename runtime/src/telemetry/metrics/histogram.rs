@@ -80,17 +80,6 @@ impl Timed {
         self.histogram.observe_between(start, end);
     }
 
-    /// Create a new timer that can record a duration from the current time.
-    pub fn timer<'a, C: Clock + ?Sized>(&self, clock: &'a C) -> Timer<'a, C> {
-        let start = clock.current();
-        Timer {
-            histogram: self.histogram.clone(),
-            clock,
-            start,
-            canceled: false,
-        }
-    }
-
     /// Time an operation, recording only if it returns `Some`.
     pub fn time_some<C: Clock + ?Sized, T, F: FnOnce() -> Option<T>>(
         &self,
@@ -103,43 +92,5 @@ impl Timed {
             self.histogram.observe_between(start, clock.current());
         }
         result
-    }
-}
-
-/// A timer that records a duration when dropped.
-pub struct Timer<'a, C: Clock + ?Sized> {
-    /// The histogram to record durations in.
-    histogram: Histogram,
-
-    /// The clock to use for recording durations.
-    clock: &'a C,
-
-    /// The time at which the timer was started.
-    start: SystemTime,
-
-    /// Whether the timer was canceled.
-    canceled: bool,
-}
-
-impl<C: Clock + ?Sized> Timer<'_, C> {
-    /// Record the duration and cancel the timer.
-    pub fn observe(&mut self) {
-        self.canceled = true;
-        let end = self.clock.current();
-        self.histogram.observe_between(self.start, end);
-    }
-
-    /// Cancel the timer, preventing the duration from being recorded when dropped.
-    pub fn cancel(mut self) {
-        self.canceled = true;
-    }
-}
-
-impl<C: Clock + ?Sized> Drop for Timer<'_, C> {
-    fn drop(&mut self) {
-        if self.canceled {
-            return;
-        }
-        self.observe();
     }
 }

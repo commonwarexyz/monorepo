@@ -322,7 +322,7 @@ where
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer(&runtime_context);
+                let build_started = runtime_context.current();
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -340,7 +340,7 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.observe_between(build_started, runtime_context.current());
 
                 let digest = built_block.digest();
                 {

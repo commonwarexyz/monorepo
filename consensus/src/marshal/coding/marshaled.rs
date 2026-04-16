@@ -441,7 +441,7 @@ where
                 );
 
                 // If consensus drops the receiver, we can stop work early.
-                let mut timer = verify_duration.timer(&runtime_context);
+                let verify_started = runtime_context.current();
                 let application_valid = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -452,7 +452,7 @@ where
                     },
                     is_valid = validity_request => is_valid,
                 };
-                timer.observe();
+                verify_duration.observe_between(verify_started, runtime_context.current());
                 if application_valid {
                     // The block is only persisted at this point.
                     marshal.verified(round, block).await;
@@ -570,7 +570,7 @@ where
                 )
                 .await;
 
-                let mut parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
+                let parent_fetch_started = runtime_context.current();
                 let parent = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -588,7 +588,8 @@ where
                         }
                     },
                 };
-                parent_timer.observe();
+                proposal_parent_fetch_duration
+                    .observe_between(parent_fetch_started, runtime_context.current());
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -622,7 +623,7 @@ where
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer(&runtime_context);
+                let build_started = runtime_context.current();
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -640,11 +641,11 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.observe_between(build_started, runtime_context.current());
 
-                let mut erasure_timer = erasure_encode_duration.timer(&runtime_context);
+                let erasure_started = runtime_context.current();
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-                erasure_timer.observe();
+                erasure_encode_duration.observe_between(erasure_started, runtime_context.current());
 
                 let commitment = coded_block.commitment();
                 {
