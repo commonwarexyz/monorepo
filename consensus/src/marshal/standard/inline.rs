@@ -396,6 +396,11 @@ where
                         return;
                     }
                     Decision::Continue(block) => block,
+                    Decision::Aborted => {
+                        // Persistence not confirmed (marshal shut down). Exit
+                        // silently rather than signal a verdict to consensus.
+                        return;
+                    }
                 };
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
@@ -496,7 +501,13 @@ where
                     );
                     return;
                 }
-                self.marshal.proposed(round, block).await;
+                if self.marshal.proposed(round, block).await.is_err() {
+                    warn!(
+                        ?round,
+                        ?digest,
+                        "marshal unavailable during proposed broadcast; block not persisted"
+                    );
+                }
             }
             Plan::Forward { round, peers } => {
                 self.marshal.forward(round, digest, peers).await;

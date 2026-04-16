@@ -51,11 +51,14 @@ where
 
 /// Result of the shared epoch / re-proposal pre-check step.
 ///
-/// `Complete(valid)` indicates verification can terminate immediately with `valid`.
-/// `Continue(block)` indicates full parent + application verification should continue.
+/// - `Complete(valid)`: verification can terminate immediately with `valid`.
+/// - `Continue(block)`: full parent + application verification should continue.
+/// - `Aborted`: persistence could not be confirmed (marshal actor gone) and
+///   the caller MUST exit silently rather than signal a verdict to consensus.
 pub(super) enum Decision<B> {
     Complete(bool),
     Continue(B),
+    Aborted,
 }
 
 /// Performs shared pre-checks used by both inline and deferred verification paths.
@@ -100,7 +103,13 @@ where
             return Decision::Complete(false);
         }
 
-        marshal.verified(context.round, block).await;
+        if marshal.verified(context.round, block).await.is_err() {
+            debug!(
+                round = ?context.round,
+                "marshal unavailable during re-proposal verified ack; aborting verify"
+            );
+            return Decision::Aborted;
+        }
         return Decision::Complete(true);
     }
 
@@ -199,8 +208,15 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid {
-        marshal.verified(context.round, block).await;
+    if application_valid && marshal.verified(context.round, block).await.is_err() {
+        debug!(
+            round = ?context.round,
+            "marshal unavailable during verified ack; aborting verify"
+        );
+        // Persistence not confirmed: caller MUST NOT signal a positive
+        // verdict to consensus. Returning `None` causes verify to exit
+        // silently without firing tx.
+        return None;
     }
     Some(application_valid)
 }

@@ -474,6 +474,11 @@ where
                         return;
                     }
                     Decision::Continue(block) => block,
+                    Decision::Aborted => {
+                        // Persistence not confirmed (marshal shut down). Exit
+                        // silently rather than signal a verdict to consensus.
+                        return;
+                    }
                 };
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
@@ -582,7 +587,16 @@ where
                 if is_reproposal {
                     // NOTE: It is possible that, during crash recovery, we call `marshal.verified`
                     // twice for the same block. That function is idempotent, so this is safe.
-                    marshaled.marshal.verified(round, block).await;
+                    // If marshal is gone, do not signal certify-true: the block was not durably
+                    // stored.
+                    if marshaled.marshal.verified(round, block).await.is_err() {
+                        debug!(
+                            ?round,
+                            "marshal unavailable during certify re-proposal verified ack; \
+                             skipping certify resolution"
+                        );
+                        return;
+                    }
                     tx.send_lossy(true);
                     return;
                 }
@@ -630,7 +644,13 @@ where
                     height = %block.height(),
                     "requested broadcast of built block"
                 );
-                self.marshal.proposed(round, block).await;
+                if self.marshal.proposed(round, block).await.is_err() {
+                    warn!(
+                        ?round,
+                        ?digest,
+                        "marshal unavailable during proposed broadcast; block not persisted"
+                    );
+                }
             }
             Plan::Forward { round, peers } => {
                 self.marshal.forward(round, digest, peers).await;

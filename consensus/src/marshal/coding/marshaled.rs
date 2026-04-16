@@ -425,8 +425,17 @@ where
                 };
                 timer.observe();
                 if application_valid {
-                    // The block is only persisted at this point.
-                    marshal.verified(round, block).await;
+                    // The block is only persisted at this point. If the marshal
+                    // actor is gone, do NOT signal certify-true: the block was
+                    // not durably stored and consensus must not finalize-vote
+                    // on it.
+                    if marshal.verified(round, block).await.is_err() {
+                        debug!(
+                            ?round,
+                            "marshal unavailable during verified ack; skipping certify resolution"
+                        );
+                        return;
+                    }
                 }
                 tx.send_lossy(application_valid);
             });
@@ -759,8 +768,17 @@ where
                     }
 
                     // Valid re-proposal. Notify the marshal and complete the
-                    // verification task for `certify`.
-                    marshal.verified(round, block).await;
+                    // verification task for `certify`. If marshal is gone, do
+                    // not signal certify-true: the block was not durably
+                    // stored.
+                    if marshal.verified(round, block).await.is_err() {
+                        debug!(
+                            ?round,
+                            "marshal unavailable during re-proposal verified ack; \
+                             skipping certify resolution"
+                        );
+                        return;
+                    }
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
                 });
@@ -897,8 +915,16 @@ where
                 if is_reproposal {
                     // NOTE: It is possible that, during crash recovery, we call
                     // `marshal.verified` twice for the same block. That function is
-                    // idempotent, so this is safe.
-                    marshaled.marshal.verified(round, block).await;
+                    // idempotent, so this is safe. If marshal is gone, do not
+                    // signal certify-true: the block was not durably stored.
+                    if marshaled.marshal.verified(round, block).await.is_err() {
+                        debug!(
+                            ?round,
+                            "marshal unavailable during certify re-proposal verified ack; \
+                             skipping certify resolution"
+                        );
+                        return;
+                    }
                     tx.send_lossy(true);
                     return;
                 }
@@ -965,12 +991,22 @@ where
                     "requested broadcast of built block"
                 );
                 // Route through marshal so the proposer's own block is durably
-                // persisted before (or alongside) shard broadcast. The marshal
-                // actor caches the verified block and forwards to the shards
-                // engine via the Buffer impl. Without this, the block lives
-                // only in the shards in-memory cache and a crash before any
-                // verify-driven persistence loses it.
-                self.marshal.proposed(round, block).await;
+                // persisted before shard broadcast. The marshal actor caches
+                // the verified block and forwards to the shards engine via
+                // the Buffer impl. Without this, the block would live only in
+                // the shards in-memory cache and a crash before any
+                // verify-driven persistence would lose it.
+                //
+                // If marshal is unavailable (graceful shutdown), log and
+                // skip: consensus is also being torn down and the local vote
+                // for this proposal must not proceed without persistence.
+                if self.marshal.proposed(round, block).await.is_err() {
+                    warn!(
+                        ?round,
+                        ?commitment,
+                        "marshal unavailable during proposed broadcast; block not persisted"
+                    );
+                }
             }
             Plan::Forward { .. } => {
                 // Coding variant does not support targeted forwarding;
