@@ -152,11 +152,12 @@ macro_rules! impl_sync_database {
                     &hasher,
                 )
                 .await;
-                // Only (journal_leaves, root) are checked. The merkle pruning
-                // boundary is blob-aligned and can lag behind the db's
-                // inactivity floor, but the MMR root is a cryptographic commitment
-                // to every leaf, so matching size + root implies matching last-op
-                // (and therefore matching inactivity floor).
+                // Size + root match implies the last CommitFloor op (and
+                // therefore the committed inactivity floor) matches. The
+                // persisted merkle pruning boundary is not checked directly;
+                // see the trait contract on [`Database::has_local_target_state`]
+                // for the `target.range.start()` == committed-inactivity-floor
+                // invariant that makes this safe.
                 matches!(
                     peek,
                     Ok(Some((_, journal_leaves, root)))
