@@ -469,6 +469,23 @@ enum FillResult {
     AtWaiterCapacity,
 }
 
+impl FillResult {
+    /// Derive the staging result from waiter-table and submission-queue fullness.
+    #[inline]
+    const fn from_capacities(waiters_full: bool, submission_queue_full: bool) -> Self {
+        // Waiter pressure dominates SQ pressure: when the waiter table is full
+        // the loop must wait for completions before it can admit more work,
+        // while SQ pressure alone only forces a submit.
+        if waiters_full {
+            Self::AtWaiterCapacity
+        } else if submission_queue_full {
+            Self::AtSubmissionQueueCapacity
+        } else {
+            Self::Drained
+        }
+    }
+}
+
 impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
@@ -697,6 +714,11 @@ impl IoUringLoop {
         if self.wake_rearm_needed {
             // If the SQ is already full from a previous iteration, submit them first.
             if !self.waker.reinstall(&mut submission_queue) {
+                // Even if waiter capacity is also exhausted, we must not take
+                // the blocking path yet: the wake poll is not rearmed, so
+                // `submit_and_wait` would sleep without the eventfd wake path
+                // being live. Flush staged SQEs first, then retry rearm in the
+                // next pass.
                 return FillResult::AtSubmissionQueueCapacity;
             }
             self.wake_rearm_needed = false;
@@ -704,20 +726,18 @@ impl IoUringLoop {
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
         if self.stage_cancellations(&mut submission_queue) {
-            // If cancels alone filled the SQ, submit them first.
-            return FillResult::AtSubmissionQueueCapacity;
+            return FillResult::from_capacities(self.waiters.is_full(), true);
         }
 
         // Requeued work already owns waiter capacity, so restage it before
         // admitting fresh channel requests.
         if self.stage_ready_requests(&mut submission_queue) {
-            // If ready request alone filled the SQ, submit them first.
-            return FillResult::AtSubmissionQueueCapacity;
+            return FillResult::from_capacities(self.waiters.is_full(), true);
         }
 
         // Stage operations until the channel is empty, waiter capacity is hit,
         // or the SQ is full. Waiter capacity is bounded by `cfg.size`.
-        while self.waiters.len() < self.cfg.size as usize && !submission_queue.is_full() {
+        while !self.waiters.is_full() && !submission_queue.is_full() {
             // Try to drain one operation from the channel. If the first
             // `try_recv()` reports `Empty`, do one acquire-guided recheck
             // before concluding there is nothing more to drain in this pass.
@@ -763,16 +783,7 @@ impl IoUringLoop {
             }
         }
 
-        // Waiter pressure dominates SQ pressure: when the waiter table is full
-        // the loop must wait for completions before it can admit more work,
-        // while SQ pressure alone only forces a submit.
-        if self.waiters.len() == self.cfg.size as usize {
-            FillResult::AtWaiterCapacity
-        } else if submission_queue.is_full() {
-            FillResult::AtSubmissionQueueCapacity
-        } else {
-            FillResult::Drained
-        }
+        FillResult::from_capacities(self.waiters.is_full(), submission_queue.is_full())
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.

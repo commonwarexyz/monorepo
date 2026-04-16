@@ -198,6 +198,11 @@ impl Waiters {
         self.len == 0
     }
 
+    /// Return whether all waiter slots are currently occupied.
+    pub const fn is_full(&self) -> bool {
+        self.len == self.entries.len()
+    }
+
     /// Insert a request and return its assigned id.
     ///
     /// Panics if no free slot is available.
@@ -466,6 +471,7 @@ mod tests {
         let id1 = waiters.insert(req1, Some(9));
         assert_eq!((id0.index(), id1.index()), (0, 1));
         assert_eq!(waiters.len(), 2);
+        assert!(!waiters.is_full());
 
         // A stale operation CQE should panic because only cancel CQEs are
         // expected to arrive after slot reuse.
@@ -556,6 +562,7 @@ mod tests {
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(4));
 
+        assert!(waiters.is_full());
         assert!(!waiters.is_in_flight(waiter_id));
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.is_in_flight(waiter_id));
@@ -940,6 +947,7 @@ mod tests {
         let (req1, _rx1) = make_sync_request();
         let _ = waiters.insert(req0, None);
         let _ = waiters.insert(req1, None);
+        assert!(waiters.is_full());
         let insert_overflow = catch_unwind(AssertUnwindSafe(|| {
             let (req2, _rx2) = make_sync_request();
             let _ = waiters.insert(req2, None);
