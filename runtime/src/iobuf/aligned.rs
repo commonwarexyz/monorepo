@@ -9,7 +9,7 @@
 //! with aligned storage ownership and view semantics.
 
 use super::IoBuf;
-use crate::iobuf::pool::{SizeClass, TlsCache};
+use crate::iobuf::pool::{BufferPoolThreadCache, SizeClass};
 use bytes::Bytes;
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
@@ -131,7 +131,7 @@ pub(crate) struct TrackedOwner {
 impl Owner for TrackedOwner {
     #[inline]
     fn release(self, buffer: AlignedBuffer) {
-        TlsCache::push(self.class, buffer);
+        BufferPoolThreadCache::push(self.class, buffer);
     }
 }
 
@@ -704,7 +704,7 @@ impl BufMut<TrackedOwner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache};
+    use crate::iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig};
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::NZUsize;
     use prometheus_client::registry::Registry;
@@ -724,7 +724,7 @@ mod tests {
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(page_size()),
         }

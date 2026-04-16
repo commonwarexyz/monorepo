@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    mmr::{Location, StandardHasher},
+    merkle::mmr::{Location, StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -767,7 +767,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::Proof;
+    use crate::merkle::mmr::Proof;
     use commonware_cryptography::sha256;
     use commonware_utils::channel::oneshot;
     use std::{future::Future, pin::Pin};

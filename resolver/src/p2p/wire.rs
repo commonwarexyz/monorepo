@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -18,11 +18,20 @@ impl<Key: Span> Write for Message<Key> {
         buf.put_u64(self.id);
         self.payload.write(buf);
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.id.write(buf);
+        self.payload.write_bufs(buf);
+    }
 }
 
 impl<Key: Span> EncodeSize for Message<Key> {
     fn encode_size(&self) -> usize {
         self.id.encode_size() + self.payload.encode_size()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.id.encode_size() + self.payload.encode_inline_size()
     }
 }
 
@@ -79,6 +88,22 @@ impl<Key: Span> Write for Payload<Key> {
             }
         }
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        match self {
+            Self::Request(key) => {
+                buf.put_u8(0);
+                key.write(buf);
+            }
+            Self::Response(data) => {
+                buf.put_u8(1);
+                data.write_bufs(buf);
+            }
+            Self::Error => {
+                buf.put_u8(2);
+            }
+        }
+    }
 }
 
 impl<Key: Span> EncodeSize for Payload<Key> {
@@ -86,6 +111,14 @@ impl<Key: Span> EncodeSize for Payload<Key> {
         1 + match self {
             Self::Request(key) => key.encode_size(),
             Self::Response(data) => data.encode_size(),
+            Self::Error => 0,
+        }
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        1 + match self {
+            Self::Request(key) => key.encode_size(),
+            Self::Response(data) => data.encode_inline_size(),
             Self::Error => 0,
         }
     }
@@ -144,6 +177,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
 
     #[test]
     fn test_codec_request() {
@@ -171,6 +205,41 @@ mod tests {
         let encoded = original.encode();
         let decoded = Message::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_message_encode_with_pool_matches_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let msg = Message {
+                id: 42,
+                payload: Payload::<MockKey>::Response(Bytes::from("hello world")),
+            };
+
+            let encoded = msg.encode();
+            let mut encoded_pool = msg.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
+    #[test]
+    fn test_payload_response_encode_with_pool_matches_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let payload = Payload::<MockKey>::Response(Bytes::from("response data"));
+
+            let encoded = payload.encode();
+            let mut encoded_pool = payload.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
     }
 
     #[cfg(feature = "arbitrary")]

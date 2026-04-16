@@ -143,6 +143,18 @@ where
         }
     }
 
+    /// Load all persisted epoch caches so that `find_block` can discover
+    /// blocks written before the last shutdown.
+    pub(crate) async fn load_persisted_epochs(&mut self) {
+        let (floor, ceiling) = self.get_metadata();
+        for e in floor.get()..=ceiling.get() {
+            let epoch = Epoch::new(e);
+            if !self.caches.contains_key(&epoch) {
+                self.init_epoch(epoch).await;
+            }
+        }
+    }
+
     /// Retrieve the epoch range that may have data.
     fn get_metadata(&self) -> (Epoch, Epoch) {
         self.metadata

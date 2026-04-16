@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the vector must fit within a [u32].
 
-use crate::{EncodeSize, Error, RangeCfg, Read, Write};
+use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -13,12 +13,22 @@ impl<T: Write> Write for Vec<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.as_slice().write(buf)
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.as_slice().write_bufs(buf)
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for Vec<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.as_slice().encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.as_slice().encode_inline_size()
     }
 }
 
@@ -30,12 +40,29 @@ impl<T: Write> Write for &[T] {
             item.write(buf);
         }
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+        for item in self.iter() {
+            item.write_bufs(buf);
+        }
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for &[T] {
     #[inline]
     fn encode_size(&self) -> usize {
         self.len().encode_size() + self.iter().map(EncodeSize::encode_size).sum::<usize>()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.len().encode_size()
+            + self
+                .iter()
+                .map(EncodeSize::encode_inline_size)
+                .sum::<usize>()
     }
 }
 

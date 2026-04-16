@@ -11,6 +11,3 @@ pub type UnmerkleizedBatch<D> = batch::UnmerkleizedBatch<Family, D>;
 
 /// A batch whose root digest has been computed.
 pub type MerkleizedBatch<D> = batch::MerkleizedBatch<Family, D>;
-
-/// Owned set of changes against a base MMB.
-pub type Changeset<D> = batch::Changeset<Family, D>;

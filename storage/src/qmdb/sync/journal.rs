@@ -13,7 +13,10 @@ pub trait Journal: Sized + Send {
     type Op: Send;
 
     /// The error type returned by the journal
-    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error>;
+    type Error: std::error::Error
+        + Send
+        + 'static
+        + Into<crate::qmdb::Error<crate::merkle::mmr::Family>>;
 
     /// Create/open a journal for syncing the given range.
     ///

@@ -6,7 +6,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, Mutable},
+        contiguous::{fixed, Contiguous, Many, Mutable},
         segmented::variable,
         Error,
     },
@@ -145,6 +145,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         self.data.get(section, offset).await
     }
+
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    fn try_read_sync(
+        &self,
+        position: u64,
+        items_per_section: u64,
+        offsets: &impl super::Reader<Item = u64>,
+    ) -> Option<V> {
+        if position >= self.size || position < self.pruning_boundary {
+            return None;
+        }
+        let offset = offsets.try_read_sync(position)?;
+        let section = position_to_section(position, items_per_section);
+        self.data.try_get_sync(section, offset)
+    }
 }
 
 /// A contiguous journal with variable-size entries.
@@ -202,6 +217,9 @@ pub struct Journal<E: Context, V: Codec> {
     /// This value is immutable after initialization and must remain consistent
     /// across restarts. Changing this value will result in data loss or corruption.
     items_per_section: u64,
+
+    /// Optional compression level when encoding items.
+    compression: Option<u8>,
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
@@ -222,6 +240,11 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
         self.guard
             .read(position, self.items_per_section, &self.offsets)
             .await
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<V> {
+        self.guard
+            .try_read_sync(position, self.items_per_section, &self.offsets)
     }
 
     async fn replay(
@@ -311,6 +334,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section,
+            compression: cfg.compression,
         })
     }
 
@@ -354,6 +378,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section: cfg.items_per_section.get(),
+            compression: cfg.compression,
         })
     }
 
@@ -509,34 +534,62 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: &V) -> Result<u64, Error> {
+        self.append_many(Many::Flat(std::slice::from_ref(item)))
+            .await
+    }
+
+    /// Append items to the journal, returning the position of the last item appended.
+    ///
+    /// Acquires the write lock once for all items instead of per-item.
+    /// Returns [Error::EmptyAppend] if items is empty.
+    pub async fn append_many<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
+        if items.is_empty() {
+            return Err(Error::EmptyAppend);
+        }
+
+        // Encode before grabbing write guard.
+        let encode = |item: &V| variable::Journal::<E, V>::encode_item(self.compression, item);
+        let encoded: Vec<_> = match &items {
+            Many::Flat(s) => s.iter().map(encode).collect::<Result<Vec<_>, _>>()?,
+            Many::Nested(nested_items) => nested_items
+                .iter()
+                .flat_map(|items| items.iter())
+                .map(encode)
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        // Calculate which section this position belongs to
-        let section = position_to_section(inner.size, self.items_per_section);
+        let mut last_position = 0;
+        for (index, (buf, _item_len)) in encoded.iter().enumerate() {
+            // Calculate which section this position belongs to.
+            let section = position_to_section(inner.size, self.items_per_section);
 
-        // Append to data journal, get offset
-        let (offset, _size) = inner.data.append(section, item).await?;
+            // Append pre-encoded data to the data journal, get offset.
+            let offset = inner.data.append_raw(section, buf).await?;
 
-        // Append offset to offsets journal
-        let offsets_pos = self.offsets.append(&offset).await?;
-        assert_eq!(offsets_pos, inner.size);
+            // Append offset to offsets journal.
+            let offsets_pos = self.offsets.append(&offset).await?;
+            assert_eq!(offsets_pos, inner.size);
 
-        // Return the current position
-        let position = inner.size;
-        inner.size += 1;
+            // Return the current position.
+            last_position = inner.size;
+            inner.size += 1;
 
-        // Return early if no sync is needed (section not full).
-        if !inner.size.is_multiple_of(self.items_per_section) {
-            return Ok(position);
+            // The section was filled and must be synced. Downgrade so readers can continue
+            // during the sync while mutators remain blocked.
+            if inner.size.is_multiple_of(self.items_per_section) {
+                let inner_ref = inner.downgrade_to_upgradable();
+                futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
+                if index + 1 == encoded.len() {
+                    return Ok(last_position);
+                }
+                inner = inner_ref.upgrade().await;
+            }
         }
 
-        // The section was filled and must be synced. Downgrade so readers can continue during the
-        // sync while mutators remain blocked.
-        let inner = inner.downgrade_to_upgradable();
-        futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
-
-        Ok(position)
+        Ok(last_position)
     }
 
     /// Acquire a reader guard that holds a consistent view of the journal.
@@ -908,6 +961,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::append(self, item).await
     }
 
+    async fn append_many<'a>(&'a mut self, items: Many<'a, Self::Item>) -> Result<u64, Error> {
+        Self::append_many(self, items).await
+    }
+
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         Self::prune(self, min_position).await
     }
@@ -937,18 +994,18 @@ impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
 impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
     type Config = Config<V::Cfg>;
 
-    async fn init<H: commonware_cryptography::Hasher>(
+    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        merkle_cfg: crate::merkle::journaled::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&V) -> bool,
     ) -> Result<
-        crate::journal::authenticated::Journal<E, Self, H>,
-        crate::journal::authenticated::Error,
+        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Error<F>,
     > {
-        crate::journal::authenticated::Journal::<E, Self, H>::new(
+        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
             context,
-            mmr_cfg,
+            merkle_cfg,
             journal_cfg,
             rewind_predicate,
         )

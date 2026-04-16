@@ -16,7 +16,15 @@ impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
 }
 
 impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
-    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
+    type JournalConfig = C;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
+
+impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
+    type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.log.clone()
@@ -40,7 +48,7 @@ pub trait Database: Sized + Send {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
