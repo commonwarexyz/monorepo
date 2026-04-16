@@ -286,24 +286,21 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            fn has_local_target_state(
+            async fn has_local_target_state(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Digest>,
-            ) -> impl std::future::Future<Output = bool> + Send {
+            ) -> bool {
                 let config = config.clone();
                 let target = target.clone();
-
-                async move {
-                    let Ok(db) = Self::init(context, config).await else {
-                        return false;
-                    };
-                    let bounds = db.bounds().await;
-                    let lower_bound = db.inactivity_floor_loc();
-                    lower_bound == target.range.start()
-                        && bounds.end == target.range.end()
-                        && <Self as qmdb::sync::Database>::root(&db) == target.root
-                }
+                let Ok(db) = Self::init(context, config).await else {
+                    return false;
+                };
+                let bounds = db.bounds().await;
+                let lower_bound = db.inactivity_floor_loc();
+                lower_bound == target.range.start()
+                    && bounds.end == target.range.end()
+                    && <Self as qmdb::sync::Database>::root(&db) == target.root
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies
