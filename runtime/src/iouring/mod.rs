@@ -591,11 +591,21 @@ impl IoUringLoop {
                 }
                 FillResult::AtWaiterCapacity => {
                     // Waiter pressure means completions are required before the
-                    // loop can admit more work, so submit pending SQEs and block
-                    // for progress with the eventfd-backed wake path armed.
-                    let _arm = self.waker.arm(self.processed_seq);
-                    self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
-                        .expect("unable to submit to ring");
+                    // loop can admit more work, so the default behavior is to
+                    // submit pending SQEs and block for progress with the
+                    // eventfd-backed wake path armed.
+                    //
+                    // The only exception is an already-latched out-of-band
+                    // wake, such as final-handle disconnect. In that case the
+                    // loop must recheck shutdown instead of sleeping, but a
+                    // published-ahead submission sequence alone is not a reason
+                    // to skip blocking here because waiter pressure still
+                    // prevents admitting more work.
+                    let arm = self.waker.arm(self.processed_seq);
+                    if !arm.wake_latched() {
+                        self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
+                            .expect("unable to submit to ring");
+                    }
                     continue;
                 }
                 FillResult::AtSubmissionQueueCapacity => {
@@ -625,7 +635,7 @@ impl IoUringLoop {
             // submit is needed. Arm the eventfd-backed blocking path and block
             // only if the post-arm snapshot still looks idle.
             let arm = self.waker.arm(self.processed_seq);
-            if arm.should_block() {
+            if arm.still_idle() {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
@@ -1111,46 +1121,87 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pending_recheck_after_empty_observes_published_request() {
+    async fn test_pending_recheck_after_empty_preserves_fifo_order_across_producers() {
         // Lock in the stronger post-`pending()` recheck assumption used by the
         // `expect(...)` in `fill_submission_queue()`: once the consumer sees
         // a published-ahead sequence after an `Empty` observation, the second
-        // `try_recv()` must observe the corresponding request rather than
-        // returning `Empty` again.
+        // `try_recv()` must observe some queued request rather than reporting
+        // `Empty` again.
         //
-        // This is the minimal shape of that race:
-        // 1. consumer sees the channel as empty
-        // 2. producer enqueues one item and then publishes it
-        // 3. consumer notices the published-ahead sequence
-        // 4. consumer's second `try_recv()` must now observe the item
-        let (sender, mut receiver) = mpsc::channel(1);
+        // Use two producers to pin the FIFO shape that matters here:
+        // 1. producer A enqueues first but intentionally delays its publish
+        // 2. producer B enqueues second and performs the publish that flips
+        //    `pending(processed_seq = 0)` to true
+        // 3. the consumer's second `try_recv()` must still return A's request,
+        //    proving the recheck only needs "a producer is published ahead"
+        //    and does not assume that the publisher owns the next FIFO slot
+        let (sender_a, mut receiver) = mpsc::channel(2);
+        let sender_b = sender_a.clone();
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         // Start from the same state as the real loop's slow path: the first
         // receive attempt found no immediately visible work.
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
 
-        let publish_waker = waker.clone();
-        let submit = tokio::spawn(async move {
-            // Match the real producer protocol exactly: enqueue first, then
-            // publish the sequence increment that `pending()` observes.
-            sender
-                .send(7u8)
+        let (a_enqueued_tx, a_enqueued_rx) = tokio::sync::oneshot::channel();
+        let (allow_a_publish_tx, allow_a_publish_rx) = tokio::sync::oneshot::channel();
+
+        let waker_a = waker.clone();
+        let producer_a = tokio::spawn(async move {
+            sender_a
+                .send(1u8)
                 .await
-                .expect("send should succeed before publish");
-            publish_waker.publish();
+                .expect("producer A should enqueue before publishing");
+            a_enqueued_tx
+                .send(())
+                .expect("producer A enqueue signal should be received");
+            allow_a_publish_rx
+                .await
+                .expect("producer A publish should be released");
+            waker_a.publish();
         });
 
-        // Poll until the acquire/release pair says producers are ahead. The
-        // real loop would take the `expect(...)` path at this point.
+        let waker_b = waker.clone();
+        let producer_b = tokio::spawn(async move {
+            a_enqueued_rx
+                .await
+                .expect("producer B should wait for producer A enqueue");
+            sender_b
+                .send(2u8)
+                .await
+                .expect("producer B should enqueue after producer A");
+            waker_b.publish();
+        });
+
+        // Poll until producer B's publish makes the packed sequence look
+        // ahead. The real loop would take the `expect(...)` recheck path now.
         while !waker.pending(0) {
             tokio::task::yield_now().await;
         }
 
-        // Once `pending()` is true for `processed_seq = 0`, the second receive
-        // must see the request rather than report `Empty` again.
-        assert_eq!(receiver.try_recv(), Ok(7));
-        submit.await.expect("sender task should finish");
+        // Even though producer B is the publisher that flipped `pending()`,
+        // FIFO still requires the next dequeue to be producer A's older entry.
+        assert_eq!(receiver.try_recv(), Ok(1));
+
+        // At this point exactly one publish is visible and exactly one request
+        // has been drained, so the loop should no longer see producers ahead
+        // until producer A finally publishes its already-queued request.
+        assert!(!waker.pending(1));
+
+        allow_a_publish_tx
+            .send(())
+            .expect("producer A publish should be unblocked");
+
+        while !waker.pending(1) {
+            tokio::task::yield_now().await;
+        }
+
+        // Once producer A publishes, the second queued request becomes
+        // directionally visible to the same recheck logic as usual.
+        assert_eq!(receiver.try_recv(), Ok(2));
+
+        producer_a.await.expect("producer A task should finish");
+        producer_b.await.expect("producer B task should finish");
     }
 
     #[test]
@@ -1436,38 +1487,6 @@ mod tests {
         assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
         assert!(ring.submission().is_full());
         assert!(iouring.waiters.len() < cfg.size as usize);
-    }
-
-    #[test]
-    fn test_fill_submission_queue_preserves_wake_rearm_when_submission_queue_starts_full() {
-        // Verify a full local SQ defers wake rearm without clearing the retry flag.
-        let cfg = Config {
-            size: 8,
-            ..Default::default()
-        };
-        let mut registry = Registry::default();
-        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
-        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
-
-        iouring.wake_rearm_needed = true;
-
-        {
-            let mut submission_queue = ring.submission();
-            while !submission_queue.is_full() {
-                let nop = io_uring::opcode::Nop::new().build().user_data(0);
-                // SAFETY: Nop SQE owns no user pointers or external resources.
-                unsafe {
-                    submission_queue
-                        .push(&nop)
-                        .expect("unable to fill submission queue");
-                }
-            }
-        }
-
-        let fill_result = iouring.fill_submission_queue(&mut ring);
-
-        assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
-        assert!(iouring.wake_rearm_needed);
     }
 
     #[test]
@@ -2070,11 +2089,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_deferred_wake_reinstall_survives_idle_futex_path() {
-        // Simulate a prior wake CQE that terminated multishot delivery by
-        // seeding `wake_rearm_needed = true`, then verify an idle futex pass
-        // can defer the reinstall until the next non-idle submission without
-        // losing later eventfd-based wakeups.
+    async fn test_wake_reinstall_survives_submission_queue_full_and_idle_futex_deferral() {
+        // Lock in the two deferral cases that protect wake-poll reinstall:
+        //
+        // 1. if the local SQ starts full, the fill pass must report
+        //    `AtSubmissionQueueCapacity` and leave `wake_rearm_needed = true`
+        //    so the reinstall can be retried after a submit-only handoff
+        // 2. once the reinstall does stage successfully, an idle futex park
+        //    may still defer the actual kernel submission until a later
+        //    non-idle iteration, and that later iteration must reactivate
+        //    eventfd-based wakeups before blocking again
+
+        // Phase 1: direct unit-level coverage of the SQ-full handoff. The
+        // local SQ is pre-filled before `fill_submission_queue()` runs, so the
+        // reinstall attempt must fail without consuming the retry flag.
+        {
+            let cfg = Config {
+                size: 8,
+                ..Default::default()
+            };
+            let mut registry = Registry::default();
+            let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+            let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+            iouring.wake_rearm_needed = true;
+
+            {
+                let mut submission_queue = ring.submission();
+                while !submission_queue.is_full() {
+                    let nop = io_uring::opcode::Nop::new().build().user_data(0);
+                    // SAFETY: Nop SQE owns no user pointers or external resources.
+                    unsafe {
+                        submission_queue
+                            .push(&nop)
+                            .expect("unable to fill submission queue");
+                    }
+                }
+            }
+
+            let fill_result = iouring.fill_submission_queue(&mut ring);
+
+            assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
+            assert!(iouring.wake_rearm_needed);
+        }
+
+        // Phase 2: end-to-end coverage of the idle futex deferral. Start from
+        // the same `wake_rearm_needed = true` state, but this time allow the
+        // reinstall SQE to stage. Because the loop is otherwise idle, it parks
+        // on the futex path before entering the kernel, so the reinstall only
+        // becomes live on a later non-idle iteration.
         let cfg = Config {
             size: 2,
             ..Default::default()

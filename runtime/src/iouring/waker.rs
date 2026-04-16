@@ -60,14 +60,21 @@ pub const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2)
 /// wake if producers publish new work or the final handle disconnects.
 pub struct ArmGuard<'a> {
     waker: &'a Waker,
-    should_block: bool,
+    still_idle: bool,
+    wake_latched: bool,
 }
 
 impl ArmGuard<'_> {
-    /// Return whether the loop was still idle after arming the blocking wake
-    /// path and therefore may safely enter `submit_and_wait`.
-    pub const fn should_block(&self) -> bool {
-        self.should_block
+    /// Return whether the post-arm snapshot still looked idle, meaning no
+    /// wake was latched and the published sequence still matched the loop's
+    /// `processed_seq`.
+    pub const fn still_idle(&self) -> bool {
+        self.still_idle
+    }
+
+    /// Return whether a wake was already latched before or during arming.
+    pub const fn wake_latched(&self) -> bool {
+        self.wake_latched
     }
 }
 
@@ -270,9 +277,11 @@ impl Waker {
 
     /// Arm the blocking wake path used around `submit_and_wait`.
     ///
-    /// The returned guard automatically clears the current wait state on drop. Call
-    /// [`ArmGuard::should_block`] to decide whether the loop was still idle
-    /// after arming.
+    /// The returned guard automatically clears the current wait state on drop.
+    /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
+    /// the normal "still idle" path, or [`ArmGuard::wake_latched`] to detect
+    /// an already-latched wake without conflating it with published-ahead
+    /// sequence progress.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
         // Arming only updates the packed wake state machine. It does not
         // publish queue memory or consume any out-of-band wake publication, so
@@ -289,12 +298,14 @@ impl Waker {
         );
 
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
-        let should_block = (snapshot & WAKE_SIGNALLED_BIT) == 0
+        let wake_latched = (snapshot & WAKE_SIGNALLED_BIT) != 0;
+        let still_idle = !wake_latched
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
 
         ArmGuard {
             waker: self,
-            should_block,
+            still_idle,
+            wake_latched,
         }
     }
 
@@ -553,7 +564,8 @@ pub mod tests {
 
         // Arm and publish should trigger an eventfd wake; acknowledge drains it.
         let arm = waker.arm(1);
-        assert!(arm.should_block());
+        assert!(arm.still_idle());
+        assert!(!arm.wake_latched());
         waker.publish();
         assert_eq!(submitted_seq(&waker), 2);
 
@@ -567,7 +579,8 @@ pub mod tests {
 
         // Re-arming should observe the same submitted snapshot while idle.
         let arm = waker.arm(2);
-        assert!(arm.should_block());
+        assert!(arm.still_idle());
+        assert!(!arm.wake_latched());
         drop(arm);
     }
 
@@ -696,7 +709,8 @@ pub mod tests {
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         let arm = waker.arm(0);
-        assert!(arm.should_block());
+        assert!(arm.still_idle());
+        assert!(!arm.wake_latched());
         waker.publish();
         waker.publish();
 
@@ -708,12 +722,14 @@ pub mod tests {
     #[test]
     fn test_arm_after_sticky_wake_skips_blocking() {
         // Verify a wake latched before arming makes the next blocking section
-        // skip `submit_and_wait`.
+        // skip the normal idle-based blocking decision, and surface that the
+        // reason was an out-of-band wake rather than published-ahead work.
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         waker.wake();
         let arm = waker.arm(0);
-        assert!(!arm.should_block());
+        assert!(!arm.still_idle());
+        assert!(arm.wake_latched());
         drop(arm);
 
         assert_eq!(submitted_seq(&waker), 0);
@@ -728,7 +744,8 @@ pub mod tests {
 
         waker.publish();
         let arm = waker.arm(0);
-        assert!(!arm.should_block());
+        assert!(!arm.still_idle());
+        assert!(!arm.wake_latched());
         drop(arm);
 
         assert_eq!(submitted_seq(&waker), 1);
@@ -742,7 +759,8 @@ pub mod tests {
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         let arm = waker.arm(0);
-        assert!(arm.should_block());
+        assert!(arm.still_idle());
+        assert!(!arm.wake_latched());
         waker.wake();
         waker.wake();
 
