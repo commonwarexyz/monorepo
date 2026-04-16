@@ -80,31 +80,23 @@ where
 
     /// Records a proposal that has already been verified.
     ///
-    /// If the slot already contains the same proposal, we refresh it to
-    /// verified state. Conflicting proposals are ignored.
+    /// Additional observations of the same proposal are ignored here.
+    /// Conflicting proposals are handled separately as equivocation.
     fn verified(&mut self, proposal: Proposal<D>, local: bool) {
-        let verified = Status::Verified(local);
         if let Some(existing) = &self.proposal {
-            if existing == &proposal && self.status != Status::Equivocated {
-                self.status = verified;
-                self.requested_build = true;
-                self.requested_verify = true;
-                return;
-            }
-
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
             debug!(
                 ?existing,
                 ?proposal,
-                "ignoring local proposal because slot already populated"
+                "ignoring verified proposal because slot already populated"
             );
             return;
         }
 
         // Otherwise, we record the proposal and flip the build/verify flags.
         self.proposal = Some(proposal);
-        self.status = verified;
+        self.status = Status::Verified(local);
         self.requested_build = true;
         self.requested_verify = true;
     }
