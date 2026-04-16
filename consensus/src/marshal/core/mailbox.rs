@@ -86,11 +86,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         response: oneshot::Sender<V::Block>,
     },
     /// A request to broadcast a proposed block to peers.
+    ///
+    /// The `ack` is signaled after the block has been durably persisted
+    /// (`cache.put_verified` returns) so callers can establish
+    /// "voted ⟹ persisted" before broadcasting their own notarize vote.
     Proposed {
         /// The round in which the block was proposed.
         round: Round,
         /// The block to broadcast.
         block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
     },
     /// A request to forward a block to a set of peers.
     Forward {
@@ -102,11 +108,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         peers: Vec<S::PublicKey>,
     },
     /// A notification that a block has been verified by the application.
+    ///
+    /// The `ack` is signaled after the block has been durably persisted
+    /// (`cache.put_verified` returns) so callers can establish
+    /// "voted ⟹ persisted" before resolving consensus's certify task.
     Verified {
         /// The round in which the block was verified.
         round: Round,
         /// The verified block.
         block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
@@ -283,17 +295,31 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .map(|block| AncestorStream::new(self.clone(), [V::into_inner(block)]))
     }
 
-    /// Requests that a proposed block is sent to peers.
+    /// Requests that a proposed block is sent to peers, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
+    ///
+    /// This is a safety boundary: it ensures the proposer cannot vote notarize
+    /// on its own proposal before the block exists on disk. Returns silently
+    /// if the actor has shut down (block is then unrecoverable from this node,
+    /// matching the existing post-shutdown contract for fire-and-forget calls).
     pub async fn proposed(&self, round: Round, block: V::Block) {
-        self.sender
-            .send_lossy(Message::Proposed { round, block })
+        let _ = self
+            .sender
+            .request(|ack| Message::Proposed { round, block, ack })
             .await;
     }
 
-    /// Notifies the actor that a block has been verified.
+    /// Notifies the actor that a block has been verified, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
+    ///
+    /// This is a safety boundary: it ensures consensus's certify task cannot
+    /// resolve true (and thus cannot drive a finalize vote) before the block
+    /// exists on disk for this validator. Returns silently if the actor has
+    /// shut down.
     pub async fn verified(&self, round: Round, block: V::Block) {
-        self.sender
-            .send_lossy(Message::Verified { round, block })
+        let _ = self
+            .sender
+            .request(|ack| Message::Verified { round, block, ack })
             .await;
     }
 

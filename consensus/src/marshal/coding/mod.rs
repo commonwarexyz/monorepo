@@ -66,7 +66,7 @@ mod tests {
     use crate::{
         marshal::{
             coding::{
-                types::{coding_config_for_participants, CodedBlock},
+                types::{coding_config_for_participants, hash_context, CodedBlock},
                 Marshaled, MarshaledConfig,
             },
             mocks::{
@@ -79,9 +79,9 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
+        Automaton, CertifiableAutomaton, CertifiableBlock, Relay,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -1593,6 +1593,121 @@ mod tests {
             // verify with a missing scheme returns a dropped sender
             let rx = marshaled.verify(ctx, genesis_commitment()).await;
             assert!(rx.await.is_err());
+        });
+    }
+
+    /// Regression: a proposer must be able to recover its own block after a
+    /// crash that occurs between `Marshaled::propose()` + `Relay::broadcast(Plan::Propose)`
+    /// and any verify-driven persistence. Without persisting on the broadcast
+    /// path, the block lives only in the in-memory shards cache and is lost
+    /// across restart.
+    #[test_traced("WARN")]
+    fn test_marshaled_proposed_block_persists_across_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            // Compute the genesis commitment as Marshaled would (mirrors the
+            // private `genesis_coding_commitment` helper in marshaled.rs).
+            let genesis_parent_commitment = Commitment::from((
+                genesis.digest(),
+                genesis.digest(),
+                hash_context::<Sha256, _>(&genesis.context()),
+                harness::GENESIS_CODING_CONFIG,
+            ));
+
+            // Build the block we want propose() to return. Its embedded context
+            // uses the proper genesis commitment so fetch_parent matches the
+            // cached genesis without going through the marshal subscription.
+            let propose_round = Round::new(Epoch::zero(), View::new(1));
+            let propose_context = CodingCtx {
+                round: propose_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block_to_propose =
+                make_coding_block(propose_context.clone(), genesis.digest(), Height::new(1), 100);
+            let block_digest = block_to_propose.digest();
+            let expected_commitment =
+                CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                    block_to_propose.clone(),
+                    coding_config,
+                    &Sequential,
+                )
+                .commitment();
+
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new(genesis).with_propose_result(block_to_propose);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Drive the full leader-side propose + broadcast path.
+            let commitment = marshaled
+                .propose(propose_context)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, expected_commitment);
+            marshaled.broadcast(commitment, Plan::Propose).await;
+
+            // Crash immediately. `broadcast` already awaited the actor's
+            // persistence ack via `marshal.proposed`, so no extra sleep is
+            // needed - the block must be on disk by now.
+            drop(marshaled);
+            drop(marshal);
+            drop(shards);
+
+            let setup2 = CodingHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            // The proposer must recover its own block after restart. Without
+            // the broadcast-path persistence fix, the block lived only in the
+            // shards engine's in-memory cache and is now gone.
+            let post_restart = marshal2.get_block(&block_digest).await;
+            assert!(
+                post_restart.is_some(),
+                "proposer should recover its own block after restart"
+            );
         });
     }
 }

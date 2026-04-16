@@ -14,7 +14,7 @@ use commonware_runtime::deterministic;
 ///
 /// This mock:
 /// - Returns the provided genesis block from `genesis()`
-/// - Returns `None` from `propose()` (never proposes)
+/// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
@@ -22,6 +22,8 @@ pub struct MockVerifyingApp<B, S> {
     pub genesis: B,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// The block returned by `propose`. If `None`, `propose` returns `None`.
+    pub propose_result: Option<B>,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -31,6 +33,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             genesis,
             verify_result: true,
+            propose_result: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -40,8 +43,15 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             genesis,
             verify_result,
+            propose_result: None,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Configure the block returned by `propose`.
+    pub fn with_propose_result(mut self, block: B) -> Self {
+        self.propose_result = Some(block);
+        self
     }
 }
 
@@ -64,7 +74,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: AncestorStream<A, Self::Block>,
     ) -> Option<Self::Block> {
-        None
+        self.propose_result.clone()
     }
 }
 

@@ -165,6 +165,10 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub mailbox: Mailbox<S, H::Variant>,
     pub extra: H::ValidatorExtra,
     pub height: Height,
+    /// Handle to the marshal actor task. Tests can call `.abort()` to simulate
+    /// an actor crash and verify that prior `marshal.verified()`/`proposed()`
+    /// calls have already been durably persisted.
+    pub actor_handle: commonware_runtime::Handle<()>,
 }
 
 /// Per-validator handle for test operations.

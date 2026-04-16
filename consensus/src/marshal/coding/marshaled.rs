@@ -964,7 +964,13 @@ where
                     height = %block.height(),
                     "requested broadcast of built block"
                 );
-                self.shards.proposed(round, block).await;
+                // Route through marshal so the proposer's own block is durably
+                // persisted before (or alongside) shard broadcast. The marshal
+                // actor caches the verified block and forwards to the shards
+                // engine via the Buffer impl. Without this, the block lives
+                // only in the shards in-memory cache and a crash before any
+                // verify-driven persistence loses it.
+                self.marshal.proposed(round, block).await;
             }
             Plan::Forward { .. } => {
                 // Coding variant does not support targeted forwarding;
