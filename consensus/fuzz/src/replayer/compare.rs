@@ -376,15 +376,7 @@ fn compare_signers(
         let empty = BTreeSet::new();
         let exp_set = expected.get(&view).unwrap_or(&empty);
         let act_set = actual.get(&view).unwrap_or(&empty);
-        // The node's own vote may or may not be present on either side due
-        // to timing (spec may not have sent it, impl may have received the
-        // certificate first). Union both sides with {node} to ignore this.
-        let node_str = node.to_string();
-        let mut exp_with_self = exp_set.clone();
-        exp_with_self.insert(node_str.clone());
-        let mut act_with_self = act_set.clone();
-        act_with_self.insert(node_str);
-        if exp_with_self != act_with_self {
+        if exp_set != act_set {
             mismatches.push(Mismatch::VoteSignerMismatch {
                 node: node.to_string(),
                 view,
