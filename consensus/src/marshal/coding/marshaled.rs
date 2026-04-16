@@ -82,9 +82,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
-            },
+            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify},
             verification_tasks::VerificationTasks,
         },
         coding::{
@@ -124,6 +122,8 @@ use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
+
+type LastBuilt<B, C, H> = Arc<Mutex<Option<(Round, CodedBlock<B, C, H>)>>>;
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
@@ -183,9 +183,9 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    last_built: LastBuilt<CodedBlock<B, C, H>>,
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
+    last_built: LastBuilt<B, C, H>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,
@@ -266,9 +266,9 @@ where
             scheme_provider,
             strategy,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
             verification_tasks: VerificationTasks::new(),
             cached_genesis: Arc::new(OnceLock::new()),
+            last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
             verify_duration,
@@ -507,10 +507,10 @@ where
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
         let cached_genesis = self.cached_genesis.clone();
+        let last_built = self.last_built.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
@@ -578,14 +578,15 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
+                    let round = consensus_context.round;
                     {
                         let mut lock = last_built.lock();
-                        *lock = Some((consensus_context.round, parent));
+                        *lock = Some((round, parent));
                     }
 
                     let success = tx.send_lossy(commitment);
                     debug!(
-                        round = ?consensus_context.round,
+                        ?round,
                         ?commitment,
                         success,
                         "re-proposed parent block at epoch boundary"
@@ -627,22 +628,16 @@ where
                 erasure_timer.observe();
 
                 let commitment = coded_block.commitment();
-
-                // Persist before returning the commitment to consensus. Once
-                // consensus receives it, the proposer will vote, so the block
-                // must be on disk before that point.
-                if !marshal.verified(consensus_context.round, coded_block.clone()).await {
-                    return;
-                }
+                let round = consensus_context.round;
 
                 {
                     let mut lock = last_built.lock();
-                    *lock = Some((consensus_context.round, coded_block));
+                    *lock = Some((round, coded_block));
                 }
 
                 let success = tx.send_lossy(commitment);
                 debug!(
-                    round = ?consensus_context.round,
+                    ?round,
                     ?commitment,
                     success,
                     "proposed new block"
@@ -991,29 +986,14 @@ where
                         "skipping requested broadcast of block with mismatched commitment"
                     );
                     return;
-                }
-                debug!(
-                    round = %round,
-                    commitment = %block.commitment(),
-                    height = %block.height(),
-                    "requested broadcast of built block"
-                );
-                // Route through marshal so the proposer's own block is durably
-                // persisted before shard broadcast. The marshal actor caches
-                // the verified block and forwards to the shards engine via
-                // the Buffer impl. Without this, the block would live only in
-                // the shards in-memory cache and a crash before any
-                // verify-driven persistence would lose it.
-                //
-                // If marshal is unavailable (graceful shutdown), log and
-                // skip: consensus is also being torn down and the local vote
-                // for this proposal must not proceed without persistence.
+                };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?commitment,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
+                    return;
                 }
             }
             Plan::Forward { .. } => {

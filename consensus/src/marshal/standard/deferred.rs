@@ -74,7 +74,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{is_inferred_reproposal_at_certify, LastBuilt},
+            validation::is_inferred_reproposal_at_certify,
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
@@ -104,6 +104,8 @@ use commonware_utils::{
 use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, warn};
+
+type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -146,8 +148,8 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    last_built: LastBuilt<B>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
+    last_built: LastBuilt<B>,
 
     build_duration: Timed<E>,
 }
@@ -182,8 +184,8 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
             verification_tasks: VerificationTasks::new(),
+            last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
         }
@@ -299,8 +301,8 @@ where
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
+        let last_built = self.last_built.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -393,13 +395,6 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
-
-                // Persist before returning the digest to consensus. Once
-                // consensus receives the digest it will vote, so the block
-                // must be on disk before that point.
-                if !marshal.verified(consensus_context.round, built_block.clone()).await {
-                    return;
-                }
 
                 {
                     let mut lock = last_built.lock();
@@ -641,13 +636,7 @@ where
                         "skipping requested broadcast of block with mismatched digest"
                     );
                     return;
-                }
-                debug!(
-                    round = %round,
-                    digest = %block.digest(),
-                    height = %block.height(),
-                    "requested broadcast of built block"
-                );
+                };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,

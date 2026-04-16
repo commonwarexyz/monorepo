@@ -45,7 +45,6 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::LastBuilt,
         core::Mailbox,
         standard::{
             validation::{
@@ -74,6 +73,8 @@ use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::{debug, warn};
+
+type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// Tracks `(round, digest)` pairs for which `verify` has already fetched the
 /// block, so `certify` can return immediately without re-subscribing to marshal.
@@ -141,8 +142,8 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    last_built: LastBuilt<B>,
     available_blocks: AvailableBlocks<B::Digest>,
+    last_built: LastBuilt<B>,
 
     build_duration: Timed<E>,
 }
@@ -162,8 +163,7 @@ where
 {
     /// Creates a new inline-verification wrapper.
     ///
-    /// Registers a `build_duration` histogram for proposal latency and initializes
-    /// the shared "last built block" cache used by [`Relay::broadcast`].
+    /// Registers a `build_duration` histogram for proposal latency.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
@@ -178,8 +178,8 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
             available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
+            last_built: Arc::new(Mutex::new(None)),
             build_duration,
         }
     }
@@ -224,16 +224,16 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
-    /// Built/re-proposed blocks are cached in `last_built` so relay can broadcast
-    /// exactly what was proposed.
+    /// Blocks are persisted and broadcast via `marshal.proposed()` before the digest
+    /// is returned to consensus.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
+        let last_built = self.last_built.clone();
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -323,17 +323,11 @@ where
 
                 let digest = built_block.digest();
 
-                // Persist before returning the digest to consensus. Once
-                // consensus receives the digest it will vote, so the block
-                // must be on disk before that point.
-                if !marshal.verified(consensus_context.round, built_block.clone()).await {
-                    return;
-                }
-
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, built_block));
                 }
+
                 let success = tx.send_lossy(digest);
                 debug!(
                     round = ?consensus_context.round,
@@ -504,13 +498,14 @@ where
                         "skipping requested broadcast of block with mismatched digest"
                     );
                     return;
-                }
+                };
                 if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?digest,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
+                    return;
                 }
             }
             Plan::Forward { round, peers } => {
