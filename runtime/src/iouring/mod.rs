@@ -1255,6 +1255,103 @@ mod tests {
     }
 
     #[test]
+    fn test_fill_submission_queue_returns_disconnected_when_early_return_skips_receiver() {
+        #[derive(Debug)]
+        enum EarlyReturnPath {
+            Cancel,
+            Ready,
+        }
+
+        // Both early-return paths share the same underlying issue: waiter
+        // pressure is already saturated, the fill pass exits before any
+        // `try_recv()` call, and a closed+empty request channel still needs to
+        // be normalized into `Disconnected`.
+        //
+        // Run both shapes:
+        // - cancel staging fills the local SQ with AsyncCancel SQEs
+        // - ready-queue staging fills the local SQ with restaged requests
+        for path in [EarlyReturnPath::Cancel, EarlyReturnPath::Ready] {
+            let cfg = Config {
+                size: 8,
+                ..Default::default()
+            };
+            let mut registry = Registry::default();
+            let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+            let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+            match path {
+                EarlyReturnPath::Cancel => {
+                    // Queue enough in-flight cancellations to overflow one
+                    // staging pass once wake poll rearm also consumes an SQE.
+                    for _ in 0..cfg.size as usize {
+                        let (sock_left, _sock_right) =
+                            UnixStream::pair().expect("failed to create unix socket pair");
+                        // SAFETY: sock_left is a valid fd that we own.
+                        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                        let (tx, _rx) = oneshot::channel();
+                        let request = Request::Sync(SyncRequest {
+                            file: Arc::new(file),
+                            result: None,
+                            sender: tx,
+                        });
+                        let waiter_id = iouring.waiters.insert(request, None);
+                        assert!(matches!(
+                            iouring.waiters.stage(waiter_id),
+                            StageOutcome::Submit(_)
+                        ));
+                        assert!(
+                            iouring.waiters.cancel(waiter_id),
+                            "cancel should transition waiter to cancel-requested"
+                        );
+                        iouring.pending_cancels.push_back(waiter_id);
+                    }
+                }
+                EarlyReturnPath::Ready => {
+                    // Leave wake rearm enabled so the wake poll consumes one
+                    // SQE and the ready queue cannot fully drain in a single
+                    // staging pass.
+                    for _ in 0..cfg.size as usize {
+                        let (sock_left, _sock_right) =
+                            UnixStream::pair().expect("failed to create unix socket pair");
+                        // SAFETY: sock_left is a valid fd that we own.
+                        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                        let (tx, _rx) = oneshot::channel();
+                        let request = Request::Sync(SyncRequest {
+                            file: Arc::new(file),
+                            result: None,
+                            sender: tx,
+                        });
+                        let waiter_id = iouring.waiters.insert(request, None);
+                        iouring.ready_queue.push_back(waiter_id);
+                    }
+                }
+            }
+
+            drop(submitter);
+
+            // `fill_submission_queue()` should classify this waiter-full,
+            // channel-closed, channel-empty state as `Disconnected` even
+            // though the early return happens before any channel drain attempt.
+            let fill_result = iouring.fill_submission_queue(&mut ring);
+
+            assert_eq!(fill_result, FillResult::Disconnected, "{path:?}");
+            match path {
+                EarlyReturnPath::Cancel => {
+                    // The cancel queue must still be non-empty, proving the
+                    // result came from the cancel early-return path rather than
+                    // from draining all queued cancels first.
+                    assert!(!iouring.pending_cancels.is_empty(), "{path:?}");
+                }
+                EarlyReturnPath::Ready => {
+                    // The ready queue should remain partially staged, proving
+                    // the result came from the ready-queue early-return path.
+                    assert!(!iouring.ready_queue.is_empty(), "{path:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_fill_submission_queue_returns_submission_queue_capacity_when_fresh_staging_fills_sq() {
         // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
         let cfg = Config {
@@ -1838,51 +1935,90 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_wake_path_progress_scenarios() {
-        // Run both wake-path variants: one with strict success assertions and
-        // one that only checks for forward progress without inspecting results.
-        for should_succeed in [true, false] {
-            let cfg = Config::default();
-            let mut registry = Registry::default();
-            let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
-            let handle = std::thread::spawn(move || iouring.run());
+    async fn test_publish_wakes_eventfd_blocked_loop() {
+        // Verify a publish wakes the eventfd-backed blocking path while an
+        // earlier waiter keeps the loop out of the fully idle futex path.
+        //
+        // The first recv occupies one waiter slot and stays blocked forever
+        // until the test explicitly writes to its peer. That guarantees the
+        // loop is sleeping in `submit_and_wait`, not in the futex-backed idle
+        // path. The second recv already has data available, so once its
+        // publish wakes the loop it should be admitted and complete promptly.
+        // If the publish wake were lost, the second recv would stall until the
+        // first recv was manually released.
+        let cfg = Config {
+            size: 2,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let eventfd_waker = iouring.waker.clone();
+        let handle = std::thread::spawn(move || iouring.run());
 
-            let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
+        let (pipe_left1, pipe_right1) = UnixStream::pair().unwrap();
+        let (tx1, rx1) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left1.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx1,
+            }))
+            .await
+            .unwrap();
 
-            // Submit a recv.
-            let recv = submitter.recv(
-                Arc::new(left_pipe.into()),
-                IoBufMut::with_capacity(5),
-                0,
-                5,
-                false,
-                Instant::now() + Duration::from_secs(5),
-            );
-            let send = submitter.send(
-                Arc::new(right_pipe.into()),
-                IoBufs::from(IoBuf::from(b"hello")),
-                Instant::now() + Duration::from_secs(5),
-            );
+        // Wait until the loop is armed on the eventfd-backed blocking path.
+        // This first recv stays blocked, so no CQE can make progress for the
+        // loop once the second request is published.
+        waker::tests::wait_until_eventfd_armed(&eventfd_waker);
 
-            let timeout = tokio::time::timeout(Duration::from_secs(2), async {
-                let (recv_result, send_result) = join(recv, send).await;
-                if should_succeed {
-                    let (_, read) = recv_result.expect("recv should succeed");
-                    assert!(read > 0);
-                    send_result.expect("send should succeed");
-                } else {
-                    let _ = recv_result;
-                    let _ = send_result;
-                }
-            });
-            assert!(
-                timeout.await.is_ok(),
-                "wake path test timed out (should_succeed={should_succeed})"
-            );
+        let (pipe_left2, pipe_right2) = UnixStream::pair().unwrap();
+        // Preload the second pipe so that once the loop wakes and stages this
+        // recv, the CQE can complete immediately without any further help.
+        (&pipe_right2).write_all(&[9]).unwrap();
+        let (tx2, rx2) = oneshot::channel();
+        submitter
+            .enqueue(Request::Recv(RecvRequest {
+                fd: Arc::new(pipe_left2.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx2,
+            }))
+            .await
+            .unwrap();
 
-            drop(submitter);
-            handle.join().unwrap();
-        }
+        // This completion is the actual regression check: the second recv can
+        // only finish promptly if its publish woke the eventfd-blocked loop and
+        // caused the request to be staged while the first recv is still stuck.
+        let (_, read2) = tokio::time::timeout(Duration::from_secs(2), rx2)
+            .await
+            .expect("published recv timed out")
+            .expect("missing published recv completion")
+            .expect("published recv should succeed");
+        assert_eq!(read2, 1);
+
+        // Cleanly finish the original blocking recv so shutdown does not depend
+        // on abandoning it.
+        (&pipe_right1).write_all(&[3]).unwrap();
+        let (_, read1) = tokio::time::timeout(Duration::from_secs(2), rx1)
+            .await
+            .expect("blocking recv timed out")
+            .expect("missing blocking recv completion")
+            .expect("blocking recv should succeed");
+        assert_eq!(read1, 1);
+
+        drop(pipe_right1);
+        drop(pipe_right2);
+        drop(submitter);
+        handle.join().unwrap();
     }
 
     #[test]
@@ -2055,6 +2191,11 @@ mod tests {
     async fn test_shutdown_timeout_when_waiters_full_and_channel_empty() {
         // Verify shutdown is still observed when waiter pressure prevents the
         // fill pass from touching the receiver at all.
+        //
+        // With `size = 1`, the single in-flight recv saturates waiter capacity.
+        // After that point each fill pass can return from the waiter-pressure
+        // path without ever calling `try_recv()`. This is the exact shape that
+        // previously hid producer disconnect forever.
         let cfg = Config {
             size: 1,
             shutdown_timeout: Some(Duration::from_millis(50)),
@@ -2084,6 +2225,9 @@ mod tests {
         // Wait until the full waiter table forces the loop onto the
         // eventfd-backed blocking path before closing the final handle.
         waker::tests::wait_until_eventfd_armed(&eventfd_waker);
+        // Closing the final submitter leaves the channel closed and empty, but
+        // still with one blocked waiter in flight. The loop must convert that
+        // waiter-full state into shutdown rather than sleeping forever.
         drop(submitter);
 
         let err = tokio::time::timeout(Duration::from_secs(2), rx)
@@ -2100,6 +2244,11 @@ mod tests {
     async fn test_shutdown_drains_buffered_request_behind_full_waiter_capacity() {
         // Verify shutdown starts only after the closed producer side is also
         // drained, so buffered requests behind waiter pressure still complete.
+        //
+        // This guards the opposite mistake from the hang above: once waiter
+        // pressure is saturated, dropping the last submitter must not jump
+        // straight to shutdown if there is still buffered channel work that
+        // has not yet been admitted into the waiter table.
         let cfg = Config {
             size: 1,
             shutdown_timeout: None,
@@ -2130,6 +2279,9 @@ mod tests {
         waker::tests::wait_until_eventfd_armed(&eventfd_waker);
 
         let (pipe_left2, pipe_right2) = UnixStream::pair().unwrap();
+        // Preload the buffered request so that as soon as the first waiter
+        // completes and frees capacity, the second recv can complete without
+        // any extra synchronization from the test.
         (&pipe_right2).write_all(&[7]).unwrap();
         let (tx2, rx2) = oneshot::channel();
         submitter
@@ -2151,6 +2303,8 @@ mod tests {
         drop(submitter);
 
         // Release the in-flight waiter so the buffered request can be admitted.
+        // If shutdown incorrectly started as soon as the channel closed, `rx2`
+        // would never receive a successful completion here.
         (&pipe_right1).write_all(&[3]).unwrap();
 
         let result1 = tokio::time::timeout(Duration::from_secs(2), rx1)
