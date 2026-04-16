@@ -1668,6 +1668,65 @@ where
     });
 }
 
+/// Test that `has_local_target_state` rejects a partition that has the right root and end
+/// location but has already been pruned past the requested sync start.
+pub(crate) fn test_has_local_target_state_rejects_pruned_past_target_start<H: SyncTestHarness>() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let mut db = H::init_db_with_config(context.with_label("local"), db_config.clone()).await;
+
+        let local_prune_boundary = {
+            let mut seed = 0;
+            loop {
+                db = H::apply_ops(db, H::create_ops_seeded(32, seed)).await;
+                let floor = db.inactivity_floor_loc().await;
+                if floor > Location::new(1) {
+                    break floor;
+                }
+                seed += 1;
+                assert!(seed < 8, "expected inactivity floor to advance beyond 1");
+            }
+        };
+        db.prune(local_prune_boundary).await.unwrap();
+        db.sync().await.unwrap();
+
+        let bounds = db.bounds().await;
+        let exact_target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(local_prune_boundary, bounds.end),
+        };
+        assert!(
+            <DbOf<H> as qmdb::sync::Database>::has_local_target_state(
+                context.with_label("probe_exact"),
+                &db_config,
+                &exact_target,
+            )
+            .await,
+            "sanity check: exact local boundary should be accepted",
+        );
+
+        let earlier_target_start = Location::new((*local_prune_boundary) / 2);
+        assert!(earlier_target_start > Location::new(0));
+        assert!(earlier_target_start < local_prune_boundary);
+        let earlier_target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(earlier_target_start, bounds.end),
+        };
+        assert!(
+            !<DbOf<H> as qmdb::sync::Database>::has_local_target_state(
+                context.with_label("probe_earlier"),
+                &db_config,
+                &earlier_target,
+            )
+            .await,
+            "local target probe must reject partitions pruned past target.range.start()",
+        );
+
+        db.destroy().await.unwrap();
+    });
+}
+
 /// A resolver wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
@@ -2265,6 +2324,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_has_local_target_state_rejects_pruned_past_target_start() {
+                super::test_has_local_target_state_rejects_pruned_past_target_start::<$harness>();
             }
 
             #[test_traced]
