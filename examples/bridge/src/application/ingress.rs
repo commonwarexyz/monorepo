@@ -96,11 +96,12 @@ impl<D: Digest> Re for Mailbox<D> {
     type PublicKey = PublicKey;
     type Plan = Plan<PublicKey>;
 
-    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) {
+    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) -> bool {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd
         // send the block to other peers here.
+        true
     }
 }
 
