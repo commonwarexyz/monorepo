@@ -24,8 +24,10 @@ where
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
 ///
-/// The `pinned_nodes` are the individual peak digests before the proven range (as returned by
-/// `nodes_to_pin`). When `start_loc` is 0, `pinned_nodes` must be empty.
+/// The `pinned_nodes` are the pruning-boundary peaks at `start_loc` (as returned by
+/// `nodes_to_pin`). These may be finer-grained than the prefix subtrees authenticated directly by
+/// the proof; the verifier reconstructs those prefix subtrees from the pins as needed. When
+/// `start_loc` is 0, `pinned_nodes` must be empty.
 pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
