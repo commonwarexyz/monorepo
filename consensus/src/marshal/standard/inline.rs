@@ -725,4 +725,124 @@ mod tests {
             }
         });
     }
+
+    /// Regression: in inline mode, `verify` itself returns true after running
+    /// app verification. That return value drives the notarize vote, so it
+    /// must imply "block is durably persisted" -- otherwise a crash between
+    /// vote and persistence leaves the validator having voted for a block it
+    /// cannot serve.
+    ///
+    /// As with the deferred-mode test, the parent and child are seeded via
+    /// the buffered broadcast layer (in-memory only), bypassing
+    /// `marshal.proposed` which would already persist them.
+    #[test_traced("WARN")]
+    fn test_inline_verify_persists_block_before_resolving() {
+        for seed in 0u64..16 {
+            inline_verify_persists_block_before_resolving_at(seed);
+        }
+    }
+
+    fn inline_verify_persists_block_before_resolving_at(seed: u64) {
+        use commonware_broadcast::Broadcaster;
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+            let actor_handle = setup.actor_handle;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Build parent (height 1) and child (height 2). Seed both into
+            // the buffered broadcast cache (in-memory only).
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = Ctx {
+                round: child_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
+            let child_digest = child.digest();
+
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                .await
+                .await
+                .expect("buffer broadcast for parent should ack");
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                .await
+                .await
+                .expect("buffer broadcast for child should ack");
+
+            // Inline verify runs full validation inline and returns true only
+            // after `marshal.verified` is enqueued. With the persistence-ack
+            // fix, that enqueue blocks until put_sync completes.
+            let verify_result = inline
+                .verify(child_ctx, child_digest)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(verify_result, "inline verify should pass");
+
+            // CRITICAL: abort the marshal actor synchronously, with no
+            // intervening await. If verify returned true but the actor had
+            // only enqueued (not processed) the `Verified` message, this
+            // abort kills the actor before persistence completes.
+            actor_handle.abort();
+            drop(inline);
+            drop(marshal);
+            drop(buffer);
+
+            // Restart from the same partition. The block must be durably
+            // persisted - otherwise the validator would have voted notarize
+            // for a block it cannot serve from local storage.
+            let setup2 = StandardHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            let post_restart = marshal2.get_block(&child_digest).await;
+            assert!(
+                post_restart.is_some(),
+                "verify resolved true ⟹ block must be durably persisted (seed={seed})"
+            );
+        });
+    }
 }

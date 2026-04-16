@@ -299,14 +299,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// confirmation that the block has been durably persisted before returning.
     ///
     /// This is a safety boundary: it ensures the proposer cannot vote notarize
-    /// on its own proposal before the block exists on disk. Returns silently
-    /// if the actor has shut down (block is then unrecoverable from this node,
-    /// matching the existing post-shutdown contract for fire-and-forget calls).
+    /// on its own proposal before the block exists on disk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the marshal actor has shut down before acknowledging
+    /// persistence. Returning silently here would let the caller proceed to
+    /// vote on a block that is not durably stored, which violates the
+    /// "voted ⟹ persisted" invariant the rest of the system relies on.
     pub async fn proposed(&self, round: Round, block: V::Block) {
-        let _ = self
-            .sender
+        self.sender
             .request(|ack| Message::Proposed { round, block, ack })
-            .await;
+            .await
+            .expect("marshal actor dropped before acknowledging proposed block persistence");
     }
 
     /// Notifies the actor that a block has been verified, awaiting the actor's
@@ -314,13 +319,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// This is a safety boundary: it ensures consensus's certify task cannot
     /// resolve true (and thus cannot drive a finalize vote) before the block
-    /// exists on disk for this validator. Returns silently if the actor has
-    /// shut down.
+    /// exists on disk for this validator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the marshal actor has shut down before acknowledging
+    /// persistence. Returning silently here would let `certify` resolve true
+    /// (driving a finalize vote) on a block that is not durably stored,
+    /// violating the "voted ⟹ persisted" invariant.
     pub async fn verified(&self, round: Round, block: V::Block) {
-        let _ = self
-            .sender
+        self.sender
             .request(|ack| Message::Verified { round, block, ack })
-            .await;
+            .await
+            .expect("marshal actor dropped before acknowledging verified block persistence");
     }
 
     /// Sets the sync starting point (advances if higher than current).

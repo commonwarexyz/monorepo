@@ -327,7 +327,10 @@ impl TestHarness for StandardHarness {
     type ApplicationBlock = B;
     type Variant = Standard<B>;
     type TestBlock = B;
-    type ValidatorExtra = ();
+    /// Exposes the buffered broadcast mailbox so tests can seed in-memory
+    /// blocks directly (mirroring how a peer's broadcast would land in the
+    /// local buffer).
+    type ValidatorExtra = buffered::Mailbox<K, B>;
     type Commitment = D;
 
     async fn setup_validator(
@@ -486,12 +489,12 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        let actor_handle = actor.start(application.clone(), buffer, resolver);
+        let actor_handle = actor.start(application.clone(), buffer.clone(), resolver);
 
         ValidatorSetup {
             application,
             mailbox,
-            extra: (),
+            extra: buffer,
             height,
             actor_handle,
         }
@@ -673,9 +676,9 @@ impl TestHarness for StandardHarness {
         )
         .await;
         let application = Application::<B>::default();
-        actor.start(application.clone(), buffer, resolver);
+        actor.start(application.clone(), buffer.clone(), resolver);
 
-        (mailbox, (), application)
+        (mailbox, buffer, application)
     }
 
     async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
@@ -771,7 +774,7 @@ impl TestHarness for InlineHarness {
         StandardHarness::propose(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -788,7 +791,7 @@ impl TestHarness for InlineHarness {
         StandardHarness::verify(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -862,7 +865,7 @@ impl TestHarness for InlineHarness {
         StandardHarness::verify_for_prune(
             &mut ValidatorHandle::<StandardHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -959,7 +962,7 @@ impl TestHarness for DeferredHarness {
         InlineHarness::propose(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -976,7 +979,7 @@ impl TestHarness for DeferredHarness {
         InlineHarness::verify(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,
@@ -1050,7 +1053,7 @@ impl TestHarness for DeferredHarness {
         InlineHarness::verify_for_prune(
             &mut ValidatorHandle::<InlineHarness> {
                 mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
+                extra: handle.extra.clone(),
             },
             round,
             block,

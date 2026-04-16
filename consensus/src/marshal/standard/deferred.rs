@@ -983,4 +983,132 @@ mod tests {
             }
         })
     }
+
+    /// Regression: a validator must not vote finalize on a block that is not
+    /// durably persisted. `certify` resolves true ⟹ block is on disk.
+    ///
+    /// To exercise the race we have to seed the parent and child via the
+    /// buffered broadcast layer (in-memory only) instead of `marshal.proposed`,
+    /// which already persists. Otherwise `marshal.verified` is just a no-op
+    /// re-write and the test cannot catch the pre-fix race.
+    #[test_traced("WARN")]
+    fn test_certify_persists_block_before_resolving() {
+        for seed in 0u64..16 {
+            certify_persists_block_before_resolving_at(seed);
+        }
+    }
+
+    fn certify_persists_block_before_resolving_at(seed: u64) {
+        use commonware_broadcast::Broadcaster;
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+            let actor_handle = setup.actor_handle;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+
+            let mut marshaled = Deferred::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Build parent (height 1) and child (height 2). Seed both into
+            // the buffered broadcast cache (in-memory only), bypassing
+            // `marshal.proposed` which would already persist them.
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = Ctx {
+                round: child_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
+            let child_digest = child.digest();
+
+            // Broadcast to no peers - this only inserts into the local
+            // buffer cache (mirrors the pre-fix in-memory-only state).
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                .await
+                .await
+                .expect("buffer broadcast for parent should ack");
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                .await
+                .await
+                .expect("buffer broadcast for child should ack");
+
+            // Optimistic verify: returns true after parent/child fetch from
+            // the buffer + ancestry validation + app verify.
+            let optimistic = marshaled
+                .verify(child_ctx, child_digest)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(optimistic, "optimistic verify should pass");
+
+            // Certify - this is the safety gate before finalize voting.
+            let certify_result = marshaled
+                .certify(child_round, child_digest)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(certify_result, "certify should succeed");
+
+            // CRITICAL: abort the marshal actor synchronously, with no
+            // intervening await. If certify returned true but the actor had
+            // only enqueued (not processed) the `Verified` message, this
+            // abort kills the actor before persistence completes.
+            actor_handle.abort();
+            drop(marshaled);
+            drop(marshal);
+            drop(buffer);
+
+            // Restart from the same partition. The block must be durably
+            // persisted - otherwise the validator would have voted finalize
+            // for a block it cannot serve from local storage.
+            let setup2 = StandardHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            let post_restart = marshal2.get_block(&child_digest).await;
+            assert!(
+                post_restart.is_some(),
+                "certify resolved true ⟹ block must be durably persisted (seed={seed})"
+            );
+        });
+    }
 }
