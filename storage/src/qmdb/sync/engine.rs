@@ -319,8 +319,8 @@ where
         let target_size = self.target.range.end();
 
         // Schedule a pinned-nodes request at the lower sync bound if we don't
-        // have pinned nodes yet and one isn't already in flight.
-        if self.pinned_nodes.is_none()
+        // have boundary state yet and one isn't already in flight.
+        if !self.has_boundary_state()
             && !self
                 .outstanding_requests
                 .contains(&self.target.range.start())
@@ -634,8 +634,8 @@ where
         // Look up the root to verify against using the tree size the request
         // asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
-        let is_current = request.target_size == self.target.range.end();
-        let target_root = if is_current {
+        let is_current_target = request.target_size == self.target.range.end();
+        let target_root = if is_current_target {
             &self.target.root
         } else {
             let Some(root) = self.retained_roots.get(&request.target_size) else {
@@ -650,8 +650,9 @@ where
         // Verify the proof. Pinned nodes are only extracted from proofs
         // for the current root because the database needs them for the
         // latest tree size.
-        let need_pinned =
-            is_current && self.pinned_nodes.is_none() && start_loc == self.target.range.start();
+        let need_pinned = is_current_target
+            && self.pinned_nodes.is_none()
+            && start_loc == self.target.range.start();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             qmdb::verify_proof_and_pinned_nodes(

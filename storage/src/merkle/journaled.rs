@@ -243,6 +243,94 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         Ok(())
     }
 
+    /// Read-only peek at the persisted structure's root and boundaries.
+    ///
+    /// Opens the journal and metadata partitions, reconstructs the in-memory MMR
+    /// from persisted pinned nodes, and returns the root without performing any
+    /// of the mutations that [`Self::init_sync`] or [`Self::init`] would apply
+    /// (no `metadata.sync`, no `journal.prune`, no `journal.clear_to_size`).
+    ///
+    /// Returns `Ok(None)` when:
+    /// - The journal is empty.
+    /// - Journal size is structurally invalid and would require a rewind (i.e.
+    ///   a crash left the structure in an unrecoverable state for a read-only
+    ///   probe).
+    ///
+    /// Intended for callers that need to verify "does persisted state match a
+    /// target" without paying the cost of a full database rebuild.
+    pub async fn peek_root(
+        context: E,
+        cfg: Config,
+        hasher: &impl Hasher<F, Digest = D>,
+    ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            write_buffer: cfg.write_buffer,
+            page_cache: cfg.page_cache,
+        };
+        let journal: Journal<E, D> =
+            Journal::init(context.with_label("merkle_journal_peek"), journal_cfg).await?;
+        let journal_size = Position::<F>::new(journal.size().await);
+
+        if journal_size == 0 {
+            return Ok(None);
+        }
+
+        // Bail if the journal would require a rewind to reach a valid size.
+        // Probe is read-only; the caller will handle recovery via `init`.
+        let last_valid_size = F::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            return Ok(None);
+        }
+
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.with_label("merkle_metadata_peek"),
+            metadata_cfg,
+        )
+        .await?;
+
+        let prune_loc = metadata
+            .get(&U64::new(PRUNED_TO_PREFIX, 0))
+            .map(|bytes| -> Result<Location<F>, Error<F>> {
+                let raw: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("metadata pruned_to is not 8 bytes"))?;
+                Ok(Location::<F>::new(u64::from_be_bytes(raw)))
+            })
+            .transpose()?
+            .unwrap_or_else(|| Location::<F>::new(0));
+        let prune_pos = Position::try_from(prune_loc)?;
+
+        let journal_leaves = Location::try_from(journal_size)?;
+        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
+        let mut mem_pinned_nodes = Vec::new();
+        for pos in nodes_to_pin_mem {
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            mem_pinned_nodes.push(digest);
+        }
+        let mut mem = Mem::init(
+            MemConfig {
+                nodes: vec![],
+                pruning_boundary: journal_leaves,
+                pinned_nodes: mem_pinned_nodes,
+            },
+            hasher,
+        )?;
+
+        if prune_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+        }
+
+        let root = *mem.root();
+        Ok(Some((prune_loc, journal_leaves, root)))
+    }
+
     /// Initialize a new `Journaled` instance.
     pub async fn init(
         context: E,
