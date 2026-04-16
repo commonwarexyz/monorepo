@@ -859,18 +859,26 @@ impl<
                     let view = round.view();
                     debug!(%view, "attempting certification");
                     let result = if am_leader {
-                        // We led this view, so the proposal is ours and certification is trivially
-                        // true. Skipping the automaton call avoids a redundant round-trip.
+                        // The elected leader of this view is us, so certification is
+                        // trivially true. Skipping the automaton avoids a redundant
+                        // round-trip.
                         //
-                        // INVARIANT: `am_leader` implies we proposed. To propose, we must have
-                        // entered the view (via `enter_view`), which always sets the round's
-                        // leader. So when `state::certify_candidates` reports `am_leader = true`,
-                        // we have provably proposed for this view. The converse case where the
-                        // round's leader is unknown (e.g. notarization arrived via resolver
-                        // before the prior view's certificate set this view's leader) is reported
-                        // as `am_leader = false` and falls through to `automaton.certify`, which
-                        // is correct: we never entered the view, so we never proposed and don't
-                        // hold the block locally.
+                        // `am_leader` can only be `true` when the round's leader has
+                        // been set AND matches the local participant. The leader for
+                        // view V is set by processing V-1's notarization (which calls
+                        // `set_leader(V, ...)`). In normal operation this happens
+                        // before we enter V and propose, so `am_leader = true` means
+                        // we proposed.
+                        //
+                        // During catch-up (resolver delivers notarizations out of
+                        // order), `am_leader` can also be `true` for a view we never
+                        // entered -- if V-1's notarization arrived and set V's leader
+                        // before V's notarization added V as a candidate. A
+                        // notarization for our view can only exist if we (or a clone
+                        // holding our key) proposed, so accepting the network's 2f+1
+                        // commitment is safe. If V's notarization arrives without
+                        // V-1's, the leader is unknown, `am_leader = false`, and we
+                        // correctly fall through to the automaton.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;

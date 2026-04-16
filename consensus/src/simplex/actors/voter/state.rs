@@ -589,14 +589,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// of each view (used to short-circuit certification for own proposals).
     ///
     /// The `am_leader` flag is `true` only when the round's leader has been
-    /// set AND matches the local participant. A round's leader is always set
-    /// before we can propose into it (proposing requires `enter_view`, which
-    /// sets the leader), so `am_leader = true` provably implies we proposed
-    /// the block. If the leader is unknown for this view (e.g. notarization
-    /// arrived via resolver/replay before the prior view's certificate set
-    /// this view's leader), `am_leader` is `false`: we never entered the
-    /// view, so the proposal cannot be ours and the caller must fall back to
-    /// the automaton to certify.
+    /// set AND matches the local participant. The leader for view V is set
+    /// by processing V-1's notarization (`add_notarization(V-1)` calls
+    /// `set_leader(V, ...)`). In normal operation this precedes entering V
+    /// and proposing, so `am_leader = true` means we proposed the block.
+    ///
+    /// During catch-up, `am_leader` can be `true` for a view we never
+    /// entered: if V-1's notarization set V's leader before V's notarization
+    /// added V as a candidate. A notarization where we are the elected
+    /// leader can only exist if we (or a clone holding our key) proposed,
+    /// so accepting the network's 2f+1 commitment is correct. If V's
+    /// notarization arrives without V-1's, the leader is unknown and
+    /// `am_leader` is `false`, falling through to the automaton.
     pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
         let me = self.scheme.me();
