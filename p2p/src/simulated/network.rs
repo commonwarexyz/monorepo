@@ -18,8 +18,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner,
+    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics,
+    Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
@@ -527,7 +527,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 let link = Link::new(
-                    &*self.context,
+                    self.context.as_ref(),
                     sender,
                     receiver,
                     receiver_socket,
@@ -752,8 +752,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency =
-                Duration::from_millis(link.sampler.sample(&mut *self.context) as u64);
+            let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
 
             // Determine if the message should be delivered
             let should_deliver = self.context.gen_bool(link.success_rate);
@@ -1245,47 +1244,47 @@ impl<P: PublicKey> Peer<P> {
         // Spawn a task that accepts new connections and spawns a task for each connection
         let (ready_tx, ready_rx) = oneshot::channel();
         context.child("listener").spawn(move |context| async move {
-                // Initialize listener
-                let mut listener = context.bind(socket).await.unwrap();
-                let _ = ready_tx.send(());
+            // Initialize listener
+            let mut listener = context.bind(socket).await.unwrap();
+            let _ = ready_tx.send(());
 
-                // Continually accept new connections
-                while let Ok((_, _, mut stream)) = listener.accept().await {
-                    // New connection accepted. Spawn a task for this connection
-                    context.child("receiver").spawn({
-                        let inbox_sender = inbox_sender.clone();
-                        move |_| async move {
-                            // Receive dialer's public key as a handshake
-                            let dialer = match recv_frame(&mut stream, max_size).await {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    error!("failed to receive public key from dialer");
-                                    return;
-                                }
-                            };
-                            let Ok(dialer) = P::decode(dialer.coalesce()) else {
-                                error!("received public key is invalid");
+            // Continually accept new connections
+            while let Ok((_, _, mut stream)) = listener.accept().await {
+                // New connection accepted. Spawn a task for this connection
+                context.child("receiver").spawn({
+                    let inbox_sender = inbox_sender.clone();
+                    move |_| async move {
+                        // Receive dialer's public key as a handshake
+                        let dialer = match recv_frame(&mut stream, max_size).await {
+                            Ok(data) => data,
+                            Err(_) => {
+                                error!("failed to receive public key from dialer");
                                 return;
-                            };
+                            }
+                        };
+                        let Ok(dialer) = P::decode(dialer.coalesce()) else {
+                            error!("received public key is invalid");
+                            return;
+                        };
 
-                            // Continually receive messages from the dialer and send them to the inbox
-                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                let data = data.coalesce();
-                                let channel = Channel::from_be_bytes(
-                                    data.as_ref()[..Channel::SIZE].try_into().unwrap(),
-                                );
-                                let message = data.slice(Channel::SIZE..);
-                                if let Err(err) =
-                                    inbox_sender.send((channel, (dialer.clone(), message)))
-                                {
-                                    debug!(?err, "failed to send message to mailbox");
-                                    break;
-                                }
+                        // Continually receive messages from the dialer and send them to the inbox
+                        while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                            let data = data.coalesce();
+                            let channel = Channel::from_be_bytes(
+                                data.as_ref()[..Channel::SIZE].try_into().unwrap(),
+                            );
+                            let message = data.slice(Channel::SIZE..);
+                            if let Err(err) =
+                                inbox_sender.send((channel, (dialer.clone(), message)))
+                            {
+                                debug!(?err, "failed to send message to mailbox");
+                                break;
                             }
                         }
-                    });
-                }
-            });
+                    }
+                });
+            }
+        });
 
         // Wait for listener to start before returning
         let _ = ready_rx.await;
@@ -1561,9 +1560,8 @@ mod tests {
                 });
             let peer_a_for_recv = peer_a.clone();
             let peer_b_for_recv = peer_b.clone();
-            let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver.split_with(
-                context.child("split_receiver"),
-                move |(sender, _)| {
+            let (mut twin_primary_recv, mut twin_secondary_recv) =
+                twin_receiver.split_with(context.child("split_receiver"), move |(sender, _)| {
                     if sender == &peer_a_for_recv {
                         SplitTarget::Primary
                     } else if sender == &peer_b_for_recv {
@@ -1571,8 +1569,7 @@ mod tests {
                     } else {
                         panic!("unexpected sender");
                     }
-                },
-            );
+                });
 
             // Establish bidirectional links
             let link = ingress::Link {
@@ -1673,9 +1670,7 @@ mod tests {
             let (_twin_primary_sender, _twin_secondary_sender) =
                 twin_sender.split_with(|_origin, recipients, _| Some(recipients.clone()));
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
-                .split_with(context.child("split_receiver_both"), |_| {
-                    SplitTarget::Both
-                });
+                .split_with(context.child("split_receiver_both"), |_| SplitTarget::Both);
 
             // Establish bidirectional links
             let link = ingress::Link {
@@ -1749,9 +1744,7 @@ mod tests {
             let (mut twin_primary_sender, mut twin_secondary_sender) =
                 twin_sender.split_with(|_origin, _, _| None);
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
-                .split_with(context.child("split_receiver_both"), |_| {
-                    SplitTarget::None
-                });
+                .split_with(context.child("split_receiver_both"), |_| SplitTarget::None);
 
             // Establish bidirectional links
             let link = ingress::Link {

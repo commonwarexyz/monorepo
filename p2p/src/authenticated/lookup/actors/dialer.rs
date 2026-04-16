@@ -17,7 +17,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -177,7 +178,7 @@ impl<
                 if self.queue.is_empty() {
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
-                    self.queue.shuffle(&mut *self.context);
+                    self.queue.shuffle(self.context.as_mut());
                     next_query_at = dialable.next_query_at;
                 }
 

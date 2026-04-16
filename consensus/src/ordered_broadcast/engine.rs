@@ -473,7 +473,7 @@ impl<
                     payload,
                     result,
                 } = verify;
-                duration.observe_now(&*self.context);
+                duration.observe_now(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
@@ -606,7 +606,7 @@ impl<
         if let Some(ref signer) = self.sequencer_signer {
             if chunk.sequencer == signer.public_key() {
                 if let Some(start) = self.propose_timer.take() {
-                    start.observe_now(&*self.context);
+                    start.observe_now(self.context.as_ref());
                 }
             }
         }
@@ -672,7 +672,7 @@ impl<
         };
         let payload = node.chunk.payload;
         let mut automaton = self.automaton.clone();
-        let duration = self.metrics.verify_duration.start(&*self.context);
+        let duration = self.metrics.verify_duration.start(self.context.as_ref());
         self.pending_verifies.push(async move {
             let receiver = automaton.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
@@ -777,7 +777,7 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Record the start time of the proposal
-        self.propose_timer = Some(self.metrics.e2e_duration.start(&*self.context));
+        self.propose_timer = Some(self.metrics.e2e_duration.start(self.context.as_ref()));
 
         // Broadcast to network
         if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
@@ -903,7 +903,7 @@ impl<
 
         // Verify the node
         node.verify(
-            &mut *self.context,
+            self.context.as_mut(),
             &self.chunk_verifier,
             &self.validators_provider,
             &self.strategy,
@@ -964,7 +964,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut *self.context, scheme.as_ref(), &self.strategy) {
+        if !ack.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 

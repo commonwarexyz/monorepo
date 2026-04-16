@@ -1073,7 +1073,12 @@ where
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(&mut *self.context, scheme.as_ref(), &certs, &self.strategy)
+            verify_certificates(
+                self.context.as_mut(),
+                scheme.as_ref(),
+                &certs,
+                &self.strategy,
+            )
         } else {
             let mut verified = vec![false; delivers.len()];
 
@@ -1093,8 +1098,12 @@ where
                     continue;
                 };
                 let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results =
-                    verify_certificates(&mut *self.context, scheme.as_ref(), &group, &self.strategy);
+                let results = verify_certificates(
+                    self.context.as_mut(),
+                    scheme.as_ref(),
+                    &group,
+                    &self.strategy,
+                );
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];
                 }

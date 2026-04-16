@@ -107,11 +107,11 @@ where
         let proposals_len = self.latest_proposals.len();
         let payload_source = self
             .strategy
-            .repeated_proposal_index(&mut *self.context, proposals_len)
+            .repeated_proposal_index(self.context.as_mut(), proposals_len)
             .and_then(|idx| self.latest_proposals.get(idx).cloned())
             .unwrap_or_else(|| {
                 self.strategy.random_proposal(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -120,7 +120,7 @@ where
             });
 
         let view = self.strategy.random_view_for_proposal(
-            &mut *self.context,
+            self.context.as_mut(),
             self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -128,7 +128,7 @@ where
         );
 
         let parent_view = self.strategy.random_parent_view(
-            &mut *self.context,
+            self.context.as_mut(),
             view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -288,7 +288,7 @@ where
         match vote {
             Vote::Notarize(notarize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     &notarize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -302,7 +302,7 @@ where
             }
             Vote::Finalize(finalize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     &finalize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -316,7 +316,7 @@ where
             }
             Vote::Nullify(_) => {
                 let v = self.strategy.mutate_nullify_view(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -363,7 +363,7 @@ where
         if self.context.gen_bool(0.5) {
             let cert = self
                 .strategy
-                .mutate_certificate_bytes(&mut *self.context, &msg);
+                .mutate_certificate_bytes(self.context.as_mut(), &msg);
             let _ = sender.send(Recipients::All, cert, true).await;
         }
     }
@@ -376,7 +376,7 @@ where
         if self.context.gen_bool(0.5) {
             let mutated = self
                 .strategy
-                .mutate_resolver_bytes(&mut *self.context, &msg);
+                .mutate_resolver_bytes(self.context.as_mut(), &msg);
             let _ = sender
                 .send(Recipients::All, IoBuf::from(mutated), true)
                 .await;
@@ -411,7 +411,7 @@ where
         for _ in 0..10 {
             let proposal = self.get_proposal();
             let proposal = self.strategy.mutate_proposal(
-                &mut *self.context,
+                self.context.as_mut(),
                 &proposal,
                 self.last_vote_view,
                 self.last_finalized_view,
@@ -431,7 +431,7 @@ where
         }
         let proposal = self.get_proposal();
         let proposal = self.strategy.mutate_proposal(
-            &mut *self.context,
+            self.context.as_mut(),
             &proposal,
             self.last_vote_view,
             self.last_finalized_view,
@@ -467,7 +467,7 @@ where
         match self.message() {
             Message::Notarize => {
                 let proposal = self.strategy.mutate_proposal(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -481,7 +481,7 @@ where
             }
             Message::Finalize => {
                 let proposal = self.strategy.mutate_proposal(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -495,7 +495,7 @@ where
             }
             Message::Nullify => {
                 let view = self.strategy.mutate_nullify_view(
-                    &mut *self.context,
+                    self.context.as_mut(),
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,

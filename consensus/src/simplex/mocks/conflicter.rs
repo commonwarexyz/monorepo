@@ -57,7 +57,7 @@ where
             match msg {
                 Vote::Notarize(notarize) => {
                     // Notarize random digest
-                    let payload = H::Digest::random(&mut *self.context);
+                    let payload = H::Digest::random(self.context.as_mut());
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
                     let n = Notarize::<S, _>::sign(&self.scheme, proposal).unwrap();
@@ -71,7 +71,7 @@ where
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize random digest
-                    let payload = H::Digest::random(&mut *self.context);
+                    let payload = H::Digest::random(self.context.as_mut());
                     let proposal =
                         Proposal::new(finalize.round(), finalize.proposal.parent, payload);
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();

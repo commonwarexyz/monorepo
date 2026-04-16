@@ -422,7 +422,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(&mut *self.context, &self.scheme, &self.strategy) {
+                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
@@ -444,7 +444,7 @@ where
 
                         // Verify the certificate
                         if !nullification.verify::<_, D>(
-                            &mut *self.context,
+                            self.context.as_mut(),
                             &self.scheme,
                             &self.strategy,
                         ) {
@@ -468,7 +468,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(&mut *self.context, &self.scheme, &self.strategy) {
+                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
@@ -574,19 +574,19 @@ where
 
                 // Batch verify votes if ready
                 let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(&mut *self.context, &self.strategy))
+                    Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
                 } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(&mut *self.context, &self.strategy))
+                    Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
                 } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(&mut *self.context, &self.strategy))
+                    Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
                 } else {
                     None
                 };
 
                 // Process batch verification results
-                let verify_duration = self.verify_latency.start(&*self.context);
+                let verify_duration = self.verify_latency.start(self.context.as_ref());
                 if let Some((voters, failed)) = verified {
-                    verify_duration.observe_now(&*self.context);
+                    verify_duration.observe_now(self.context.as_ref());
 
                     // Process verified votes
                     let batch = voters.len() + failed.len();
@@ -621,7 +621,7 @@ where
                 // Try to construct and forward certificates
                 let notarization = self
                     .recover_latency
-                    .time_some(&*self.context, || round.try_construct_notarization(&self.scheme, &self.strategy));
+                    .time_some(self.context.as_ref(), || round.try_construct_notarization(&self.scheme, &self.strategy));
                 if let Some(notarization) = notarization {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
@@ -632,7 +632,7 @@ where
                 }
                 let nullification = self
                     .recover_latency
-                    .time_some(&*self.context, || round.try_construct_nullification(&self.scheme, &self.strategy));
+                    .time_some(self.context.as_ref(), || round.try_construct_nullification(&self.scheme, &self.strategy));
                 if let Some(nullification) = nullification {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
@@ -641,7 +641,7 @@ where
                 }
                 let finalization = self
                     .recover_latency
-                    .time_some(&*self.context, || round.try_construct_finalization(&self.scheme, &self.strategy));
+                    .time_some(self.context.as_ref(), || round.try_construct_finalization(&self.scheme, &self.strategy));
                 if let Some(finalization) = finalization {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter

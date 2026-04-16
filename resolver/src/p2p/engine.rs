@@ -246,7 +246,7 @@ impl<
                                     self.fetch_timers
                                         .insert(
                                             key.clone(),
-                                            self.metrics.fetch_duration.start(&*self.context),
+                                            self.metrics.fetch_duration.start(self.context.as_ref()),
                                         );
                                     self.fetcher.add_ready(key);
                                 } else {
@@ -334,7 +334,7 @@ impl<
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
                     .await;
                 if success {
-                    duration.observe_now(&*self.context);
+                    duration.observe_now(self.context.as_ref());
                 }
             },
             // Handle network messages
@@ -401,7 +401,7 @@ impl<
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let duration = self.metrics.serve_duration.start(&*self.context);
+        let duration = self.metrics.serve_duration.start(self.context.as_ref());
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
@@ -429,7 +429,7 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             let duration = self.fetch_timers.remove(&key).unwrap(); // must exist in the map
-            duration.observe_now(&*self.context);
+            duration.observe_now(self.context.as_ref());
 
             // Clear all targets for this key
             self.fetcher.clear_targets(&key);

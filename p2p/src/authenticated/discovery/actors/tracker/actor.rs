@@ -234,7 +234,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Truncate to a random selection of peers if we have too many infos
                 let max = self.peer_gossip_max_count;
                 if infos.len() > max {
-                    infos.partial_shuffle(&mut *self.context, max);
+                    infos.partial_shuffle(self.context.as_mut(), max);
                     infos.truncate(max);
                 }
 
@@ -906,7 +906,8 @@ mod tests {
                 PrivateKey::from_seed(0),
                 vec![(boot_pk.clone(), boot_addr.into())],
             );
-            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg_initial);
+            let TestHarness { mut mailbox, .. } =
+                setup_actor(context.child("tracker"), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.peers.len(), 1);
@@ -1025,7 +1026,8 @@ mod tests {
                 vec![(boot_pk.clone(), boot_addr.into())],
             );
 
-            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg_initial);
+            let TestHarness { mut mailbox, .. } =
+                setup_actor(context.child("tracker"), cfg_initial);
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());

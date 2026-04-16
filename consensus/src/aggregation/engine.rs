@@ -337,7 +337,7 @@ impl<
                     result,
                     duration,
                 } = request;
-                duration.observe_now(&*self.context);
+                duration.observe_now(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");
@@ -675,7 +675,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut *self.context, &*scheme, &self.strategy) {
+        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -690,7 +690,7 @@ impl<
     fn get_digest(&mut self, height: Height) {
         assert!(self.pending.contains_key(&height));
         let mut automaton = self.automaton.clone();
-        let duration = self.metrics.digest_duration.start(&*self.context);
+        let duration = self.metrics.digest_duration.start(self.context.as_ref());
         self.digest_requests.push(async move {
             let receiver = automaton.propose(height).await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);

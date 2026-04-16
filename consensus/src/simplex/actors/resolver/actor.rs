@@ -179,7 +179,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut *self.context, &self.scheme, &self.strategy) {
+                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -199,7 +199,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut *self.context, &self.scheme, &self.strategy) {
+                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -219,7 +219,11 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut *self.context, &self.scheme, &self.strategy) {
+                if !nullification.verify::<_, D>(
+                    self.context.as_mut(),
+                    &self.scheme,
+                    &self.strategy,
+                ) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

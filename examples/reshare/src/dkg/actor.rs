@@ -247,7 +247,7 @@ where
         if storage.epoch().is_none() {
             let initial_state = EpochState {
                 round: 0,
-                rng_seed: Summary::random(&mut *self.context),
+                rng_seed: Summary::random(self.context.as_mut()),
                 output,
                 share,
             };
@@ -522,7 +522,7 @@ where
                         let (success, next_round, next_output, next_share) = if let Some(ps) =
                             player_state.take()
                         {
-                            match ps.finalize::<N3f1, Batch>(&mut *self.context, logs, &Sequential) {
+                            match ps.finalize::<N3f1, Batch>(self.context.as_mut(), logs, &Sequential) {
                                 Ok((new_output, new_share)) => (
                                     true,
                                     epoch_state.round + 1,
@@ -537,7 +537,7 @@ where
                                 ),
                             }
                         } else {
-                            match observe::<_, _, N3f1, Batch>(&mut *self.context, logs, &Sequential)
+                            match observe::<_, _, N3f1, Batch>(self.context.as_mut(), logs, &Sequential)
                             {
                                 Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                 Err(_) => (
@@ -568,7 +568,7 @@ where
                                 epoch.next(),
                                 EpochState {
                                     round: next_round,
-                                    rng_seed: Summary::random(&mut *self.context),
+                                    rng_seed: Summary::random(self.context.as_mut()),
                                     output: next_output.clone(),
                                     share: next_share.clone(),
                                 },

@@ -111,3 +111,15 @@ impl<C> DerefMut for Cell<C> {
         self.as_present_mut()
     }
 }
+
+impl<C> AsRef<C> for Cell<C> {
+    fn as_ref(&self) -> &C {
+        self.as_present()
+    }
+}
+
+impl<C> AsMut<C> for Cell<C> {
+    fn as_mut(&mut self) -> &mut C {
+        self.as_present_mut()
+    }
+}
