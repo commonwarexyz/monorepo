@@ -44,8 +44,7 @@ thread_local! {
                 handshake_timeout: Duration::from_secs(2),
             };
 
-
-        let listener_handle = context.child("lazy_transport").spawn(move |context| async move {
+        let listener_handle = context.child("listener").spawn(move |context| async move {
             listen(
                 context,
                 |_| async { true },
@@ -56,7 +55,7 @@ thread_local! {
         });
 
         let (dialer_sender, _) = dial(
-            context.child("lazy_transport"),
+            context.child("dialer"),
             dialer_config,
             listener_crypto.public_key(),
             dialer_stream,

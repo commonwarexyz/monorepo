@@ -1,4 +1,31 @@
 //! Utilities for working with histograms.
+//!
+//! # Examples
+//!
+//! ```
+//! use commonware_runtime::{
+//!     deterministic,
+//!     telemetry::metrics::histogram::{Buckets, Timed},
+//!     Clock, Runner,
+//! };
+//! use prometheus_client::metrics::histogram::Histogram;
+//! use std::time::Duration;
+//!
+//! let runner = deterministic::Runner::default();
+//! runner.start(|context| async move {
+//!     let latency = Timed::new(Histogram::new(Buckets::LOCAL));
+//!
+//!     let started = latency.start(&context);
+//!     context.sleep(Duration::from_millis(1)).await;
+//!     started.observe_now(&context);
+//!
+//!     let value = latency.time(&context, || 7);
+//!     assert_eq!(value, 7);
+//!
+//!     let missing: Option<u8> = latency.time_some(&context, || None);
+//!     assert!(missing.is_none());
+//! });
+//! ```
 
 use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;

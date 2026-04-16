@@ -529,10 +529,10 @@ fn main() {
 
         // Dispatch based on database type
         let result = match config.database_type {
-            DatabaseType::Any => run_any(context.child("sync"), config).await,
-            DatabaseType::Current => run_current(context.child("sync"), config).await,
-            DatabaseType::Immutable => run_immutable(context.child("sync"), config).await,
-            DatabaseType::Keyless => run_keyless(context.child("sync"), config).await,
+            DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Current => run_current(context, config).await,
+            DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {

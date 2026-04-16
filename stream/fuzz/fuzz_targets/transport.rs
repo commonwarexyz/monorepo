@@ -36,7 +36,7 @@ fn fuzz(data: &[u8]) {
             handshake_timeout: Duration::from_secs(1),
         };
 
-        let listener_handle = context.child("transport").spawn(move |context| async move {
+        let listener_handle = context.child("listener").spawn(move |context| async move {
             listen(
                 context,
                 |_| async { true },
@@ -48,7 +48,7 @@ fn fuzz(data: &[u8]) {
         });
 
         let (mut dialer_sender, mut dialer_receiver) = dial(
-            context.child("transport"),
+            context.child("dialer"),
             dialer_config,
             listener_crypto.public_key(),
             dialer_stream,
