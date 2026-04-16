@@ -263,14 +263,11 @@ where
             }));
         }
 
-        // Create journal and verifier using the database's factory methods
-        let journal = <DB::Journal as Journal>::new(
-            config.context.with_label("journal"),
-            config.db_config.journal_config(),
-            config.target.range.clone().into(),
-        )
-        .await?;
-
+        // Probe for persisted local state matching the target before opening
+        // any engine-owned handles. `has_local_target_state` opens the full
+        // database to inspect bounds and root; running it before journal
+        // creation ensures its handles are dropped before the engine takes
+        // its own, avoiding concurrent access to the same on-disk partition.
         let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
                 config.context.with_label("local_target_probe"),
@@ -281,6 +278,14 @@ where
         } else {
             false
         };
+
+        // Create journal and verifier using the database's factory methods
+        let journal = <DB::Journal as Journal>::new(
+            config.context.with_label("journal"),
+            config.db_config.journal_config(),
+            config.target.range.clone().into(),
+        )
+        .await?;
 
         let mut engine = Self {
             outstanding_requests: Requests::new(),
