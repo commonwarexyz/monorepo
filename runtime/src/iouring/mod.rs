@@ -99,6 +99,8 @@
 //! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE`
 //!   is not set
 //! - The loop uses an arm-and-recheck sleep handshake (`submitted_seq` vs `processed_seq`)
+//! - The rounded ring/channel size stays below half the packed submission-sequence
+//!   domain so modular sequence deltas remain directional
 //! - A dedicated signalled bit coalesces repeated wake attempts while a wait is armed
 //!
 //! ## Shutdown Process
@@ -174,7 +176,12 @@ use timeout::{Tick, TimeoutWheel};
 mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
-use waker::{Waker, MAX_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+use waker::{Waker, HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+
+/// Maximum rounded ring size accepted by [`Config::size`].
+///
+/// Requested sizes are rounded up to the next power of two before validation.
+pub const MAX_RING_SIZE: u32 = HALF_SUBMISSION_SEQUENCE_DOMAIN / 2;
 
 /// Packed `io_uring` `user_data` value.
 type UserData = u64;
@@ -212,7 +219,8 @@ pub struct Config {
     ///
     /// This value is rounded up to the next power of two when constructing
     /// [IoUringLoop], so the configured in-flight waiter capacity matches the
-    /// effective ring sizing behavior.
+    /// effective ring sizing behavior. After rounding, the maximum allowed size
+    /// is [`MAX_RING_SIZE`], larger rounded sizes panic during construction.
     pub size: u32,
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
@@ -461,9 +469,13 @@ impl IoUringLoop {
             .size
             .checked_next_power_of_two()
             .expect("ring size exceeds u32::MAX");
+        // `pending()` interprets packed submission-sequence deltas with
+        // half-range modular ordering. After rounding to a power of two, that
+        // means the maximum admissible ring size is `MAX_RING_SIZE`.
         assert!(
-            cfg.size < MAX_SUBMISSION_SEQUENCE_DOMAIN,
-            "rounded ring size must stay below the packed wake sequence domain"
+            cfg.size <= MAX_RING_SIZE,
+            "rounded ring size must be at most {}",
+            MAX_RING_SIZE
         );
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
@@ -525,15 +537,14 @@ impl IoUringLoop {
             // Update pending operations metric.
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // If submissions are still pending, do not arm idle sleep.
+            // If producers are still ahead of the drained sequence, do not arm
+            // idle sleep.
             //
-            // `pending(processed_seq)` means producers have published work we
-            // have not yet drained. Sleep here could park with pending work and
-            // no guaranteed wake, because publish only signals once a wait target
-            // is armed.
+            // Sleep here could park with published work and no guaranteed wake,
+            // because `publish()` only signals once a wait target is armed.
             if self.waker.pending(self.processed_seq) {
                 if at_capacity {
-                    // Pending submissions exist and staging stopped at capacity.
+                    // Producers are still ahead and staging stopped at capacity.
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
                     // least one completion so capacity can open up.
@@ -550,7 +561,7 @@ impl IoUringLoop {
                 continue;
             }
 
-            // No pending submissions are currently visible.
+            // No published-ahead sequence is currently visible.
             //
             // If the ring is truly idle, avoid `io_uring_enter` entirely and
             // wait on the shared wake state via futex until a producer changes
@@ -665,7 +676,6 @@ impl IoUringLoop {
     /// Returns whether staging ended at waiter or SQ capacity, or `None` if the
     /// producer channel disconnected.
     fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
-        let mut drained = 0u32;
         let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
@@ -697,17 +707,37 @@ impl IoUringLoop {
         // Stage operations until the channel is empty, waiter capacity is hit,
         // or the SQ is full. Waiter capacity is bounded by `cfg.size`.
         while self.waiters.len() < self.cfg.size as usize && !submission_queue.is_full() {
-            // Try to drain one operation from the channel. If the channel is empty, we're
-            // done for now.
+            // Try to drain one operation from the channel. If the first
+            // `try_recv()` reports `Empty`, do one acquire-guided recheck
+            // before concluding there is nothing more to drain in this pass.
             let request = match self.receiver.try_recv() {
                 Ok(request) => request,
                 Err(TryRecvError::Disconnected) => return None,
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    // Catch the race where a producer submitted after the
+                    // empty observation but before the loop decided to stop
+                    // draining in this pass.
+                    if !self.waker.pending(self.processed_seq) {
+                        break;
+                    }
+
+                    // `pending()`'s acquire load observed a published-ahead
+                    // sequence delta after the empty observation. The rounded
+                    // ring size stays below half the packed sequence domain, so
+                    // that delta is directional: producers are genuinely ahead.
+                    // Tokio's bounded MPSC also guarantees `try_recv()` returns
+                    // `Disconnected` only when the channel is closed AND empty.
+                    // We keep a canary test to lock in those semantics.
+                    self.receiver.try_recv().expect(
+                        "published-ahead sequence observed after acquire, but channel had no request",
+                    )
+                }
             };
 
-            // Count exactly how many published submissions we consumed so
-            // `processed_seq` stays in sync with the published sequence domain.
-            drained += 1;
+            // `processed_seq` counts items drained from the channel. Once a
+            // request is removed from the queue by either receive path above,
+            // it is considered processed for the wake protocol.
+            self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
 
             // Avoid per-loop clock reads when no deadlines are active. When the
             // first deadline arrives after an idle period, align wheel time once
@@ -721,9 +751,6 @@ impl IoUringLoop {
                 self.stage_request(waiter_id, &mut submission_queue);
             }
         }
-
-        // Track which submitted sequence has been consumed.
-        self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
         let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
@@ -1009,6 +1036,25 @@ mod tests {
     };
 
     #[test]
+    fn test_bounded_mpsc_drains_all_buffered_messages_before_disconnected() {
+        // Lock in the Tokio MPSC semantics relied on by `fill_submission_queue()`:
+        // once the last sender is dropped, all buffered messages are still
+        // drained before `try_recv()` reports `Disconnected`.
+        let (sender, mut receiver) = mpsc::channel(2);
+        sender
+            .try_send(41)
+            .expect("first buffered send should succeed");
+        sender
+            .try_send(42)
+            .expect("second buffered send should succeed");
+        drop(sender);
+
+        assert_eq!(receiver.try_recv(), Ok(41));
+        assert_eq!(receiver.try_recv(), Ok(42));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[test]
     fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
@@ -1029,14 +1075,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "rounded ring size must stay below the packed wake sequence domain")]
-    fn test_iouring_loop_rejects_sizes_that_exceed_wake_sequence_domain() {
-        // The wake state reserves only 29 bits for the submission sequence, so
-        // the bounded request channel must stay strictly below that domain even
-        // after ring-size round-up.
+    #[should_panic(expected = "rounded ring size must be at most")]
+    fn test_iouring_loop_rejects_sizes_that_exceed_max_ring_size() {
+        // The wake state reserves 29 bits for the submission sequence, and
+        // `pending()` relies on half-range modular ordering. The rounded
+        // request channel size must therefore stay at or below
+        // `MAX_RING_SIZE`.
         let mut registry = Registry::default();
         let cfg = Config {
-            size: (MAX_SUBMISSION_SEQUENCE_DOMAIN / 2) + 1,
+            size: MAX_RING_SIZE + 1,
             ..Default::default()
         };
         let _ = IoUringLoop::new(cfg, &mut registry);

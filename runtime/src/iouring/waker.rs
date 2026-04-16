@@ -49,10 +49,10 @@ const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIG
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// Packed-state increment for one submitted operation (low bits are reserved).
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
-/// Sequence domain used by the packed submission counter (state >> 3).
+/// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
-/// Maximum bounded queue size that preserves alias-free sequence comparisons.
-pub const MAX_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK + 1;
+/// Maximum live published-minus-processed gap that keeps modular order directional.
+pub const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2);
 
 /// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
 ///
@@ -85,12 +85,18 @@ impl Drop for ArmGuard<'_> {
 ///
 /// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
 /// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
-/// stored in loop-local state). The loop may block only when:
-/// - a wait target is armed, and
-/// - `submitted_seq == processed_seq`.
+/// stored in loop-local state). After arming a wait target, the loop blocks only
+/// if the same post-arm snapshot still shows no latched wake and still carries
+/// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
+///
+/// The loop bounds the rounded channel/ring size strictly below half the packed
+/// sequence domain. That makes the modular delta `submitted_seq - processed_seq`
+/// directional: any non-zero delta smaller than half the domain means
+/// `submitted_seq` is ahead, while larger deltas mean the visible submission
+/// sequence is lagging behind requests the loop has already drained.
 ///
 /// Blocking follows an arm-and-recheck protocol:
-/// - The loop first verifies `submitted_seq == processed_seq`, then arms a wait target.
+/// - The loop first checks for a published-ahead delta, then arms a wait target.
 /// - The loop blocks only if the post-arm snapshot still looks idle after that
 ///   same atomic state transition.
 /// - Submitters signal the currently armed wait target exactly once.
@@ -195,16 +201,14 @@ impl Waker {
     /// signals the armed wait target.
     #[inline]
     pub fn publish(&self) {
-        // The sequence is only a sticky "do not sleep yet" hint. The loop may
-        // observe this increment before Tokio makes the corresponding enqueue
-        // visible to `try_recv`. That can cause a transient extra iteration,
-        // but the mismatched sequence still prevents sleep until the channel
-        // drain catches up. Since this counter does not publish request memory,
-        // `Relaxed` is sufficient here.
+        // Use `Release` so that when `pending()` later observes a published-ahead
+        // sequence delta with its `Acquire` load, a following
+        // `self.receiver.try_recv()` in `fill_submission_queue()` must observe
+        // the corresponding request.
         let prev = self
             .inner
             .state
-            .fetch_add(SUBMISSION_INCREMENT, Ordering::Relaxed);
+            .fetch_add(SUBMISSION_INCREMENT, Ordering::Release);
 
         let waiting = prev & WAITING_MASK;
 
@@ -217,15 +221,20 @@ impl Waker {
         self.wake();
     }
 
-    /// Return whether producers have published work the loop has not yet
-    /// drained from the channel.
+    /// Return whether any published submissions are still pending relative to
+    /// `processed_seq`, i.e. whether the published sequence is currently ahead
+    /// of that drained sequence.
     #[inline]
     pub fn pending(&self, processed_seq: u32) -> bool {
-        // A visible mismatch only means "do not sleep yet", it does not mean a
-        // following `try_recv` must succeed immediately. This comparison is
-        // only against the packed sequence domain, so `Relaxed` is sufficient.
-        ((self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK)
-            != processed_seq
+        // Pair this `Acquire` with `publish()`'s `Release`. The rounded ring
+        // size is kept strictly below half the packed sequence domain, so a
+        // non-zero modular delta smaller than that half-range unambiguously
+        // means `published_seq` is ahead of `processed_seq`.
+        let published_seq =
+            (self.inner.state.load(Ordering::Acquire) >> STATE_BITS) & SUBMISSION_SEQ_MASK;
+
+        let delta = published_seq.wrapping_sub(processed_seq) & SUBMISSION_SEQ_MASK;
+        delta != 0 && delta < HALF_SUBMISSION_SEQUENCE_DOMAIN
     }
 
     /// Park on the idle path until the packed wake state changes.
@@ -545,6 +554,27 @@ pub mod tests {
         let arm = waker.arm(2);
         assert!(arm.should_block());
         drop(arm);
+    }
+
+    #[test]
+    fn test_pending_uses_directional_half_range_compare() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        waker.inner.state.store(1 << STATE_BITS, Ordering::Relaxed);
+        assert!(waker.pending(0));
+        assert!(!waker.pending(1));
+
+        waker.inner.state.store(0, Ordering::Relaxed);
+        assert!(!waker.pending(1));
+
+        waker.inner.state.store(
+            HALF_SUBMISSION_SEQUENCE_DOMAIN << STATE_BITS,
+            Ordering::Relaxed,
+        );
+        assert!(!waker.pending(0));
+
+        waker.inner.state.store(0, Ordering::Relaxed);
+        assert!(waker.pending(SUBMISSION_SEQ_MASK));
     }
 
     #[test]
