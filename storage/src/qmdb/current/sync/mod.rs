@@ -291,30 +291,12 @@ macro_rules! impl_current_sync_database {
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Digest>,
             ) -> bool {
-                // Read-only peek: compute the persisted ops MMR root without
-                // opening the full database or replaying the operations log.
-                // Avoids the O(N) snapshot rebuild and all disk mutations that
-                // `Self::init` would perform. The sync engine verifies against
-                // the ops root (not the canonical root), which is what
-                // `peek_root` returns.
-                let hasher = StandardHasher::<H>::new();
-                let peek = mmr::journaled::Mmr::<_, DigestOf<H>>::peek_root(
-                    context.with_label("local_target_probe"),
+                qmdb::any::sync::has_local_target_state::<_, H>(
+                    context,
                     config.merkle_config.clone(),
-                    &hasher,
+                    target,
                 )
-                .await;
-                // Size + root match implies the last CommitFloor op (and
-                // therefore the committed inactivity floor) matches. The
-                // persisted merkle pruning boundary is not checked directly;
-                // see the trait contract on [`Database::has_local_target_state`]
-                // for the `target.range.start()` == committed-inactivity-floor
-                // invariant that makes this safe.
-                matches!(
-                    peek,
-                    Ok(Some((_, journal_leaves, root)))
-                        if journal_leaves == target.range.end() && root == target.root
-                )
+                .await
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies

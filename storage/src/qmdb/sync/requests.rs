@@ -24,7 +24,7 @@ pub(super) struct Id(u64);
 pub(super) struct RequestInfo {
     /// The location of the first requested operation.
     pub start_loc: Location,
-    /// The tree size the request asked the resolver to prove against.
+    /// The database size the request asked the resolver to prove against.
     pub target_size: Location,
 }
 

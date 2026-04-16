@@ -245,19 +245,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
 
     /// Read-only peek at the persisted structure's root and boundaries.
     ///
-    /// Opens the journal and metadata partitions, reconstructs the in-memory MMR
-    /// from persisted pinned nodes, and returns the root without performing any
-    /// of the mutations that [`Self::init_sync`] or [`Self::init`] would apply
-    /// (no `metadata.sync`, no `journal.prune`, no `journal.clear_to_size`).
-    ///
     /// Returns `Ok(None)` when:
     /// - The journal is empty.
     /// - Journal size is structurally invalid and would require a rewind (i.e.
     ///   a crash left the structure in an unrecoverable state for a read-only
     ///   probe).
-    ///
-    /// Intended for callers that need to verify "does persisted state match a
-    /// target" without paying the cost of a full database rebuild.
     pub async fn peek_root(
         context: E,
         cfg: Config,
