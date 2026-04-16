@@ -34,7 +34,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 /// Result from a fetch operation.
 ///
 /// Parameterized over the merkle family `F` so the embedded `Proof<F, D>` matches
-/// the [Database](super::Database) being synced.
+/// the database being synced.
 pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The proof for the operations
     pub proof: Proof<F, D>,
@@ -45,9 +45,9 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     /// Pinned MMR nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
     /// Sender's current overlay state, populated only on the first (boundary) batch by
-    /// [crate::qmdb::current::sync] resolvers; `None` otherwise. The engine extracts overlay
-    /// state only when the same conditions that gate `pinned_nodes` hold (first batch at the
-    /// sync range's lower bound).
+    /// `current` resolvers; `None` otherwise. The engine extracts overlay state only when
+    /// the same conditions that gate `pinned_nodes` hold (first batch at the sync range's
+    /// lower bound).
     ///
     /// Overlay state is not authenticated by the ops-root proof chain and must be validated
     /// indirectly by the receiver by comparing the rebuilt database's canonical root against
@@ -70,7 +70,7 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
 /// Trait for network communication with the sync server.
 ///
 /// The associated `Family` is the merkle family whose proofs this resolver serves.
-/// It must match the [Database](super::Database) being synced.
+/// It must match the database being synced.
 pub trait Resolver: Send + Sync + Clone + 'static {
     /// The merkle family backing the resolver's proofs.
     type Family: Family;
@@ -88,7 +88,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     /// Returns the operations and a proof that they were present in the database when it had
     /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
     /// pinned MMR nodes at `start_loc` and, for `current` resolvers, the sender's current
-    /// [`CurrentOverlayState`] in `FetchResult::overlay_state`.
+    /// `CurrentOverlayState` in `FetchResult::overlay_state`.
     ///
     /// The corresponding `cancel_tx` is dropped when the engine no longer needs this
     /// request (e.g. due to a target update), causing `cancel_rx.await` to return
@@ -108,8 +108,9 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<E, K, V, H, T> Resolver for Arc<$db<mmr::Family, E, K, V, H, T>>
+        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
         where
+            F: Family,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -117,10 +118,10 @@ macro_rules! impl_resolver {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,
@@ -147,8 +148,9 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<mmr::Family, E, K, V, H, T>>>
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
         where
+            F: Family,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -156,10 +158,10 @@ macro_rules! impl_resolver {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,
@@ -186,8 +188,9 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<mmr::Family, E, K, V, H, T>>>>
+        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
         where
+            F: Family,
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
@@ -195,10 +198,10 @@ macro_rules! impl_resolver {
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
         {
-            type Family = mmr::Family;
+            type Family = F;
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<F, K, V>;
+            type Error = qmdb::Error<F>;
 
             async fn get_operations(
                 &self,

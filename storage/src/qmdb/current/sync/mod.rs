@@ -12,7 +12,7 @@
 //! range proofs (identical to `any` sync). Validating that the ops root is part of the
 //! canonical root is the caller's responsibility; the sync engine does not perform this check.
 //!
-//! The [Database](crate::qmdb::sync::Database)`::`[root()](crate::qmdb::sync::Database::root)
+//! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
 //! implementation returns the **ops root** (not the canonical root) because that is what the
 //! sync engine verifies against.
 //!

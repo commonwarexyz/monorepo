@@ -1718,9 +1718,119 @@ where
 
 mod harnesses {
     use super::SyncTestHarness;
-    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
+    use crate::{
+        merkle::{self, mmb},
+        qmdb::any::value::VariableEncoding,
+        translator::TwoCap,
+    };
     use commonware_cryptography::sha256::Digest;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_utils::test_rng_seeded;
+    use rand::RngCore;
+
+    // ===== Family-generic op creation helpers =====
+    //
+    // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
+    // are structurally identical across families.
+
+    fn create_ordered_fixed_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
+        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(Operation::Update(Update {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_unordered_fixed_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
+        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(Operation::Update(Update(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_ordered_variable_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Vec<u8>>> {
+        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let len = ((rng.next_u64() % 13) + 7) as usize;
+                let value = vec![(rng.next_u64() % 255) as u8; len];
+                ops.push(Operation::Update(Update {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_unordered_variable_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Vec<u8>>> {
+        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let len = ((rng.next_u64() % 13) + 7) as usize;
+                let value = vec![(rng.next_u64() % 255) as u8; len];
+                ops.push(Operation::Update(Update(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    // ===== MMR harnesses (existing, unchanged) =====
 
     // ----- Ordered/Fixed -----
 
@@ -1972,6 +2082,323 @@ mod harnesses {
             db
         }
     }
+
+    // ===== MMB harnesses =====
+
+    // ----- Ordered/Fixed MMB -----
+
+    pub struct OrderedFixedMmbHarness;
+
+    impl SyncTestHarness for OrderedFixedMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::ordered::fixed::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+            create_ordered_fixed_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+            create_ordered_fixed_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            Self::Db::init(ctx, cfg).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.key, Some(data.value));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Ordered/Variable MMB -----
+
+    pub struct OrderedVariableMmbHarness;
+
+    impl SyncTestHarness for OrderedVariableMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::ordered::variable::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+            crate::qmdb::any::ordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+                pooler,
+            )
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_ordered_variable_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_ordered_variable_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::ordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.key, Some(data.value));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Unordered/Fixed MMB -----
+
+    pub struct UnorderedFixedMmbHarness;
+
+    impl SyncTestHarness for UnorderedFixedMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::unordered::fixed::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            Self::Db::init(ctx, cfg).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.0, Some(data.1));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Unordered/Variable MMB -----
+
+    pub struct UnorderedVariableMmbHarness;
+
+    impl SyncTestHarness for UnorderedVariableMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::unordered::variable::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+            crate::qmdb::any::unordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+                pooler,
+            )
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_unordered_variable_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_unordered_variable_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let config =
+                crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<
+                crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>,
+            >,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.0, Some(data.1));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
 }
 
 // ===== Test Generation Macro =====
@@ -2100,6 +2527,17 @@ macro_rules! sync_tests_for_harness {
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
+        }
+    };
+}
+
+/// Additional from_sync_result tests that require `FromSyncTestable`.
+/// Only the MMR harnesses have `FromSyncTestable` impls.
+macro_rules! from_sync_result_tests_for_harness {
+    ($harness:ty, $mod_name:ident) => {
+        mod $mod_name {
+            use super::harnesses;
+            use commonware_macros::test_traced;
 
             #[test_traced("WARN")]
             fn test_from_sync_result_empty_to_empty() {
@@ -2124,7 +2562,28 @@ macro_rules! sync_tests_for_harness {
     };
 }
 
+// MMR harnesses (all tests including from_sync_result)
 sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
 sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
 sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
 sync_tests_for_harness!(harnesses::UnorderedVariableHarness, unordered_variable);
+
+from_sync_result_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed_from_sync);
+from_sync_result_tests_for_harness!(
+    harnesses::OrderedVariableHarness,
+    ordered_variable_from_sync
+);
+from_sync_result_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed_from_sync);
+from_sync_result_tests_for_harness!(
+    harnesses::UnorderedVariableHarness,
+    unordered_variable_from_sync
+);
+
+// MMB harnesses (sync tests only, no from_sync_result)
+sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
+sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
+sync_tests_for_harness!(
+    harnesses::UnorderedVariableMmbHarness,
+    unordered_variable_mmb
+);
