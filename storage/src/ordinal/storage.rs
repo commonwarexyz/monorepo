@@ -1,12 +1,12 @@
 use super::{Config, Error};
-use crate::{rmap::RMap, Persistable};
+use crate::{rmap::RMap, Context, Persistable};
 use commonware_codec::{
     CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
@@ -69,7 +69,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -95,7 +95,7 @@ pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cf
     _phantom: PhantomData<V>,
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -334,6 +334,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
     /// Retrieve the first index in the [Ordinal].
     pub fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
@@ -438,9 +443,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistable
-    for Ordinal<E, V>
-{
+impl<E: BufferPooler + Context, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Self::Error> {

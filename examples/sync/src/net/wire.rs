@@ -1,6 +1,6 @@
 use crate::net::{ErrorResponse, RequestId};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, IsUnit, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
@@ -84,7 +84,8 @@ where
 
 impl<Op, D> super::Message for Message<Op, D>
 where
-    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
+    Op: Encode + Read + Send + Sync + 'static,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -141,7 +142,8 @@ where
 
 impl<Op, D> Read for Message<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -258,7 +260,8 @@ where
 
 impl<Op, D> Read for GetOperationsResponse<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -267,7 +270,7 @@ where
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+            Vec::<Op>::read_cfg(buf, &(range_cfg, Op::Cfg::default()))?
         };
         let has_pinned_nodes = u8::read(buf)? != 0;
         let pinned_nodes = if has_pinned_nodes {

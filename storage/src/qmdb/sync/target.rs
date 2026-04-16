@@ -1,9 +1,9 @@
 #[cfg(feature = "arbitrary")]
-use crate::merkle::Family as _;
+use crate::merkle::mmr::Family;
 #[cfg(feature = "arbitrary")]
-use crate::mmr::Family;
+use crate::merkle::Family as _;
 use crate::{
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -82,9 +82,12 @@ where
         }));
     }
 
-    // Check if sync target moved backward
+    // Start must not decrease; end must strictly increase. Same end
+    // implies same tree size implies same root (the MMR is append-only),
+    // so retaining the old root under the old tree size in
+    // `retained_roots` requires a distinct end.
     if new_target.range.start() < old_target.range.start()
-        || new_target.range.end() < old_target.range.end()
+        || new_target.range.end() <= old_target.range.end()
     {
         return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
             old: old_target.clone(),
@@ -169,6 +172,19 @@ mod tests {
         target(sha256::Digest::from([0; 32]), 0, 100),
         target(sha256::Digest::from([1; 32]), 50, 200),
         Ok(())
+    )]
+    #[case::same_start(
+        target(sha256::Digest::from([0; 32]), 0, 100),
+        target(sha256::Digest::from([1; 32]), 0, 200),
+        Ok(())
+    )]
+    #[case::same_end(
+        target(sha256::Digest::from([0; 32]), 0, 100),
+        target(sha256::Digest::from([1; 32]), 50, 100),
+        Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
+            old: target(sha256::Digest::from([0; 32]), 0, 100),
+            new: target(sha256::Digest::from([1; 32]), 50, 100),
+        }))
     )]
     #[case::moves_backward(
         target(sha256::Digest::from([0; 32]), 0, 100),

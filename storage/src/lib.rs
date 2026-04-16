@@ -14,8 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
     pub mod merkle;
-    pub use merkle::mmr;
-    pub use merkle::mmb;
+    pub use merkle::{mmb, mmr};
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
@@ -33,6 +32,20 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
+
+    /// A runtime context providing storage, timing, and metrics capabilities.
+    ///
+    /// This is a convenience alias for the trait bound
+    /// `Storage + Clock + Metrics` that appears on nearly every type in this crate.
+    pub trait Context:
+        commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics
+    {
+    }
+    impl<
+            T: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+        > Context for T
+    {
+    }
 
     /// A storage structure with capabilities to persist and recover state across restarts.
     pub trait Persistable {

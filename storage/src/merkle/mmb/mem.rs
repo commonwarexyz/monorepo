@@ -21,14 +21,14 @@ mod tests {
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
         let hasher = H::new();
         let mut mmb = Mmb::new(&hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmb, &hasher)
         };
-        mmb.apply(changeset).unwrap();
+        mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
     }
 
@@ -38,14 +38,14 @@ mod tests {
         let mut mmb = Mmb::new(&hasher);
 
         for i in 0u64..8 {
-            let changeset = {
+            let batch = {
                 let mut batch = mmb.new_batch();
                 let loc = batch.leaves();
                 batch = batch.add(&hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmb, &hasher)
             };
-            mmb.apply(changeset).unwrap();
+            mmb.apply_batch(&batch).unwrap();
         }
         assert_eq!(*mmb.leaves(), 8);
         assert_eq!(*mmb.size(), 13);
@@ -121,7 +121,6 @@ mod tests {
 
         let root = *mmb.root();
         let prune_loc = Location::new(9);
-        let prune_pos = Position::try_from(prune_loc).unwrap();
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
@@ -140,9 +139,11 @@ mod tests {
 
         let mmb_copy = Mmb::init(
             Config {
-                nodes: mmb.nodes.iter().copied().collect(),
-                pruned_to: prune_loc,
-                pinned_nodes: mmb.node_digests_to_pin(prune_pos),
+                nodes: (*Position::try_from(prune_loc).unwrap()..*mmb.size())
+                    .map(|i| mmb.get_node(Position::new(i)).unwrap())
+                    .collect(),
+                pruning_boundary: prune_loc,
+                pinned_nodes: mmb.node_digests_to_pin(prune_loc),
             },
             &hasher,
         )
@@ -162,7 +163,7 @@ mod tests {
         assert!(Mmb::<D>::init(
             Config {
                 nodes: vec![],
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -173,7 +174,7 @@ mod tests {
             Mmb::init(
                 Config {
                     nodes: vec![hasher.digest(b"node1"), hasher.digest(b"node2")],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -188,7 +189,7 @@ mod tests {
                     hasher.digest(b"leaf2"),
                     hasher.digest(b"parent"),
                 ],
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -202,7 +203,7 @@ mod tests {
         assert!(Mmb::init(
             Config {
                 nodes,
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -214,12 +215,12 @@ mod tests {
         let nodes: Vec<_> = (6..*mmb.size())
             .map(|i| *mmb.get_node_unchecked(Position::new(i)))
             .collect();
-        let pinned_nodes = mmb.node_digests_to_pin(Position::new(6));
+        let pinned_nodes = mmb.node_digests_to_pin(Location::new(4));
 
         assert!(Mmb::init(
             Config {
                 nodes: nodes.clone(),
-                pruned_to: Location::new(4),
+                pruning_boundary: Location::new(4),
                 pinned_nodes: pinned_nodes.clone(),
             },
             &hasher,
@@ -230,7 +231,7 @@ mod tests {
             Mmb::init(
                 Config {
                     nodes,
-                    pruned_to: Location::new(2),
+                    pruning_boundary: Location::new(2),
                     pinned_nodes,
                 },
                 &hasher,

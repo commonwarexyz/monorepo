@@ -229,8 +229,8 @@ where
     ) -> Vec<Participant> {
         match self.forwarding {
             ForwardingPolicy::Disabled => Vec::new(),
-            ForwardingPolicy::Silent => round.missing_voters(proposal),
-            ForwardingPolicy::NextLeader => round
+            ForwardingPolicy::SilentVoters => round.missing_voters(proposal),
+            ForwardingPolicy::SilentLeader => round
                 .is_missing_voter(proposal, next_leader)
                 .then_some(next_leader)
                 .into_iter()
@@ -276,7 +276,7 @@ where
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter, vote_receiver, certificate_receiver).await
+            self.run(voter, vote_receiver, certificate_receiver)
         )
     }
 
@@ -353,7 +353,9 @@ where
                     // Forward the proposal, if enabled and we have something to forward
                     if let Some((proposal, round)) = forwardable_proposal
                         .filter(|_| self.forwarding.is_enabled())
-                        .and_then(|proposal| work.get(&proposal.view()).map(|round| (proposal, round)))
+                        .and_then(|proposal| {
+                            work.get(&proposal.view()).map(|round| (proposal, round))
+                        })
                     {
                         let participants = self.forward_targets(round, &proposal, leader);
                         self.forward_proposal(proposal, participants).await;

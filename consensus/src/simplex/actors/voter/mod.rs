@@ -79,7 +79,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::simulated::{Config as NConfig, Link, Network};
+    use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
@@ -96,6 +96,28 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn start_test_network_with_peers<I>(
+        context: deterministic::Context,
+        peers: I,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_peers(
+            context.with_label("network"),
+            NConfig {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            peers,
+        )
+        .await;
+        network.start();
+        oracle
+    }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
@@ -301,23 +323,16 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -541,23 +556,16 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -821,23 +829,16 @@ mod tests {
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -949,23 +950,16 @@ mod tests {
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1093,21 +1087,15 @@ mod tests {
         let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1224,21 +1212,15 @@ mod tests {
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1402,17 +1384,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -1420,6 +1391,10 @@ mod tests {
                 verifier: _,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1622,23 +1597,16 @@ mod tests {
         let namespace = b"populate_resolver_on_restart_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock
             let elector = L::default();
@@ -1855,21 +1823,19 @@ mod tests {
         let namespace = b"startup_update_timeout_hint_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
             let me = participants[0].clone();
 
             let elector = RoundRobin::<Sha256>::default();
@@ -2048,23 +2014,16 @@ mod tests {
         let namespace = b"finalization_from_resolver".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2155,23 +2114,16 @@ mod tests {
         let namespace = b"no_resolver_boomerang".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2277,23 +2229,16 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2503,21 +2448,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2666,9 +2605,9 @@ mod tests {
                 .await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
-            while context.current() < duplicate_window {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -2714,21 +2653,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2895,21 +2828,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -3110,21 +3037,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3264,21 +3185,15 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3417,9 +3332,9 @@ mod tests {
             // Wait until we actually broadcast a vote in our leader view.
             let ready_deadline = context.current() + Duration::from_secs(1);
             let mut became_ready = false;
-            while context.current() < ready_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -3501,9 +3416,9 @@ mod tests {
             // We should still broadcast for target_view (typically a nullify after timeout).
             let target_deadline = context.current() + Duration::from_secs(1);
             let mut saw_target_network_vote = false;
-            while context.current() < target_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -3560,21 +3475,15 @@ mod tests {
         let namespace = b"no_recertification_after_replay".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3819,6 +3728,708 @@ mod tests {
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// When the voter is the leader of a view and builds its own proposal, it
+    /// must not subsequently ask the automaton to verify that same proposal.
+    ///
+    /// This is guarded by `Slot::built` (which sets `status = Verified` and
+    /// `requested_verify = true`) and by `Round::verify_ready` short-circuiting
+    /// for leader-owned views. This test asserts the end-to-end invariant on
+    /// the live path (no restart): after calling `automaton.propose`, the voter
+    /// must never call `automaton.verify` for the produced payload.
+    fn no_self_verify_when_proposing<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_self_verify_when_proposing".to_vec();
+        let partition = "no_self_verify_when_proposing".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Set up the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
+            let target_view = View::new(2);
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            // Install propose + verify observers from the start so we can assert the
+            // leader's propose call fires but no verify call is issued for our proposal.
+            let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let propose_tracker = propose_calls.clone();
+            let verify_tracker = verify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor
+                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                verify_tracker.lock().push(ctx.view())
+            }));
+            app_actor.start();
+
+            // Build and start the voter wired to the observing application.
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for startup, then advance to the leader-owned view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { response, .. } => {
+                        response.send(None).unwrap();
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Wait for the voter to time out (leader_timeout) and construct a Nullify
+            // for the view. By that point the voter has already run the full propose
+            // flow (so propose_observer should have fired) and any spurious verify for
+            // the same payload would have fired before the timeout.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify))
+                        if nullify.view() == target_view =>
+                    {
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Assert the live invariant: propose fired (precondition proving the leader
+            // flow ran) but verify did not fire for the payload we just built.
+            let proposed = propose_calls.lock();
+            let verified = verify_calls.lock();
+            assert!(
+                proposed.contains(&target_view),
+                "test precondition: voter must have called automaton.propose for the leader-owned view (observed: {proposed:?})"
+            );
+            assert!(
+                !verified.contains(&target_view),
+                "voter must not verify its own leader-built proposal (observed: {verified:?})"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_self_verify_when_proposing() {
+        no_self_verify_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_self_verify_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        no_self_verify_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
+        no_self_verify_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_verify_when_proposing(ed25519::fixture);
+        no_self_verify_when_proposing(secp256r1::fixture);
+    }
+
+    /// Restart analogue of `no_self_verify_when_proposing`: after the voter has
+    /// proposed and journaled a local notarize as leader, restarting must not
+    /// cause the voter to re-propose or to verify its own proposal when it is
+    /// re-delivered (e.g. via peer echo through the automaton).
+    ///
+    /// Replay of the journaled local notarize must restore the slot's proposal,
+    /// `requested_build`, and `requested_verify` flags so that:
+    /// - `should_build` returns false on the next run-loop iteration (no new
+    ///   `automaton.propose` call for a payload the voter already proposed
+    ///   and voted on pre-crash), and
+    /// - subsequent delivery of the same proposal is a no-op (no
+    ///   `automaton.verify` call for a payload the voter built itself).
+    fn no_self_propose_or_verify_after_restart<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_self_propose_or_verify_after_restart".to_vec();
+        let partition = "no_self_propose_or_verify_after_restart".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Set up the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
+            let target_view = View::new(2);
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            // Pre-restart: plain application (no observers) so the voter can
+            // cleanly propose and journal its own notarize vote for view 2.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            // Build and start the pre-restart voter.
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for startup, then advance to the leader-owned view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { response, .. } => {
+                        response.send(None).unwrap();
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Wait for the voter to emit its own notarize (journaled). The captured
+            // proposal is reused post-restart to exercise the re-delivery path.
+            let proposal = loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize))
+                        if notarize.view() == target_view =>
+                    {
+                        break notarize.proposal;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            };
+
+            // Restart: abort the voter and construct a fresh application with
+            // propose + verify observers to catch any spurious work for the
+            // leader-owned view that has a journaled local notarize vote.
+            handle.abort();
+            let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let propose_tracker = propose_calls.clone();
+            let verify_tracker = verify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) = mocks::application::Application::new(
+                context.with_label("app_restarted"),
+                app_cfg,
+            );
+            app_actor
+                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                verify_tracker.lock().push(ctx.view())
+            }));
+            app_actor.start();
+
+            // Build and start the post-restart voter against the same journal partition.
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) =
+                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for replay to complete; confirm we re-entered the leader-owned view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        response,
+                        ..
+                    } => {
+                        response.send(None).unwrap();
+                        assert_eq!(current, target_view);
+                        assert_eq!(leader, Participant::new(0));
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Re-deliver the proposal via the automaton, simulating peer echo after
+            // restart. Any spurious propose/verify for this view would fire on the next
+            // run-loop iteration. Then wait for leader_timeout to fire a Nullify,
+            // proving the voter ran its full flow without ever advancing.
+            mailbox.proposal(proposal.clone()).await;
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify))
+                        if nullify.view() == target_view =>
+                    {
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Assert the restart invariant: neither propose nor verify fires post-restart
+            // for a leader-owned view whose journaled notarize replay should have
+            // restored the slot's proposal state.
+            let proposed = propose_calls.lock();
+            let verified = verify_calls.lock();
+            assert!(
+                !proposed.contains(&target_view),
+                "voter must not propose for a leader-owned view after restart (observed: {proposed:?})"
+            );
+            assert!(
+                !verified.contains(&target_view),
+                "voter must not verify its own leader-built proposal after restart (observed: {verified:?})"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_self_propose_or_verify_after_restart() {
+        no_self_propose_or_verify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_self_propose_or_verify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        no_self_propose_or_verify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        no_self_propose_or_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_propose_or_verify_after_restart(ed25519::fixture);
+        no_self_propose_or_verify_after_restart(secp256r1::fixture);
+    }
+
+    /// After restart, a proposal we already voted on must not be re-verified
+    /// when it is re-delivered to the voter (e.g. via the automaton after
+    /// peer vote aggregation reconstructs it).
+    ///
+    /// Uses a view where we are a follower (so `verify_ready` does not
+    /// short-circuit). Pre-restart the voter verifies the leader's proposal,
+    /// emits a `Notarize` vote, and journals it. Post-restart the voter
+    /// replays the journaled `Notarize`; the proposal must be restored as
+    /// `Verified` so that re-delivering the proposal does not trigger another
+    /// `automaton.verify` call.
+    fn no_self_verify_after_restart<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_self_verify_after_restart".to_vec();
+        let partition = "no_self_verify_after_restart".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Set up the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            // RoundRobin with epoch=333, n=5: view 3 -> leader=Participant::new(1).
+            // We are Participant::new(0), so view 3 is a follower view.
+            let target_view = View::new(3);
+            let target_leader_idx = 1usize;
+            let me = participants[0].clone();
+            let leader_pk = participants[target_leader_idx].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            // Pre-restart: plain application (no observers) so the voter can verify
+            // the leader's proposal and journal its own notarize vote for view 3.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            // Build and start the pre-restart voter.
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for startup, then advance to view 3 via a synthetic finalization for
+            // view 2. `advance_to_view` uses Sha256::hash(prev_view.to_be_bytes()) as the
+            // parent payload, which we reuse below.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { response, .. } => {
+                        response.send(None).unwrap();
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Simulate the leader's proposal: broadcast its payload contents to the
+            // application via the relay, then deliver the proposal to the voter.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"follower_proposal"),
+            );
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader_pk, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // Wait for our local notarize (journaled) so replay has something to restore.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize))
+                        if notarize.view() == target_view =>
+                    {
+                        assert_eq!(notarize.proposal, proposal);
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Restart: abort the voter and construct a fresh application with
+            // propose + verify observers to catch any spurious work for the
+            // follower view that has a journaled local notarize vote.
+            handle.abort();
+            let propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
+            let propose_tracker = propose_calls.clone();
+            let verify_tracker = verify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) = mocks::application::Application::new(
+                context.with_label("app_restarted"),
+                app_cfg,
+            );
+            app_actor
+                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                verify_tracker.lock().push(ctx.view())
+            }));
+            app_actor.start();
+
+            // Build and start the post-restart voter against the same journal partition.
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1),
+                timeout_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) =
+                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for replay to complete; confirm we re-entered the follower view.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        response,
+                        ..
+                    } => {
+                        response.send(None).unwrap();
+                        assert_eq!(current, target_view);
+                        assert_eq!(leader, Participant::from_usize(target_leader_idx));
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Re-deliver the proposal via the automaton (simulating peer echo after restart).
+            // Any spurious verify for the follower view would fire on the next run-loop
+            // iteration after the proposal is processed. We then wait for the voter to time
+            // out (leader_timeout) and construct a Nullify for the view: by that point the
+            // run loop has had ample opportunity to request verification, and emitting a
+            // Nullify proves the voter reached the timeout path without ever advancing.
+            mailbox.proposal(proposal.clone()).await;
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify))
+                        if nullify.view() == target_view =>
+                    {
+                        break;
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Assert the restart invariant: verify does not fire for the previously-voted
+            // follower proposal (primary) and propose does not fire for the follower view
+            // (trivially, since we are not its leader).
+            let proposed = propose_calls.lock();
+            let verified = verify_calls.lock();
+            assert!(
+                !verified.contains(&target_view),
+                "voter must not request verification for a previously-voted view after restart (observed: {verified:?})"
+            );
+            assert!(
+                !proposed.contains(&target_view),
+                "voter must not propose for a previously-voted view after restart (observed: {proposed:?})"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_self_verify_after_restart() {
+        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        no_self_verify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        no_self_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_verify_after_restart(ed25519::fixture);
+        no_self_verify_after_restart(secp256r1::fixture);
+    }
+
     /// Test that in-flight certification requests are cancelled when finalization occurs.
     ///
     /// 1. Use a very long certify latency to ensure certification is in-flight.
@@ -3836,21 +4447,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4036,21 +4641,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4213,22 +4812,16 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network.
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Build participants and voter.
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4326,23 +4919,16 @@ mod tests {
         let namespace = b"certification_after_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4455,23 +5041,16 @@ mod tests {
         let namespace = b"certification_after_notarize_timeout_as_follower".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4617,23 +5196,16 @@ mod tests {
         let namespace = b"certification_after_notarize_timeout_as_leader".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -4770,23 +5342,20 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -4914,21 +5483,19 @@ mod tests {
         let namespace = b"cancelled_cert_restart_recertify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -5199,23 +5766,16 @@ mod tests {
         let namespace = b"future_notarization_no_rescue".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -5409,23 +5969,20 @@ mod tests {
         let namespace = b"cert_fail_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -5550,23 +6107,16 @@ mod tests {
         let namespace = b"pending_cert_nullify".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -5686,21 +6236,19 @@ mod tests {
         let namespace = b"proposal_clears_leader_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
@@ -5758,8 +6306,9 @@ mod tests {
             // see nullify in this 2s window after proposal handling, even though
             // leader timeout has elapsed.
             let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
+            loop {
                 select! {
+                    _ = context.sleep_until(no_nullify_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
@@ -5770,8 +6319,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5832,21 +6380,19 @@ mod tests {
         let namespace = b"recovered_proposal_clears_leader_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
@@ -5888,8 +6434,9 @@ mod tests {
             // emit a notarize vote or nullify in this 2s window after certificate handling,
             // even though leader timeout has elapsed.
             let quiet_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < quiet_deadline {
+            loop {
                 select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             panic!(
@@ -5905,8 +6452,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5954,6 +6500,151 @@ mod tests {
         );
     }
 
+    /// Regression: after a timed-out view is nullified and the voter advances,
+    /// the next view must start with a fresh leader timeout.
+    fn next_view_gets_fresh_timeout_after_prior_view_nullifies<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"next_view_gets_fresh_timeout_after_prior_view_nullifies".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle = start_test_network_with_peers(
+                context.clone(),
+                participants.clone(),
+                true,
+            )
+            .await;
+
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Wait for the initial view 1 batcher update.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, response, ..
+                    } => {
+                        response.send(None).unwrap();
+                        if current == View::new(1) {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Allow view 1 to time out and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected nullify for view 1");
+                    },
+                }
+            }
+
+            // Deliver a nullification certificate for view 1 so the voter enters view 2.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), View::new(1)), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current == View::new(2) {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected voter to advance to view 2");
+                    },
+                }
+            }
+
+            // The old view timed out, but the new view should still get its own leader timeout
+            // rather than immediately nullifying on entry.
+            let quiet_deadline = context.current() + Duration::from_millis(500);
+            loop {
+                select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_next_view_gets_fresh_timeout_after_prior_view_nullifies() {
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(ed25519::fixture);
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(secp256r1::fixture);
+    }
+
     /// Regression: the first view should make progress without timing out when peers are online.
     ///
     /// We require:
@@ -5972,21 +6663,15 @@ mod tests {
         let namespace = b"first_view_progress_without_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));
@@ -6069,10 +6754,8 @@ mod tests {
 
             let deadline = context.current() + Duration::from_secs(3);
             let reached_view2 = loop {
-                if context.current() >= deadline {
-                    break false;
-                }
                 select! {
+                    _ = context.sleep_until(deadline) => break false,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Finalize(finalize))
                             if finalize.view() == View::new(1) =>
@@ -6094,16 +6777,13 @@ mod tests {
                         }
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_millis(10)) => {},
                 }
             };
             assert!(!reached_view2, "view advanced before finalize for view 1");
 
             let reached_view2 = loop {
-                if context.current() >= deadline {
-                    break false;
-                }
                 select! {
+                    _ = context.sleep_until(deadline) => break false,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == View::new(1) =>
@@ -6120,7 +6800,6 @@ mod tests {
                         }
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_millis(10)) => {},
                 }
             };
             assert!(reached_view2, "expected progress to view 2 from view 1");

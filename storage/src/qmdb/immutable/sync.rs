@@ -2,48 +2,61 @@ use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
-        contiguous::{variable, Reader as _},
+        contiguous::{Mutable, Reader as _},
+        Error as JournalError,
     },
-    mmr::{journaled::Mmr, Location, StandardHasher},
+    merkle::{
+        journaled::{self, Journaled},
+        mmr, Location,
+    },
     qmdb::{
-        any::VariableValue,
+        any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, Operation},
+        operation::Key,
         sync::{self},
         Error,
     },
     translator::Translator,
+    Context, Persistable,
 };
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
+type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
+
+impl<E, K, V, C, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, C, H, T>
 where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<K, V>>
+        + Persistable<Error = JournalError>
+        + sync::Journal<Context = E, Op = Operation<K, V>>,
+    C::Item: EncodeShared,
+    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
     type Op = Operation<K, V>;
-    type Journal = variable::Journal<E, Self::Op>;
+    type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, V::Cfg>;
+    type Config = immutable::Config<T, C::Config>;
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns a [super::Immutable] initialized data collected in the sync process.
+    /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
     /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or the last item is before the range start, it creates a
-    ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (has length < range end), missing operations
-    ///   from the log are applied to bring it up to the target state
-    /// - If the MMR journal has data beyond the range end, it is rewound to match the sync target
+    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
+    ///   fresh Merkle structure from the provided `pinned_nodes`
+    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
+    ///   operations from the log are applied to bring it up to the target state
+    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
+    ///   target
     ///
     /// # Returns
     ///
@@ -54,16 +67,16 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: Range<mmr::Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<mmr::Family>> {
         let hasher = StandardHasher::new();
 
-        // Initialize MMR for sync
-        let mmr = Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
-                config: db_config.mmr.clone(),
+        // Initialize Merkle structure for sync
+        let merkle = Journaled::init_sync(
+            context.with_label("merkle"),
+            journaled::SyncConfig {
+                config: db_config.merkle_config.clone(),
                 range,
                 pinned_nodes,
             },
@@ -71,32 +84,33 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _>::from_components(
-            mmr,
+        let journal = authenticated::Journal::<_, _, _, _>::from_components(
+            merkle,
             log,
             hasher,
             apply_batch_size as u64,
         )
         .await?;
 
-        let mut snapshot: Index<T, Location> =
+        let mut snapshot: Index<T, mmr::Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.journal.reader().await;
-            let start_loc = Location::new(reader.bounds().start);
+            let bounds = reader.bounds();
+            let start_loc = mmr::Location::new(bounds.start);
 
             // Build snapshot from the log
-            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
-
-            Location::new(
-                reader
-                    .bounds()
-                    .end
-                    .checked_sub(1)
-                    .expect("commit should exist"),
+            build_snapshot_from_log::<mmr::Family, _, _, _>(
+                start_loc,
+                &reader,
+                &mut snapshot,
+                |_, _| {},
             )
+            .await?;
+
+            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         let db = Self {
@@ -117,10 +131,10 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        mmr::Location,
+        merkle::mmr::Location,
         qmdb::{
             immutable,
-            immutable::Operation,
+            immutable::variable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -147,7 +161,8 @@ mod tests {
     };
 
     /// Type alias for sync tests with simple codec config
-    type ImmutableSyncTest = immutable::Immutable<
+    type ImmutableSyncTest = immutable::variable::Db<
+        crate::merkle::mmr::Family,
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
@@ -159,14 +174,14 @@ mod tests {
     fn create_sync_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> immutable::Config<crate::translator::TwoCap, ()> {
+    ) -> immutable::variable::Config<crate::translator::TwoCap, ((), ())> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            mmr: crate::mmr::journaled::Config {
+            merkle_config: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -178,7 +193,7 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 items_per_section: ITEMS_PER_SECTION,
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
@@ -221,21 +236,19 @@ mod tests {
         ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
     ) {
-        let finalized = {
-            let mut batch = db.new_batch();
-            for op in ops {
-                match op {
-                    Operation::Set(key, value) => {
-                        batch = batch.set(key, value);
-                    }
-                    Operation::Commit(_metadata) => {
-                        panic!("Commit operation not supported in apply_ops");
-                    }
+        let mut batch = db.new_batch();
+        for op in ops {
+            match op {
+                Operation::Set(key, value) => {
+                    batch = batch.set(key, value);
+                }
+                Operation::Commit(_metadata) => {
+                    panic!("Commit operation not supported in apply_ops");
                 }
             }
-            batch.merkleize(metadata).finalize()
-        };
-        db.apply_batch(finalized).await.unwrap();
+        }
+        let merkleized = batch.merkleize(db, metadata);
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     #[rstest]
@@ -282,6 +295,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -360,6 +376,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -409,6 +428,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -493,6 +515,9 @@ mod tests {
                     max_outstanding_requests: 10,
                     apply_batch_size: 1024,
                     update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 1,
                 };
                 let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
                 loop {
@@ -581,6 +606,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -609,7 +637,7 @@ mod tests {
                 create_sync_config(&format!("partial_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
+                immutable::variable::Db::init(client_context.clone(), sync_db_config.clone())
                     .await
                     .unwrap();
 
@@ -642,6 +670,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -669,7 +700,7 @@ mod tests {
                 create_sync_config(&format!("exact_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(client_context.clone(), sync_config.clone())
+                immutable::variable::Db::init(client_context.clone(), sync_config.clone())
                     .await
                     .unwrap();
 
@@ -699,6 +730,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -745,6 +779,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -805,6 +842,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -883,6 +923,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Send target update with increased upper bound
@@ -941,6 +984,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Complete the sync

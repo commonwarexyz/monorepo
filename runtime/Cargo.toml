@@ -77,3 +77,8 @@ bench = false
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+path = "src/iobuf/benches/bench.rs"

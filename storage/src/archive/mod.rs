@@ -102,6 +102,9 @@ pub trait Archive: Send {
     /// Retrieve an iterator over all populated ranges (inclusive) within the [Archive].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
 
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)>;
+
     /// Retrieve the first index in the [Archive].
     fn first_index(&self) -> Option<u64>;
 

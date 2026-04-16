@@ -125,6 +125,15 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+/// Observer invoked on every `Message::Propose` request. Used by tests to
+/// detect spurious propose calls.
+type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
+
+/// Observer invoked on every `Message::Verify` request. Used by tests to
+/// detect spurious verification calls.
+type VerifyObserver<H, P> =
+    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
+
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
 pub enum Certifier<D: Digest> {
@@ -188,6 +197,15 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
+    /// Invoked on every `Message::Propose` request received by the application.
+    /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
+    propose_observer: Option<ProposeObserver<H, P>>,
+
+    /// Invoked on every `Message::Verify` request received by the application.
+    /// Used by tests to detect spurious verification requests (e.g. after replay
+    /// of a leader-owned proposal).
+    verify_observer: Option<VerifyObserver<H, P>>,
+
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
     pending_certifications: Vec<oneshot::Sender<bool>>,
@@ -227,6 +245,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
+                propose_observer: None,
+                verify_observer: None,
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -243,6 +263,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
         self.drop_verifications = drop;
+    }
+
+    pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
+        self.propose_observer = Some(observer);
+    }
+
+    pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
+        self.verify_observer = Some(observer);
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -360,7 +388,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     }
 
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(mut self) {
@@ -385,6 +413,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
+                        if let Some(observer) = &self.propose_observer {
+                            observer(context.clone());
+                        }
                         if self.drop_proposals {
                             continue;
                         }
@@ -396,6 +427,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
+                        if let Some(observer) = &self.verify_observer {
+                            observer(context.clone(), payload);
+                        }
                         if self.drop_verifications {
                             continue;
                         }

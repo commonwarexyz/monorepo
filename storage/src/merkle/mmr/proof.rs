@@ -1,142 +1,14 @@
-//! MMR-specific proof construction and verification.
-
-use crate::merkle::{
-    hasher::Hasher,
-    mmr::{iterator::nodes_to_pin, Error, Family, Location, Position},
-    proof::{Blueprint, Proof},
-};
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use commonware_cryptography::Digest;
-
-impl<D: Digest> Proof<Family, D> {
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, returning the (position,digest) of every node whose digest was required by the
-    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
-    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
-    /// root.
-    pub fn verify_range_inclusion_and_extract_digests<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location,
-        root: &D,
-    ) -> Result<Vec<(Position, D)>, Error>
-    where
-        H: Hasher<Family, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        let mut collected_digests = Vec::new();
-        let Ok(reconstructed_root) = self.reconstruct_root_collecting(
-            hasher,
-            elements,
-            start_loc,
-            Some(&mut collected_digests),
-        ) else {
-            return Err(Error::InvalidProof);
-        };
-
-        if reconstructed_root != *root {
-            return Err(Error::RootMismatch);
-        }
-
-        Ok(collected_digests)
-    }
-
-    /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
-    ///
-    /// The `pinned_nodes` are the peak digests of the sub-MMR at `start_loc`, in the order returned
-    /// by `nodes_to_pin`. Each pinned node is either:
-    ///
-    /// - A peak of the full MMR that precedes the proven range (fold-prefix peak). These are
-    ///   verified by refolding them and comparing against the proof's fold-prefix accumulator.
-    /// - A sibling node within a range peak's reconstruction. These are verified against the
-    ///   digests extracted during proof verification.
-    ///
-    /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
-    /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
-    pub fn verify_proof_and_pinned_nodes<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location,
-        pinned_nodes: &[D],
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Family, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        // Verify the proof and extract all node digests used in the reconstruction.
-        let collected = match self
-            .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        if elements.is_empty() {
-            return pinned_nodes.is_empty();
-        }
-
-        let Ok(start_pos) = Position::try_from(start_loc) else {
-            return false;
-        };
-
-        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
-        if pinned_positions.len() != pinned_nodes.len() {
-            return false;
-        }
-
-        let Ok(fold_prefix) = Blueprint::fold_prefix(self.leaves, start_loc) else {
-            return false;
-        };
-
-        // Combine pinned positions and digests into a map for fast lookup.
-        let mut pinned_map: BTreeMap<Position, D> = pinned_positions
-            .into_iter()
-            .zip(pinned_nodes.iter().copied())
-            .collect();
-
-        // Verify fold-prefix pinned nodes by recomputing the accumulator (without the leaf
-        // count, which is hashed into the final root independently).
-        if !fold_prefix.is_empty() {
-            if self.digests.is_empty() {
-                return false;
-            }
-            let Some(first) = pinned_map.remove(&fold_prefix[0]) else {
-                return false;
-            };
-            let mut acc = first;
-            for pos in &fold_prefix[1..] {
-                let Some(digest) = pinned_map.remove(pos) else {
-                    return false;
-                };
-                acc = hasher.fold(&acc, &digest);
-            }
-            if acc != self.digests[0] {
-                return false;
-            }
-        }
-
-        // Verify remaining pinned nodes (siblings) against the extracted digests.
-        let extracted: BTreeMap<Position, D> = collected.into_iter().collect();
-        for (pos, digest) in pinned_map {
-            if extracted.get(&pos) != Some(&digest) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
+//! MMR-specific proof tests.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::merkle::{
         self as merkle,
-        mmr::{iterator::PeakIterator, mem::Mmr, StandardHasher as Standard},
-        proof::nodes_required_for_multi_proof,
+        mmr::{
+            iterator::PeakIterator, mem::Mmr, Error, Family, Location, Position,
+            StandardHasher as Standard,
+        },
+        proof::{nodes_required_for_multi_proof, Blueprint},
         Family as _, LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -151,14 +23,14 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
@@ -416,14 +288,14 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         let mut mmr = Mmr::new(&hasher);
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         // Proof for range [1, 3) -- fold prefix is empty, pinned node at position 0 is a sibling.
@@ -432,10 +304,7 @@ mod tests {
             .range_proof(&hasher, start_loc..Location::new(3))
             .unwrap();
 
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
+        let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
         assert_eq!(pinned.len(), 1, "should have exactly one pinned node");
 
         // Correct pinned nodes must verify.
@@ -485,14 +354,14 @@ mod tests {
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
         // start_loc=8 puts the first peak entirely in the fold prefix.
         let elements: Vec<Digest> = (0..10).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mmr.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmr, &hasher)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
         let root = mmr.root();
 
         let start_loc = Location::new(8);
@@ -500,10 +369,7 @@ mod tests {
             .range_proof(&hasher, start_loc..Location::new(10))
             .unwrap();
 
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
+        let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(

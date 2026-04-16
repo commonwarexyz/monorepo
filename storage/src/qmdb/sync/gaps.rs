@@ -1,8 +1,8 @@
 //! Gap detection algorithm for sync operations.
 
-use crate::mmr::Location;
+use crate::merkle::mmr::Location;
 use core::{num::NonZeroU64, ops::Range};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// * `range` - The sync range
 /// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
-/// * `outstanding_requests` - Set of start locations for outstanding requests
+/// * `outstanding_requests` - Start locations of outstanding requests, in ascending order
 /// * `fetch_batch_size` - Expected size of each fetch batch
 ///
 /// # Invariants
@@ -23,10 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - All start locations in `fetched_operations` are in `range`
 /// - All start locations in `outstanding_requests` are in `range`
 /// - All operation counts in `fetched_operations` are > 0
-pub fn find_next(
+pub fn find_next<'a>(
     range: Range<Location>,
     fetched_operations: &BTreeMap<Location, u64>, // start_loc -> operation_count
-    outstanding_requests: &BTreeSet<Location>,
+    outstanding_requests: impl IntoIterator<Item = &'a Location>,
     fetch_batch_size: NonZeroU64,
 ) -> Option<Range<Location>> {
     if range.is_empty() {
@@ -46,7 +46,7 @@ pub fn find_next(
         .peekable();
 
     let mut outstanding_reqs_iter = outstanding_requests
-        .iter()
+        .into_iter()
         .map(|&start_loc| {
             let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap();
             start_loc..end_loc
@@ -259,7 +259,7 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (Location::new(k), v))
             .collect();
-        let outstanding_requests: BTreeSet<Location> = test_case
+        let outstanding_requests: Vec<Location> = test_case
             .requested_ops
             .into_iter()
             .map(Location::new)

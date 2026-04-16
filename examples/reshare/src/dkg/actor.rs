@@ -12,19 +12,20 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, W
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck},
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
             variant::Variant,
         },
     },
+    ed25519::Batch,
     transcript::Summary,
-    Hasher, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
-use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Clock,
@@ -144,6 +145,7 @@ where
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
@@ -215,7 +217,7 @@ where
         // cryptographic operations.
         spawn_cell!(
             self.context,
-            self.run(output, share, orchestrator, dkg, callback).await
+            self.run(output, share, orchestrator, dkg, callback)
         )
     }
 
@@ -300,18 +302,16 @@ where
                 )
             };
 
-            // Any given peer set includes:
-            // - Dealers and players for the active epoch
-            // - Players for the next epoch
+            // Primary = dealers (drive the DKG round/running consensus)
+            // Secondary = current players + next-epoch players (give time to sync)
+            //
+            // Overlapping keys are deduplicated as primary (so we don't need to do any filtering here)
             self.manager
                 .track(
                     epoch.get(),
-                    Set::from_iter_dedup(
-                        dealers
-                            .iter()
-                            .cloned()
-                            .chain(players.iter().cloned())
-                            .chain(next_players),
+                    TrackedPeers::new(
+                        dealers.clone(),
+                        Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
                     ),
                 )
                 .await;
@@ -514,34 +514,41 @@ where
                         }
 
                         // Finalize the round before acknowledging
-                        let logs = storage.logs(epoch);
-                        let (success, next_round, next_output, next_share) =
-                            if let Some(ps) = player_state.take() {
-                                match ps.finalize::<N3f1>(logs, &Sequential) {
-                                    Ok((new_output, new_share)) => (
-                                        true,
-                                        epoch_state.round + 1,
-                                        Some(new_output),
-                                        Some(new_share),
-                                    ),
-                                    Err(_) => (
-                                        false,
-                                        epoch_state.round,
-                                        epoch_state.output.clone(),
-                                        epoch_state.share.clone(),
-                                    ),
-                                }
-                            } else {
-                                match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
-                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
-                                    Err(_) => (
-                                        false,
-                                        epoch_state.round,
-                                        epoch_state.output.clone(),
-                                        epoch_state.share.clone(),
-                                    ),
-                                }
-                            };
+                        //
+                        // TODO(#3453): Minimize end-of-epoch processing via pre-verify
+                        let mut logs = Logs::<_, _, N3f1>::new(round.clone());
+                        for (dealer, log) in storage.logs(epoch) {
+                            logs.record(dealer, log);
+                        }
+                        let (success, next_round, next_output, next_share) = if let Some(ps) =
+                            player_state.take()
+                        {
+                            match ps.finalize::<N3f1, Batch>(&mut self.context, logs, &Sequential) {
+                                Ok((new_output, new_share)) => (
+                                    true,
+                                    epoch_state.round + 1,
+                                    Some(new_output),
+                                    Some(new_share),
+                                ),
+                                Err(_) => (
+                                    false,
+                                    epoch_state.round,
+                                    epoch_state.output.clone(),
+                                    epoch_state.share.clone(),
+                                ),
+                            }
+                        } else {
+                            match observe::<_, _, N3f1, Batch>(&mut self.context, logs, &Sequential)
+                            {
+                                Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                Err(_) => (
+                                    false,
+                                    epoch_state.round,
+                                    epoch_state.output.clone(),
+                                    epoch_state.share.clone(),
+                                ),
+                            }
+                        };
                         if success {
                             info!(?epoch, "epoch succeeded");
                             self.successful_epochs.inc();

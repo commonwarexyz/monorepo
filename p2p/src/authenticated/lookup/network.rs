@@ -130,7 +130,7 @@ impl<
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(self) {
@@ -145,6 +145,7 @@ impl<
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
+                send_batch_size: self.cfg.send_batch_size,
                 ping_frequency: self.cfg.ping_frequency,
             },
         );

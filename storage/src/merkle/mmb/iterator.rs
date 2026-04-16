@@ -227,80 +227,6 @@ pub(super) const fn peak_birth_leaf(last_leaf: Location, height: u32) -> Locatio
     }
 }
 
-/// Compute the position of the `leaf_index`-th leaf.
-#[inline]
-pub(crate) fn leaf_pos(leaf_index: Location) -> Position {
-    Family::location_to_position(leaf_index)
-}
-
-/// Return the set of pruned node positions (pos < `prune_pos`) that must be retained after
-/// pruning.
-///
-/// The peaks of a sub-MMB at the prune boundary are sufficient for root computation and for
-/// proving the boundary leaf (they are exactly the left-siblings needed to authenticate the
-/// next leaf). However, updating an *arbitrary* retained leaf via `update_leaf` requires more:
-/// each dirty ancestor needs both children during re-merkleization, and the off-path sibling
-/// may lie in the pruned region without being a peak of the boundary sub-MMB.
-///
-/// This function therefore pins every pruned child of every retained parent, which covers all
-/// possible update paths. It uses leaf-range checks to skip subtrees that are fully retained and
-/// to pin roots of subtrees that are fully pruned. Each sliced peak contributes at most O(height)
-/// pinned/traversed nodes, and there are O(log N) peaks, so worst-case total work is O(log^2 N).
-///
-/// If `update_leaf` after pruning is not needed (e.g., append-only with pruning but no
-/// mutations), pinning only peaks would suffice and be cheaper.
-pub(crate) fn nodes_to_pin(mmb_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
-    let mut pinned = alloc::vec::Vec::new();
-    let mut first_leaf = 0u64;
-
-    for (peak_pos, height) in PeakIterator::new(mmb_size) {
-        let leaves_in_peak = 1u64 << height;
-
-        if peak_pos < prune_pos {
-            pinned.push(peak_pos);
-        } else if height > 0 {
-            // If the oldest leaf is pruned, the peak spans the prune boundary, so we must traverse
-            // its children.
-            if leaf_pos(Location::new(first_leaf)) < prune_pos {
-                collect_pruned_children(peak_pos, height, first_leaf, prune_pos, &mut pinned);
-            }
-        }
-
-        first_leaf += leaves_in_peak;
-    }
-
-    pinned
-}
-
-/// Walk a tree top-down, pinning any child whose position falls below `prune_pos`. Uses leaf-range
-/// checks to skip fully retained subtrees.
-fn collect_pruned_children(
-    pos: Position,
-    height: u32,
-    leaf_start: u64,
-    prune_pos: Position,
-    pinned: &mut alloc::vec::Vec<Position>,
-) {
-    if height == 0 {
-        return;
-    }
-
-    let (left, right) = children(pos, height);
-    let mid_leaf = leaf_start + (1u64 << (height - 1));
-
-    if left < prune_pos {
-        pinned.push(left);
-    } else if leaf_pos(Location::new(leaf_start)) < prune_pos {
-        collect_pruned_children(left, height - 1, leaf_start, prune_pos, pinned);
-    }
-
-    if right < prune_pos {
-        pinned.push(right);
-    } else if leaf_pos(Location::new(mid_leaf)) < prune_pos {
-        collect_pruned_children(right, height - 1, mid_leaf, prune_pos, pinned);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,38 +278,6 @@ mod tests {
         assert!(!Position::new(max_pos + 1).is_valid());
     }
 
-    /// Slow reference implementation for `nodes_to_pin` that recurses into every retained branch.
-    fn nodes_to_pin_slow(mmb_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
-        fn collect(
-            pos: Position,
-            height: u32,
-            prune_pos: Position,
-            pinned: &mut alloc::vec::Vec<Position>,
-        ) {
-            if height == 0 {
-                return;
-            }
-            let (left, right) = children(pos, height);
-            for child in [left, right] {
-                if child < prune_pos {
-                    pinned.push(child);
-                } else {
-                    collect(child, height - 1, prune_pos, pinned);
-                }
-            }
-        }
-
-        let mut pinned = alloc::vec::Vec::new();
-        for (peak_pos, height) in PeakIterator::new(mmb_size) {
-            if peak_pos < prune_pos {
-                pinned.push(peak_pos);
-            } else if height > 0 {
-                collect(peak_pos, height, prune_pos, &mut pinned);
-            }
-        }
-        pinned
-    }
-
     #[test]
     fn test_child_leaves_matches_children() {
         for n in 1u64..=256 {
@@ -420,23 +314,6 @@ mod tests {
                 let computed_pos = birthed_node_pos(leaf, height == 0);
                 assert_eq!(computed_pos, pos, "n={n}, height={height}");
                 first_leaf += leaves_in_peak;
-            }
-        }
-    }
-
-    #[test]
-    fn test_nodes_to_pin_matches_reference() {
-        for n in 0u64..=256 {
-            let size = if n == 0 {
-                Position::new(0)
-            } else {
-                Position::try_from(Location::new(n)).unwrap()
-            };
-            for prune in 0..=size.as_u64() {
-                let prune_pos = Position::new(prune);
-                let fast = nodes_to_pin(size, prune_pos);
-                let slow = nodes_to_pin_slow(size, prune_pos);
-                assert_eq!(fast, slow, "n={n}, prune={prune}");
             }
         }
     }

@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig, Location},
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
@@ -34,7 +34,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Db = Current<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db = Current<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -98,7 +98,7 @@ fn make_config(
 ) -> VariableConfig<TwoCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        mmr: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),
             metadata_partition: format!("crash-mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(mmr_items_per_blob),
@@ -106,7 +106,7 @@ fn make_config(
             thread_pool: None,
             page_cache: page_cache.clone(),
         },
-        log: VConfig {
+        journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,
@@ -114,7 +114,7 @@ fn make_config(
             codec_config: ((), ()),
             page_cache,
         },
-        grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
+        grafted_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
         translator: TwoCap,
     }
 }
@@ -153,20 +153,18 @@ async fn commit_pending(
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut HashMap<RawKey, RawValue>,
 ) -> bool {
-    let result = {
-        let mut batch = db.new_batch();
-        for (k, v) in pending_writes.drain(..) {
-            batch = batch.write(k, v);
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = match batch.merkleize(db, None).await {
+        Ok(m) => m,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return false;
         }
-        let merkleized = match batch.merkleize(None).await {
-            Ok(m) => m,
-            Err(_) => {
-                forget_pending(pending, committed);
-                return false;
-            }
-        };
-        db.apply_batch(merkleized.finalize()).await
     };
+    let result = db.apply_batch(merkleized).await;
     if result.is_err() {
         forget_pending(pending, committed);
         return false;
@@ -344,14 +342,13 @@ fn fuzz(input: FuzzInput) {
             // Verify the recovered DB is usable.
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            let finalized = db
+            let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(None)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized)
+                .unwrap();
+            db.apply_batch(batch)
                 .await
                 .expect("apply_batch after recovery should succeed");
             db.commit()

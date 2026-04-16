@@ -1,6 +1,7 @@
 //! Shared read-only trait for merkleized data structures.
 
 use crate::merkle::{hasher::Hasher, proof::Proof, Family, Location, Position};
+use alloc::sync::Arc;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -24,8 +25,8 @@ pub trait Readable: Send + Sync {
     /// Root digest of the structure.
     fn root(&self) -> Self::Digest;
 
-    /// Items before this position have been pruned.
-    fn pruned_to_pos(&self) -> Position<Self::Family>;
+    /// Leaf location up to which pruning has been performed, or 0 if never pruned.
+    fn pruning_boundary(&self) -> Location<Self::Family>;
 
     /// Inclusion proof for the element at `loc`.
     fn proof(
@@ -48,6 +49,44 @@ pub trait Readable: Send + Sync {
 
     /// `[start, end)` range of retained leaf locations.
     fn bounds(&self) -> Range<Location<Self::Family>> {
-        Location::try_from(self.pruned_to_pos()).expect("valid pruned_to_pos")..self.leaves()
+        self.pruning_boundary()..self.leaves()
+    }
+}
+
+impl<T: Readable> Readable for Arc<T> {
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Error = T::Error;
+
+    fn size(&self) -> Position<Self::Family> {
+        (**self).size()
+    }
+
+    fn get_node(&self, pos: Position<Self::Family>) -> Option<Self::Digest> {
+        (**self).get_node(pos)
+    }
+
+    fn root(&self) -> Self::Digest {
+        (**self).root()
+    }
+
+    fn pruning_boundary(&self) -> Location<Self::Family> {
+        (**self).pruning_boundary()
+    }
+
+    fn proof(
+        &self,
+        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
+        loc: Location<Self::Family>,
+    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error> {
+        (**self).proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
+        range: Range<Location<Self::Family>>,
+    ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error> {
+        (**self).range_proof(hasher, range)
     }
 }
