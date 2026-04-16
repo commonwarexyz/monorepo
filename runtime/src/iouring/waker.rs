@@ -345,7 +345,14 @@ impl Waker {
     ///
     /// This uses multishot poll and is called on startup and whenever a wake
     /// CQE indicates the previous multishot request is no longer active.
-    pub fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) {
+    ///
+    /// Returns `false` if the local SQ is already full and the rearm must be
+    /// retried in a later staging pass.
+    pub fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        if submission_queue.is_full() {
+            return false;
+        }
+
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
             .build()
@@ -355,8 +362,10 @@ impl Waker {
         unsafe {
             submission_queue
                 .push(&wake_poll)
-                .expect("wake poll SQE should always fit in the ring");
+                .expect("checked wake poll SQE capacity");
         }
+
+        true
     }
 
     /// Clear the current wait epoch after we resume running.
@@ -702,15 +711,28 @@ pub mod tests {
 
     #[test]
     fn test_reinstall_pushes_wake_poll() {
-        // Verify reinstall contributes exactly one multishot wake poll SQE.
+        // Verify reinstall enqueues one multishot wake poll SQE when space is
+        // available and reports failure without mutating the SQ when it is full.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
 
         // Reinstall should enqueue exactly one wake poll request.
         let mut sq = ring.submission();
         let before = sq.len();
-        waker.reinstall(&mut sq);
+        assert!(waker.reinstall(&mut sq));
         assert_eq!(sq.len(), before + 1);
+
+        while !sq.is_full() {
+            let nop = io_uring::opcode::Nop::new().build().user_data(0);
+            // SAFETY: Nop SQE owns no user pointers or external resources.
+            unsafe {
+                sq.push(&nop).expect("unable to fill submission queue");
+            }
+        }
+
+        let before = sq.len();
+        assert!(!waker.reinstall(&mut sq));
+        assert_eq!(sq.len(), before);
     }
 
     #[test]

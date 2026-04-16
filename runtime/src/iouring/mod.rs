@@ -694,8 +694,12 @@ impl IoUringLoop {
         // entirely. If multishot termination was observed earlier, the next
         // iteration that might block in `submit_and_wait` stages the rearm SQE
         // here before entering the kernel again.
-        if std::mem::take(&mut self.wake_rearm_needed) {
-            self.waker.reinstall(&mut submission_queue);
+        if self.wake_rearm_needed {
+            // If the SQ is already full from a previous iteration, submit them first.
+            if !self.waker.reinstall(&mut submission_queue) {
+                return FillResult::AtSubmissionQueueCapacity;
+            }
+            self.wake_rearm_needed = false;
         }
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
@@ -1260,6 +1264,38 @@ mod tests {
         assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
         assert!(ring.submission().is_full());
         assert!(iouring.waiters.len() < cfg.size as usize);
+    }
+
+    #[test]
+    fn test_fill_submission_queue_preserves_wake_rearm_when_submission_queue_starts_full() {
+        // Verify a full local SQ defers wake rearm without clearing the retry flag.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        iouring.wake_rearm_needed = true;
+
+        {
+            let mut submission_queue = ring.submission();
+            while !submission_queue.is_full() {
+                let nop = io_uring::opcode::Nop::new().build().user_data(0);
+                // SAFETY: Nop SQE owns no user pointers or external resources.
+                unsafe {
+                    submission_queue
+                        .push(&nop)
+                        .expect("unable to fill submission queue");
+                }
+            }
+        }
+
+        let fill_result = iouring.fill_submission_queue(&mut ring);
+
+        assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
+        assert!(iouring.wake_rearm_needed);
     }
 
     #[test]
