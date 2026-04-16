@@ -567,21 +567,29 @@ pub mod tests {
 
     #[test]
     fn test_pending_uses_directional_half_range_compare() {
+        // Verify `pending()` only reports work when the published sequence is
+        // directionally ahead within the half-range window.
         let waker = Waker::new().expect("eventfd creation should succeed");
 
+        // A one-step published-ahead delta is pending for `processed_seq = 0`,
+        // but not once the loop has caught up.
         waker.inner.state.store(1 << STATE_BITS, Ordering::Relaxed);
         assert!(waker.pending(0));
         assert!(!waker.pending(1));
 
+        // A visible published sequence that lags behind `processed_seq` must
+        // not be treated as pending work.
         waker.inner.state.store(0, Ordering::Relaxed);
         assert!(!waker.pending(1));
 
+        // Exactly half the domain is ambiguous and therefore not directional.
         waker.inner.state.store(
             HALF_SUBMISSION_SEQUENCE_DOMAIN << STATE_BITS,
             Ordering::Relaxed,
         );
         assert!(!waker.pending(0));
 
+        // Wrapping by one still counts as a published-ahead delta.
         waker.inner.state.store(0, Ordering::Relaxed);
         assert!(waker.pending(SUBMISSION_SEQ_MASK));
     }
@@ -711,17 +719,21 @@ pub mod tests {
 
     #[test]
     fn test_reinstall_pushes_wake_poll() {
-        // Verify reinstall enqueues one multishot wake poll SQE when space is
-        // available and reports failure without mutating the SQ when it is full.
+        // Verify `reinstall()` queues one multishot wake poll SQE when space
+        // is available and reports failure without mutating the SQ when it is
+        // full.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
 
-        // Reinstall should enqueue exactly one wake poll request.
+        // With SQ space available, `reinstall()` should enqueue exactly one
+        // wake poll request.
         let mut sq = ring.submission();
         let before = sq.len();
         assert!(waker.reinstall(&mut sq));
         assert_eq!(sq.len(), before + 1);
 
+        // Once the SQ is full, `reinstall()` must leave it unchanged and ask
+        // the caller to retry later.
         while !sq.is_full() {
             let nop = io_uring::opcode::Nop::new().build().user_data(0);
             // SAFETY: Nop SQE owns no user pointers or external resources.
