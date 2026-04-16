@@ -452,6 +452,23 @@ pub(crate) struct IoUringLoop {
     processed_seq: u32,
 }
 
+/// Outcome of one `fill_submission_queue()` staging pass.
+///
+/// This tells the outer loop whether staging drained all currently visible
+/// work, hit submission-queue pressure, hit waiter-capacity pressure, or
+/// discovered producer disconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FillResult {
+    /// The producer side disconnected while draining the request channel.
+    Disconnected,
+    /// Staging drained all currently visible work without hitting a hard limit.
+    Drained,
+    /// The submission queue filled before waiter capacity was exhausted.
+    AtSubmissionQueueCapacity,
+    /// The waiter table filled, regardless of whether the submission queue also filled.
+    AtWaiterCapacity,
+}
+
 impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
@@ -528,41 +545,40 @@ impl IoUringLoop {
             self.advance_timeouts();
 
             // Stage as much inbound work as capacity allows.
-            let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
-                // Producer side disconnected. Drain in-flight requests and exit.
-                self.drain(&mut ring);
-                return;
-            };
+            let fill_result = self.fill_submission_queue(&mut ring);
 
             // Update pending operations metric.
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // If producers are still ahead of the drained sequence, do not arm
-            // idle sleep.
-            //
-            // Sleep here could park with published work and no guaranteed wake,
-            // because `publish()` only signals once a wait target is armed.
-            if self.waker.pending(self.processed_seq) {
-                if at_capacity {
-                    // Producers are still ahead and staging stopped at capacity.
-                    //
-                    // Enter the kernel to submit pending SQEs and wait for at
-                    // least one completion so capacity can open up.
-                    //
-                    // Keep the eventfd-backed wake path armed across this
-                    // blocking section so a later producer disconnect can
-                    // interrupt `submit_and_wait` instead of waiting for an
-                    // unrelated CQE or timeout.
+            match fill_result {
+                FillResult::Disconnected => {
+                    // Producer side disconnected. Drain in-flight requests and exit.
+                    self.drain(&mut ring);
+                    return;
+                }
+                FillResult::AtWaiterCapacity => {
+                    // Waiter pressure means completions are required before the
+                    // loop can admit more work, so submit pending SQEs and block
+                    // for progress with the eventfd-backed wake path armed.
                     let _arm = self.waker.arm(self.processed_seq);
                     self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                         .expect("unable to submit to ring");
+                    continue;
                 }
-
-                continue;
+                FillResult::AtSubmissionQueueCapacity => {
+                    // SQ pressure alone only means the staged batch must be
+                    // flushed into the kernel. Do that without waiting and then
+                    // re-enter the loop to drain completions or stage more work.
+                    self.submit(&mut ring).expect("unable to submit to ring");
+                    continue;
+                }
+                FillResult::Drained => {
+                    // The staging pass drained all currently visible work from
+                    // the request channel. Fall through to the normal
+                    // idle-vs-blocking decision below.
+                }
             }
 
-            // No published-ahead sequence is currently visible.
-            //
             // If the ring is truly idle, avoid `io_uring_enter` entirely and
             // wait on the shared wake state via futex until a producer changes
             // it. This bypasses the eventfd wake path when there are no active
@@ -572,20 +588,11 @@ impl IoUringLoop {
                 continue;
             }
 
-            // Otherwise, active waiters remain in the ring, so sleep by
-            // blocking in `submit_and_wait`.
-            //
-            // If staging hit capacity, force a submit-and-wait cycle to open
-            // space, even though the sequence snapshot looks idle here.
-            // Otherwise, arm the eventfd-backed blocking path. If
-            // `arm.should_block()` is true, we may enter `submit_and_wait`.
-            //
-            // While the returned guard is live, any later submission or
-            // producer disconnect observes the armed eventfd target and wakes
-            // this blocking section instead of waiting for an unrelated CQE or
-            // timeout.
+            // Otherwise, active waiters remain in the ring and no forced
+            // submit is needed. Arm the eventfd-backed blocking path and block
+            // only if the post-arm snapshot still looks idle.
             let arm = self.waker.arm(self.processed_seq);
-            if at_capacity || arm.should_block() {
+            if arm.should_block() {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
@@ -673,9 +680,8 @@ impl IoUringLoop {
     ///
     /// Advances `processed_seq` by exactly the number of drained submissions.
     ///
-    /// Returns whether staging ended at waiter or SQ capacity, or `None` if the
-    /// producer channel disconnected.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
+    /// Returns why staging stopped.
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> FillResult {
         let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
@@ -695,13 +701,14 @@ impl IoUringLoop {
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
         if self.stage_cancellations(&mut submission_queue) {
             // If cancels alone filled the SQ, submit them first.
-            return Some(true);
+            return FillResult::AtSubmissionQueueCapacity;
         }
 
         // Requeued work already owns waiter capacity, so restage it before
         // admitting fresh channel requests.
         if self.stage_ready_requests(&mut submission_queue) {
-            return Some(true);
+            // If ready request alone filled the SQ, submit them first.
+            return FillResult::AtSubmissionQueueCapacity;
         }
 
         // Stage operations until the channel is empty, waiter capacity is hit,
@@ -712,7 +719,7 @@ impl IoUringLoop {
             // before concluding there is nothing more to drain in this pass.
             let request = match self.receiver.try_recv() {
                 Ok(request) => request,
-                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Disconnected) => return FillResult::Disconnected,
                 Err(TryRecvError::Empty) => {
                     // Catch the race where a producer submitted after the
                     // empty observation but before the loop decided to stop
@@ -752,9 +759,16 @@ impl IoUringLoop {
             }
         }
 
-        let at_sq_capacity = submission_queue.is_full();
-        let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-        Some(at_sq_capacity || at_waiter_capacity)
+        // Waiter pressure dominates SQ pressure: when the waiter table is full
+        // the loop must wait for completions before it can admit more work,
+        // while SQ pressure alone only forces a submit.
+        if self.waiters.len() == self.cfg.size as usize {
+            FillResult::AtWaiterCapacity
+        } else if submission_queue.is_full() {
+            FillResult::AtSubmissionQueueCapacity
+        } else {
+            FillResult::Drained
+        }
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
@@ -989,6 +1003,12 @@ impl IoUringLoop {
             },
         }
     }
+
+    /// Submit pending SQEs without waiting for a completion.
+    #[inline]
+    fn submit(&self, ring: &mut IoUring) -> Result<(), std::io::Error> {
+        self.submit_and_wait(ring, 0, None).map(|_| ())
+    }
 }
 
 /// Build and configure an `io_uring` instance.
@@ -1126,9 +1146,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_submission_queue_returns_true_when_cancel_staging_fills_sq() {
-        // Verify cancel staging reports SQ saturation so the loop drains completions
-        // before trying to enqueue more work.
+    fn test_fill_submission_queue_returns_waiter_capacity_when_cancel_staging_fills_sq() {
+        // Verify cancel staging reports waiter pressure when the waiter table
+        // is already full, even if the SQ is also saturated.
         let cfg = Config {
             size: 8,
             ..Default::default()
@@ -1163,17 +1183,15 @@ mod tests {
         }
 
         // Staging should stop at SQ capacity and leave some cancels queued.
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
-        assert!(at_capacity);
+        let fill_result = iouring.fill_submission_queue(&mut ring);
+        assert_eq!(fill_result, FillResult::AtWaiterCapacity);
         assert!(!iouring.pending_cancels.is_empty());
     }
 
     #[test]
-    fn test_fill_submission_queue_returns_true_when_ready_staging_fills_sq() {
-        // Verify requeued work can also saturate the SQ and force the loop to
-        // return early with ready-queue work still pending.
+    fn test_fill_submission_queue_returns_waiter_capacity_when_ready_staging_fills_sq() {
+        // Verify requeued work reports waiter pressure when the waiter table is
+        // already full, even if the SQ is also saturated.
         let cfg = Config {
             size: 8,
             ..Default::default()
@@ -1199,16 +1217,14 @@ mod tests {
             iouring.ready_queue.push_back(waiter_id);
         }
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
-        assert!(at_capacity);
+        assert_eq!(fill_result, FillResult::AtWaiterCapacity);
         assert!(!iouring.ready_queue.is_empty());
     }
 
     #[test]
-    fn test_fill_submission_queue_returns_true_when_fresh_staging_fills_sq() {
+    fn test_fill_submission_queue_returns_submission_queue_capacity_when_fresh_staging_fills_sq() {
         // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
         let cfg = Config {
             size: 8,
@@ -1239,13 +1255,84 @@ mod tests {
             }
         });
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
-        assert!(at_capacity);
+        assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
         assert!(ring.submission().is_full());
         assert!(iouring.waiters.len() < cfg.size as usize);
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_waiter_capacity_when_waiters_are_full() {
+        // Verify staging reports waiter pressure even when the SQ itself still
+        // has room.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        iouring.wake_rearm_needed = false;
+
+        for _ in 0..cfg.size as usize {
+            let (sock_left, _sock_right) =
+                UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, _rx) = oneshot::channel();
+            let request = Request::Sync(SyncRequest {
+                file: Arc::new(file),
+                result: None,
+                sender: tx,
+            });
+            iouring.waiters.insert(request, None);
+        }
+
+        let fill_result = iouring.fill_submission_queue(&mut ring);
+
+        assert_eq!(fill_result, FillResult::AtWaiterCapacity);
+        assert_eq!(ring.submission().len(), 0);
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_waiter_capacity_when_fresh_staging_fills_everything() {
+        // Verify a full fresh staging pass reports waiter pressure when both
+        // the SQ and waiter table saturate in the same iteration.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        iouring.wake_rearm_needed = false;
+
+        futures::executor::block_on(async {
+            for _ in 0..cfg.size as usize {
+                let (sock_left, _sock_right) =
+                    UnixStream::pair().expect("failed to create unix socket pair");
+                // SAFETY: sock_left is a valid fd that we own.
+                let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                let (tx, _rx) = oneshot::channel();
+                submitter
+                    .enqueue(Request::Sync(SyncRequest {
+                        file: Arc::new(file),
+                        result: None,
+                        sender: tx,
+                    }))
+                    .await
+                    .expect("failed to enqueue request");
+            }
+        });
+
+        let fill_result = iouring.fill_submission_queue(&mut ring);
+
+        assert_eq!(fill_result, FillResult::AtWaiterCapacity);
+        assert!(ring.submission().is_full());
+        assert_eq!(iouring.waiters.len(), cfg.size as usize);
     }
 
     #[test]
@@ -1276,12 +1363,10 @@ mod tests {
         assert!(iouring.waiters.cancel(waiter_id));
         iouring.pending_cancels.push_back(waiter_id);
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
         // No cancel SQE should be staged because there is no in-flight op left to cancel.
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.pending_cancels.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert!(matches!(
@@ -1318,11 +1403,9 @@ mod tests {
             .await
             .expect("failed to enqueue request");
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.pending_cancels.is_empty());
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
@@ -2308,12 +2391,10 @@ mod tests {
         assert!(iouring.waiters.cancel(waiter_id));
         iouring.ready_queue.push_back(waiter_id);
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
         // Ready-queue staging should retire the waiter locally and leave the SQ untouched.
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         let result = rx.await.expect("missing timeout completion");
@@ -2346,13 +2427,11 @@ mod tests {
             .await
             .expect("request should enqueue");
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
         // The request should retire locally without consuming waiter or SQ
         // capacity, and its scheduled deadline should disappear as well.
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert_eq!(iouring.timeout_wheel.next_deadline(), None);
@@ -2376,12 +2455,10 @@ mod tests {
             .await
             .expect("request should enqueue");
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
         // The read request should take the same orphan path as send.
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert_eq!(iouring.timeout_wheel.next_deadline(), None);
@@ -2417,13 +2494,11 @@ mod tests {
         iouring.timeout_wheel.schedule(waiter_id, 1);
         iouring.ready_queue.push_back(waiter_id);
 
-        let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
-            .expect("channel should remain connected");
+        let fill_result = iouring.fill_submission_queue(&mut ring);
 
         // Restaging should notice the closed caller, drop the request locally,
         // and clean up its deadline tracking without touching the SQ.
-        assert!(!at_capacity);
+        assert_eq!(fill_result, FillResult::Drained);
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert_eq!(iouring.timeout_wheel.next_deadline(), None);
