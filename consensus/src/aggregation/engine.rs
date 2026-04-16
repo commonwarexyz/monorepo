@@ -25,6 +25,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
+        histogram,
         status::{CounterExt, GaugeExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
@@ -65,7 +66,7 @@ struct DigestRequest<D: Digest> {
     result: Result<D, Error>,
 
     /// Records the time taken to get the digest.
-    start: SystemTime,
+    duration: histogram::Started,
 }
 
 /// Instance of the engine.
@@ -251,12 +252,9 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(
-            self.context.child("journal"),
-            journal_cfg,
-        )
-        .await
-        .expect("init failed");
+        let journal = Journal::init(self.context.child("journal"), journal_cfg)
+            .await
+            .expect("init failed");
         let unverified_heights = self.replay(&journal).await;
         self.journal = Some(journal);
 
@@ -337,11 +335,9 @@ impl<
                 let DigestRequest {
                     height,
                     result,
-                    start,
+                    duration,
                 } = request;
-                self.metrics
-                    .digest_duration
-                    .observe_between(start, self.context.current());
+                duration.observe_now(&*self.context);
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");
@@ -694,14 +690,14 @@ impl<
     fn get_digest(&mut self, height: Height) {
         assert!(self.pending.contains_key(&height));
         let mut automaton = self.automaton.clone();
-        let start = self.context.current();
+        let duration = self.metrics.digest_duration.start(&*self.context);
         self.digest_requests.push(async move {
             let receiver = automaton.propose(height).await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);
             DigestRequest {
                 height,
                 result,
-                start,
+                duration,
             }
         });
     }

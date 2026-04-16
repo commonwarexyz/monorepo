@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},

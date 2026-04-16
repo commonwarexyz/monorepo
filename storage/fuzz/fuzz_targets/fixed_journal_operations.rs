@@ -2,9 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as JournalConfig, Journal},
     Reader,

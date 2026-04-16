@@ -393,7 +393,7 @@ where
                     ancestor_stream,
                 );
 
-                let build_started = runtime_context.current();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -411,7 +411,7 @@ where
                         }
                     },
                 };
-                build_duration.observe_between(build_started, runtime_context.current());
+                build_duration.observe_now(&runtime_context);
 
                 let digest = built_block.digest();
                 {
@@ -715,9 +715,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("deferred"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
@@ -841,9 +844,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("deferred"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
@@ -863,8 +869,12 @@ mod tests {
                 max_epoch: 0,
             };
 
-            let mut marshaled =
-                Deferred::new(context.child("deferred"), mock_app, marshal.clone(), limited_epocher);
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mock_app,
+                marshal.clone(),
+                limited_epocher,
+            );
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = Ctx {
@@ -931,9 +941,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("deferred"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 

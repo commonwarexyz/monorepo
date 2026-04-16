@@ -374,7 +374,9 @@ where
         }
         // Optionally send malformed resolver data
         if self.context.gen_bool(0.5) {
-            let mutated = self.strategy.mutate_resolver_bytes(&mut *self.context, &msg);
+            let mutated = self
+                .strategy
+                .mutate_resolver_bytes(&mut *self.context, &msg);
             let _ = sender
                 .send(Recipients::All, IoBuf::from(mutated), true)
                 .await;

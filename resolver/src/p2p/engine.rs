@@ -15,6 +15,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
+        histogram,
         status::{CounterExt, GaugeExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
@@ -31,7 +32,7 @@ use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
 struct Serve<P: PublicKey> {
-    start: std::time::SystemTime,
+    duration: histogram::Started,
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
@@ -73,8 +74,8 @@ pub struct Engine<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
-    /// Track the start time of fetch operations
-    fetch_timers: HashMap<Key, std::time::SystemTime>,
+    /// Track the duration of fetch operations.
+    fetch_timers: HashMap<Key, histogram::Started>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -243,7 +244,10 @@ impl<
                                 // Only start new fetch if not already in progress
                                 if is_new {
                                     self.fetch_timers
-                                        .insert(key.clone(), self.context.current());
+                                        .insert(
+                                            key.clone(),
+                                            self.metrics.fetch_duration.start(&*self.context),
+                                        );
                                     self.fetcher.add_ready(key);
                                 } else {
                                     trace!(?key, "updated targets for existing fetch");
@@ -255,7 +259,7 @@ impl<
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
                         if self.fetcher.cancel(&key) {
                             guard.set(Status::Success);
-                            self.fetch_timers.remove(&key).unwrap(); // must exist
+                            self.fetch_timers.remove(&key).unwrap().discard(); // must exist
                             self.consumer.failed(key.clone(), ()).await;
                         }
                     }
@@ -308,7 +312,7 @@ impl<
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve {
-                    start,
+                    duration,
                     peer,
                     id,
                     result,
@@ -330,9 +334,7 @@ impl<
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
                     .await;
                 if success {
-                    self.metrics
-                        .serve_duration
-                        .observe_between(start, self.context.current());
+                    duration.observe_now(&*self.context);
                 }
             },
             // Handle network messages
@@ -399,12 +401,12 @@ impl<
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let start = self.context.current();
+        let duration = self.metrics.serve_duration.start(&*self.context);
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
             Serve {
-                start,
+                duration,
                 peer,
                 id,
                 result,
@@ -426,10 +428,8 @@ impl<
         if self.consumer.deliver(key.clone(), response).await {
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
-            let start = self.fetch_timers.remove(&key).unwrap(); // must exist in the map
-            self.metrics
-                .fetch_duration
-                .observe_between(start, self.context.current());
+            let duration = self.fetch_timers.remove(&key).unwrap(); // must exist in the map
+            duration.observe_now(&*self.context);
 
             // Clear all targets for this key
             self.fetcher.clear_targets(&key);

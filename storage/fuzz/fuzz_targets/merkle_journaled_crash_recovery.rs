@@ -5,9 +5,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, journaled::Config, mmb, mmr, Family as MerkleFamily,
     Location,

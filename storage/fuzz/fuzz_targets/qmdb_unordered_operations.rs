@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},

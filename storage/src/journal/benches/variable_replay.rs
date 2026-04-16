@@ -64,8 +64,9 @@ fn bench_variable_replay(c: &mut Criterion) {
                     // Benchmark: measure replay time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j = get_variable_journal(ctx.child("journal"), PARTITION, ITEMS_PER_BLOB)
-                            .await;
+                        let j =
+                            get_variable_journal(ctx.child("journal"), PARTITION, ITEMS_PER_BLOB)
+                                .await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();

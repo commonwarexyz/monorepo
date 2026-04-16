@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::merkle::{
     hasher::Standard, journaled::Config, mem::Mem, mmb, mmr, Error, Family as MerkleFamily,
     Location, LocationRangeExt as _, Position,

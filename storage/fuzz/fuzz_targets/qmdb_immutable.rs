@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},

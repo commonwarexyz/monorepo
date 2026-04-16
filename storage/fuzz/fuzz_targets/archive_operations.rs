@@ -1,9 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     archive::{
         prunable::{Archive, Config},

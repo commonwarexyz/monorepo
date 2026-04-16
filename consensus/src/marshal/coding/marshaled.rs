@@ -441,7 +441,7 @@ where
                 );
 
                 // If consensus drops the receiver, we can stop work early.
-                let verify_started = runtime_context.current();
+                let verify_duration = verify_duration.start(&runtime_context);
                 let application_valid = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -452,7 +452,7 @@ where
                     },
                     is_valid = validity_request => is_valid,
                 };
-                verify_duration.observe_between(verify_started, runtime_context.current());
+                verify_duration.observe_now(&runtime_context);
                 if application_valid {
                     // The block is only persisted at this point.
                     marshal.verified(round, block).await;
@@ -570,7 +570,7 @@ where
                 )
                 .await;
 
-                let parent_fetch_started = runtime_context.current();
+                let parent_fetch_duration = proposal_parent_fetch_duration.start(&runtime_context);
                 let parent = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -588,8 +588,7 @@ where
                         }
                     },
                 };
-                proposal_parent_fetch_duration
-                    .observe_between(parent_fetch_started, runtime_context.current());
+                parent_fetch_duration.observe_now(&runtime_context);
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -623,7 +622,7 @@ where
                     ancestor_stream,
                 );
 
-                let build_started = runtime_context.current();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -641,11 +640,11 @@ where
                         }
                     },
                 };
-                build_duration.observe_between(build_started, runtime_context.current());
+                build_duration.observe_now(&runtime_context);
 
-                let erasure_started = runtime_context.current();
+                let erasure_encode_duration = erasure_encode_duration.start(&runtime_context);
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-                erasure_encode_duration.observe_between(erasure_started, runtime_context.current());
+                erasure_encode_duration.observe_now(&runtime_context);
 
                 let commitment = coded_block.commitment();
                 {

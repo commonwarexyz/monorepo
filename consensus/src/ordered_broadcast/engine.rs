@@ -34,6 +34,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
+        histogram,
         status::{CounterExt, GaugeExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
@@ -54,7 +55,7 @@ use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
 struct Verify<C: PublicKey, D: Digest> {
-    start: SystemTime,
+    duration: histogram::Started,
     context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
@@ -196,7 +197,7 @@ pub struct Engine<
     metrics: metrics::Metrics,
 
     // The timer of my last new proposal
-    propose_timer: Option<SystemTime>,
+    propose_timer: Option<histogram::Started>,
 }
 
 impl<
@@ -467,14 +468,12 @@ impl<
             // Handle completed verification futures.
             verify = self.pending_verifies.next_completed() => {
                 let Verify {
-                    start,
+                    duration,
                     context,
                     payload,
                     result,
                 } = verify;
-                self.metrics
-                    .verify_duration
-                    .observe_between(start, self.context.current());
+                duration.observe_now(&*self.context);
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
@@ -607,9 +606,7 @@ impl<
         if let Some(ref signer) = self.sequencer_signer {
             if chunk.sequencer == signer.public_key() {
                 if let Some(start) = self.propose_timer.take() {
-                    self.metrics
-                        .e2e_duration
-                        .observe_between(start, self.context.current());
+                    start.observe_now(&*self.context);
                 }
             }
         }
@@ -675,12 +672,12 @@ impl<
         };
         let payload = node.chunk.payload;
         let mut automaton = self.automaton.clone();
-        let start = self.context.current();
+        let duration = self.metrics.verify_duration.start(&*self.context);
         self.pending_verifies.push(async move {
             let receiver = automaton.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
-                start,
+                duration,
                 context,
                 payload,
                 result,
@@ -780,7 +777,7 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Record the start time of the proposal
-        self.propose_timer = Some(self.context.current());
+        self.propose_timer = Some(self.metrics.e2e_duration.start(&*self.context));
 
         // Broadcast to network
         if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {

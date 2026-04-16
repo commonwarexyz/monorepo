@@ -3,9 +3,7 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},

@@ -584,10 +584,9 @@ where
                 };
 
                 // Process batch verification results
-                let verify_started = self.context.current();
+                let verify_duration = self.verify_latency.start(&*self.context);
                 if let Some((voters, failed)) = verified {
-                    self.verify_latency
-                        .observe_between(verify_started, self.context.current());
+                    verify_duration.observe_now(&*self.context);
 
                     // Process verified votes
                     let batch = voters.len() + failed.len();
@@ -611,6 +610,7 @@ where
                         round.add_verified(valid);
                     }
                 } else {
+                    verify_duration.discard();
                     trace!(
                         current = %current.view,
                         %finalized,

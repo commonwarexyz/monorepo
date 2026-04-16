@@ -322,7 +322,7 @@ where
                     ancestor_stream,
                 );
 
-                let build_started = runtime_context.current();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -340,7 +340,7 @@ where
                         }
                     },
                 };
-                build_duration.observe_between(build_started, runtime_context.current());
+                build_duration.observe_now(&runtime_context);
 
                 let digest = built_block.digest();
                 {
@@ -607,9 +607,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("inline"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
@@ -685,9 +688,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("inline"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
