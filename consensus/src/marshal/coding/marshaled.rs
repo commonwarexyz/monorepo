@@ -82,7 +82,9 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify},
+            validation::{
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
+            },
             verification_tasks::VerificationTasks,
         },
         coding::{
@@ -122,8 +124,6 @@ use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
-
-type LastBuilt<B, C, H> = Arc<Mutex<Option<(Round, CodedBlock<B, C, H>)>>>;
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
@@ -185,7 +185,7 @@ where
     strategy: S,
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
-    last_built: LastBuilt<B, C, H>,
+    last_built: LastBuilt<CodedBlock<B, C, H>>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,

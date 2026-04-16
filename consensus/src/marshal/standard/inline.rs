@@ -45,6 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
+        application::validation::LastBuilt,
         core::Mailbox,
         standard::{
             validation::{
@@ -73,8 +74,6 @@ use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::{debug, warn};
-
-type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// Tracks `(round, digest)` pairs for which `verify` has already fetched the
 /// block, so `certify` can return immediately without re-subscribing to marshal.

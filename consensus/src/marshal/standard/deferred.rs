@@ -74,7 +74,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::is_inferred_reproposal_at_certify,
+            validation::{is_inferred_reproposal_at_certify, LastBuilt},
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
@@ -104,8 +104,6 @@ use commonware_utils::{
 use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, warn};
-
-type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///

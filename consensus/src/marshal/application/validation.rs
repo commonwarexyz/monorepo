@@ -4,6 +4,12 @@
 //! and certification flows.
 
 use crate::types::{Epoch, Epocher, Height, Round};
+use commonware_utils::sync::Mutex;
+use std::sync::Arc;
+
+/// Cache for the last block built during proposal, shared between the
+/// proposer task and the broadcast path.
+pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// Returns true if the block is at an epoch boundary (last block in its epoch).
 #[inline]
