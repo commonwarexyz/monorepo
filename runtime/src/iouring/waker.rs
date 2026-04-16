@@ -452,11 +452,22 @@ impl Waker {
             if ret >= 0 {
                 return;
             }
-            match std::io::Error::last_os_error().raw_os_error() {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
                 _ => {
-                    warn!("futex wake failed");
-                    return;
+                    // The operation-specific `FUTEX_WAKE` error here is `EINVAL` for
+                    // a PI waiter mismatch, and the generic futex syscall errors are
+                    // invalid or inaccessible user memory, invalid arguments, or an
+                    // unsupported op. For this private, aligned in-process futex,
+                    // all of those indicate a broken invariant or environment.
+                    // Unlike `futex_wait()`, there is no safe "just continue in
+                    // userspace" fallback here: because `WAKE_SIGNALLED_BIT` is
+                    // already latched for this epoch, logging and continuing would
+                    // risk a permanent lost wake.
+                    //
+                    // [https://www.man7.org/linux/man-pages/man2/FUTEX_WAKE.2const.html#ERRORS]
+                    panic!("futex wake failed: {err}");
                 }
             }
         }
@@ -494,11 +505,16 @@ impl Waker {
             if ret == 0 {
                 return;
             }
-            match std::io::Error::last_os_error().raw_os_error() {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
                 Some(libc::EAGAIN) => return,
                 _ => {
-                    warn!("futex wait failed");
+                    // With a null timeout, documented timeout-specific errors do not
+                    // apply here. An unexpected futex wait error means the kernel
+                    // refused to block, so the safe fallback is to return to
+                    // userspace and re-check the packed state rather than panic.
+                    warn!("futex wait failed: {err}");
                     return;
                 }
             }
@@ -513,6 +529,7 @@ pub mod tests {
     use std::{
         mem::size_of,
         os::fd::{AsRawFd, FromRawFd},
+        sync::Arc,
     };
 
     pub fn wait_until_futex_armed(waker: &Waker) {
@@ -614,23 +631,46 @@ pub mod tests {
     }
 
     #[test]
-    fn test_park_idle_wake_keeps_sequence_stable() {
-        // Verify `park_idle` sleeps on the idle path and out-of-band wakes do
-        // not perturb the logical submission sequence.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
-        let notifier = waker.clone();
+    fn test_park_idle_handles_concurrent_publish_and_wake_races() {
+        #[derive(Clone, Copy, Debug)]
+        enum Notifier {
+            Wake,
+            Publish,
+        }
 
-        let handle = std::thread::spawn(move || {
-            while state_bits(&notifier) & WAITING_ON_FUTEX_BIT == 0 {
-                std::hint::spin_loop();
+        // Stress the real concurrent idle-path races rather than only the
+        // single-threaded stale-snapshot path. The notifier thread waits until
+        // `WAITING_ON_FUTEX_BIT` is visible and then races a `wake()` or
+        // `publish()` against the parked thread's equality check, futex
+        // syscall, and eventual `clear_wait()`.
+        for notifier in [Notifier::Wake, Notifier::Publish] {
+            for _ in 0..64 {
+                let waker = Waker::new().expect("eventfd creation should succeed");
+                let before = submitted_seq(&waker);
+                let notifier_waker = waker.clone();
+
+                let handle = std::thread::spawn(move || {
+                    while state_bits(&notifier_waker) & WAITING_ON_FUTEX_BIT == 0 {
+                        std::hint::spin_loop();
+                    }
+                    match notifier {
+                        Notifier::Wake => notifier_waker.wake(),
+                        Notifier::Publish => notifier_waker.publish(),
+                    }
+                });
+
+                waker.park_idle(before);
+                handle.join().expect("idle notifier thread panicked");
+
+                let expected = match notifier {
+                    Notifier::Wake => before,
+                    Notifier::Publish => before.wrapping_add(1) & SUBMISSION_SEQ_MASK,
+                };
+
+                assert_eq!(submitted_seq(&waker), expected, "{notifier:?}");
+                assert_eq!(state_bits(&waker), 0, "{notifier:?}");
             }
-            notifier.wake();
-        });
-
-        waker.park_idle(before);
-        handle.join().expect("idle notifier thread panicked");
-        assert_eq!(submitted_seq(&waker), before);
+        }
     }
 
     #[test]
@@ -704,17 +744,30 @@ pub mod tests {
 
     #[test]
     fn test_publish_deduplicates_eventfd_wakes() {
-        // Verify repeated publishes while the same eventfd wait is armed only
-        // queue one wake write, while still advancing the sequence each time.
+        // Verify contended publishes while the same eventfd wait is armed only
+        // queue one wake write, while still advancing the sequence for every
+        // publisher that raced in this epoch.
         let waker = Waker::new().expect("eventfd creation should succeed");
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let mut handles = Vec::new();
 
         let arm = waker.arm(0);
         assert!(arm.still_idle());
         assert!(!arm.wake_latched());
-        waker.publish();
-        waker.publish();
+        for _ in 0..4 {
+            let publisher = waker.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                publisher.publish();
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("publish thread panicked");
+        }
 
-        assert_eq!(submitted_seq(&waker), 2);
+        assert_eq!(submitted_seq(&waker), 4);
         assert_eq!(read_eventfd_count(&waker), 1);
         drop(arm);
     }
@@ -754,15 +807,27 @@ pub mod tests {
 
     #[test]
     fn test_wake_deduplicates_eventfd_wakes() {
-        // Verify repeated out-of-band notifications while the same eventfd
+        // Verify contended out-of-band notifications while the same eventfd
         // wait is armed only queue one wake write and do not perturb sequence.
         let waker = Waker::new().expect("eventfd creation should succeed");
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let mut handles = Vec::new();
 
         let arm = waker.arm(0);
         assert!(arm.still_idle());
         assert!(!arm.wake_latched());
-        waker.wake();
-        waker.wake();
+        for _ in 0..4 {
+            let notifier = waker.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                notifier.wake();
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("wake thread panicked");
+        }
 
         assert_eq!(submitted_seq(&waker), 0);
         assert_eq!(read_eventfd_count(&waker), 1);

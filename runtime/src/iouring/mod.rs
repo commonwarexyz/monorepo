@@ -2221,21 +2221,72 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_shutdown_wakes_futex_wait() {
-        // Verify dropping the last submitter wakes an otherwise idle loop that
-        // is sleeping on the futex-backed idle path.
-        let cfg = Config::default();
-        let mut registry = Registry::default();
-        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
-        let idle_waker = iouring.waker.clone();
-        let handle = std::thread::spawn(move || iouring.run());
+    fn test_idle_shutdown_wakes_futex_wait_across_publish_then_drop_interleavings() {
+        #[derive(Clone, Copy, Debug)]
+        enum Scenario {
+            DropOnly,
+            PublishThenDrop,
+        }
 
-        // Wait until the loop has armed its futex-backed idle path before
-        // dropping the final submitter.
-        waker::tests::wait_until_futex_armed(&idle_waker);
-        drop(submitter);
+        // Cover the two idle-path shutdown shapes that matter for
+        // `HandleInner::drop -> Waker::wake`:
+        //
+        // - plain final-handle drop while the loop is futex-armed and idle
+        // - a request publish wakes the idle loop, then the final handle drops
+        //   immediately afterward on the producer thread
+        //
+        // The waiter-full `submit_and_wait` shutdown path is covered separately
+        // by `test_shutdown_timeout_when_waiters_full_and_channel_empty`.
+        for scenario in [Scenario::DropOnly, Scenario::PublishThenDrop] {
+            let cfg = Config::default();
+            let mut registry = Registry::default();
+            let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+            let idle_waker = iouring.waker.clone();
+            let handle = std::thread::spawn(move || iouring.run());
 
-        handle.join().expect("io_uring loop thread panicked");
+            // Wait until the loop has armed its futex-backed idle path before
+            // driving the chosen shutdown interleaving.
+            waker::tests::wait_until_futex_armed(&idle_waker);
+
+            match scenario {
+                Scenario::DropOnly => {
+                    // Baseline: final-handle drop alone must wake the idle
+                    // futex path and let the loop exit.
+                    drop(submitter);
+                }
+                Scenario::PublishThenDrop => {
+                    // Enqueue one request while the loop is idle so
+                    // `Handle::enqueue` performs a real `publish()` wake before
+                    // the final handle is dropped.
+                    let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+                    // SAFETY: sock_left is a valid fd that we own.
+                    let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                    let (tx, rx) = oneshot::channel();
+
+                    futures::executor::block_on(submitter.enqueue(Request::Sync(SyncRequest {
+                        file: Arc::new(file),
+                        result: None,
+                        sender: tx,
+                    })))
+                    .expect("idle publish enqueue should succeed");
+
+                    // Drop immediately after the publish. This exercises the
+                    // "published wake then final-drop wake" ordering on the
+                    // producer side while the loop was previously parked idle.
+                    drop(submitter);
+
+                    let result = futures::executor::block_on(rx)
+                        .expect("missing published request completion");
+                    // Socket fsync may succeed or fail, either is fine here;
+                    // the regression is about wake/liveness, not op result.
+                    let _ = result;
+                }
+            }
+
+            handle
+                .join()
+                .unwrap_or_else(|_| panic!("io_uring loop thread panicked: {scenario:?}"));
+        }
     }
 
     #[tokio::test]
