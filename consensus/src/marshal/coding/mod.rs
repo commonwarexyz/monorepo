@@ -1500,7 +1500,7 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            v1_mailbox.proposed(round1, coded_block_b.clone()).await;
+            assert!(v1_mailbox.proposed(round1, coded_block_b.clone()).await);
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
