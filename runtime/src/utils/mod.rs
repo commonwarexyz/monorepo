@@ -132,14 +132,14 @@ impl ArcWake for Blocker {
 /// # Example
 ///
 /// ```rust
-/// use commonware_runtime::{Clock, Metrics, Runner, Spawner, deterministic};
+/// use commonware_runtime::{Clock, Metrics, Supervisor, Observer, Runner, Spawner, deterministic};
 /// use commonware_runtime::utils::count_running_tasks;
 /// use std::time::Duration;
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Spawn a task under a labeled context
-///     let handle = context.with_label("worker").spawn(|ctx| async move {
+///     let handle = context.child("worker").spawn(|ctx| async move {
 ///         ctx.sleep(Duration::from_secs(100)).await;
 ///     });
 ///
@@ -522,7 +522,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics, Runner};
+    use crate::{deterministic, Observer, Runner, Supervisor};
     use commonware_macros::test_traced;
     use futures::task::waker;
     use prometheus_client::metrics::counter::Counter;
@@ -917,7 +917,7 @@ b_total 2
 
     #[test_traced]
     fn test_count_running_tasks() {
-        use crate::{Metrics, Runner, Spawner};
+        use crate::{Runner, Spawner, Supervisor};
         use futures::future;
 
         let executor = deterministic::Runner::default();
@@ -930,8 +930,8 @@ b_total 2
             );
 
             // Spawn a task under a labeled context that stays running
-            let worker_ctx = context.with_label("worker");
-            let handle1 = worker_ctx.clone().spawn(|_| async move {
+            let worker_ctx = context.child("worker");
+            let handle1 = worker_ctx.child("task").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -947,7 +947,7 @@ b_total 2
             );
 
             // Spawn a nested task (worker_child)
-            let handle2 = worker_ctx.with_label("child").spawn(|_| async move {
+            let handle2 = worker_ctx.child("child").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -982,23 +982,37 @@ b_total 2
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
             let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
+            context.child("a").register("test", "help", c1);
             let c2 = Counter::<u64>::default();
-            context.with_label("b").register("test", "help", c2);
+            context.child("b").register("test", "help", c2);
         });
         // Test passes if runtime doesn't panic on shutdown
     }
 
-    #[test]
-    #[should_panic(expected = "duplicate metric:")]
-    fn test_duplicate_metrics_panics() {
+    #[test_traced]
+    fn test_duplicate_metrics_return_existing_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register metrics with the same label, causing duplicates
-            let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
-            let c2 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c2);
+            let c1 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+            let c2 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+
+            c1.inc();
+            c2.inc();
+
+            let output = context.encode();
+            assert_eq!(
+                output.matches("# HELP a_test").count(),
+                1,
+                "duplicate registration should not create duplicate HELP lines: {output}"
+            );
+            assert!(
+                output.contains("a_test_total 2"),
+                "duplicate registration should return the existing counter handle: {output}"
+            );
         });
     }
 }

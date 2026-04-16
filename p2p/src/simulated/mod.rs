@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
+//! use commonware_runtime::{deterministic, Metrics, Supervisor, Observer, Quota, Runner, Spawner};
 //! use commonware_utils::{NZU32, NZUsize};
 //! use std::time::Duration;
 //!
@@ -88,7 +88,7 @@
 //! executor.start(|context| async move {
 //!     // Initialize the network with an initial peer set (tracked at id 0).
 //!     let (network, oracle) =
-//!         Network::new_with_peers(context.with_label("network"), p2p_cfg, peers.clone())
+//!         Network::new_with_peers(context.child("network"), p2p_cfg, peers.clone())
 //!             .await;
 //!
 //!     // Start network
@@ -194,7 +194,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group};
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
+        count_running_tasks, deterministic, Clock, IoBuf, Quota, Runner, Spawner, Supervisor,
     };
     use commonware_utils::{
         channel::mpsc,
@@ -226,7 +226,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -250,7 +250,7 @@ mod tests {
                 agents.insert(pk, sender);
                 let agent_sender = seen_sender.clone();
                 context
-                    .with_label("agent_receiver")
+                    .child("agent_receiver")
                     .spawn(move |_| async move {
                         for _ in 0..size {
                             receiver.recv().await.unwrap();
@@ -291,7 +291,7 @@ mod tests {
 
             // Send messages
             context
-                .with_label("agent_sender")
+                .child("agent_sender")
                 .spawn(|mut context| async move {
                     // Sort agents for deterministic output
                     let keys = agents.keys().collect::<Vec<_>>();
@@ -350,7 +350,7 @@ mod tests {
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -396,7 +396,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -439,7 +439,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -552,7 +552,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -605,7 +605,7 @@ mod tests {
 
             // Create simulated network
             let (network, oracle) = Network::new_with_peers(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -660,7 +660,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -752,7 +752,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -815,7 +815,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -895,7 +895,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1104,7 +1104,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1203,7 +1203,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1359,7 +1359,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1427,7 +1427,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1535,7 +1535,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1628,7 +1628,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1726,7 +1726,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1826,7 +1826,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1891,7 +1891,7 @@ mod tests {
             // at 15KB/s until completion at t=1.5s
             let mut tx0 = sender_txs[0].clone();
             let rx_clone = receiver.clone();
-            context.clone().spawn(move |_| async move {
+            context.child("simulated").spawn(move |_| async move {
                 let msg = IoBuf::from(vec![0u8; 30_000]);
                 tx0.send(Recipients::One(rx_clone), msg, true)
                     .await
@@ -1903,7 +1903,7 @@ mod tests {
             // then gets the full 30KB/s
             let mut tx1 = sender_txs[1].clone();
             let rx_clone = receiver.clone();
-            context.clone().spawn(move |context| async move {
+            context.child("simulated").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(500)).await;
                 let msg = IoBuf::from(vec![1u8; 30_000]);
                 tx1.send(Recipients::One(rx_clone), msg, true)
@@ -1915,7 +1915,7 @@ mod tests {
             // sender 1, completing at roughly t=2.5s
             let mut tx2 = sender_txs[2].clone();
             let rx_clone = receiver.clone();
-            context.clone().spawn(move |context| async move {
+            context.child("simulated").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(1500)).await;
                 let msg = IoBuf::from(vec![2u8; 15_000]);
                 tx2.send(Recipients::One(rx_clone), msg, true)
@@ -1976,7 +1976,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2081,7 +2081,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2188,7 +2188,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2284,7 +2284,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2365,7 +2365,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2446,7 +2446,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2476,7 +2476,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2539,7 +2539,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2579,7 +2579,7 @@ mod tests {
             // pk2 is in both primary and secondary TrackedPeers; stored secondary is pk3 only.
             // latest and aggregate.secondary omit pk2; aggregate.primary still includes pk2.
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2627,7 +2627,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2668,7 +2668,7 @@ mod tests {
         executor.start(|context| async move {
             // Same key in primary and secondary maps; primary address and role win (secondary ignored).
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2707,7 +2707,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2761,7 +2761,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2897,7 +2897,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a simulated network
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -3022,7 +3022,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -3127,7 +3127,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -3182,7 +3182,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -3285,13 +3285,13 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
+            let network_context = context.child("network");
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             let (network, oracle) =
-                Network::new_with_peers(network_context.clone(), cfg, [pk1.clone(), pk2.clone()])
+                Network::new_with_peers(network_context.child("simulated"), cfg, [pk1.clone(), pk2.clone()])
                     .await;
             network.start();
 
@@ -3364,13 +3364,13 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
+            let network_context = context.child("network");
             // Create peers
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             let (network, oracle) =
-                Network::new_with_peers(network_context.clone(), cfg, [pk1.clone(), pk2.clone()])
+                Network::new_with_peers(network_context.child("simulated"), cfg, [pk1.clone(), pk2.clone()])
                     .await;
             let handle = network.start();
             let mut manager = oracle.manager();
@@ -3434,7 +3434,7 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
+            let network_context = context.child("network");
             // Create peers
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
@@ -3514,7 +3514,7 @@ mod tests {
         executor.start(|context| async move {
             // Create simulated network with peer set tracking
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -3563,7 +3563,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,

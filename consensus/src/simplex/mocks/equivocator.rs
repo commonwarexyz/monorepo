@@ -124,7 +124,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| Participant::from_usize(*index) != self.scheme.me().unwrap())
-                .choose(&mut self.context)
+                .choose(&mut *self.context)
                 .unwrap();
 
             // Create two different proposals

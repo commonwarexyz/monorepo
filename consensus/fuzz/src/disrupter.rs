@@ -186,7 +186,7 @@ where
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        let context = self.context.clone();
+        let context = self.context.child("disrupter");
         context.spawn(|_| self.run(vote_network, certificate_network, resolver_network))
     }
 

@@ -96,7 +96,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Metrics, Quota, Runner, Spawner,
+        Clock, Supervisor, Quota, Runner, Spawner,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
@@ -187,7 +187,7 @@ mod tests {
         Registrations<PublicKey>,
     ) {
         let (network, mut oracle) = Network::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -221,7 +221,7 @@ mod tests {
         let namespace = b"my testing namespace";
 
         for (idx, validator) in fixture.participants.iter().enumerate() {
-            let context = context.with_label(&format!("validator_{validator}"));
+            let context = context.child(&format!("validator_{validator}"));
             let monitor = mocks::Monitor::new(epoch);
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
@@ -232,18 +232,18 @@ mod tests {
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             let chunk_verifier = ChunkVerifier::new(namespace);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                context.clone(),
+                context.child("ordered_broadcast"),
                 chunk_verifier.clone(),
                 fixture.verifier.clone(),
                 misses_allowed,
             );
-            context.with_label("reporter").spawn(|_| reporter.run());
+            context.child("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
             let journal_page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let engine = Engine::new(
-                context.with_label("engine"),
+                context.child("engine"),
                 Config {
                     sequencer_signer: Some(ChunkSigner::new(
                         namespace,
@@ -295,7 +295,7 @@ mod tests {
                 let (tx, rx) = oneshot::channel();
                 receivers.push(rx);
 
-                context.with_label("reporter_watcher").spawn({
+                context.child("reporter_watcher").spawn({
                     let reporter = reporter.clone();
                     let sequencer = sequencer.clone();
                     let mut mailbox = mailbox.clone();
@@ -363,11 +363,11 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validators"),
+                context.child("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -378,7 +378,7 @@ mod tests {
             );
 
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (Height::new(100), epoch, true),
@@ -415,7 +415,7 @@ mod tests {
                 let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
                 let (network, mut oracle) = Network::new_with_peers(
-                    context.with_label("network"),
+                    context.child("network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
@@ -437,7 +437,7 @@ mod tests {
                 .await;
 
                 let reporters = spawn_validator_engines(
-                    context.with_label("validator"),
+                    context.child("validator"),
                     &fixture,
                     &fixture.participants,
                     &mut registrations,
@@ -450,7 +450,7 @@ mod tests {
                 // Either crash after `crash_after` or succeed once everyone reaches `target_height`.
                 let crash = context.sleep(crash_after);
                 let run = await_reporters(
-                    context.with_label("reporter"),
+                    context.child("reporter"),
                     reporters.keys().cloned().collect::<Vec<_>>(),
                     &reporters,
                     (target_height, epoch, true),
@@ -502,10 +502,10 @@ mod tests {
 
             // Configure the network
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
             let mut reporters = spawn_validator_engines(
-                context.with_label("validators"),
+                context.child("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -531,7 +531,7 @@ mod tests {
             )
             .await;
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (
@@ -571,7 +571,7 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
             let delayed_link = Link {
                 latency: Duration::from_millis(50),
@@ -587,7 +587,7 @@ mod tests {
             .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validators"),
+                context.child("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -598,7 +598,7 @@ mod tests {
             );
 
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (Height::new(40), epoch, false),
@@ -693,11 +693,11 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validators"),
+                context.child("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -708,7 +708,7 @@ mod tests {
             );
 
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (Height::new(100), epoch, true),
@@ -742,7 +742,7 @@ mod tests {
 
             // Setup network
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
             let mut reporters = BTreeMap::new();
@@ -753,7 +753,7 @@ mod tests {
             let namespace = b"my testing namespace";
 
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&format!("validator_{validator}"));
+                let context = context.child(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
@@ -766,18 +766,18 @@ mod tests {
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.clone(),
+                    context.child("ordered_broadcast"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.with_label("reporter").spawn(|_| reporter.run());
+                context.child("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let journal_page_cache =
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    context.child("engine"),
                     Config {
                         sequencer_signer: Some(ChunkSigner::new(
                             namespace,
@@ -811,7 +811,7 @@ mod tests {
 
             // Perform some work
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (Height::new(100), epoch, true),
@@ -848,7 +848,7 @@ mod tests {
             )
             .await;
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (
@@ -892,7 +892,7 @@ mod tests {
 
             // Create network
             let (network, mut oracle) = Network::new_with_peers(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -919,7 +919,7 @@ mod tests {
 
             // Spawn validator engines (no signing key, only validate)
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&format!("validator_{validator}"));
+                let context = context.child(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
@@ -931,18 +931,18 @@ mod tests {
 
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.clone(),
+                    context.child("ordered_broadcast"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.with_label("reporter").spawn(|_| reporter.run());
+                context.child("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
                 let journal_page_cache =
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    context.child("engine"),
                     Config {
                         sequencer_signer: None::<ChunkSigner<PrivateKey>>, // Validators don't propose in this test
                         chunk_verifier,
@@ -973,16 +973,16 @@ mod tests {
 
             // Spawn sequencer engine
             {
-                let context = context.with_label("sequencer");
+                let context = context.child("sequencer");
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
-                    context.clone(),
+                    context.child("ordered_broadcast"),
                     chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
-                context.with_label("reporter").spawn(|_| reporter.run());
+                context.child("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
 
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
@@ -991,9 +991,9 @@ mod tests {
                 assert!(validators_provider.register(epoch, fixture.verifier.clone()));
 
                 let journal_page_cache =
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    context.child("engine"),
                     Config {
                         sequencer_signer: Some(ChunkSigner::new(namespace, sequencer.clone())),
                         chunk_verifier,
@@ -1029,7 +1029,7 @@ mod tests {
 
             // Await reporters
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
                 (Height::new(100), epoch, true),
@@ -1069,7 +1069,7 @@ mod tests {
             };
 
             let (mut oracle, mut registrations) =
-                initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
             // Update to delayed links
@@ -1086,7 +1086,7 @@ mod tests {
                 fixture.participants[0..num_validators as usize / 2].to_vec();
 
             let reporters = spawn_validator_engines(
-                context.with_label("validators"),
+                context.child("validators"),
                 &fixture,
                 &sequencers,
                 &mut registrations,
@@ -1097,7 +1097,7 @@ mod tests {
             );
 
             await_reporters(
-                context.with_label("reporter"),
+                context.child("reporter"),
                 sequencers,
                 &reporters,
                 (Height::new(1_000), epoch, false),

@@ -393,7 +393,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let mut journal =
-            SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
+            SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
@@ -401,7 +401,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
+            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
 
         // Parse metadata if present
         let meta_pruning_boundary = match metadata.get(&PRUNING_BOUNDARY_KEY) {
@@ -623,9 +623,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
+            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
         let mut journal =
-            SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
+            SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
 
         // Clear blobs before updating metadata.
         // This ordering is critical for crash safety:
@@ -1023,7 +1023,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Blob, Error as RuntimeError, Metrics, Runner, Storage,
+        Blob, Error as RuntimeError, Runner, Storage, Supervisor,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -1063,7 +1063,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let legacy_partition = cfg.partition.clone();
@@ -1093,7 +1093,7 @@ mod tests {
             new_blob.sync().await.expect("Failed to sync new blob");
 
             let result =
-                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+                Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1103,7 +1103,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let legacy_partition = cfg.partition.clone();
@@ -1123,7 +1123,7 @@ mod tests {
                 .await
                 .expect("Failed to sync legacy blob");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1142,13 +1142,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1170,9 +1170,9 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let cfg = test_cfg(
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let journal = Journal::init(first_ctx, cfg.clone())
@@ -1190,9 +1190,9 @@ mod tests {
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let cfg = test_cfg(
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let journal = Journal::init(second_ctx, cfg.clone())
@@ -1325,11 +1325,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, ITEMS_PER_BLOB),
             )
             .await
@@ -1344,11 +1344,11 @@ mod tests {
             // Sync, reopen, then read back.
             journal.sync().await.expect("failed to sync journal");
             drop(journal);
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, ITEMS_PER_BLOB),
             )
             .await
@@ -1370,12 +1370,12 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1440,11 +1440,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, ITEMS_PER_BLOB),
             )
             .await
@@ -1493,12 +1493,12 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1526,11 +1526,11 @@ mod tests {
 
             // The segmented journal will trim the incomplete blob on init, resulting in the blob
             // missing one item. This should be detected as corruption during replay.
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, ITEMS_PER_BLOB),
             )
             .await
@@ -1560,12 +1560,12 @@ mod tests {
     fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(2));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             for i in 0u64..5 {
@@ -1583,11 +1583,11 @@ mod tests {
                 .expect("failed to remove blob");
 
             // Init won't detect the corruption.
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let result = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(2)),
             )
             .await
@@ -1618,12 +1618,12 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, ITEMS_PER_BLOB);
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1648,11 +1648,11 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, ITEMS_PER_BLOB),
             )
             .await
@@ -1680,10 +1680,10 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ITEMS_PER_BLOB,
             );
-            let journal = Journal::init(context.with_label("journal"), cfg.clone())
+            let journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1744,12 +1744,12 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(3));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -1772,11 +1772,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(3)),
             )
             .await
@@ -1792,11 +1792,11 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
 
-            let third_ctx = context.with_label("third");
+            let third_ctx = context.child("third");
             let third_cache =
-                CacheRef::from_pooler(third_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(third_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                third_ctx.with_label("journal"),
+                third_ctx.child("journal"),
                 test_cfg(third_cache, NZU64!(3)),
             )
             .await
@@ -1812,13 +1812,13 @@ mod tests {
     fn test_fixed_journal_recover_detects_oldest_section_too_short() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blobs_partition = blob_partition(&first_cfg);
             let journal =
-                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.child("journal"), first_cfg, 7)
                     .await
                     .expect("failed to initialize journal at size");
 
@@ -1842,11 +1842,11 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to corrupt blob");
             blob.sync().await.expect("failed to sync blob");
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let result = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await;
@@ -1859,12 +1859,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(10));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -1886,11 +1886,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(10)),
             )
             .await
@@ -1917,12 +1917,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(10));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -1947,11 +1947,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(10)),
             )
             .await
@@ -1976,9 +1976,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let cfg = test_cfg(
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(2),
             );
             let journal = Journal::init(first_ctx, cfg.clone())
@@ -2035,9 +2035,9 @@ mod tests {
             drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut second_cfg = test_cfg(second_cache, NZU64!(3));
             second_cfg.partition = "test-partition-2".into();
             let journal = Journal::init(second_ctx, second_cfg)
@@ -2058,13 +2058,13 @@ mod tests {
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let third_ctx = context.with_label("third");
+            let third_ctx = context.child("third");
             let third_cache =
-                CacheRef::from_pooler(third_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(third_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut third_cfg = test_cfg(third_cache, NZU64!(3));
             third_cfg.partition = "test-partition-2".into();
             let journal: Journal<_, Digest> =
-                Journal::init(third_ctx.with_label("journal"), third_cfg)
+                Journal::init(third_ctx.child("journal"), third_cfg)
                     .await
                     .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await, 10 * (100 - 49));
@@ -2100,12 +2100,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: Context| async move {
             // Use a small items_per_blob to keep the test focused on a single blob
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(100));
             let blobs_partition = blob_partition(&first_cfg);
-            let journal = Journal::init(first_ctx.with_label("journal"), first_cfg)
+            let journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -2145,11 +2145,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal - it should recover by truncating to valid data
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(100)),
             )
             .await
@@ -2190,9 +2190,9 @@ mod tests {
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
@@ -2201,7 +2201,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let journal = Journal::init(first_ctx.with_label("journal"), cfg)
+            let journal = Journal::init(first_ctx.child("journal"), cfg)
                 .await
                 .expect("failed to initialize journal");
 
@@ -2299,11 +2299,11 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per blob ===
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 Config {
                     partition: "single-item-per-blob".into(),
                     items_per_blob: NZU64!(1),
@@ -2336,11 +2336,11 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index ===
             // Fresh journal for this test
-            let third_ctx = context.with_label("third");
+            let third_ctx = context.child("third");
             let third_cache =
-                CacheRef::from_pooler(third_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(third_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                third_ctx.with_label("journal"),
+                third_ctx.child("journal"),
                 Config {
                     partition: "single-item-per-blob".into(),
                     items_per_blob: NZU64!(1),
@@ -2367,11 +2367,11 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let fourth_ctx = context.with_label("fourth");
+            let fourth_ctx = context.child("fourth");
             let fourth_cache =
-                CacheRef::from_pooler(fourth_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(fourth_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                fourth_ctx.with_label("journal"),
+                fourth_ctx.child("journal"),
                 Config {
                     partition: "single-item-per-blob".into(),
                     items_per_blob: NZU64!(1),
@@ -2399,11 +2399,11 @@ mod tests {
             journal.destroy().await.expect("failed to destroy journal");
 
             // === Test 6: Prune all items (edge case) ===
-            let sixth_ctx = context.with_label("sixth");
+            let sixth_ctx = context.child("sixth");
             let sixth_cache =
-                CacheRef::from_pooler(sixth_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(sixth_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                sixth_ctx.with_label("journal"),
+                sixth_ctx.child("journal"),
                 Config {
                     partition: "single-item-per-blob".into(),
                     items_per_blob: NZU64!(1),
@@ -2446,10 +2446,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 0)
                 .await
                 .unwrap();
 
@@ -2472,12 +2472,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
             // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
                 .await
                 .unwrap();
 
@@ -2505,12 +2505,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
                 .await
                 .unwrap();
 
@@ -2539,13 +2539,13 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Initialize at position 15
             let journal = Journal::<_, Digest>::init_at_size(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 15,
             )
@@ -2564,11 +2564,11 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await
@@ -2597,13 +2597,13 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence_without_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Initialize at position 15
             let journal = Journal::<_, Digest>::init_at_size(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 15,
             )
@@ -2618,11 +2618,11 @@ mod tests {
             drop(journal);
 
             // Reopen and verify size persisted
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await
@@ -2646,12 +2646,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
             // Initialize at a large position (position 1000)
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 1000)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 1000)
                 .await
                 .unwrap();
 
@@ -2673,12 +2673,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
             // Initialize at position 20
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 20)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 20)
                 .await
                 .unwrap();
 
@@ -2713,11 +2713,11 @@ mod tests {
     fn test_fixed_journal_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let initial_ctx = context.with_label("initial");
+            let initial_ctx = context.child("initial");
             let first_cache =
-                CacheRef::from_pooler(initial_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(initial_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::init(
-                initial_ctx.with_label("journal"),
+                initial_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(10)),
             )
             .await
@@ -2741,14 +2741,14 @@ mod tests {
 
             // Verify size persists after restart without writing any data
             drop(journal);
-            let after_clear_ctx = context.with_label("after_clear");
+            let after_clear_ctx = context.child("after_clear");
             let second_cache = CacheRef::from_pooler(
-                after_clear_ctx.with_label("cache"),
+                after_clear_ctx.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let journal = Journal::<_, Digest>::init(
-                after_clear_ctx.with_label("journal"),
+                after_clear_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(10)),
             )
             .await
@@ -2771,11 +2771,11 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let reopened_ctx = context.with_label("reopened");
+            let reopened_ctx = context.child("reopened");
             let third_cache =
-                CacheRef::from_pooler(reopened_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(reopened_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                reopened_ctx.with_label("journal"),
+                reopened_ctx.child("journal"),
                 test_cfg(third_cache, NZU64!(10)),
             )
             .await
@@ -2795,11 +2795,11 @@ mod tests {
         // Old meta = None (aligned), new boundary = aligned.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(5)),
             )
             .await
@@ -2814,11 +2814,11 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await
@@ -2835,14 +2835,14 @@ mod tests {
         // Old meta = None (aligned), new boundary = mid-section.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blobs_partition = blob_partition(&first_cfg);
             let metadata_partition = format!("{}-metadata", first_cfg.partition);
             let journal =
-                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.child("journal"), first_cfg, 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
@@ -2861,11 +2861,11 @@ mod tests {
             // Section 1 has items 7,8,9 but metadata is missing, so falls back to blob-based boundary.
             // Section 1 has 3 items, but recovery thinks it should have 5 because metadata deletion
             // causes us to forget that section 1 starts at logical position 7.
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let result = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await;
@@ -2880,11 +2880,11 @@ mod tests {
         // Old meta = Some(mid), new boundary = mid-section (same value).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init_at_size(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 7,
             )
@@ -2899,11 +2899,11 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await
@@ -2919,11 +2919,11 @@ mod tests {
         // Old meta = Some(mid), new boundary = aligned.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init_at_size(
-                first_ctx.with_label("journal"),
+                first_ctx.child("journal"),
                 test_cfg(first_cache, NZU64!(5)),
                 7,
             )
@@ -2941,11 +2941,11 @@ mod tests {
             drop(inner);
             drop(journal);
 
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let second_cache =
-                CacheRef::from_pooler(second_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                second_ctx.with_label("journal"),
+                second_ctx.child("journal"),
                 test_cfg(second_cache, NZU64!(5)),
             )
             .await
@@ -2964,12 +2964,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
             // init_at_size(7) sets pruning_boundary = 7 (mid-section in section 1)
             let journal =
-                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             // Append 5 items at positions 7-11, filling section 1 and part of section 2
@@ -2990,13 +2990,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
             // Initialize at position 7 (mid-section with items_per_blob=5)
             // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 7)
                 .await
                 .unwrap();
 
@@ -3060,11 +3060,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(5),
             );
 
-            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+            let journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg.clone(), 10)
                 .await
                 .unwrap();
 
@@ -3094,16 +3094,16 @@ mod tests {
     fn test_fixed_journal_init_at_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blob_part = blob_partition(&first_cfg);
             let meta_part = format!("{}-metadata", first_cfg.partition);
 
             // Setup: Create a journal with some data and mid-section metadata
             let journal =
-                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 7)
+                Journal::<_, Digest>::init_at_size(first_ctx.child("journal"), first_cfg, 7)
                     .await
                     .unwrap();
             for i in 0..5u64 {
@@ -3117,11 +3117,11 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
 
             // Recovery should see no blobs and return empty journal, ignoring metadata
-            let crash1_ctx = context.with_label("crash1");
+            let crash1_ctx = context.child("crash1");
             let crash1_cache =
-                CacheRef::from_pooler(crash1_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(crash1_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                crash1_ctx.with_label("journal"),
+                crash1_ctx.child("journal"),
                 test_cfg(crash1_cache, NZU64!(5)),
             )
             .await
@@ -3137,7 +3137,7 @@ mod tests {
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
-                Metadata::<_, u64, Vec<u8>>::init(context.with_label("restore_meta"), meta_cfg)
+                Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg)
                     .await
                     .unwrap();
             metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
@@ -3159,11 +3159,11 @@ mod tests {
             blob.sync().await.unwrap(); // Ensure it exists
 
             // Recovery should warn "metadata ahead" and use blob state (0, 0)
-            let crash2_ctx = context.with_label("crash2");
+            let crash2_ctx = context.child("crash2");
             let crash2_cache =
-                CacheRef::from_pooler(crash2_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(crash2_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                crash2_ctx.with_label("journal"),
+                crash2_ctx.child("journal"),
                 test_cfg(crash2_cache, NZU64!(5)),
             )
             .await
@@ -3182,16 +3182,16 @@ mod tests {
     fn test_fixed_journal_clear_to_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let first_cache =
-                CacheRef::from_pooler(first_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let first_cfg = test_cfg(first_cache, NZU64!(5));
             let blob_part = blob_partition(&first_cfg);
 
             // Setup: Init at 12 (Section 2, offset 2)
             // Metadata = 12
             let journal =
-                Journal::<_, Digest>::init_at_size(first_ctx.with_label("journal"), first_cfg, 12)
+                Journal::<_, Digest>::init_at_size(first_ctx.child("journal"), first_cfg, 12)
                     .await
                     .unwrap();
             journal.sync().await.unwrap();
@@ -3211,11 +3211,11 @@ mod tests {
             // Blob is Section 0
             // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
 
-            let crash_ctx = context.with_label("crash_clear");
+            let crash_ctx = context.child("crash_clear");
             let crash_cache =
-                CacheRef::from_pooler(crash_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(crash_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal = Journal::<_, Digest>::init(
-                crash_ctx.with_label("journal"),
+                crash_ctx.child("journal"),
                 test_cfg(crash_cache, NZU64!(5)),
             )
             .await
@@ -3234,10 +3234,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(10),
             );
-            let journal = Journal::<_, Digest>::init(context.with_label("j"), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
 
@@ -3254,10 +3254,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(10),
             );
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3277,10 +3277,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(3),
             );
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3301,10 +3301,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(3),
             );
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3332,10 +3332,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(10),
             );
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
@@ -3355,10 +3355,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 NZU64!(4),
             );
-            let journal = Journal::init(context.with_label("j"), cfg).await.unwrap();
+            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
                 journal.append(&test_digest(i)).await.unwrap();

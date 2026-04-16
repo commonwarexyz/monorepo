@@ -16,7 +16,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::Metrics as _;
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -263,7 +263,7 @@ where
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal>::new(
-            config.context.with_label("journal"),
+            config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone().into(),
         )

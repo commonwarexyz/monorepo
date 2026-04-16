@@ -122,7 +122,7 @@ where
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
-            context.with_label("metadata"),
+            context.child("metadata"),
             metadata::Config {
                 partition: format!("{}-metadata", cfg.partition_prefix),
                 codec_config: ((), ()),
@@ -201,7 +201,7 @@ where
     async fn init_epoch(&mut self, epoch: Epoch) {
         let scope = self
             .context
-            .with_label("cache")
+            .child("cache")
             .with_attribute("epoch", epoch)
             .with_scope();
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
@@ -268,7 +268,7 @@ where
             key_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
+        let archive = prunable::Archive::init(ctx.child(name), archive_cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?ctx.current().duration_since(start).unwrap_or(Duration::ZERO), "restored {name} archive");

@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the directory
         let directory = Directory::init(
-            context.with_label("directory"),
+            context.child("directory"),
             cfg.bootstrappers,
             myself,
             directory_cfg,
@@ -234,7 +234,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Truncate to a random selection of peers if we have too many infos
                 let max = self.peer_gossip_max_count;
                 if infos.len() > max {
-                    infos.partial_shuffle(&mut self.context, max);
+                    infos.partial_shuffle(&mut *self.context, max);
                     infos.truncate(max);
                 }
 
@@ -301,7 +301,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
     use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
     use futures::future::Either;
     use std::{
@@ -429,7 +429,7 @@ mod tests {
                 cfg,
                 mut mailbox,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
             let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .try_collect()
@@ -450,7 +450,7 @@ mod tests {
                 cfg,
                 mut mailbox,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             // Create a secondary set larger than max_peer_set_size.
             // This should not panic because the limit only applies to
@@ -472,7 +472,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
+            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
 
@@ -504,7 +504,7 @@ mod tests {
                 cfg,
                 ip_namespace,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
@@ -540,7 +540,7 @@ mod tests {
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
-            } = setup_actor(context.clone(), cfg_with_boot);
+            } = setup_actor(context.child("tracker"), cfg_with_boot);
 
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
             new_mailbox.construct(boot_pk.clone(), peer_mailbox.clone());
@@ -570,7 +570,7 @@ mod tests {
                 mut oracle,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
@@ -604,7 +604,7 @@ mod tests {
                 mut oracle,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
@@ -638,7 +638,7 @@ mod tests {
                 mut oracle,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
@@ -665,7 +665,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
 
@@ -685,7 +685,7 @@ mod tests {
                 ip_namespace,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_, pk1) = new_signer_and_pk(1);
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
@@ -753,7 +753,7 @@ mod tests {
                 ip_namespace,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let ts_new = context.current().epoch_millis();
             let ts_old = ts_new.saturating_sub(100);
@@ -833,7 +833,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             // None listenable because not registered
             assert!(!mailbox.acceptable(peer_pk.clone()).await);
@@ -866,7 +866,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
 
@@ -906,7 +906,7 @@ mod tests {
                 PrivateKey::from_seed(0),
                 vec![(boot_pk.clone(), boot_addr.into())],
             );
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
+            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.peers.len(), 1);
@@ -924,7 +924,7 @@ mod tests {
                 mut oracle,
                 ip_namespace,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let mut subscription = oracle.subscribe().await;
 
@@ -982,7 +982,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let mut subscription = oracle.subscribe().await;
 
@@ -1025,7 +1025,7 @@ mod tests {
                 vec![(boot_pk.clone(), boot_addr.into())],
             );
 
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
+            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg_initial);
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());
@@ -1058,7 +1058,7 @@ mod tests {
                 mut oracle,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
@@ -1095,7 +1095,7 @@ mod tests {
                 ip_namespace,
                 tracker_pk,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (mut peer1_s, peer1_pk) = new_signer_and_pk(1);
             let (_peer2_s, peer2_pk) = new_signer_and_pk(2);

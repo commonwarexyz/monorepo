@@ -17,7 +17,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef},
-    deterministic, Blob, Buf, Error, Metrics, Runner, Storage,
+    deterministic, Blob, Buf, Error, Runner, Storage, Supervisor,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -95,7 +95,7 @@ fn fuzz(input: FuzzInput) {
         let physical_page_size = page_size + CRC_SIZE;
         let cache_capacity = input.cache_capacity as usize;
         let cache_ref = CacheRef::from_pooler(
-            context.with_label("cache"),
+            context.child("cache"),
             NZU16!(page_size as u16),
             NZUsize!(cache_capacity),
         );

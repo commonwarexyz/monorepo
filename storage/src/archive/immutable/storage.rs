@@ -108,7 +108,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
         let metadata = Metadata::<E, U64, Record>::init(
-            context.with_label("metadata"),
+            context.child("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
                 codec_config: (),
@@ -124,7 +124,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         //
         // TODO (#1227): Use sharded metadata to provide consistency
         let freezer = Freezer::init_with_checkpoint(
-            context.with_label("freezer"),
+            context.child("freezer"),
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
                 key_write_buffer: cfg.freezer_key_write_buffer,
@@ -163,7 +163,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         //
         // TODO (#1227): Use sharded metadata to provide consistency
         let ordinal = Ordinal::init_with_bits(
-            context.with_label("ordinal"),
+            context.child("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,
                 items_per_blob: cfg.items_per_section,

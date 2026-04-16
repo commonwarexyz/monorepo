@@ -110,7 +110,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor};
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
@@ -123,9 +123,9 @@ pub mod test {
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
         let cfg = fixed_config::<OneCap>(
             &partition_prefix,
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         );
-        CurrentTest::init(context.with_label("db"), cfg)
+        CurrentTest::init(context.child("db"), cfg)
             .await
             .unwrap()
     }
@@ -148,7 +148,7 @@ pub mod test {
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
             let mut hasher = Sha256::new();
-            let mut db = open_db(context.with_label("db"), partition).await;
+            let mut db = open_db(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
 

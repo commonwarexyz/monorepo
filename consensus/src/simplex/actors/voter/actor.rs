@@ -23,8 +23,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -163,7 +162,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
-            context.with_label("state"),
+            context.child("state"),
             StateConfig {
                 scheme: cfg.scheme,
                 elector: cfg.elector,
@@ -716,7 +715,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
-            self.context.with_label("journal").into_present(),
+            self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

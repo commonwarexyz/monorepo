@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, Metrics};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, Supervisor};
 
 // ===== Harness Implementations =====
 
@@ -62,7 +62,7 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
@@ -134,7 +134,7 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
@@ -204,7 +204,7 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
@@ -276,7 +276,7 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Self::config("default", page_cache);
             Self::Db::init(ctx, cfg).await.unwrap()
         }

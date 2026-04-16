@@ -126,7 +126,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Supervisor, Observer, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -143,7 +143,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo-index".into(),
-//!         key_page_cache: CacheRef::from_pooler(context.with_label("cache"), NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: CacheRef::from_pooler(context.child("cache"), NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -218,7 +218,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Observer, Runner, Supervisor};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -243,9 +243,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the archive
-            let first_context = context.with_label("first");
+            let first_context = context.child("first");
             let key_page_cache = CacheRef::from_pooler(
-                first_context.with_label("cache"),
+                first_context.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -280,9 +280,9 @@ mod tests {
 
             // Initialize the archive again without compression.
             // Index journal replay succeeds (no compression), but value reads will fail.
-            let second_context = context.with_label("second");
+            let second_context = context.child("second");
             let key_page_cache = CacheRef::from_pooler(
-                second_context.with_label("cache"),
+                second_context.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -325,7 +325,7 @@ mod tests {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -337,7 +337,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.with_label("archive"), cfg)
+            let mut archive = Archive::init(context.child("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -394,7 +394,7 @@ mod tests {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -406,7 +406,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.with_label("archive"), cfg)
+            let mut archive = Archive::init(context.child("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -457,7 +457,7 @@ mod tests {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -469,7 +469,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
-            let mut archive = Archive::init(context.with_label("archive"), cfg)
+            let mut archive = Archive::init(context.child("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -545,9 +545,9 @@ mod tests {
         executor.start(|mut context| async move {
             // Initialize the archive
             let items_per_section = 256u64;
-            let init1_context = context.with_label("init1");
+            let init1_context = context.child("init1");
             let key_page_cache = CacheRef::from_pooler(
-                init1_context.with_label("cache"),
+                init1_context.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -612,9 +612,9 @@ mod tests {
             drop(archive);
 
             // Reinitialize the archive
-            let init2_context = context.with_label("init2");
+            let init2_context = context.child("init2");
             let key_page_cache = CacheRef::from_pooler(
-                init2_context.with_label("cache"),
+                init2_context.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -719,7 +719,7 @@ mod tests {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -731,7 +731,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.with_label("archive"), cfg)
+            let mut archive = Archive::init(context.child("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
@@ -760,7 +760,7 @@ mod tests {
                 translator: FourCap,
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -772,7 +772,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
-            let mut archive = Archive::init(context.with_label("archive"), cfg)
+            let mut archive = Archive::init(context.child("archive"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 

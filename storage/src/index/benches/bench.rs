@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::Metrics;
+use commonware_runtime::{Name, Observer, Supervisor};
 use criterion::criterion_main;
 use prometheus_client::registry::Metric;
 
@@ -15,28 +15,32 @@ pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 #[derive(Clone)]
 pub(crate) struct DummyMetrics;
 
-impl Metrics for DummyMetrics {
-    fn label(&self) -> String {
-        "".into()
-    }
-
-    fn with_label(&self, _: &str) -> Self {
+impl Supervisor for DummyMetrics {
+    fn child(&self, _: &str) -> Self {
         Self
     }
 
-    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
+    fn with_attribute(self, _: &str, _: impl std::fmt::Display) -> Self {
         Self
     }
 
-    fn with_scope(&self) -> Self {
+    fn name(&self) -> Name {
+        Name::default()
+    }
+}
+
+impl Observer for DummyMetrics {
+    fn with_scope(self) -> Self {
         Self
     }
 
-    fn with_span(&self) -> Self {
+    fn with_span(self) -> Self {
         Self
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+    fn register<M: Metric + Clone>(&self, _: &str, _: &str, default: M) -> M {
+        default
+    }
 
     fn encode(&self) -> String {
         "".into()

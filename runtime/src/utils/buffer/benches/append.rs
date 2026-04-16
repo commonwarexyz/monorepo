@@ -3,6 +3,7 @@
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Metrics, Runner, Storage,
+    Supervisor,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
@@ -22,12 +23,9 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(
-                        ctx.with_label("cache"),
-                        PAGE_SIZE,
-                        NZUsize!(CACHE_SIZE),
-                    );
-                    let append = create_append(ctx.with_label("append"), &name, cache_ref).await;
+                    let cache_ref =
+                        CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let append = create_append(ctx.child("append"), &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {
@@ -38,7 +36,7 @@ where
                     }
                     let elapsed = start.elapsed();
 
-                    destroy_append(ctx.with_label("destroy"), append, &name).await;
+                    destroy_append(ctx.child("destroy"), append, &name).await;
 
                     elapsed
                 })

@@ -184,7 +184,7 @@ where
     // Request verification from the application over the two-block ancestry prefix.
     let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
     let validity_request = application.verify(
-        (runtime_context.with_label("app_verify"), context.clone()),
+        (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
     );
     // If consensus drops the receiver, we can stop work early.

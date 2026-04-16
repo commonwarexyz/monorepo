@@ -8,7 +8,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
+};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     mmr::{self, journaled::Config as MmrConfig, Location},
@@ -194,10 +196,9 @@ fn fuzz(input: FuzzInput) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut db = Db::init(
-                ctx.with_label("db"),
+                ctx.child("db"),
                 make_config(
                     &suffix,
                     page_cache,
@@ -277,10 +278,9 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut db = Db::init(
-                ctx.with_label("recovered"),
+                ctx.child("recovered"),
                 make_config(
                     &suffix,
                     page_cache,

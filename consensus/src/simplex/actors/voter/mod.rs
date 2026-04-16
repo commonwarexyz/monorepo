@@ -82,7 +82,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Supervisor, Observer, Quota, Runner,
     };
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
@@ -106,7 +106,7 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
     {
         let (network, oracle) = Network::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             NConfig {
                 max_size: 1024 * 1024,
                 disconnect_on_block,
@@ -200,7 +200,7 @@ mod tests {
             scheme: signing.clone(),
             elector: elector.clone(),
         };
-        let reporter = mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::new());
 
         let application_cfg = mocks::application::Config {
@@ -213,11 +213,11 @@ mod tests {
             should_certify,
         };
         let (actor, application) =
-            mocks::application::Application::new(context.with_label("app"), application_cfg);
+            mocks::application::Application::new(context.child("app"), application_cfg);
         actor.start();
 
         let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let voter_cfg = Config {
             scheme: signing.clone(),
             elector,
@@ -236,7 +236,7 @@ mod tests {
             write_buffer: NZUsize!(10240),
             page_cache,
         };
-        let (voter, mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+        let (voter, mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
         let (resolver_sender, resolver_receiver) = mpsc::channel(8);
         let (batcher_sender, batcher_receiver) = mpsc::channel(16);
@@ -334,7 +334,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), false).await;
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -345,7 +345,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -357,12 +357,12 @@ mod tests {
                 should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
+                context.child("application"),
                 application_cfg,
             );
             actor.start();
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -381,7 +381,7 @@ mod tests {
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache,
             };
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mut mailbox) = Actor::new(context.child("voter"), cfg);
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
@@ -569,7 +569,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -581,7 +581,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -593,10 +593,10 @@ mod tests {
                 should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_config);
+                mocks::application::Application::new(context.child("app"), app_config);
             actor.start();
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_config = Config {
                 scheme: signing.clone(),
                 elector,
@@ -615,7 +615,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), voter_config);
+            let (actor, mut mailbox) = Actor::new(context.child("voter"), voter_config);
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
@@ -844,7 +844,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -965,7 +965,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1101,7 +1101,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1226,7 +1226,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1235,7 +1235,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1247,11 +1247,11 @@ mod tests {
                 should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
             actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -1270,7 +1270,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -1402,7 +1402,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1428,7 +1428,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
             actor.start();
 
             let reporter_cfg = mocks::reporter::Config {
@@ -1437,11 +1437,11 @@ mod tests {
                 elector: elector_config.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             // Initialize voter actor
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
                 elector: elector_config,
@@ -1460,7 +1460,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
@@ -1616,7 +1616,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock
             let elector = L::default();
@@ -1626,7 +1626,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1638,12 +1638,12 @@ mod tests {
                 should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
             actor.start();
 
             // Initialize voter actor
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1662,7 +1662,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1736,7 +1736,7 @@ mod tests {
 
             // Initialize voter actor
             let page_cache = CacheRef::from_pooler(
-                context.with_label("cache_restarted"),
+                context.child("cache_restarted"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -1758,7 +1758,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -1847,7 +1847,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -1861,7 +1861,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -1874,7 +1874,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor.start();
 
             let partition = "voter_startup_update_timeout_hint_nullify".to_string();
@@ -1901,11 +1901,11 @@ mod tests {
 
             // First run: persist progress to a later view.
             let cfg = make_cfg(CacheRef::from_pooler(
-                context.with_label("cache_initial"),
+                context.child("cache_initial"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter_initial"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
@@ -1945,11 +1945,11 @@ mod tests {
 
             // Restart and inject startup timeout hint from first update.
             let cfg = make_cfg(CacheRef::from_pooler(
-                context.with_label("cache_restarted"),
+                context.child("cache_restarted"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ));
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
@@ -2047,7 +2047,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2147,7 +2147,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2262,7 +2262,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2274,7 +2274,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -2287,14 +2287,14 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
 
             // Configure application to always fail verification
             actor.set_fail_verification(true);
             actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -2314,7 +2314,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
@@ -2482,7 +2482,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2494,7 +2494,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -2507,11 +2507,11 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -2531,7 +2531,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -2689,7 +2689,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -2701,7 +2701,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -2714,12 +2714,12 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor.set_drop_proposals(true);
             app_actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -2739,7 +2739,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -2866,7 +2866,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -2877,7 +2877,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -2890,12 +2890,12 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
             app_actor.set_drop_verifications(true);
             app_actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -2915,7 +2915,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -3077,7 +3077,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3225,7 +3225,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3237,7 +3237,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -3250,12 +3250,12 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
+                mocks::application::Application::new(context.child("app"), application_cfg);
             app_actor.set_drop_verifications(true);
             app_actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -3274,7 +3274,7 @@ mod tests {
                 write_buffer: NZUsize!(10240),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
@@ -3517,7 +3517,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3530,7 +3530,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let me = participants[0].clone();
 
@@ -3548,11 +3548,11 @@ mod tests {
                 })),
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3571,7 +3571,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -3686,11 +3686,11 @@ mod tests {
                 })),
             };
             let (actor, application) =
-                mocks::application::Application::new(context.with_label("app2"), app_cfg);
+                mocks::application::Application::new(context.child("app2"), app_cfg);
             actor.start();
 
             let page_cache = CacheRef::from_pooler(
-                context.with_label("cache_restarted"),
+                context.child("cache_restarted"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -3712,7 +3712,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -3795,7 +3795,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -3807,7 +3807,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             // Install propose + verify observers from the start so we can assert the
@@ -3826,7 +3826,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor
                 .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
             app_actor.set_verify_observer(Box::new(move |ctx, _| {
@@ -3851,9 +3851,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -3963,7 +3963,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -3975,7 +3975,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             // Pre-restart: plain application (no observers) so the voter can
@@ -3990,7 +3990,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor.start();
 
             // Build and start the pre-restart voter.
@@ -4010,9 +4010,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4083,7 +4083,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) = mocks::application::Application::new(
-                context.with_label("app_restarted"),
+                context.child("app_restarted"),
                 app_cfg,
             );
             app_actor
@@ -4110,10 +4110,10 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context.with_label("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context.child("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
-                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+                Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4222,7 +4222,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // RoundRobin with epoch=333, n=5: view 3 -> leader=Participant::new(1).
             // We are Participant::new(0), so view 3 is a follower view.
@@ -4237,7 +4237,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             // Pre-restart: plain application (no observers) so the voter can verify
@@ -4252,7 +4252,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app"), app_cfg);
+                mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor.start();
 
             // Build and start the pre-restart voter.
@@ -4272,9 +4272,9 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4358,7 +4358,7 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (mut app_actor, application) = mocks::application::Application::new(
-                context.with_label("app_restarted"),
+                context.child("app_restarted"),
                 app_cfg,
             );
             app_actor
@@ -4385,10 +4385,10 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context.with_label("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context.child("cache_restarted"), PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
-                Actor::new(context.with_label("voter_restarted"), voter_cfg);
+                Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let (vote_sender, _) = oracle
@@ -4496,7 +4496,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4506,7 +4506,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -4519,13 +4519,13 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
+                context.child("application"),
                 application_cfg,
             );
             actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4544,7 +4544,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mut mailbox) = Actor::new(context.child("voter"), cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver = resolver::Mailbox::new(resolver_sender);
@@ -4692,7 +4692,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -4702,7 +4702,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -4715,13 +4715,13 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
+                context.child("application"),
                 application_cfg,
             );
             actor.start();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -4740,7 +4740,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mut mailbox) = Actor::new(context.child("voter"), cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver = resolver::Mailbox::new(resolver_sender);
@@ -4866,7 +4866,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4973,7 +4973,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5095,7 +5095,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5250,7 +5250,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -5396,7 +5396,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -5536,7 +5536,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -5550,7 +5550,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let partition = "cancelled_certification_recertifies_after_restart".to_string();
@@ -5567,11 +5567,11 @@ mod tests {
                 should_certify: mocks::application::Certifier::Cancel,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app_cancel"), app_cfg);
+                mocks::application::Application::new(context.child("app_cancel"), app_cfg);
             app_actor.start();
 
             let page_cache = CacheRef::from_pooler(
-                context.with_label("cache_cancel"),
+                context.child("cache_cancel"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -5593,7 +5593,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, mut mailbox) = Actor::new(context.with_label("voter_cancel"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.child("voter_cancel"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -5685,11 +5685,11 @@ mod tests {
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
-                mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
+                mocks::application::Application::new(context.child("app_restarted"), app_cfg);
             app_actor.start();
 
             let page_cache = CacheRef::from_pooler(
-                context.with_label("cache_restarted"),
+                context.child("cache_restarted"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -5711,7 +5711,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
             };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -5830,7 +5830,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -6033,7 +6033,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -6171,7 +6171,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -6299,7 +6299,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -6443,7 +6443,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -6575,7 +6575,7 @@ mod tests {
 
             // Create simulated network
             let oracle = start_test_network_with_peers(
-                context.clone(),
+                context.child("voter"),
                 participants.clone(),
                 true,
             )
@@ -6726,7 +6726,7 @@ mod tests {
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("voter"), participants.clone(), true).await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));

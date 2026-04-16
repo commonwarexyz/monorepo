@@ -238,7 +238,7 @@ where
 
         // Initialize persistent state
         let mut storage = Storage::init(
-            self.context.with_label("storage"),
+            self.context.child("storage"),
             &self.partition_prefix,
             max_read_size,
             self.max_supported_mode,
@@ -247,7 +247,7 @@ where
         if storage.epoch().is_none() {
             let initial_state = EpochState {
                 round: 0,
-                rng_seed: Summary::random(&mut self.context),
+                rng_seed: Summary::random(&mut *self.context),
                 output,
                 share,
             };
@@ -255,8 +255,7 @@ where
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
-        let (mux, mut dkg_mux) =
-            Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
+        let (mux, mut dkg_mux) = Muxer::new(self.context.child("dkg_mux"), sender, receiver, 100);
         mux.start();
 
         'actor: loop {
@@ -523,7 +522,7 @@ where
                         let (success, next_round, next_output, next_share) = if let Some(ps) =
                             player_state.take()
                         {
-                            match ps.finalize::<N3f1, Batch>(&mut self.context, logs, &Sequential) {
+                            match ps.finalize::<N3f1, Batch>(&mut *self.context, logs, &Sequential) {
                                 Ok((new_output, new_share)) => (
                                     true,
                                     epoch_state.round + 1,
@@ -538,7 +537,7 @@ where
                                 ),
                             }
                         } else {
-                            match observe::<_, _, N3f1, Batch>(&mut self.context, logs, &Sequential)
+                            match observe::<_, _, N3f1, Batch>(&mut *self.context, logs, &Sequential)
                             {
                                 Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                 Err(_) => (
@@ -569,7 +568,7 @@ where
                                 epoch.next(),
                                 EpochState {
                                     round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
+                                    rng_seed: Summary::random(&mut *self.context),
                                     output: next_output.clone(),
                                     share: next_share.clone(),
                                 },
@@ -613,7 +612,7 @@ where
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
+        storage: &mut Storage<E, V, C::PublicKey>,
         epoch: Epoch,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,

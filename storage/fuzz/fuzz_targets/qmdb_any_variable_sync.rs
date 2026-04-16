@@ -2,7 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
+};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::Family as _,
@@ -168,17 +170,13 @@ fn fuzz(input: FuzzInput) {
         let hasher = Standard::<Sha256>::new();
         let mut restarts = 0usize;
         let mut page_cache = CacheRef::from_pooler(
-            context
-                .with_label("cache")
-                .with_attribute("instance", restarts),
+            context.child("cache").with_attribute("instance", restarts),
             PAGE_SIZE,
             NZUsize!(1),
         );
         let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
         let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
-            context
-                .with_label("db")
-                .with_attribute("instance", restarts),
+            context.child("db").with_attribute("instance", restarts),
             cfg,
         )
         .await
@@ -332,17 +330,13 @@ fn fuzz(input: FuzzInput) {
 
                     restarts += 1;
                     page_cache = CacheRef::from_pooler(
-                        context
-                            .with_label("cache")
-                            .with_attribute("instance", restarts),
+                        context.child("cache").with_attribute("instance", restarts),
                         PAGE_SIZE,
                         NZUsize!(1),
                     );
                     let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
                     db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await

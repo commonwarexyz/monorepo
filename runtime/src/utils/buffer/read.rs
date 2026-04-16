@@ -17,7 +17,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Metrics, Storage, deterministic, BufferPooler};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Metrics, Supervisor, Observer, Storage, deterministic, BufferPooler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -29,7 +29,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::from_pooler(context.with_label("reader"), blob, size, NZUsize!(buffer));
+///     let mut reader = Read::from_pooler(context.child("reader"), blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let header = reader.read(16).await.expect("unable to read data");

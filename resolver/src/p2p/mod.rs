@@ -93,7 +93,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Provider, TrackedPeers,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{count_running_tasks, deterministic, Clock, Observer, Supervisor, Quota, Runner};
     use commonware_utils::{non_empty_vec, ordered::Set, NZUsize, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
@@ -143,7 +143,7 @@ mod tests {
         )>,
     ) {
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -206,7 +206,7 @@ mod tests {
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{public_key}")),
+            context.child(&format!("actor_{public_key}")),
             Config {
                 peer_provider: provider,
                 blocker,
@@ -434,7 +434,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1837,7 +1837,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -1943,7 +1943,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2076,7 +2076,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
-                context.with_label("network"),
+                context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
@@ -2281,7 +2281,7 @@ mod tests {
         Vec<Mailbox<Key, PublicKey>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let actor_context = context.with_label("actor");
+        let actor_context = context.child("actor");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
@@ -2291,7 +2291,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.with_label(&format!("peer_{idx}"));
+            let ctx = actor_context.child(&format!("peer_{idx}"));
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,
@@ -2332,7 +2332,7 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
 
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                context.clone(),
+                context.child("actors"),
                 &oracle,
                 schemes,
                 connections,
@@ -2394,7 +2394,7 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
 
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                context.clone(),
+                context.child("actors"),
                 &oracle,
                 schemes,
                 connections,
@@ -2406,7 +2406,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Count running tasks under the actor prefix
-            let running_before = count_running_tasks(&context, "actor");
+            let running_before = count_running_tasks(&context, "actors_actor");
             assert!(
                 running_before > 0,
                 "at least one actor task should be running"
@@ -2427,7 +2427,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify all actor tasks are stopped
-            let running_after = count_running_tasks(&context, "actor");
+            let running_after = count_running_tasks(&context, "actors_actor");
             assert_eq!(
                 running_after, 0,
                 "all actor tasks should be stopped, but {running_after} still running"

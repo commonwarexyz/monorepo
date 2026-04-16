@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_cryptography::{ed25519::PrivateKey, handshake::TAG_SIZE, Signer};
-use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
+use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner, Supervisor};
 use commonware_stream::{
     encrypted::{dial, listen, Config, Error, Receiver, Sender},
     utils::codec::{recv_frame, send_frame},
@@ -118,7 +118,7 @@ fn fuzz(input: FuzzInput) {
             handshake_timeout: Duration::from_secs(1),
         };
 
-        let dialer_handle = context.clone().spawn(move |context| async move {
+        let dialer_handle = context.child("e2e").spawn(move |context| async move {
             dial(
                 context,
                 dialer_config,
@@ -128,7 +128,7 @@ fn fuzz(input: FuzzInput) {
             )
             .await
         });
-        let listener_handle = context.clone().spawn(move |context| async move {
+        let listener_handle = context.child("e2e").spawn(move |context| async move {
             listen(
                 context,
                 |_| async { true },
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
             .await
         });
         let adversary_handle: Handle<Result<_, Error>> =
-            context.clone().spawn(move |_context| async move {
+            context.child("e2e").spawn(move |_context| async move {
                 let mut corruption_i = 0;
 
                 let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;

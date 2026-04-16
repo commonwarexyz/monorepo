@@ -65,7 +65,7 @@ where
         let hasher = StandardHasher::<H>::new();
 
         let merkle = Journaled::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             journaled::SyncConfig {
                 config: config.merkle.clone(),
                 range,
@@ -127,7 +127,7 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor,
     };
     use commonware_utils::{
         channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64,
@@ -156,7 +156,7 @@ mod tests {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache =
-            CacheRef::from_pooler(pooler.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -181,7 +181,7 @@ mod tests {
     async fn create_test_db(mut context: deterministic::Context) -> KeylessSyncTest {
         let seed = context.next_u64();
         let config = create_sync_config(&format!("sync-test-{seed}"), &context);
-        KeylessSyncTest::init(context.with_label("db"), config)
+        KeylessSyncTest::init(context.child("db"), config)
             .await
             .unwrap()
     }
@@ -231,7 +231,7 @@ mod tests {
             let resolver = FailResolver::<VariableOp, sha256::Digest>::new();
             let db_config = create_sync_config(&context.next_u64().to_string(), &context);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 target: Target {
                     root: sha256::Digest::from([0; 32]),
                     range: non_empty_range!(Location::new(0), Location::new(5)),
@@ -264,7 +264,7 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_ops.clone(), Some(vec![42])).await;
             let bounds = target_db.bounds().await;
@@ -283,7 +283,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -328,7 +328,7 @@ mod tests {
     fn test_sync_empty_to_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             apply_ops(&mut target_db, vec![], Some(vec![1, 2, 3])).await;
 
             let bounds = target_db.bounds().await;
@@ -346,7 +346,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -374,7 +374,7 @@ mod tests {
     fn test_sync_database_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone(), Some(vec![0])).await;
 
@@ -384,7 +384,7 @@ mod tests {
             let op_count = bounds.end;
 
             let db_config = create_sync_config("persistence-test", &context);
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: db_config.clone(),
@@ -393,7 +393,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
                 },
-                context: client_context.clone(),
+                context: client_context.child("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -413,7 +413,7 @@ mod tests {
             // Drop and reopen
             synced_db.sync().await.unwrap();
             drop(synced_db);
-            let reopened_db = KeylessSyncTest::init(context.with_label("reopened"), db_config)
+            let reopened_db = KeylessSyncTest::init(context.child("reopened"), db_config)
                 .await
                 .unwrap();
 
@@ -441,7 +441,7 @@ mod tests {
     fn test_target_update_during_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops, None).await;
 
@@ -460,7 +460,7 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let client = {
                 let config = Config {
-                    context: context.with_label("client"),
+                    context: context.child("client"),
                     db_config: create_sync_config(
                         &format!("update_test_{}", context.next_u64()),
                         &context,
@@ -521,7 +521,7 @@ mod tests {
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec(), None).await;
@@ -542,7 +542,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -569,12 +569,12 @@ mod tests {
         executor.start(|mut context| async move {
             let original_ops = create_test_ops(50);
 
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let sync_db_config =
                 create_sync_config(&format!("partial_{}", context.next_u64()), &context);
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let mut sync_db: KeylessSyncTest =
-                KeylessSyncTest::init(client_context.clone(), sync_db_config.clone())
+                KeylessSyncTest::init(client_context.child("sync"), sync_db_config.clone())
                     .await
                     .unwrap();
 
@@ -600,7 +600,7 @@ mod tests {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -627,12 +627,12 @@ mod tests {
         executor.start(|mut context| async move {
             let target_ops = create_test_ops(40);
 
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let sync_config =
                 create_sync_config(&format!("exact_{}", context.next_u64()), &context);
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let mut sync_db: KeylessSyncTest =
-                KeylessSyncTest::init(client_context.clone(), sync_config.clone())
+                KeylessSyncTest::init(client_context.child("sync"), sync_config.clone())
                     .await
                     .unwrap();
 
@@ -654,7 +654,7 @@ mod tests {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 resolver: resolver.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -679,7 +679,7 @@ mod tests {
     fn test_target_update_lower_bound_decrease() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -693,7 +693,7 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(&format!("lb-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -739,7 +739,7 @@ mod tests {
     fn test_target_update_upper_bound_decrease() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -751,7 +751,7 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(&format!("ub-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -794,7 +794,7 @@ mod tests {
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -820,7 +820,7 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(
                     &format!("bounds_inc_{}", context.next_u64()),
                     &context,
@@ -865,7 +865,7 @@ mod tests {
     fn test_target_update_on_done_client() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -877,7 +877,7 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(&format!("done_{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(20),
                 target: Target {
@@ -928,7 +928,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let target_config = fixed::Config {
                 merkle: crate::merkle::journaled::Config {
                     journal_partition: format!("fixed-journal-target-{}", context.next_u64()),
@@ -947,7 +947,7 @@ mod tests {
             };
 
             let mut target_db: FixedSyncTest =
-                FixedSyncTest::init(context.with_label("target"), target_config)
+                FixedSyncTest::init(context.child("target"), target_config)
                     .await
                     .unwrap();
 
@@ -965,7 +965,7 @@ mod tests {
             let upper_bound = bounds.end;
 
             let client_page_cache = CacheRef::from_pooler(
-                context.with_label("client_page_cache"),
+                context.child("client_page_cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
@@ -994,7 +994,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,

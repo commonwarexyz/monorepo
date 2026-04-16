@@ -60,7 +60,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Recipients, Sender as _,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{count_running_tasks, deterministic, Clock, Supervisor, Quota, Runner};
     use commonware_utils::{ordered::Set, NZUsize, NZU32};
     use std::time::Duration;
 
@@ -98,7 +98,7 @@ mod tests {
         )>,
     ) {
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -165,7 +165,7 @@ mod tests {
     ) -> Mailbox<PublicKey, Request> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("engine_{public_key}")),
+            context.child(&format!("engine_{public_key}")),
             Config {
                 blocker,
                 monitor,
@@ -683,7 +683,7 @@ mod tests {
             let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
             let (sender2, receiver2) = conn.1; // Response channel
             let (engine, mut mailbox) = Engine::new(
-                context.with_label(&format!("engine_{}", scheme.public_key())),
+                context.child(&format!("engine_{}", scheme.public_key())),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -724,7 +724,7 @@ mod tests {
             let (sender1, receiver1) = conn.0; // Request channel
             let (sender2, receiver2) = conn.1; // Response channel
             let (engine, mut mailbox) = Engine::new(
-                context.with_label(&format!("engine_{}", scheme.public_key())),
+                context.child(&format!("engine_{}", scheme.public_key())),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -862,12 +862,12 @@ mod tests {
         Vec<Mailbox<PublicKey, Request>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let engine_context = context.with_label("engine");
+        let engine_context = context.child("engine");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
         for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
-            let ctx = engine_context.with_label(&format!("peer_{idx}"));
+            let ctx = engine_context.child(&format!("peer_{idx}"));
             let (mon, _) = MockMonitor::new();
             let (handler, _) = MockHandler::new(true);
             let (engine, mailbox) = Engine::new(
@@ -900,7 +900,7 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+                spawn_engines_with_handles(context.child("engines"), &oracle, schemes, connections);
 
             // Abort all engines immediately
             for handle in handles {
@@ -933,13 +933,13 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (mut mailboxes, handles) =
-                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+                spawn_engines_with_handles(context.child("engines"), &oracle, schemes, connections);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
 
             // Count running tasks under the engine prefix
-            let running_before = count_running_tasks(&context, "engine");
+            let running_before = count_running_tasks(&context, "engines_engine");
             assert!(
                 running_before > 0,
                 "at least one engine task should be running"
@@ -960,7 +960,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify all engine tasks are stopped
-            let running_after = count_running_tasks(&context, "engine");
+            let running_after = count_running_tasks(&context, "engines_engine");
             assert_eq!(
                 running_after, 0,
                 "all engine tasks should be stopped, but {running_after} still running"

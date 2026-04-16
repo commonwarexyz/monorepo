@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, Metrics};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, Supervisor};
 use commonware_storage::{
     journal::{
         contiguous::{
@@ -56,9 +56,9 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
-        page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
     };
-    FixedJournal::init(context.with_label("journal"), journal_config)
+    FixedJournal::init(context.child("journal"), journal_config)
         .await
         .unwrap()
 }
@@ -95,10 +95,10 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
     };
-    VariableJournal::init(context.with_label("journal"), journal_config)
+    VariableJournal::init(context.child("journal"), journal_config)
         .await
         .unwrap()
 }

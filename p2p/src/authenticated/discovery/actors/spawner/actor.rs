@@ -16,7 +16,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::mpsc;
+use commonware_utils::{channel::mpsc, hex};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
@@ -124,7 +124,9 @@ impl<
                         reservation,
                     } => {
                         // Spawn peer
-                        self.context.with_label("peer").spawn({
+                        self.context.child("peer")
+                            .with_attribute("peer", hex(peer.as_ref()))
+                            .spawn({
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
                             let dropped_messages = self.dropped_messages.clone();

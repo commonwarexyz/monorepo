@@ -35,7 +35,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor,
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
@@ -220,7 +220,7 @@ async fn setup_network<P: simplex::Simplex>(
         ..
     } = P::fixture(context, NAMESPACE, input.configuration.n);
     let (network, mut oracle) = Network::new_with_peers(
-        context.with_label("network"),
+        context.child("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
             disconnect_on_block: false,
@@ -319,7 +319,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 ) {
     let (vote_network, certificate_network, resolver_network) = channels;
     start_disrupter::<P>(
-        context.with_label("disrupter"),
+        context.child("disrupter"),
         scheme,
         &input.strategy,
         vote_network,
@@ -366,7 +366,7 @@ where
         scheme: scheme.clone(),
         elector: elector.clone(),
     };
-    let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -377,11 +377,10 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: application::Certifier::Sometimes,
     };
-    let (actor, application) =
-        application::Application::new(context.with_label("application"), app_cfg);
+    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     actor.start();
 
-    let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
     let blocker = oracle.control(validator.clone());
     let engine_cfg = config::Config {
         blocker,
@@ -406,7 +405,7 @@ where
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
-    let engine = Engine::new(context.with_label("engine"), engine_cfg);
+    let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
 
     reporter
@@ -429,7 +428,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context.child(&format!("validator_{validator}"));
             spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
         }
 
@@ -437,7 +436,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
+            let ctx = context.child(&format!("validator_{validator}"));
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
@@ -460,7 +459,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -504,7 +503,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
-            let context = context.with_label(&format!("twin_{idx}"));
+            let context = context.child(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(validator)
@@ -571,26 +570,26 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let (vote_sender_primary, vote_sender_secondary) =
                 vote_sender.split_with(make_vote_forwarder());
             let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                context.with_label(&format!("pending_split_{idx}")),
+                context.child(&format!("pending_split_{idx}")),
                 make_vote_router(),
             );
             let (certificate_sender_primary, certificate_sender_secondary) =
                 certificate_sender.split_with(make_certificate_forwarder());
             let (certificate_receiver_primary, certificate_receiver_secondary) =
                 certificate_receiver.split_with(
-                    context.with_label(&format!("recovered_split_{idx}")),
+                    context.child(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
             let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
                 .split_with(|_origin, recipients, _message| Some(recipients.clone()));
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
+                .split_with(context.child(&format!("resolver_split_{idx}")), |_| {
                     SplitTarget::Both
                 });
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
-            let primary_context = context.with_label(&primary_label);
+            let primary_context = context.child(&primary_label);
             let primary_elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 participants: participants
@@ -600,8 +599,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter =
-                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+            let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -613,14 +611,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 should_certify: application::Certifier::Sometimes,
             };
             let (actor, application) =
-                application::Application::new(primary_context.with_label("application"), app_cfg);
+                application::Application::new(primary_context.child("application"), app_cfg);
             actor.start();
 
-            let page_cache = CacheRef::from_pooler(
-                primary_context.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let page_cache =
+                CacheRef::from_pooler(primary_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let blocker = oracle.control(validator.clone());
             let engine_cfg = config::Config {
                 blocker,
@@ -645,7 +640,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
+            let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
@@ -654,7 +649,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             // Secondary: Disrupter
             start_disrupter::<P>(
-                context.with_label(&format!("twin_{idx}_secondary")),
+                context.child(&format!("twin_{idx}_secondary")),
                 scheme.clone(),
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
@@ -665,7 +660,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
-            let ctx = context.with_label(&format!("honest_{idx}"));
+            let ctx = context.child(&format!("honest_{idx}"));
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
@@ -691,7 +686,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }

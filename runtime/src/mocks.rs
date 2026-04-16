@@ -176,7 +176,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Spawner};
+    use crate::{deterministic, Clock, Runner, Spawner, Supervisor};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
@@ -270,7 +270,7 @@ mod tests {
             assert!(sink.send(b"7 bytes".as_slice()).await.is_ok());
 
             // Spawn a task to initiate recv's where the first one will succeed and then will drop.
-            let handle = context.clone().spawn(|_| async move {
+            let handle = context.child("receiver").spawn(|_| async move {
                 let _ = stream.recv(5).await;
                 let _ = stream.recv(5).await;
             });
@@ -364,7 +364,7 @@ mod tests {
         executor.start(|context| async move {
             // Spawn recv that will block waiting
             let (tx, rx) = oneshot::channel();
-            let recv_handle = context.clone().spawn(|_| async move {
+            let recv_handle = context.child("recv").spawn(|_| async move {
                 let data = stream.recv(3).await.unwrap();
                 tx.send(stream).ok();
                 data
@@ -445,7 +445,7 @@ mod tests {
         executor.start(|context| async move {
             // Start recv before send (will wait)
             let recv_handle = context
-                .clone()
+                .child("recv")
                 .spawn(|_| async move { stream.recv(3).await.unwrap() });
 
             // Give recv time to set up waiter

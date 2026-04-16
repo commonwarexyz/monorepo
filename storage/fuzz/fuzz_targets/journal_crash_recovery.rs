@@ -3,7 +3,9 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
+};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
@@ -510,10 +512,9 @@ where
         let partition_name = partition_name.clone();
         let operations = operations.clone();
         async move {
-            let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut journal = J::init(
-                ctx.with_label("journal"),
+                ctx.child("journal"),
                 J::config(&partition_name, page_cache, items_per_section, write_buffer),
             )
             .await
@@ -534,9 +535,9 @@ where
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+        let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
         let mut journal = J::init(
-            ctx.with_label("recovered"),
+            ctx.child("recovered"),
             J::config(&partition_name, page_cache, items_per_section, write_buffer),
         )
         .await

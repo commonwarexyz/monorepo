@@ -171,7 +171,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
+            let rate_limiter = RateLimiter::direct_with_clock(
+                rate,
+                self.context.child("channel_rate_limiter").with_attribute("idx", channel),
+            );
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
@@ -189,7 +192,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> =
-            self.context.with_label("sender").spawn({
+            self.context.child("sender").spawn({
                 let peer = peer.clone();
                 let mut tracker = tracker.clone();
                 let mailbox = self.mailbox.clone();
@@ -246,18 +249,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     Ok(())
                 }
             });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
-            .with_label("receiver")
-            .spawn(move |context| async move {
+        let mut receive_handler: Handle<Result<(), Error>> =
+            self.context.child("receiver").spawn(move |context| async move {
                 // Use half the gossip frequency for rate limiting to allow for timing
                 // jitter at message boundaries.
                 let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
                 let rate = Quota::with_period(half).unwrap();
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(rate, context.clone());
+                    RateLimiter::direct_with_clock(rate, context.child("bit_vec_rate_limiter"));
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(rate, context.clone());
+                    RateLimiter::direct_with_clock(rate, context.child("peers_rate_limiter"));
                 let mut greeting_received = false;
                 let mut first_bit_vec_received = false;
                 let mut first_peers_received = false;
@@ -431,6 +432,7 @@ mod tests {
     };
     use commonware_runtime::{
         deterministic, iobuf::BufferPool, mocks, BufferPooler, IoBuf, Runner, Spawner,
+        Supervisor,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
@@ -499,7 +501,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -517,7 +519,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -533,7 +535,7 @@ mod tests {
 
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.clone(),
+                context.child("peer"),
                 default_peer_config(remote_pk),
             );
 
@@ -598,7 +600,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -616,7 +618,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -632,7 +634,7 @@ mod tests {
 
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.clone(),
+                context.child("peer"),
                 default_peer_config(remote_pk),
             );
 
@@ -703,7 +705,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -721,7 +723,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -737,7 +739,7 @@ mod tests {
 
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.clone(),
+                context.child("peer"),
                 default_peer_config(remote_pk),
             );
 
@@ -806,7 +808,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -824,7 +826,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -861,7 +863,7 @@ mod tests {
             };
 
             let (peer_actor, _messenger) =
-                Actor::<deterministic::Context, PublicKey>::new(context.clone(), config);
+                Actor::<deterministic::Context, PublicKey>::new(context.child("peer"), config);
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -885,12 +887,12 @@ mod tests {
                 channel_id,
                 Quota::per_second(std::num::NonZeroU32::new(100).unwrap()),
                 1, // Very small backlog to force drops
-                context.clone(),
+                context.child("peer"),
             );
 
             // Spawn task to send messages
             let local_pk_clone = local_pk.clone();
-            context.clone().spawn(move |_| async move {
+            context.child("peer").spawn(move |_| async move {
                 // Send valid greeting first
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
                     &local_key,
@@ -953,7 +955,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -971,7 +973,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -993,7 +995,7 @@ mod tests {
                 ..default_peer_config(remote_pk)
             };
             let (peer_actor, _messenger) =
-                Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+                Actor::<deterministic::Context, PublicKey>::new(context.child("peer"), cfg);
 
             // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
@@ -1011,7 +1013,7 @@ mod tests {
             let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
+            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("peer"));
 
             // Simulate the attack: the discovery protocol requires a valid
             // greeting before Data messages are accepted, so we send one
@@ -1019,7 +1021,7 @@ mod tests {
             // channel. Before the fix, this would create a persistent
             // "data_99999" time series in the metrics Family.
             let local_pk_clone = local_pk.clone();
-            context.clone().spawn(move |_ctx| async move {
+            context.child("peer").spawn(move |_ctx| async move {
                 // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
                     &local_key,

@@ -4,7 +4,7 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{Metrics, Spawner};
+use crate::{Observer, Spawner, Supervisor};
 use axum::{
     body::Body,
     http::{header, Response, StatusCode},
@@ -12,7 +12,7 @@ use axum::{
     serve, Extension, Router,
 };
 use cfg_if::cfg_if;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
@@ -86,7 +86,7 @@ pub fn init(
     // Expose metrics over HTTP
     if let Some(cfg) = metrics {
         context
-            .with_label("metrics")
+            .child("server")
             .spawn(move |context| async move {
                 // Create a tokio listener for the metrics server.
                 //
@@ -97,11 +97,16 @@ pub fn init(
                     .await
                     .expect("Failed to bind metrics server");
 
+                // Wrap the context in an Arc so axum's `Extension` (which
+                // requires `Clone`) can share it across request handlers
+                // without cloning the underlying context.
+                let shared = Arc::new(context);
+
                 // Create a router for the metrics server
                 let app = Router::new()
                     .route(
                         "/metrics",
-                        get(|Extension(ctx): Extension<Context>| async move {
+                        get(|Extension(ctx): Extension<Arc<Context>>| async move {
                             Response::builder()
                                 .status(StatusCode::OK)
                                 .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -109,7 +114,7 @@ pub fn init(
                                 .expect("Failed to create response")
                         }),
                     )
-                    .layer(Extension(context));
+                    .layer(Extension(shared));
 
                 // Serve the metrics over HTTP.
                 //

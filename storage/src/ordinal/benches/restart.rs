@@ -2,7 +2,7 @@ use super::utils::{append_random, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
+    Runner, Supervisor,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ fn bench_restart(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    let _store = init(ctx.clone()).await; // replay happens inside init
+                    let _store = init(ctx.child("ordinal")).await; // replay happens inside init
                     total += start.elapsed();
                 }
                 total

@@ -36,7 +36,7 @@
 //!
 //! ```rust
 //! use commonware_codec::RangeCfg;
-//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Supervisor, Observer, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::{queue::{Queue, Config}};
 //! use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 //!
@@ -44,7 +44,7 @@
 //! executor.start(|context| async move {
 //!     // Create a page cache
 //!     let page_cache = CacheRef::from_pooler(
-//!         context.with_label("cache"),
+//!         context.child("cache"),
 //!         NonZeroU16::new(1024).unwrap(),
 //!         NonZeroUsize::new(10).unwrap(),
 //!     );

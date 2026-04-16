@@ -5,7 +5,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Runner, Supervisor,
+};
 use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, journaled::Config, mmb, mmr, Family as MerkleFamily,
     Location,
@@ -233,10 +235,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new();
-            let page_cache =
-                CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut merkle = Journaled::<F>::init(
-                ctx.with_label("merkle"),
+                ctx.child("merkle"),
                 &hasher,
                 merkle_config(&partition_suffix, page_cache, items_per_blob, write_buffer),
             )
@@ -260,9 +261,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
-        let page_cache = CacheRef::from_pooler(ctx.with_label("cache"), page_size, page_cache_size);
+        let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
         let mut merkle = Journaled::<F>::init(
-            ctx.with_label("recovered"),
+            ctx.child("recovered"),
             &hasher,
             merkle_config(&partition_suffix, page_cache, items_per_blob, write_buffer),
         )

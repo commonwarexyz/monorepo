@@ -168,7 +168,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Metrics as _, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -210,9 +210,9 @@ pub(crate) mod test {
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_test_config(seed, page_cache);
-        AnyTest::init(context.with_label("db"), config)
+        AnyTest::init(context.child("db"), config)
             .await
             .unwrap()
     }
@@ -290,12 +290,12 @@ pub(crate) mod test {
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
         let page_cache = CacheRef::from_pooler(
-            context.with_label("cache"),
+            context.child("cache"),
             crate::qmdb::any::test::PAGE_SIZE,
             crate::qmdb::any::test::PAGE_CACHE_SIZE,
         );
         let cfg = variable_db_config("fixed-bytes-var-partition", page_cache);
-        VariableDb::init(context.with_label("db"), cfg)
+        VariableDb::init(context.child("db"), cfg)
             .await
             .unwrap()
     }
@@ -304,7 +304,7 @@ pub(crate) mod test {
     fn test_ordered_any_variable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("initial")).await;
+            let db = open_variable_db(context.child("initial")).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -313,7 +313,7 @@ pub(crate) mod test {
     fn test_ordered_any_variable_db_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("initial")).await;
+            let db = open_variable_db(context.child("initial")).await;
             test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -322,7 +322,7 @@ pub(crate) mod test {
     fn test_ordered_any_update_collision_edge_case_variable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
+            let db = open_variable_db(context.child("db")).await;
             test_ordered_any_update_collision_edge_case(db).await;
         });
     }
@@ -333,7 +333,7 @@ pub(crate) mod test {
     fn test_ordered_any_update_batch_create_between_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_variable_db(context.clone()).await;
+            let mut db = open_variable_db(context.child("db")).await;
 
             // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
             // collisions.
@@ -393,7 +393,7 @@ pub(crate) mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.with_label("first")).await;
+            let mut db = open_variable_db(context.child("first")).await;
             let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))
@@ -422,7 +422,7 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.with_label("second")).await;
+            let mut db = open_variable_db(context.child("second")).await;
             let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))

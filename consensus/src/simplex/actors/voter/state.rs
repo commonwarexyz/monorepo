@@ -770,7 +770,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor};
     use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
 
@@ -876,7 +876,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             // Should return same deadline until something done
@@ -940,7 +940,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
@@ -996,7 +996,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
@@ -1038,7 +1038,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
@@ -1098,7 +1098,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             // Expiring a non-current view should do nothing.
@@ -1151,7 +1151,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let view_1 = state.current_view();
@@ -1221,7 +1221,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
@@ -1668,7 +1668,7 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let epoch = Epoch::new(1);
             let mut state = State::new(
-                context.clone(),
+                context.child("voter_state"),
                 Config {
                     scheme: verifier.clone(),
                     elector: <RoundRobin>::default(),
@@ -1724,7 +1724,7 @@ mod tests {
             let Fixture { verifier, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let epoch = Epoch::new(1);
             let mut state = State::new(
-                context.clone(),
+                context.child("voter_state"),
                 Config {
                     scheme: verifier,
                     elector: <RoundRobin>::default(),
@@ -1826,7 +1826,7 @@ mod tests {
             let other_schemes: Vec<_> = scheme_iter.collect();
             let epoch: Epoch = Epoch::new(3);
             let mut state = State::new(
-                context.with_label("state"),
+                context.child("state"),
                 Config {
                     scheme: local_scheme.clone(),
                     elector: <RoundRobin>::default(),
@@ -1863,7 +1863,7 @@ mod tests {
 
             // Restart state and replay
             let mut restarted = State::new(
-                context.with_label("state_restarted"),
+                context.child("state_restarted"),
                 Config {
                     scheme: local_scheme,
                     elector: <RoundRobin>::default(),
@@ -2291,7 +2291,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
             };
-            let mut state = State::new(context.clone(), cfg);
+            let mut state = State::new(context.child("voter_state"), cfg);
             state.set_genesis(test_genesis());
 
             let parent_view = View::new(1);

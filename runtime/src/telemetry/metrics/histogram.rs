@@ -2,7 +2,7 @@
 
 use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
-use std::{sync::Arc, time::SystemTime};
+use std::time::SystemTime;
 
 /// Holds constants for bucket sizes for histograms.
 ///
@@ -55,51 +55,64 @@ impl HistogramExt for Histogram {
     }
 }
 
-/// A wrapper around a histogram that includes a clock.
-#[derive(Clone)]
-pub struct Timed<C: Clock> {
+/// A wrapper around a histogram that can time operations against a borrowed clock.
+pub struct Timed {
     /// The histogram to record durations in.
     histogram: Histogram,
-
-    /// The clock to use for recording durations.
-    clock: Arc<C>,
 }
 
-impl<C: Clock> Timed<C> {
+impl Clone for Timed {
+    fn clone(&self) -> Self {
+        Self {
+            histogram: self.histogram.clone(),
+        }
+    }
+}
+
+impl Timed {
     /// Create a new timed histogram.
-    pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
-        Self { histogram, clock }
+    pub const fn new(histogram: Histogram) -> Self {
+        Self { histogram }
+    }
+
+    /// Observe the duration between two points in time directly.
+    pub fn observe_between(&self, start: SystemTime, end: SystemTime) {
+        self.histogram.observe_between(start, end);
     }
 
     /// Create a new timer that can record a duration from the current time.
-    pub fn timer(&self) -> Timer<C> {
-        let start = self.clock.current();
+    pub fn timer<'a, C: Clock + ?Sized>(&self, clock: &'a C) -> Timer<'a, C> {
+        let start = clock.current();
         Timer {
             histogram: self.histogram.clone(),
-            clock: self.clock.clone(), // Arc clone
+            clock,
             start,
             canceled: false,
         }
     }
 
     /// Time an operation, recording only if it returns `Some`.
-    pub fn time_some<T, F: FnOnce() -> Option<T>>(&self, f: F) -> Option<T> {
-        let start = self.clock.current();
+    pub fn time_some<C: Clock + ?Sized, T, F: FnOnce() -> Option<T>>(
+        &self,
+        clock: &C,
+        f: F,
+    ) -> Option<T> {
+        let start = clock.current();
         let result = f();
         if result.is_some() {
-            self.histogram.observe_between(start, self.clock.current());
+            self.histogram.observe_between(start, clock.current());
         }
         result
     }
 }
 
 /// A timer that records a duration when dropped.
-pub struct Timer<C: Clock> {
+pub struct Timer<'a, C: Clock + ?Sized> {
     /// The histogram to record durations in.
     histogram: Histogram,
 
     /// The clock to use for recording durations.
-    clock: Arc<C>,
+    clock: &'a C,
 
     /// The time at which the timer was started.
     start: SystemTime,
@@ -108,7 +121,7 @@ pub struct Timer<C: Clock> {
     canceled: bool,
 }
 
-impl<C: Clock> Timer<C> {
+impl<C: Clock + ?Sized> Timer<'_, C> {
     /// Record the duration and cancel the timer.
     pub fn observe(&mut self) {
         self.canceled = true;
@@ -122,7 +135,7 @@ impl<C: Clock> Timer<C> {
     }
 }
 
-impl<C: Clock> Drop for Timer<C> {
+impl<C: Clock + ?Sized> Drop for Timer<'_, C> {
     fn drop(&mut self) {
         if self.canceled {
             return;

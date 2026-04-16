@@ -23,7 +23,7 @@ use commonware_cryptography::{
     Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{tokio, Listener, Network, Runner, Spawner, Supervisor};
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -156,7 +156,7 @@ fn main() {
 
         // Start handler
         let mut hasher = Sha256::new();
-        context.with_label("handler").spawn(|mut ctx| async move {
+        context.child("handler").spawn(|mut ctx| async move {
             while let Some(msg) = receiver.recv().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
@@ -254,7 +254,7 @@ fn main() {
             };
 
             let (peer, mut sender, mut receiver) = match listen(
-                context.with_label("listener"),
+                context.child("listener"),
                 |peer| {
                     let out = validators.position(&peer).is_some();
                     async move { out }
@@ -274,7 +274,7 @@ fn main() {
             info!(?peer, "upgraded connection");
 
             // Spawn message handler
-            context.with_label("connection").spawn({
+            context.child("connection").spawn({
                 let handler = handler.clone();
                 move |_| async move {
                     // Handle messages

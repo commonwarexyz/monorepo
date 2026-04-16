@@ -290,7 +290,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
     async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
         // Simulate the propose latency
-        let duration = self.propose_latency.sample(&mut self.context);
+        let duration = self.propose_latency.sample(&mut *self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -316,7 +316,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         mut contents: Bytes,
     ) -> bool {
         // Simulate the verify latency
-        let duration = self.verify_latency.sample(&mut self.context);
+        let duration = self.verify_latency.sample(&mut *self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -368,7 +368,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
         // Simulate the certify latency
-        let duration = self.certify_latency.sample(&mut self.context);
+        let duration = self.certify_latency.sample(&mut *self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
