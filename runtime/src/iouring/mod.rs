@@ -263,8 +263,9 @@ struct HandleInner {
 
 impl Drop for HandleInner {
     fn drop(&mut self) {
-        // Disconnect first, then wake. This avoids a race where the loop
-        // handles a wake CQE before channel closure becomes observable.
+        // Disconnect first, then wake. `Waker::wake` is the publishing edge
+        // for this out-of-band shutdown signal, so channel closure must happen
+        // before the wake is issued.
         drop(self.sender.take());
 
         // Wake the loop so shutdown observes disconnect promptly. This is an

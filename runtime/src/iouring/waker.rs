@@ -151,11 +151,19 @@ impl Waker {
     /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
     /// wake. Subsequent callers do nothing until the loop disarms and clears
     /// the bit.
+    ///
+    /// All claimed wakes flow through this path, whether they come from
+    /// `publish()` on an armed epoch or from an out-of-band caller such as the
+    /// final sender disconnecting.
     pub fn wake(&self) {
+        // `HandleInner::drop` uses this path without bumping the submission
+        // sequence. Publish that disconnect here so that after the loop resumes
+        // and `clear_wait()` acquires, the next channel check cannot observe
+        // the wake without also observing the disconnect that caused it.
         let prev = self
             .inner
             .state
-            .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Relaxed);
+            .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Release);
 
         if (prev & WAKE_SIGNALLED_BIT) != 0 {
             return;
@@ -179,8 +187,7 @@ impl Waker {
     /// wait target.
     ///
     /// Callers must invoke this only after successfully enqueueing work into
-    /// the MPSC channel. That ordering guarantees that when the loop observes
-    /// an updated sequence, there is corresponding work to drain.
+    /// the MPSC channel.
     ///
     /// The common unarmed path performs only one `fetch_add`. When a wait is
     /// armed and no wake has yet been claimed for that epoch, this caller
@@ -188,6 +195,12 @@ impl Waker {
     /// signals the armed wait target.
     #[inline]
     pub fn publish(&self) {
+        // The sequence is only a sticky "do not sleep yet" hint. The loop may
+        // observe this increment before Tokio makes the corresponding enqueue
+        // visible to `try_recv`. That can cause a transient extra iteration,
+        // but the mismatched sequence still prevents sleep until the channel
+        // drain catches up. Since this counter does not publish request memory,
+        // `Relaxed` is sufficient here.
         let prev = self
             .inner
             .state
@@ -208,6 +221,9 @@ impl Waker {
     /// drained from the channel.
     #[inline]
     pub fn pending(&self, processed_seq: u32) -> bool {
+        // A visible mismatch only means "do not sleep yet", it does not mean a
+        // following `try_recv` must succeed immediately. This comparison is
+        // only against the packed sequence domain, so `Relaxed` is sufficient.
         ((self.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK)
             != processed_seq
     }
@@ -217,6 +233,9 @@ impl Waker {
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always clears the current wait state before returning.
     pub fn park_idle(&self, processed_seq: u32) {
+        // Arming only updates the packed wake state machine. It does not
+        // publish queue memory or consume any out-of-band wake publication, so
+        // `Relaxed` is sufficient on this RMW.
         let prev = self
             .inner
             .state
@@ -246,6 +265,9 @@ impl Waker {
     /// [`ArmGuard::should_block`] to decide whether the loop was still idle
     /// after arming.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
+        // Arming only updates the packed wake state machine. It does not
+        // publish queue memory or consume any out-of-band wake publication, so
+        // `Relaxed` is sufficient on this RMW.
         let prev = self
             .inner
             .state
@@ -328,14 +350,19 @@ impl Waker {
         }
     }
 
-    /// Disarm the current wait target after we resume running.
+    /// Clear the current wait epoch after we resume running.
     ///
     /// Keeping wait bits clear while actively running avoids redundant futex
-    /// wakes and eventfd writes during bursts. This is done both after a real
-    /// wake and after a post-arm recheck decides not to block.
+    /// wakes and eventfd writes during bursts. This is done both after
+    /// `park_idle()` / `submit_and_wait` return and after a post-arm recheck
+    /// decides not to block.
     #[inline]
     fn clear_wait(&self) {
-        self.inner.state.fetch_and(!STATE_MASK, Ordering::Relaxed);
+        // Pair with `wake()`'s `Release`. This is the first common point after
+        // resuming from a wake and before the next channel check, so acquiring
+        // here ensures the loop cannot observe the wake without also observing
+        // the sender-side state change that caused it.
+        self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
     }
 
     /// Wake the loop while it is blocked in `submit_and_wait`.
@@ -418,7 +445,8 @@ impl Waker {
     fn futex_wait(&self, snapshot: u32) {
         loop {
             // This is only a same-word equality check before entering the
-            // syscall.
+            // syscall. It relies only on modification order of this atomic, so
+            // `Relaxed` is sufficient.
             if self.inner.state.load(Ordering::Relaxed) != snapshot {
                 return;
             }
@@ -464,6 +492,10 @@ pub mod tests {
         }
     }
 
+    fn state_bits(waker: &Waker) -> u32 {
+        waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
+    }
+
     fn submitted_seq(waker: &Waker) -> u32 {
         (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
     }
@@ -507,10 +539,7 @@ pub mod tests {
         assert_eq!(submitted_seq(&waker), 2);
         drop(arm);
         assert_eq!(submitted_seq(&waker), 2);
-        assert_eq!(
-            waker.inner.state.load(std::sync::atomic::Ordering::Relaxed) & STATE_MASK,
-            0
-        );
+        assert_eq!(state_bits(&waker), 0);
 
         // Re-arming should observe the same submitted snapshot while idle.
         let arm = waker.arm(2);
@@ -527,13 +556,7 @@ pub mod tests {
         let notifier = waker.clone();
 
         let handle = std::thread::spawn(move || {
-            while notifier
-                .inner
-                .state
-                .load(std::sync::atomic::Ordering::Relaxed)
-                & WAITING_ON_FUTEX_BIT
-                == 0
-            {
+            while state_bits(&notifier) & WAITING_ON_FUTEX_BIT == 0 {
                 std::hint::spin_loop();
             }
             notifier.wake();
@@ -565,7 +588,7 @@ pub mod tests {
         waker.park_idle(before);
 
         assert_eq!(submitted_seq(&waker), before);
-        assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
+        assert_eq!(state_bits(&waker), 0);
     }
 
     #[test]
@@ -596,7 +619,7 @@ pub mod tests {
         drop(arm);
 
         assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
+        assert_eq!(state_bits(&waker), 0);
     }
 
     #[test]
@@ -611,7 +634,7 @@ pub mod tests {
         drop(arm);
 
         assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(waker.inner.state.load(Ordering::Relaxed) & STATE_MASK, 0);
+        assert_eq!(state_bits(&waker), 0);
     }
 
     #[test]
