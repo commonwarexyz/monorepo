@@ -9,6 +9,8 @@
 //! - Removed `serde` dependency.
 //! - Swapped `hex` dependency to [`commonware_utils::hex()`].
 //! - Adapted code to `commonware`'s clippy rules.
+//! - The batch verifier accepts pre-decompressed [`VerificationKey`] values and reuses their
+//!   cached point decompression state.
 //!
 //! [`ed25519_consensus`]: https://crates.io/crates/ed25519-consensus
 //! [`curve25519_dalek_ng`]: https://crates.io/crates/curve25519-dalek-ng

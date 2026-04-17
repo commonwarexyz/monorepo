@@ -38,10 +38,10 @@
 //! let mut batch = batch::Verifier::new();
 //! for _ in 0..32 {
 //!     let sk = SigningKey::new(rand::thread_rng());
-//!     let vk_bytes = VerificationKeyBytes::from(&sk);
+//!     let vk = VerificationKey::from(&sk);
 //!     let msg = b"BatchVerifyTest";
 //!     let sig = sk.sign(&msg[..]);
-//!     batch.queue((vk_bytes, sig, &msg[..]));
+//!     batch.queue(vk, sig, &msg[..]);
 //! }
 //! assert!(batch.verify(rand::thread_rng()).is_ok());
 //! ```
@@ -65,6 +65,15 @@ fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
+fn compute_k<M: AsRef<[u8]> + ?Sized>(vk_bytes: &[u8; 32], sig: &Signature, msg: &M) -> Scalar {
+    Scalar::from_hash(
+        Sha512::default()
+            .chain(&sig.R_bytes[..])
+            .chain(vk_bytes)
+            .chain(msg),
+    )
+}
+
 /// A batch verification item.
 ///
 /// This struct exists to allow batch processing to be decoupled from the
@@ -80,13 +89,7 @@ pub struct Item {
 impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg M)> for Item {
     fn from(tup: (VerificationKeyBytes, Signature, &'msg M)) -> Self {
         let (vk_bytes, sig, msg) = tup;
-        // Compute k now to avoid dependency on the msg lifetime.
-        let k = Scalar::from_hash(
-            Sha512::default()
-                .chain(&sig.R_bytes[..])
-                .chain(&vk_bytes.0[..])
-                .chain(msg),
-        );
+        let k = compute_k(vk_bytes.as_bytes(), &sig, msg);
         Self { vk_bytes, sig, k }
     }
 }
@@ -105,11 +108,27 @@ impl Item {
     }
 }
 
+struct Entry {
+    key: Option<VerificationKey>,
+    signatures: Vec<(Scalar, Signature)>,
+}
+
+impl Entry {
+    fn new() -> Self {
+        Self {
+            key: None,
+            // The common case is 1 signature per public key.
+            // We could also consider using a smallvec here.
+            signatures: Vec::with_capacity(1),
+        }
+    }
+}
+
 /// A batch verification context.
 #[derive(Default)]
 pub struct Verifier {
     /// Signature data queued for verification.
-    signatures: HashMap<VerificationKeyBytes, Vec<(Scalar, Signature)>>,
+    signatures: HashMap<VerificationKeyBytes, Entry>,
     /// Caching this count avoids a hash traversal to figure out
     /// how much to preallocate.
     batch_size: usize,
@@ -121,16 +140,40 @@ impl Verifier {
         Self::default()
     }
 
-    /// Queue a (key, signature, message) tuple for verification.
-    pub fn queue<I: Into<Item>>(&mut self, item: I) {
-        let Item { vk_bytes, sig, k } = item.into();
+    /// Queue a `(key, signature, message)` tuple for verification.
+    pub fn queue<M: AsRef<[u8]> + ?Sized>(
+        &mut self,
+        key: VerificationKey,
+        sig: Signature,
+        msg: &M,
+    ) {
+        let item = Item {
+            vk_bytes: VerificationKeyBytes::from(key),
+            k: compute_k(key.as_bytes(), &sig, msg),
+            sig,
+        };
+        self.queue_inner(item, Some(key));
+    }
 
-        self.signatures
-            .entry(vk_bytes)
-            // The common case is 1 signature per public key.
-            // We could also consider using a smallvec here.
-            .or_insert_with(|| Vec::with_capacity(1))
-            .push((k, sig));
+    /// Queue an item without a pre-decompressed verification key.
+    ///
+    /// This path only accepts [`Item`] values or tuples built from
+    /// [`VerificationKeyBytes`].
+    pub fn queue_raw<I: Into<Item>>(&mut self, item: I) {
+        self.queue_inner(item.into(), None);
+    }
+
+    fn queue_inner(&mut self, item: Item, key: Option<VerificationKey>) {
+        let Item { vk_bytes, sig, k } = item;
+        let key = key.filter(|key| key.as_bytes() == vk_bytes.as_bytes());
+
+        let entry = self.signatures.entry(vk_bytes).or_insert_with(Entry::new);
+
+        if entry.key.is_none() {
+            entry.key = key;
+        }
+
+        entry.signatures.push((k, sig));
         self.batch_size += 1;
     }
 
@@ -169,7 +212,7 @@ impl Verifier {
         // However, when m = 1 and all signatures are from a single verification
         // key, this is nearly twice as fast.
 
-        let m = self.signatures.keys().count();
+        let m = self.signatures.len();
 
         let mut A_coeffs = Vec::with_capacity(m);
         let mut As = Vec::with_capacity(m);
@@ -177,14 +220,16 @@ impl Verifier {
         let mut Rs = Vec::with_capacity(self.batch_size);
         let mut B_coeff = Scalar::ZERO;
 
-        for (vk_bytes, sigs) in self.signatures.iter() {
-            let A = CompressedEdwardsY(vk_bytes.0)
-                .decompress()
+        for (vk_bytes, entry) in self.signatures.iter() {
+            let A = entry
+                .key
+                .map(|vk| -vk.minus_A)
+                .or_else(|| CompressedEdwardsY(vk_bytes.0).decompress())
                 .ok_or(Error::InvalidSignature)?;
 
             let mut A_coeff = Scalar::ZERO;
 
-            for (k, sig) in sigs.iter() {
+            for (k, sig) in entry.signatures.iter() {
                 let R = CompressedEdwardsY(sig.R_bytes)
                     .decompress()
                     .ok_or(Error::InvalidSignature)?;
@@ -214,5 +259,75 @@ impl Verifier {
         } else {
             Err(Error::InvalidSignature)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ed25519::ed25519_consensus::SigningKey;
+    use commonware_utils::test_rng;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(true)]
+    #[case(false)]
+    fn verify_accepts_mixed_key_representations(#[case] queue_verification_key_first: bool) {
+        let mut rng = test_rng();
+        let mut batch = Verifier::new();
+        let signer = SigningKey::new(&mut rng);
+        let vk = signer.verification_key();
+        let vk_bytes = VerificationKeyBytes::from(vk);
+
+        let first_message = b"first";
+        let second_message = b"second";
+        let first_signature = signer.sign(first_message);
+        let second_signature = signer.sign(second_message);
+
+        if queue_verification_key_first {
+            batch.queue(vk, first_signature, &first_message[..]);
+            batch.queue_raw((vk_bytes, second_signature, &second_message[..]));
+        } else {
+            batch.queue_raw((vk_bytes, first_signature, &first_message[..]));
+            batch.queue(vk, second_signature, &second_message[..]);
+        }
+
+        assert!(batch.verify(&mut rng).is_ok());
+    }
+
+    #[test]
+    fn verify_accepts_raw_key_representations() {
+        let mut rng = test_rng();
+        let mut batch = Verifier::new();
+        let signer = SigningKey::new(&mut rng);
+        let vk_bytes = VerificationKeyBytes::from(signer.verification_key());
+
+        let first_message = b"first";
+        let second_message = b"second";
+        let first_signature = signer.sign(first_message);
+        let second_signature = signer.sign(second_message);
+
+        batch.queue_raw((vk_bytes, first_signature, &first_message[..]));
+        batch.queue_raw((vk_bytes, second_signature, &second_message[..]));
+
+        assert!(batch.verify(&mut rng).is_ok());
+    }
+
+    #[test]
+    fn verify_accepts_predecompressed_key_representations() {
+        let mut rng = test_rng();
+        let mut batch = Verifier::new();
+        let signer = SigningKey::new(&mut rng);
+        let vk = signer.verification_key();
+
+        let first_message = b"first";
+        let second_message = b"second";
+        let first_signature = signer.sign(first_message);
+        let second_signature = signer.sign(second_message);
+
+        batch.queue(vk, first_signature, &first_message[..]);
+        batch.queue(vk, second_signature, &second_message[..]);
+
+        assert!(batch.verify(&mut rng).is_ok());
     }
 }
