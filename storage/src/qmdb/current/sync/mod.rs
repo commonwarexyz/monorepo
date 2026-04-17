@@ -195,7 +195,12 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(
+        &grafted_tree,
+        grafting::height::<N>(),
+        &any.log.merkle,
+        hasher.clone(),
+    );
     let partial = db::partial_chunk(&status);
     let grafted_root = db::compute_grafted_root(&hasher, &status, &storage).await?;
     let ops_root = any.log.root();
@@ -277,6 +282,19 @@ macro_rules! impl_current_sync_database {
                     apply_batch_size,
                     metadata_partition,
                     thread_pool,
+                )
+                .await
+            }
+
+            async fn has_local_target_state(
+                context: Self::Context,
+                config: &Self::Config,
+                target: &qmdb::sync::Target<Self::Digest>,
+            ) -> bool {
+                qmdb::any::sync::has_local_target_state::<_, H>(
+                    context,
+                    config.merkle_config.clone(),
+                    target,
                 )
                 .await
             }

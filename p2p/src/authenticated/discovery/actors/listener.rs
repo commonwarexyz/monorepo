@@ -137,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor).await)
+        spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]

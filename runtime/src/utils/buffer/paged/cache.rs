@@ -237,6 +237,33 @@ impl CacheRef {
         original_len - buf.len()
     }
 
+    /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
+    ///
+    /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have
+    /// their data written to the destination slice and are removed from `ranges`. Entries left
+    /// in `ranges` correspond to cache misses that the caller must read from the underlying
+    /// blob.
+    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
+        let page_cache = self.cache.read();
+        ranges.retain_mut(|(buf, logical_offset)| {
+            let mut remaining = buf.len();
+            let mut offset = *logical_offset;
+            let mut dst = 0;
+            while remaining > 0 {
+                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
+                if count == 0 {
+                    break;
+                }
+                offset += count as u64;
+                dst += count;
+                remaining -= count;
+            }
+
+            // Keep cache misses in `ranges`; drop fully-cached entries.
+            remaining > 0
+        });
+    }
+
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
     /// will be read from the provided `blob` and cached for future reads.
     pub(super) async fn read<B: Blob>(
@@ -1104,5 +1131,96 @@ mod tests {
             ));
             assert_eq!(reads.load(Ordering::Relaxed), 2);
         });
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_all_cached() {
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let page0 = vec![0xAA; PAGE_SIZE.get() as usize];
+        let page1 = vec![0xBB; PAGE_SIZE.get() as usize];
+
+        // Populate two pages with distinct data.
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &page0, 0);
+            cache.cache(blob_id, &page1, 1);
+        }
+
+        let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf0, 0), (&mut buf1, PAGE_SIZE_U64)];
+
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+
+        // All ranges served from cache, so the vec is now empty.
+        assert!(ranges.is_empty());
+        drop(ranges);
+
+        // Buffers should contain the cached page data.
+        assert!(buf0 == page0);
+        assert!(buf1 == page1);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_none_cached() {
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+
+        let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf0, 0), (&mut buf1, PAGE_SIZE_U64)];
+
+        // Empty cache: both ranges should miss and remain in the vec unchanged.
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].1, 0);
+        assert_eq!(ranges[1].1, PAGE_SIZE_U64);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_scattered_misses() {
+        // Verify that read_cached_many checks ALL ranges, not just up to the
+        // first miss. Pages 0 and 2 are cached, page 1 is not.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+
+        let page0 = vec![0x11; PAGE_SIZE.get() as usize];
+        let page2 = vec![0x33; PAGE_SIZE.get() as usize];
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &page0, 0);
+            // page 1 deliberately not cached
+            cache.cache(blob_id, &page2, 2);
+        }
+
+        let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut buf2 = vec![0u8; PAGE_SIZE_U64 as usize];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![
+            (&mut buf0, 0),
+            (&mut buf1, PAGE_SIZE_U64),
+            (&mut buf2, PAGE_SIZE_U64 * 2),
+        ];
+
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+
+        // Only the page 1 miss should remain (page 2 is still processed despite
+        // the earlier miss).
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].1, PAGE_SIZE_U64);
+        drop(ranges);
+
+        // Cached pages should have their data written to the buffers.
+        assert!(buf0 == page0);
+        assert!(buf2 == page2);
+        // Missed page's buffer should be untouched (still zeroed).
+        assert!(buf1.iter().all(|b| *b == 0));
     }
 }

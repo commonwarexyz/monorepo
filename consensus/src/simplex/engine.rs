@@ -183,7 +183,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(vote_network, certificate_network, resolver_network)
-                .await
         )
     }
 

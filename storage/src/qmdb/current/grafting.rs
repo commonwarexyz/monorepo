@@ -387,10 +387,12 @@ pub(super) struct Storage<
     D: Digest,
     G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
     S: StorageTrait<F, Digest = D>,
+    H: HasherTrait<F, Digest = D> + Clone,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
     ops_tree: &'a S,
+    grafted_hasher: GraftedHasher<F, H>,
     _phantom: PhantomData<(F, D)>,
 }
 
@@ -400,16 +402,58 @@ impl<
         D: Digest,
         G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
         S: StorageTrait<F, Digest = D>,
-    > Storage<'a, F, D, G, S>
+        H: HasherTrait<F, Digest = D> + Clone,
+    > Storage<'a, F, D, G, S, H>
 {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
+    pub(super) const fn new(
+        grafted_tree: &'a G,
+        grafting_height: u32,
+        ops_tree: &'a S,
+        hasher: H,
+    ) -> Self {
         Self {
             grafted_tree,
             grafting_height,
             ops_tree,
+            grafted_hasher: GraftedHasher::new(hasher, grafting_height),
             _phantom: PhantomData,
         }
+    }
+
+    /// Reconstruct a grafted node that is missing from the pruned grafted tree.
+    ///
+    /// After pruning, only the grafted tree's pinned peaks and retained nodes are available.
+    /// As the ops tree grows, delayed merges create new ops peaks that map to grafted nodes
+    /// above the pinned peaks (ancestors). This function reconstructs those ancestors by
+    /// recursing into their children and hashing upward until it reaches available nodes
+    /// (pinned peaks or retained nodes).
+    ///
+    /// Recursion depth is bounded by the height difference between the queried node and the
+    /// nearest available descendant (a pinned peak or retained node). In practice it remains
+    /// small because the settlement guard limits how far ahead the ops tree can grow before
+    /// bitmap pruning advances.
+    ///
+    /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
+    /// cannot be recomputed from the tree structure alone. The settlement guard in
+    /// [`super::db::Db::settled_bitmap_prune_loc`] ensures this case is unreachable for
+    /// pruned chunks.
+    fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<D> {
+        if let Some(node) = self.grafted_tree.get_node(pos) {
+            return Some(node);
+        }
+
+        let height = F::pos_to_height(pos);
+        if height == 0 {
+            return None;
+        }
+        let (left, right) = F::children(pos, height);
+        let left_digest = self.reconstruct_grafted_node(left)?;
+        let right_digest = self.reconstruct_grafted_node(right)?;
+        Some(
+            self.grafted_hasher
+                .node_digest(pos, &left_digest, &right_digest),
+        )
     }
 }
 
@@ -418,7 +462,8 @@ impl<
         D: Digest,
         G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
         S: StorageTrait<F, Digest = D>,
-    > StorageTrait<F> for Storage<'_, F, D, G, S>
+        H: HasherTrait<F, Digest = D> + Clone + Send + Sync,
+    > StorageTrait<F> for Storage<'_, F, D, G, S, H>
 {
     type Digest = D;
 
@@ -431,9 +476,8 @@ impl<
         if ops_height < self.grafting_height {
             return self.ops_tree.get_node(pos).await;
         }
-        // Convert the ops-family position to a grafted position (same family F).
         let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
-        Ok(self.grafted_tree.get_node(grafted_pos))
+        Ok(self.reconstruct_grafted_node(grafted_pos))
     }
 }
 
@@ -762,7 +806,7 @@ mod tests {
             let ops_root = *ops_mmr.root();
 
             {
-                let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+                let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
                 assert_eq!(combined.size().await, ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
@@ -891,7 +935,7 @@ mod tests {
 
             ops_mmr.apply_batch(&batch).unwrap();
 
-            let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
             assert_eq!(combined.size().await, ops_mmr.size());
 
             // Compute the grafted root.
@@ -1029,7 +1073,8 @@ mod tests {
                     &chunks,
                     grafting_height,
                 );
-                let combined = Storage::<F, _, _, _>::new(&grafted, grafting_height, &ops);
+                let combined =
+                    Storage::<F, _, _, _, _>::new(&grafted, grafting_height, &ops, hasher.clone());
 
                 let leaves = merkle::Location::<F>::try_from(size).unwrap();
                 let mut peaks = Vec::new();

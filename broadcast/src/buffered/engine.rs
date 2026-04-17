@@ -147,7 +147,7 @@ where
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.

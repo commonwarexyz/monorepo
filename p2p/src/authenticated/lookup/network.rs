@@ -130,7 +130,7 @@ impl<
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(self) {
