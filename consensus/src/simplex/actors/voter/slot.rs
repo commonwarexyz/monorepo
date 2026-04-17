@@ -65,7 +65,7 @@ where
         self.proposal.is_some() && self.status != Status::Equivocated
     }
 
-    /// Returns whether the current proposal was built locally and remains usable.
+    /// Returns whether the current proposal was built locally.
     pub const fn is_local(&self) -> bool {
         matches!(self.status, Status::Verified(true))
     }
