@@ -5,8 +5,9 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
+        hasher::Standard as StandardHasher,
         journaled::{self, Journaled},
-        mmr::{self, Location, StandardHasher},
+        mmr, Location,
     },
     qmdb::{
         self,
@@ -27,11 +28,12 @@ where
     V: ValueEncoding + Codec,
     C: Mutable<Item = Operation<V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<V>>,
+        + sync::Journal<mmr::Family, Context = E, Op = Operation<V>>,
     C::Config: Clone + Send,
     H: Hasher,
     Operation<V>: EncodeShared,
 {
+    type Family = mmr::Family;
     type Op = Operation<V>;
     type Journal = C;
     type Hasher = H;
@@ -59,7 +61,7 @@ where
         config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: Range<Location<mmr::Family>>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let hasher = StandardHasher::<H>::new();
@@ -226,7 +228,7 @@ mod tests {
     fn test_sync_resolver_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let resolver = FailResolver::<VariableOp, sha256::Digest>::new();
+            let resolver = FailResolver::<mmr::Family, VariableOp, sha256::Digest>::new();
             let db_config = create_sync_config(&context.next_u64().to_string(), &context);
             let config = Config {
                 context: context.with_label("client"),

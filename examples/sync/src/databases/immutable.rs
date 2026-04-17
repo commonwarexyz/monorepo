@@ -129,10 +129,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // For Immutable databases, all retained operations are active,
-        // so the inactivity floor equals the pruning boundary.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary().await
     }
 
     fn historical_proof(

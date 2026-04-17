@@ -1778,6 +1778,131 @@ pub mod tests {
         });
     }
 
+    /// Verify that `Db::prune` never advances the ops journal past the settled bitmap
+    /// pruning boundary on a delayed-merge (MMB) family. The journal's lower bound must be
+    /// less than or equal to `pruning_boundary()`, and the test setup must force the lag to
+    /// be strictly active so the assertion is not vacuous.
+    #[test_traced]
+    fn test_current_mmb_prune_clips_journal_to_settled_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmb", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            for round in 0..COMMITS {
+                mmb_commit(&mut db, [(k, Some(val(70_000 + round)))]).await;
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+
+            let boundary = db.sync_boundary().unwrap();
+            let floor = db.inactivity_floor_loc();
+            assert!(
+                boundary < floor,
+                "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal was pruned past the settled bitmap boundary: \
+                 bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that on a non-delayed-merge (MMR) family `pruning_boundary()` lags the
+    /// inactivity floor only by chunk alignment (less than one chunk) — never by a
+    /// delayed-merge absorption window. Guards against an accidental regression that
+    /// would introduce a larger lag on families that don't need it.
+    #[test_traced]
+    fn test_current_mmr_prune_boundary_lag_is_only_chunk_alignment() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+            const N: usize = 32;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmr", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key(0), Some(val(80_000 + round)))],
+                    None,
+                )
+                .await;
+            }
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+
+            let boundary = db.sync_boundary().unwrap();
+            let floor = db.inactivity_floor_loc();
+            let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+            assert!(
+                boundary <= floor && *floor - *boundary < chunk_bits,
+                "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal bounds must be <= pruning_boundary: bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that `prune(loc)` with `loc < pruning_boundary()` prunes the ops journal only
+    /// as far as the caller requested. The clip must pick the smaller of the two — it must
+    /// not over-prune when the caller asked for less than the settled boundary.
+    #[test_traced]
+    fn test_current_prune_below_settled_boundary_is_honored() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 100;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-below-boundary", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key(0), Some(val(90_000 + round)))], None)
+                    .await;
+            }
+
+            assert!(*db.inactivity_floor_loc() > 1);
+            let small = Location::new(1);
+            db.prune(small).await.unwrap();
+
+            assert!(
+                db.bounds().await.start <= small,
+                "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Prune, then grow without pruning again so delayed MMB merges occur inside the
     /// already-pruned region. Verify proof + reopen correctness.
     #[test_traced]

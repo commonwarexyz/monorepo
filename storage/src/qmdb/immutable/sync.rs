@@ -33,12 +33,13 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<K, V>>,
+        + sync::Journal<mmr::Family, Context = E, Op = Operation<K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
+    type Family = mmr::Family;
     type Op = Operation<K, V>;
     type Journal = C;
     type Hasher = H;
@@ -67,7 +68,7 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<mmr::Location>,
+        range: Range<Location<mmr::Family>>,
         apply_batch_size: usize,
     ) -> Result<Self, Error<mmr::Family>> {
         let hasher = StandardHasher::new();

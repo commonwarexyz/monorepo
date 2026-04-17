@@ -1,4 +1,8 @@
-use crate::{mmr::Location, qmdb::sync::Journal, translator::Translator};
+use crate::{
+    merkle::{Family, Location},
+    qmdb::sync::Journal,
+    translator::Translator,
+};
 use commonware_cryptography::Digest;
 use std::{future::Future, ops::Range};
 
@@ -30,10 +34,13 @@ impl<J: Clone> Config for crate::qmdb::keyless::Config<J> {
         self.log.clone()
     }
 }
+
 pub trait Database: Sized + Send {
+    /// The merkle family backing this database (e.g. MMR or MMB).
+    type Family: Family;
     type Op: Send;
-    type Journal: Journal<Context = Self::Context, Op = Self::Op>;
-    type Config: Config<JournalConfig = <Self::Journal as Journal>::Config>;
+    type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+    type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -46,9 +53,9 @@ pub trait Database: Sized + Send {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: Range<Location<Self::Family>>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;

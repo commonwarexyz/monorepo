@@ -102,7 +102,10 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    ///
+    /// This is an implementation detail of the activity tracking; external callers should
+    /// prefer [`Self::sync_boundary`] when constructing a sync target or calling [`Self::prune`].
+    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
         self.any.inactivity_floor_loc()
     }
 
@@ -264,6 +267,21 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
+    /// Returns the most recent location from which this database can safely be synced.
+    ///
+    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this value, or
+    /// any earlier retained location, as `range.start`. Values *above* this boundary are unsafe:
+    /// the receiver's grafted-pin derivation requires chunk-aligned, absorbed state at the start
+    /// of the range, and locations above this boundary place that derivation in the
+    /// delayed-merge-unstable region (relevant for MMB).
+    ///
+    /// For families without delayed merges this is the inactivity floor rounded down to the
+    /// nearest chunk boundary. For families with delayed merges (MMB) it is held back further,
+    /// until the youngest pruned chunk-pair's height-`gh+1` parent has been born in the ops tree.
+    pub fn sync_boundary(&self) -> Result<Location<F>, Error<F>> {
+        self.settled_bitmap_prune_loc()
+    }
+
     /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
     /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
     /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
@@ -379,8 +397,9 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// `prune_loc` controls ops-log pruning only. Bitmap pruning advances to the settled
-    /// portion of the inactivity floor, independent of `prune_loc`.
+    /// Pruning is clipped to the settled bitmap boundary (see [`Db::sync_boundary`]): the ops
+    /// log's lower bound is never advanced past where the grafting overlay has been pruned. The
+    /// bitmap and grafted tree advance to that same settled boundary regardless of `prune_loc`.
     ///
     /// # Errors
     ///
@@ -442,7 +461,7 @@ where
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
 
-        self.any.prune(prune_loc).await
+        self.any.prune(prune_loc.min(settled_bitmap_floor)).await
     }
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
