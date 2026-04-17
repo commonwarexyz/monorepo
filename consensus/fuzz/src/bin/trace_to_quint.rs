@@ -1,13 +1,11 @@
-//! Converts JSON trace files (produced by the quint tracing fuzzer) into
-//! `.qnt` test files that can be verified with the quint model checker.
+//! Converts canonical `Trace` JSON files into `.qnt` test files that can be
+//! verified with the quint model checker.
 //!
 //! Usage:
 //!   cargo run -p commonware-consensus-fuzz --bin trace_to_quint -- <trace_dir> <output_dir>
 
-use commonware_consensus_fuzz::tracing::{
-    data::TraceData,
-    encoder::{self, EncoderConfig},
-};
+use commonware_consensus::simplex::replay::Trace;
+use commonware_consensus_fuzz::tracing::encoder;
 use std::{env, fs, path::PathBuf, process};
 
 fn main() {
@@ -52,7 +50,7 @@ fn main() {
             }
         };
 
-        let trace_data: TraceData = match serde_json::from_str(&json) {
+        let trace: Trace = match Trace::from_json(&json) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error parsing {}: {}", path.display(), e);
@@ -61,15 +59,19 @@ fn main() {
             }
         };
 
-        let cfg = EncoderConfig {
-            n: trace_data.n,
-            faults: trace_data.faults,
-            epoch: trace_data.epoch,
-            max_view: trace_data.max_view,
-            required_containers: trace_data.required_containers,
-        };
+        // Derive required_containers from the maximum last_finalized across
+        // all recorded nodes; defaults to 0 when the snapshot is empty (the
+        // encoder tolerates 0 and just doesn't set a finalizations lower
+        // bound).
+        let required_containers = trace
+            .expected
+            .nodes
+            .values()
+            .map(|n| n.last_finalized.get())
+            .max()
+            .unwrap_or(0);
 
-        let qnt = encoder::encode(&trace_data, &cfg);
+        let qnt = encoder::encode_from_trace(&trace, required_containers);
         let output_path = output_dir.join(format!("trace_{}.qnt", stem));
         fs::write(&output_path, &qnt).expect("failed to write quint test");
         println!("{} -> {}", path.display(), output_path.display());

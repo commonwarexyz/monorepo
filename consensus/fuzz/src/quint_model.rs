@@ -303,7 +303,7 @@ pub fn validate_and_extract_expected_canonical(
 /// with hex payloads) into a [`Snapshot`] keyed by [`Participant`] with
 /// typed payload digests. Returns `ModelError` if any payload hex is
 /// malformed or any node ID is not the expected `"nN"` shape.
-fn expected_state_to_snapshot(es: &ExpectedState) -> Result<Snapshot, ModelError> {
+pub fn expected_state_to_snapshot(es: &ExpectedState) -> Result<Snapshot, ModelError> {
     let mut nodes: BTreeMap<Participant, NodeSnapshot> = BTreeMap::new();
     for (id, ns) in &es.nodes {
         let participant = node_id_to_participant(id)?;
