@@ -9,6 +9,14 @@ FUZZ_CORPUS ?= ../fuzz/corpus
 TRACES_DIR ?= traces
 FUZZ_RUNS ?= -1
 
+# Selection strategy used by the canonical fuzz recorder to decide
+# which recorded traces to keep. `smallscope` keeps novel, short-shape
+# traces; `lof` keeps outliers; `current` keeps everything with certs
+# and distinct proposals. The value becomes the per-target artifact
+# directory suffix: artifacts/traces/<target>_<strategy>/.
+TRACE_SELECTION_STRATEGY ?= smallscope
+export TRACE_SELECTION_STRATEGY
+
 # Model-based fuzzing (mbf)
 MUTATION_SEEDS_FOLDER ?= ../fuzz/artifacts/tlc_mutator
 MUTATED_TRACES_DIR ?= ../fuzz/artifacts/mutated_traces

@@ -1,2 +1,4 @@
 tlc-controlled
 modelfuzz
+# Per-run scratch output from quint_model's ITF validation step.
+.mbf_model_tmp/

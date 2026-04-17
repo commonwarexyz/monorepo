@@ -1,5 +1,6 @@
 pub mod encoder;
 pub mod record;
+pub mod selection;
 pub mod static_honest;
 pub mod tlc_encoder;
 

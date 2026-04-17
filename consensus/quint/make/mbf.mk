@@ -10,7 +10,7 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
-MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_canonical
+MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
 MBF_TRACE_STATIC_MAX_VIEWS ?= 3
 MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
 MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
@@ -145,7 +145,7 @@ mbf_live: clean_mutated_traces
 
 mbf_live_trace_fuzz_gen:
 	@bash -eu -o pipefail -c '\
-		src="$(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_canonical"; \
+		src="$(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)"; \
 		dst="$(MUTATION_SEEDS_FOLDER)"; \
 		mkdir -p "$$dst"; \
 		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" -- -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) & \
@@ -247,7 +247,7 @@ mbf_prepare_validated_seeds:
 
 # Runs the simplex_ed25519_quint_honest libfuzzer target concurrently with
 # Quint validation. The fuzzer writes traces into
-# $(FUZZ_TRACES_ROOT)/<target>_canonical/, and validate_trace_corpus
+# $(FUZZ_TRACES_ROOT)/<target>_$(TRACE_SELECTION_STRATEGY)/, and validate_trace_corpus
 # (in APPEND mode) repeatedly picks them up, validates them through
 # replica.qnt, and appends accepted traces with expected_state embedded
 # into $(MBF_VALIDATED_SEEDS_FOLDER) (i.e., the existing seed pool is
@@ -258,7 +258,7 @@ mbf_prepare_validated_seeds:
 mbf_augment_seeds_from_fuzz:
 	@bash -eu -o pipefail -c '\
 		target="$(MBF_TRACE_GEN_TARGET)"; \
-		src="$(FUZZ_TRACES_ROOT)/$${target}_canonical"; \
+		src="$(FUZZ_TRACES_ROOT)/$${target}_$(TRACE_SELECTION_STRATEGY)"; \
 		dst="$(MBF_VALIDATED_SEEDS_FOLDER)"; \
 		rm -rf "$$src"; \
 		mkdir -p "$$src" "$$dst"; \

@@ -121,14 +121,27 @@ pub(crate) fn try_mutation<R: RngCore>(
 /// against a replay result.
 pub fn mutate_once<R: RngCore>(trace: &Trace, rng: &mut R) -> Option<Trace> {
     use commonware_consensus::simplex::replay::Snapshot;
+    const MAX_ATTEMPTS: usize = 32;
+
     let original_events = trace.events.clone();
     let mut mutated = trace.clone();
-    if !apply_mutation(&mut mutated.events, rng) {
-        return None;
+    let mut accepted = false;
+    // Retry internally: a single random mutation may violate
+    // preserves_first_broadcast_order, but a different one on the same
+    // trace usually passes. Without this retry the overall mutation
+    // success rate on honest traces drops to ~30%, which drains the
+    // driver's candidate queue too fast.
+    for _ in 0..MAX_ATTEMPTS {
+        mutated.events = original_events.clone();
+        if !apply_mutation(&mut mutated.events, rng) {
+            continue;
+        }
+        if preserves_first_broadcast_order(&original_events, &mutated.events) {
+            accepted = true;
+            break;
+        }
     }
-    // Enforce the honest-trace invariant: first-broadcast order must
-    // be preserved (see `preserves_first_broadcast_order`).
-    if !preserves_first_broadcast_order(&original_events, &mutated.events) {
+    if !accepted {
         return None;
     }
     // Candidate trace — `expected` is stale and must be revalidated.
@@ -943,6 +956,14 @@ pub fn run() {
             );
         }
 
+        // Queue-empty handling: a valid mutation can reasonably fail
+        // (mutate_once may return None when the chosen random mutation
+        // violates preserves_first_broadcast_order), so treat drain as
+        // "refill the queue via seed_queue_generated", not a fatal
+        // error. seed_queue_generated already tolerates per-attempt
+        // None; if after a full regeneration attempt the queue is
+        // still empty, fall back to a generously-sized retry loop
+        // before exiting.
         let trace = match queue.pop_front() {
             Some(t) => {
                 mutated_executions += 1;
@@ -950,24 +971,47 @@ pub fn run() {
             }
             None => {
                 random_executions += 1;
-                let mut generated = None;
-                for _ in 0..base_seeds.len().max(1) {
-                    let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
-                    if let Some(trace) =
-                        next_candidate_trace(base, &mut rng, faults_override, false)
-                    {
-                        generated = Some(trace);
-                        break;
+                println!(
+                    "[iter {iter}] queue drained, refilling from {} base seeds (population={})",
+                    base_seeds.len(),
+                    seed_population_size
+                );
+                seed_queue_generated(
+                    &mut queue,
+                    &base_seeds,
+                    &mut rng,
+                    seed_population_size,
+                    faults_override,
+                );
+                if let Some(t) = queue.pop_front() {
+                    t
+                } else {
+                    // Refill produced nothing (unusual). Try up to
+                    // seed_population_size single-shot fallbacks
+                    // before giving up, so we don't exit on the
+                    // probabilistic tail of a 30-40% per-attempt
+                    // success rate.
+                    let mut generated = None;
+                    for _ in 0..seed_population_size.max(64) {
+                        let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
+                        if let Some(trace) =
+                            next_candidate_trace(base, &mut rng, faults_override, false)
+                        {
+                            generated = Some(trace);
+                            break;
+                        }
                     }
-                }
-                match generated {
-                    Some(t) => t,
-                    None => {
-                        eprintln!(
-                            "failed to produce a mutation from {} seed bases",
-                            base_seeds.len()
-                        );
-                        process::exit(1);
+                    match generated {
+                        Some(t) => t,
+                        None => {
+                            eprintln!(
+                                "failed to produce any mutation after {} refill + {} single-shot attempts from {} seed bases",
+                                seed_population_size,
+                                seed_population_size.max(64),
+                                base_seeds.len()
+                            );
+                            process::exit(1);
+                        }
                     }
                 }
             }

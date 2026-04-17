@@ -40,8 +40,6 @@ use futures::future::join_all;
 use sha1::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -95,24 +93,12 @@ fn timing_for_twins() -> Timing {
     }
 }
 
-fn trace_artifacts_dir(base_dir: &str) -> PathBuf {
-    let dir_name = format!("{base_dir}_canonical");
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("artifacts/traces")
-        .join(dir_name)
-}
-
 fn persist_trace(base_dir: &str, hash_hex: &str, trace: &Trace) {
-    let artifacts_dir = trace_artifacts_dir(base_dir);
-    fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
-    let json = trace.to_json().expect("failed to serialize trace");
-    let json_path = artifacts_dir.join(format!("{hash_hex}.json"));
-    fs::write(&json_path, &json).expect("failed to write trace JSON");
-    println!(
-        "wrote {} trace events to {}",
-        trace.events.len(),
-        json_path.display()
-    );
+    // Disrupter traces filter n0 from the signer vector (n0 is the
+    // Byzantine disrupter and its certificate broadcasts are not a
+    // novelty signal). Everything else includes n0.
+    let filter_n0 = base_dir == "simplex_ed25519_quint_disrupter";
+    super::selection::select_and_persist(base_dir, hash_hex, trace, filter_n0);
 }
 
 fn pk_index(pk: &PublicKey, participants: &[PublicKey]) -> Option<usize> {
