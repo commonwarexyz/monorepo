@@ -2293,7 +2293,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.child("peer").with_attribute("peer", idx);
+            let ctx = actor_context.child("peer").with_attribute("index", idx);
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,

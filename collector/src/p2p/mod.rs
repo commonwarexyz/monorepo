@@ -874,7 +874,7 @@ mod tests {
         for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
             let ctx = context
                 .child("peer")
-                .with_attribute("peer", idx)
+                .with_attribute("index", idx)
                 .child("engine");
             let (mon, _) = MockMonitor::new();
             let (handler, _) = MockHandler::new(true);

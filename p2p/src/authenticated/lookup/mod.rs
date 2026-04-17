@@ -291,7 +291,7 @@ mod tests {
             let public_key = public_key.clone();
 
             // Create peer context
-            let context = context.child("peer").with_attribute("peer", i);
+            let context = context.child("peer").with_attribute("index", i);
 
             // Create network
             let config = Config::test(private_key.clone(), *address, max_message_size);
@@ -519,7 +519,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
                 // Create peer context
-                let context = context.child("peer").with_attribute("peer", i);
+                let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
                 let config = Config::test(
@@ -816,7 +816,7 @@ mod tests {
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (sk, pk, addr)) in peers_and_sks.iter().enumerate() {
-                let peer_context = context.child("peer").with_attribute("peer", i);
+                let peer_context = context.child("peer").with_attribute("index", i);
                 let config = Config::test(sk.clone(), *addr, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
@@ -1103,7 +1103,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (private_key, public_key, socket, _, _)) in peers_and_sks.iter().enumerate() {
-                let context = context.child("peer").with_attribute("peer", i);
+                let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
                 let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
@@ -1235,7 +1235,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (private_key, public_key, socket)) in peers_and_sks.iter().enumerate() {
-                let context = context.child("peer").with_attribute("peer", i);
+                let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
                 let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
@@ -1547,7 +1547,7 @@ mod tests {
 
             // Create networks for all peers
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child("peer").with_attribute("peer", i);
+                let peer_context = context.child("peer").with_attribute("index", i);
 
                 let config = Config::test(
                     peer.clone(),
@@ -1646,7 +1646,7 @@ mod tests {
                     // Restart the peer with new port
                     let peer_context = context
                         .child("peer")
-                        .with_attribute("peer", restart_peer_idx)
+                        .with_attribute("index", restart_peer_idx)
                         .with_attribute("round", round);
                     let config = Config::test(
                         peers[restart_peer_idx].clone(),
@@ -1770,7 +1770,7 @@ mod tests {
 
             // Create networks for all peers
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child("peer").with_attribute("peer", i);
+                let peer_context = context.child("peer").with_attribute("index", i);
 
                 let config = Config::test(
                     peer.clone(),
@@ -1868,7 +1868,7 @@ mod tests {
             for &idx in &restart_peers {
                 let peer_context = context
                     .child("peer")
-                    .with_attribute("peer", idx)
+                    .with_attribute("index", idx)
                     .with_attribute("state", "restarted");
                 let config = Config::test(
                     peers[idx].clone(),

@@ -448,7 +448,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             };
 
             // Create network instance for this peer
-            let peer_context = context.child("peer").with_attribute("peer", id);
+            let peer_context = context.child("peer").with_attribute("index", id);
             let network = N::create_network(peer_context, &peer_ctx).await;
 
             // Create and store peer state
