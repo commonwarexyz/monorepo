@@ -673,14 +673,12 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_p2p::{CheckedSender, LimitedSender, PeerSetSubscription, Provider, Recipients};
-    use commonware_runtime::{deterministic, IoBuf, IoBufs, Runner};
-    use commonware_utils::sync::Mutex;
-    use commonware_utils::{channel::mpsc, ordered::Set, N3f1, TryCollect, NZU32};
-    use core::{future, marker::PhantomData};
-    use std::{
-        collections::BTreeMap, convert::Infallible, sync::Arc, time::Duration, time::SystemTime,
+    use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::{
+        channel::mpsc, ordered::Set, sync::Mutex, N3f1, TryCollect, NZU32,
     };
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]
     struct TestManager<P: PublicKey> {
@@ -721,75 +719,6 @@ mod tests {
         {
             self.tracked.lock().insert(id, peers.into());
         }
-    }
-
-    #[derive(Clone, Debug)]
-    struct InertSender<P: PublicKey> {
-        peers: Arc<[P]>,
-    }
-
-    #[derive(Debug)]
-    struct InertCheckedSender<P> {
-        recipients: Vec<P>,
-    }
-
-    #[derive(Debug, Default)]
-    struct InertReceiver<P> {
-        _phantom: PhantomData<P>,
-    }
-
-    impl<P: PublicKey> LimitedSender for InertSender<P> {
-        type PublicKey = P;
-        type Checked<'a>
-            = InertCheckedSender<P>
-        where
-            Self: 'a;
-
-        async fn check(
-            &mut self,
-            recipients: Recipients<Self::PublicKey>,
-        ) -> Result<Self::Checked<'_>, SystemTime> {
-            Ok(InertCheckedSender {
-                recipients: match recipients {
-                    Recipients::All => self.peers.iter().cloned().collect(),
-                    Recipients::Some(recipients) => recipients,
-                    Recipients::One(recipient) => vec![recipient],
-                },
-            })
-        }
-    }
-
-    impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
-        type PublicKey = P;
-        type Error = Infallible;
-
-        async fn send(
-            self,
-            _: impl Into<IoBufs> + Send,
-            _: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            Ok(self.recipients)
-        }
-    }
-
-    impl<P: PublicKey> Receiver for InertReceiver<P> {
-        type Error = Infallible;
-        type PublicKey = P;
-
-        async fn recv(&mut self) -> Result<(P, IoBuf), Self::Error> {
-            future::pending().await
-        }
-    }
-
-    fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, InertReceiver<P>) {
-        (
-            InertSender {
-                peers: Arc::from(peers.as_ref()),
-            },
-            InertReceiver {
-                _phantom: PhantomData,
-            },
-        )
     }
 
     fn peer_config(
@@ -870,8 +799,7 @@ mod tests {
                     max_supported_mode: crate::dkg::MAX_SUPPORTED_MODE,
                 },
             );
-            let (sender, receiver) =
-                inert_channel(peer_config.participants.iter().cloned().collect::<Vec<_>>());
+            let (sender, receiver) = inert_channel(&peer_config.participants);
             let (orchestrator_sender, _orchestrator_receiver) = mpsc::channel(4);
             actor.start(
                 None,
