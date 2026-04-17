@@ -1,6 +1,6 @@
 use crate::simplex::types::Proposal;
 use commonware_cryptography::Digest;
-use tracing::debug;
+use tracing::warn;
 
 /// Proposal verification status within a round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,9 +86,10 @@ where
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
-            debug!(
+            warn!(
                 ?existing,
                 ?proposal,
+                ?local,
                 "ignoring verified proposal because slot already populated"
             );
             return;
