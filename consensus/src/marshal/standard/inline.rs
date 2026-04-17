@@ -450,15 +450,22 @@ where
         //
         // TODO(#3393): Avoid fetching the block just to check if it's available.
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
-                if await_block_subscription(&mut tx, block_rx, &digest, "certification")
-                    .await
-                    .is_some()
-                {
+                let Some(block) =
+                    await_block_subscription(&mut tx, block_rx, &digest, "certification").await
+                else {
+                    return;
+                };
+
+                // `certify` resolving true drives the finalize vote, so mere
+                // buffered availability is not sufficient here. Persist the
+                // block through marshal before signaling success.
+                if marshal.verified(round, block).await {
                     tx.send_lossy(true);
                 }
             });
@@ -933,6 +940,109 @@ mod tests {
             assert!(
                 post_restart.is_some(),
                 "verify resolved true ⟹ block must be durably persisted (seed={seed})"
+            );
+        });
+    }
+
+    /// Regression: `certify` resolving true drives the finalize vote in inline
+    /// mode, so it must imply the block is durably persisted even when the
+    /// certify path subscribed before `verify()` finished.
+    #[test_traced("WARN")]
+    fn test_inline_certify_persists_block_before_resolving() {
+        for seed in 0u64..16 {
+            inline_certify_persists_block_before_resolving_at(seed);
+        }
+    }
+
+    fn inline_certify_persists_block_before_resolving_at(seed: u64) {
+        use commonware_broadcast::Broadcaster;
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+            let actor_handle = setup.actor_handle;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = Ctx {
+                round: child_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
+            let child_digest = child.digest();
+
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                .await
+                .await
+                .expect("buffer broadcast for parent should ack");
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                .await
+                .await
+                .expect("buffer broadcast for child should ack");
+
+            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            let certify_result = inline
+                .certify(child_round, child_digest)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(certify_result, "certify should succeed");
+
+            actor_handle.abort();
+            drop(verify_rx);
+            drop(inline);
+            drop(marshal);
+            drop(buffer);
+
+            let setup2 = StandardHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            let post_restart = marshal2.get_block(&child_digest).await;
+            assert!(
+                post_restart.is_some(),
+                "certify resolved true ⟹ block must be durably persisted (seed={seed})"
             );
         });
     }
