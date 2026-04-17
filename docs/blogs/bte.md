@@ -164,9 +164,7 @@ This computes all of the cross-terms $C_i$ using $O(B\log{B})$ group operations 
 ## Evaluation and Discussion
 
 We implemented a prototype of the construction in Rust and benchmarked the FFT-accelerated
-decryption on an M5 MacBook Pro in single-threaded mode (available [here](https://github.com/commonwarexyz/simple-bte)). Decryption time also accounts for verification of NIZK proofs.
-We also expect decryption to scale well with parallelization.
-Despite the interactive setup phase, we only need to carry it out once, and rotation of committees can be achieved via resharing of secrets.
+decryption on an M5 MacBook Pro in single-threaded mode (available [here](https://github.com/commonwarexyz/simple-bte)).
 
 <div align="center">
 
@@ -180,5 +178,7 @@ Despite the interactive setup phase, we only need to carry it out once, and rota
 </div>
 
 _[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against._
+
+We expect decryption to scale well with parallelization but have not yet implemented or benchmarked such an implementation. Despite the interactive setup phase, we only need to carry it out once, and rotation of committees can be achieved via resharing of secrets.
 
 In conclusion, our construction is a conceptually simple and efficient BTE scheme with no caveats of epoch restrictions or censorship issues coupled with a performance win!

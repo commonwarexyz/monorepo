@@ -315,12 +315,7 @@ Vamsi Policharla</a></div>
         <p>We implemented a prototype of the construction in Rust and
         benchmarked the FFT-accelerated decryption on an M5 MacBook Pro
         in single-threaded mode (available <a
-        href="https://github.com/commonwarexyz/simple-bte">here</a>).
-        Decryption time also accounts for verification of NIZK proofs.
-        We also expect decryption to scale well with parallelization.
-        Despite the interactive setup phase, we only need to carry it
-        out once, and rotation of committees can be achieved via
-        resharing of secrets.</p>
+        href="https://github.com/commonwarexyz/simple-bte">here</a>).</p>
         <div data-align="center">
         <table>
         <colgroup>
@@ -371,6 +366,11 @@ Vamsi Policharla</a></div>
         <p><em><a href="https://eprint.iacr.org/2026/674">BNRT26</a>
         does not yet have a public implementation to compare
         against.</em></p>
+        <p>We expect decryption to scale well with parallelization but
+        have not yet implemented or benchmarked such an implementation.
+        Despite the interactive setup phase, we only need to carry it
+        out once, and rotation of committees can be achieved via
+        resharing of secrets.</p>
         <p>In conclusion, our construction is a conceptually simple and
         efficient BTE scheme with no caveats of epoch restrictions or
         censorship issues coupled with a performance win!</p>
