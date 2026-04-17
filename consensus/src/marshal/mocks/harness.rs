@@ -335,6 +335,19 @@ struct HailstormValidator<H: TestHarness> {
     actor_handle: commonware_runtime::Handle<()>,
 }
 
+type CanonicalEntry<H> = (Height, D, Finalization<S, <H as TestHarness>::Commitment>);
+type CanonicalChain<H> = Vec<CanonicalEntry<H>>;
+
+struct HailstormState<'a, H: TestHarness> {
+    validators: &'a mut [Option<HailstormValidator<H>>],
+    canonical: &'a mut CanonicalChain<H>,
+    parent: &'a mut D,
+    parent_commitment: &'a mut H::Commitment,
+    participants: &'a [K],
+    schemes: &'a [S],
+    propagation_delay: Duration,
+}
+
 fn active_validator_indices<H: TestHarness>(
     validators: &[Option<HailstormValidator<H>>],
 ) -> Vec<usize> {
@@ -383,7 +396,7 @@ async fn wait_for_validator_height<H: TestHarness>(
 
 async fn assert_validator_matches_canonical<H: TestHarness>(
     validator: &HailstormValidator<H>,
-    canonical: &[(Height, D, Finalization<S, H::Commitment>)],
+    canonical: &[CanonicalEntry<H>],
     label: &str,
 ) {
     let delivered = validator.application.blocks();
@@ -473,7 +486,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
 
 async fn assert_active_validators_match_canonical<H: TestHarness>(
     validators: &[Option<HailstormValidator<H>>],
-    canonical: &[(Height, D, Finalization<S, H::Commitment>)],
+    canonical: &[CanonicalEntry<H>],
 ) {
     for idx in active_validator_indices(validators) {
         let validator = validators[idx]
@@ -486,17 +499,11 @@ async fn assert_active_validators_match_canonical<H: TestHarness>(
 async fn advance_hailstorm_to<H: TestHarness>(
     target: u64,
     context: &mut deterministic::Context,
-    validators: &mut [Option<HailstormValidator<H>>],
-    canonical: &mut Vec<(Height, D, Finalization<S, H::Commitment>)>,
-    parent: &mut D,
-    parent_commitment: &mut H::Commitment,
-    participants: &[K],
-    schemes: &[S],
-    propagation_delay: Duration,
+    state: &mut HailstormState<'_, H>,
 ) {
-    for height_value in (canonical.len() as u64 + 1)..=target {
+    for height_value in (state.canonical.len() as u64 + 1)..=target {
         let height = Height::new(height_value);
-        let active = active_validator_indices(validators);
+        let active = active_validator_indices(state.validators);
         let proposer_idx = active[context.gen_range(0..active.len())];
         let verifier_count = usize::min(QUORUM as usize, active.len());
         let verifier_indices = active
@@ -505,11 +512,11 @@ async fn advance_hailstorm_to<H: TestHarness>(
             .filter(|idx| *idx != proposer_idx)
             .choose_multiple(context, verifier_count.saturating_sub(1));
         let block = H::make_test_block(
-            *parent,
-            parent_commitment.clone(),
+            *state.parent,
+            *state.parent_commitment,
             height,
             height_value,
-            participants.len() as u16,
+            state.participants.len() as u16,
         );
         let round = Round::new(Epoch::zero(), View::new(height_value));
         let proposal = Proposal {
@@ -521,45 +528,46 @@ async fn advance_hailstorm_to<H: TestHarness>(
             payload: H::commitment(&block),
         };
         let expected_digest = H::digest(&block);
-        let finalization = H::make_finalization(proposal.clone(), schemes, QUORUM);
+        let finalization = H::make_finalization(proposal.clone(), state.schemes, QUORUM);
 
         {
-            let proposer = validators[proposer_idx]
+            let proposer = state.validators[proposer_idx]
                 .as_mut()
                 .expect("proposer should be active");
             H::propose(&mut proposer.handle, round, &block).await;
             H::report_notarization(
                 &mut proposer.handle.mailbox,
-                H::make_notarization(proposal, schemes, QUORUM),
+                H::make_notarization(proposal, state.schemes, QUORUM),
             )
             .await;
         }
 
         for verifier_idx in verifier_indices.iter().copied() {
-            let verifier = validators[verifier_idx]
+            let verifier = state.validators[verifier_idx]
                 .as_mut()
                 .expect("verifier should be active");
             H::verify(&mut verifier.handle, round, &block, &mut []).await;
         }
 
-        context.sleep(propagation_delay).await;
+        context.sleep(state.propagation_delay).await;
 
-        for idx in active_validator_indices(validators) {
-            let validator = validators[idx]
+        for idx in active_validator_indices(state.validators) {
+            let validator = state.validators[idx]
                 .as_mut()
                 .expect("validator should remain active");
             H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
         }
 
-        canonical.push((height, expected_digest, finalization));
-        *parent = expected_digest;
-        *parent_commitment = H::commitment(&block);
+        state.canonical.push((height, expected_digest, finalization));
+        *state.parent = expected_digest;
+        *state.parent_commitment = H::commitment(&block);
 
-        let (_, _, expected_finalization) = canonical
+        let (_, _, expected_finalization) = state
+            .canonical
             .last()
             .expect("canonical chain should contain the new height");
-        for idx in active_validator_indices(validators) {
-            let validator = validators[idx]
+        for idx in active_validator_indices(state.validators) {
+            let validator = state.validators[idx]
                 .as_ref()
                 .expect("validator should be active");
             wait_for_validator_height(
@@ -574,7 +582,7 @@ async fn advance_hailstorm_to<H: TestHarness>(
         }
     }
 
-    assert_active_validators_match_canonical(validators, canonical).await;
+    assert_active_validators_match_canonical(state.validators, state.canonical).await;
 }
 
 /// Stress marshal with repeated validator crashes and recoveries while a
@@ -622,7 +630,7 @@ pub fn hailstorm<H: TestHarness>(
             }));
         }
 
-        let mut canonical = Vec::<(Height, D, Finalization<S, H::Commitment>)>::new();
+        let mut canonical = CanonicalChain::<H>::new();
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut target_height = 0u64;
@@ -632,18 +640,16 @@ pub fn hailstorm<H: TestHarness>(
         for shutdown_idx in 0..shutdowns {
             let leadup = context.gen_range(1..=max_interval);
             target_height += leadup;
-            advance_hailstorm_to(
-                target_height,
-                &mut context,
-                &mut validators,
-                &mut canonical,
-                &mut parent,
-                &mut parent_commitment,
-                &participants,
-                &schemes,
+            let mut state = HailstormState {
+                validators: &mut validators,
+                canonical: &mut canonical,
+                parent: &mut parent,
+                parent_commitment: &mut parent_commitment,
+                participants: &participants,
+                schemes: &schemes,
                 propagation_delay,
-            )
-            .await;
+            };
+            advance_hailstorm_to(target_height, &mut context, &mut state).await;
 
             let active = active_validator_indices(&validators);
             let down_limit = usize::min(max_down, active.len().saturating_sub(1));
@@ -674,18 +680,16 @@ pub fn hailstorm<H: TestHarness>(
 
             let downtime = context.gen_range(1..=max_interval);
             target_height += downtime;
-            advance_hailstorm_to(
-                target_height,
-                &mut context,
-                &mut validators,
-                &mut canonical,
-                &mut parent,
-                &mut parent_commitment,
-                &participants,
-                &schemes,
+            let mut state = HailstormState {
+                validators: &mut validators,
+                canonical: &mut canonical,
+                parent: &mut parent,
+                parent_commitment: &mut parent_commitment,
+                participants: &participants,
+                schemes: &schemes,
                 propagation_delay,
-            )
-            .await;
+            };
+            advance_hailstorm_to(target_height, &mut context, &mut state).await;
 
             for idx in selected.iter().copied() {
                 let restarted = H::setup_validator(
