@@ -329,6 +329,384 @@ fn restart_cycles_for_seed(seed: u64) -> usize {
     rng.gen_range(2..=4)
 }
 
+struct HailstormValidator<H: TestHarness> {
+    application: Application<H::ApplicationBlock>,
+    handle: ValidatorHandle<H>,
+    actor_handle: commonware_runtime::Handle<()>,
+}
+
+fn active_validator_indices<H: TestHarness>(
+    validators: &[Option<HailstormValidator<H>>],
+) -> Vec<usize> {
+    validators
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, validator)| validator.as_ref().map(|_| idx))
+        .collect()
+}
+
+async fn wait_for_validator_height<H: TestHarness>(
+    context: &mut deterministic::Context,
+    validator: &HailstormValidator<H>,
+    height: Height,
+    expected_digest: D,
+    expected_finalization: &Finalization<S, H::Commitment>,
+    label: &str,
+) {
+    loop {
+        let block = validator.handle.mailbox.get_block(height).await;
+        let finalization = validator.handle.mailbox.get_finalization(height).await;
+        if let (Some(block), Some(finalization)) = (block, finalization) {
+            assert_eq!(
+                block.digest(),
+                expected_digest,
+                "{label}: wrong block digest at height {}",
+                height.get()
+            );
+            assert_eq!(
+                finalization.round(),
+                expected_finalization.round(),
+                "{label}: wrong finalization round at height {}",
+                height.get()
+            );
+            assert_eq!(
+                finalization.proposal.payload,
+                expected_finalization.proposal.payload,
+                "{label}: wrong finalization payload at height {}",
+                height.get()
+            );
+            break;
+        }
+        context.sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn assert_validator_matches_canonical<H: TestHarness>(
+    validator: &HailstormValidator<H>,
+    canonical: &[(Height, D, Finalization<S, H::Commitment>)],
+    label: &str,
+) {
+    let delivered = validator.application.blocks();
+    for (height, block) in delivered {
+        let (_, expected_digest, _) = canonical
+            .iter()
+            .find(|(expected_height, _, _)| *expected_height == height)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: unexpected delivered block at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            block.digest(),
+            *expected_digest,
+            "{label}: application delivered wrong digest at height {}",
+            height.get()
+        );
+    }
+
+    if let Some((height, digest)) = validator.application.tip() {
+        let (_, expected_digest, _) = canonical
+            .iter()
+            .find(|(expected_height, _, _)| *expected_height == height)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: unexpected delivered tip at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            digest,
+            *expected_digest,
+            "{label}: application reported wrong tip digest at height {}",
+            height.get()
+        );
+    }
+
+    for (height, expected_digest, expected_finalization) in canonical {
+        let stored_block = validator
+            .handle
+            .mailbox
+            .get_block(*height)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: missing finalized block at height {}",
+                    height.get()
+                )
+            });
+        assert_eq!(
+            stored_block.digest(),
+            *expected_digest,
+            "{label}: stored wrong block digest at height {}",
+            height.get()
+        );
+
+        let stored_finalization = validator
+            .handle
+            .mailbox
+            .get_finalization(*height)
+            .await
+            .unwrap_or_else(|| panic!("{label}: missing finalization at height {}", height.get()));
+        assert_eq!(
+            stored_finalization.round(),
+            expected_finalization.round(),
+            "{label}: stored wrong finalization round at height {}",
+            height.get()
+        );
+        assert_eq!(
+            stored_finalization.proposal.payload,
+            expected_finalization.proposal.payload,
+            "{label}: stored wrong finalization payload at height {}",
+            height.get()
+        );
+    }
+
+    if let Some((height, digest, _)) = canonical.last() {
+        assert_eq!(
+            validator.handle.mailbox.get_info(Identifier::Latest).await,
+            Some((*height, *digest)),
+            "{label}: latest info should match the canonical tip",
+        );
+    }
+}
+
+async fn assert_active_validators_match_canonical<H: TestHarness>(
+    validators: &[Option<HailstormValidator<H>>],
+    canonical: &[(Height, D, Finalization<S, H::Commitment>)],
+) {
+    for idx in active_validator_indices(validators) {
+        let validator = validators[idx]
+            .as_ref()
+            .expect("active validator should be present");
+        assert_validator_matches_canonical(validator, canonical, &format!("validator_{idx}")).await;
+    }
+}
+
+async fn advance_hailstorm_to<H: TestHarness>(
+    target: u64,
+    context: &mut deterministic::Context,
+    validators: &mut [Option<HailstormValidator<H>>],
+    canonical: &mut Vec<(Height, D, Finalization<S, H::Commitment>)>,
+    parent: &mut D,
+    parent_commitment: &mut H::Commitment,
+    participants: &[K],
+    schemes: &[S],
+    propagation_delay: Duration,
+) {
+    for height_value in (canonical.len() as u64 + 1)..=target {
+        let height = Height::new(height_value);
+        let active = active_validator_indices(validators);
+        let proposer_idx = active[context.gen_range(0..active.len())];
+        let block = H::make_test_block(
+            *parent,
+            parent_commitment.clone(),
+            height,
+            height_value,
+            participants.len() as u16,
+        );
+        let round = Round::new(Epoch::zero(), View::new(height_value));
+        let proposal = Proposal {
+            round,
+            parent: height
+                .previous()
+                .map(|previous| View::new(previous.get()))
+                .unwrap_or(View::zero()),
+            payload: H::commitment(&block),
+        };
+        let expected_digest = H::digest(&block);
+        let finalization = H::make_finalization(proposal.clone(), schemes, QUORUM);
+
+        {
+            let proposer = validators[proposer_idx]
+                .as_mut()
+                .expect("proposer should be active");
+            H::propose(&mut proposer.handle, round, &block).await;
+            H::verify(&mut proposer.handle, round, &block, &mut []).await;
+            H::report_notarization(
+                &mut proposer.handle.mailbox,
+                H::make_notarization(proposal, schemes, QUORUM),
+            )
+            .await;
+        }
+
+        context.sleep(propagation_delay).await;
+
+        for idx in active_validator_indices(validators) {
+            let validator = validators[idx]
+                .as_mut()
+                .expect("validator should remain active");
+            H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
+        }
+
+        canonical.push((height, expected_digest, finalization));
+        *parent = expected_digest;
+        *parent_commitment = H::commitment(&block);
+
+        let (_, _, expected_finalization) = canonical
+            .last()
+            .expect("canonical chain should contain the new height");
+        for idx in active_validator_indices(validators) {
+            let validator = validators[idx]
+                .as_ref()
+                .expect("validator should be active");
+            wait_for_validator_height(
+                context,
+                validator,
+                height,
+                expected_digest,
+                expected_finalization,
+                &format!("validator_{idx}"),
+            )
+            .await;
+        }
+    }
+
+    assert_active_validators_match_canonical(validators, canonical).await;
+}
+
+/// Stress marshal with repeated validator crashes and recoveries while a
+/// canonical finalized chain continues to advance.
+pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, link: Link) -> String {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(H::finalize_timeout())),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
+                .await;
+        let propagation_delay = link.latency;
+        setup_network_links(&mut oracle, &participants, link).await;
+
+        let mut validators = Vec::new();
+        for (idx, validator) in participants.iter().enumerate() {
+            let setup = H::setup_validator(
+                context.with_label(&format!("validator_{idx}")),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[idx].clone()),
+            )
+            .await;
+            validators.push(Some(HailstormValidator::<H> {
+                application: setup.application,
+                handle: ValidatorHandle {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                },
+                actor_handle: setup.actor_handle,
+            }));
+        }
+
+        let mut canonical = Vec::<(Height, D, Finalization<S, H::Commitment>)>::new();
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut target_height = 0u64;
+
+        for shutdown_idx in 0..shutdowns {
+            target_height += interval;
+            advance_hailstorm_to(
+                target_height,
+                &mut context,
+                &mut validators,
+                &mut canonical,
+                &mut parent,
+                &mut parent_commitment,
+                &participants,
+                &schemes,
+                propagation_delay,
+            )
+            .await;
+
+            let active = active_validator_indices(&validators);
+            let selected = active[context.gen_range(0..active.len())];
+            let persisted_height = target_height;
+            let crashed = validators[selected]
+                .take()
+                .expect("selected validator should be active");
+            crashed.actor_handle.abort();
+            let _ = crashed.actor_handle.await;
+            info!(
+                seed,
+                shutdown_idx, selected, persisted_height, "marshal hailstorm shutdown"
+            );
+
+            target_height += interval;
+            advance_hailstorm_to(
+                target_height,
+                &mut context,
+                &mut validators,
+                &mut canonical,
+                &mut parent,
+                &mut parent_commitment,
+                &participants,
+                &schemes,
+                propagation_delay,
+            )
+            .await;
+
+            let restarted = H::setup_validator(
+                context.with_label(&format!("validator_{selected}_restart_{shutdown_idx}")),
+                &mut oracle,
+                participants[selected].clone(),
+                ConstantProvider::new(schemes[selected].clone()),
+            )
+            .await;
+            assert_eq!(
+                restarted.height,
+                Height::new(persisted_height),
+                "validator {selected} should recover its persisted finalized height before replay"
+            );
+
+            let mut restarted = HailstormValidator::<H> {
+                application: restarted.application,
+                handle: ValidatorHandle {
+                    mailbox: restarted.mailbox,
+                    extra: restarted.extra,
+                },
+                actor_handle: restarted.actor_handle,
+            };
+            for (_, _, finalization) in canonical.iter().skip(persisted_height as usize) {
+                H::report_finalization(&mut restarted.handle.mailbox, finalization.clone()).await;
+            }
+            validators[selected] = Some(restarted);
+
+            let expected_digest = canonical
+                .last()
+                .map(|(_, digest, _)| *digest)
+                .expect("canonical chain should be non-empty");
+            let expected_finalization = canonical
+                .last()
+                .map(|(_, _, finalization)| finalization.clone())
+                .expect("canonical chain should be non-empty");
+            wait_for_validator_height(
+                &mut context,
+                validators[selected]
+                    .as_ref()
+                    .expect("restarted validator should be active"),
+                Height::new(target_height),
+                expected_digest,
+                &expected_finalization,
+                &format!("validator_{selected}_restarted"),
+            )
+            .await;
+            assert_active_validators_match_canonical(&validators, &canonical).await;
+            info!(
+                seed,
+                shutdown_idx, selected, target_height, "marshal hailstorm recovered"
+            );
+        }
+
+        context.auditor().state()
+    })
+}
+
 /// Contract: `marshal.proposed(...)=true` means the block survives an
 /// immediate crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>() {

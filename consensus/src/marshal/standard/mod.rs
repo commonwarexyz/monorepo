@@ -111,6 +111,12 @@ mod tests {
         assert_eq!(r1, r2);
     }
 
+    fn assert_hailstorm_deterministic<H: TestHarness>(seed: u64) {
+        let r1 = harness::hailstorm::<H>(seed, 4, 4, LINK);
+        let r2 = harness::hailstorm::<H>(seed, 4, 4, LINK);
+        assert_eq!(r1, r2);
+    }
+
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links() {
@@ -144,6 +150,15 @@ mod tests {
         for seed in 0..5 {
             assert_finalize_deterministic::<InlineHarness>(seed, UNRELIABLE_LINK, true);
             assert_finalize_deterministic::<DeferredHarness>(seed, UNRELIABLE_LINK, true);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_standard_hailstorm_restarts() {
+        for seed in 0..2 {
+            assert_hailstorm_deterministic::<InlineHarness>(seed);
+            assert_hailstorm_deterministic::<DeferredHarness>(seed);
         }
     }
 
