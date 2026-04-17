@@ -13,7 +13,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    Metrics, Runner as _, ThreadPooler,
+    Runner as _, Supervisor, ThreadPooler,
 };
 use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
@@ -81,7 +81,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let page_cache = CacheRef::from_pooler(
-                                ctx.with_label("cache"),
+                                ctx.child("cache"),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );
@@ -151,7 +151,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
                             let page_cache = CacheRef::from_pooler(
-                                ctx.with_label("cache"),
+                                ctx.child("cache"),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
                             );

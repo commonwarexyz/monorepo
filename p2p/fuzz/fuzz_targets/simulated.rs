@@ -6,7 +6,7 @@ use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
-use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
+use commonware_runtime::{deterministic, Clock, IoBuf, Quota, Runner, Supervisor};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
 
         // Create the simulated network and oracle for controlling it
         let (network, oracle) = simulated::Network::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             p2p_cfg,
             peer_pks.iter().cloned(),
         )

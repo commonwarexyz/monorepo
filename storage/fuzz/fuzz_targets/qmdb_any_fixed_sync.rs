@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::mmr::Family,
@@ -129,7 +129,7 @@ async fn test_sync<
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
-        context: context.with_label("sync").with_attribute("id", sync_id),
+        context: context.child("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
         reached_target_tx: None,
@@ -163,17 +163,13 @@ fn fuzz(mut input: FuzzInput) {
     runner.start(|context| async move {
         let mut restarts = 0usize;
         let mut page_cache = CacheRef::from_pooler(
-            context
-                .with_label("cache")
-                .with_attribute("instance", restarts),
+            context.child("cache").with_attribute("instance", restarts),
             PAGE_SIZE,
             NZUsize!(1),
         );
         let cfg = test_config(TEST_NAME, page_cache.clone());
         let mut db = FixedDb::init(
-            context
-                .with_label("db")
-                .with_attribute("instance", restarts),
+            context.child("db").with_attribute("instance", restarts),
             cfg,
         )
         .await
@@ -252,7 +248,7 @@ fn fuzz(mut input: FuzzInput) {
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(
-                        context.clone(),
+                        context.child("sync"),
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
@@ -273,17 +269,13 @@ fn fuzz(mut input: FuzzInput) {
 
                     restarts += 1;
                     page_cache = CacheRef::from_pooler(
-                        context
-                            .with_label("cache")
-                            .with_attribute("instance", restarts),
+                        context.child("cache").with_attribute("instance", restarts),
                         PAGE_SIZE,
                         NZUsize!(1),
                     );
                     let cfg = test_config(TEST_NAME, page_cache.clone());
                     db = FixedDb::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await

@@ -117,8 +117,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         peers.insert(myself.public_key.clone(), Record::myself(myself));
 
         // Other initialization.
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = Metrics::init(context.clone());
+        let metrics = Metrics::init(&context);
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
@@ -569,7 +568,7 @@ mod tests {
     use super::*;
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Observer, Runner, Supervisor};
     use commonware_utils::{
         bitmap::BitMap, ordered::Set as OrderedSet, NZUsize, SystemTimeExt, TryCollect,
     };
@@ -619,7 +618,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Blocking myself should be ignored (Myself is unblockable)
             directory.block(&my_pk);
@@ -899,7 +904,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Block a peer that doesn't exist yet
             directory.block(&unknown_pk);
@@ -986,7 +997,13 @@ mod tests {
         let pk_1 = PrivateKey::from_seed(1).public_key();
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
             let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));
 
@@ -998,14 +1015,17 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
                 Some(connected_at)
             );
 
             directory.release(Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
+            assert_eq!(
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
+                None
+            );
         });
     }
 
@@ -1029,7 +1049,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Register a peer
             let peer_set: OrderedSet<_> =
@@ -1128,7 +1154,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1194,7 +1226,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1269,7 +1307,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Initially no blocked peers
             assert!(
@@ -1369,7 +1413,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add all peers
             let peer_set: OrderedSet<_> = [pk_1.clone(), pk_2.clone(), pk_3.clone()]
@@ -1450,7 +1500,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1507,7 +1563,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1563,7 +1625,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1616,7 +1684,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
@@ -1686,7 +1760,7 @@ mod tests {
         runtime.start(|context| async move {
             // Initialize with a bootstrapper
             let mut directory = Directory::init(
-                context.clone(),
+                context.child("directory"),
                 vec![(bootstrapper_pk.clone(), bootstrapper_ingress)],
                 my_info,
                 config,
@@ -1750,7 +1824,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             // Add both peers to a set
             let peer_set: OrderedSet<_> = [peer_pk_1.clone(), peer_pk_2.clone()]
@@ -1829,7 +1909,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));
@@ -1881,7 +1967,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));
@@ -1922,7 +2014,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
@@ -1950,7 +2048,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));
@@ -1987,7 +2091,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));
@@ -2038,7 +2148,13 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set));

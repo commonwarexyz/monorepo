@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},
@@ -114,17 +114,13 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut restarts = 0usize;
         let mut page_cache = CacheRef::from_pooler(
-            context
-                .with_label("cache")
-                .with_attribute("instance", restarts),
+            context.child("cache").with_attribute("instance", restarts),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = test_config("store-fuzz-test", page_cache.clone());
         let mut db = StoreDb::init(
-            context
-                .with_label("db")
-                .with_attribute("instance", restarts),
+            context.child("db").with_attribute("instance", restarts),
             cfg,
         )
         .await
@@ -192,17 +188,13 @@ fn fuzz(input: FuzzInput) {
 
                     restarts += 1;
                     page_cache = CacheRef::from_pooler(
-                        context
-                            .with_label("cache")
-                            .with_attribute("instance", restarts),
+                        context.child("cache").with_attribute("instance", restarts),
                         PAGE_SIZE,
                         NZUsize!(PAGE_CACHE_SIZE),
                     );
                     let cfg = test_config("store-fuzz-test", page_cache.clone());
                     db = StoreDb::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await

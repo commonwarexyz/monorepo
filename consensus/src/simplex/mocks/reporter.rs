@@ -43,9 +43,8 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub elector: L,
 }
 
-#[derive(Clone)]
 pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
-    context: E,
+    context: Arc<Mutex<E>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
@@ -66,6 +65,36 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
+impl<E, S, L, D> Clone for Reporter<E, S, L, D>
+where
+    E: CryptoRngCore,
+    S: Scheme,
+    L: ElectorConfig<S>,
+    D: Digest,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            participants: self.participants.clone(),
+            scheme: self.scheme.clone(),
+            elector: self.elector.clone(),
+            leaders: self.leaders.clone(),
+            certified: self.certified.clone(),
+            notarizes: self.notarizes.clone(),
+            notarizations: self.notarizations.clone(),
+            nullifies: self.nullifies.clone(),
+            nullifications: self.nullifications.clone(),
+            finalizes: self.finalizes.clone(),
+            finalizations: self.finalizations.clone(),
+            faults: self.faults.clone(),
+            invalid_votes: self.invalid_votes.clone(),
+            invalid_certificates: self.invalid_certificates.clone(),
+            latest: self.latest.clone(),
+            subscribers: self.subscribers.clone(),
+        }
+    }
+}
+
 impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: CryptoRngCore,
@@ -78,7 +107,7 @@ where
         let elector = cfg.elector.build(&cfg.participants);
 
         Self {
-            context,
+            context: Arc::new(Mutex::new(context)),
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
@@ -126,7 +155,7 @@ where
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
-    E: Clone + CryptoRngCore + Send + Sync + 'static,
+    E: CryptoRngCore + Send + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -139,7 +168,8 @@ where
         // consensus).
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !notarize.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -157,8 +187,9 @@ where
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
+                let mut context = self.context.lock();
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut self.context,
+                    &mut *context,
                     Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
@@ -175,7 +206,8 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !nullify.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -191,8 +223,9 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
+                let mut context = self.context.lock();
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut self.context,
+                    &mut *context,
                     Subject::Nullify {
                         round: nullification.round,
                     },
@@ -211,7 +244,8 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !finalize.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -229,8 +263,9 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
+                let mut context = self.context.lock();
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut self.context,
+                    &mut *context,
                     Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
@@ -255,7 +290,8 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !conflicting.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -272,7 +308,8 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !conflicting.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -289,7 +326,8 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
+                let mut context = self.context.lock();
+                if !conflicting.verify(&mut *context, &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
                     return;
                 }
@@ -310,7 +348,7 @@ where
 
 impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
-    E: Clone + CryptoRngCore + Send + Sync + 'static,
+    E: CryptoRngCore + Send + 'static,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,

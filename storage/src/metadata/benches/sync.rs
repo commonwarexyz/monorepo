@@ -1,5 +1,8 @@
 use super::utils::{get_modified_kvs, get_random_kvs, init};
-use commonware_runtime::benchmarks::{context, tokio};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    Supervisor,
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -23,7 +26,7 @@ fn bench_sync(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             // Put initial state
-                            let mut metadata = init(ctx.clone()).await;
+                            let mut metadata = init(ctx.child("metadata")).await;
                             for (k, v) in &initial_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }

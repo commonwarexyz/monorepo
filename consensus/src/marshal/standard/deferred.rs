@@ -133,7 +133,6 @@ use tracing::{debug, warn};
 ///
 /// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting._
-#[derive(Clone)]
 pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -142,14 +141,35 @@ where
     B: CertifiableBlock,
     ES: Epocher,
 {
-    context: E,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: LastBuilt<B>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
-    build_duration: Timed<E>,
+    build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: CertifiableBlock,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            last_built: self.last_built.clone(),
+            verification_tasks: self.verification_tasks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
@@ -169,13 +189,14 @@ where
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
+        let context = Arc::new(context);
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
             build_histogram.clone(),
         );
-        let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
+        let build_duration = Timed::new(build_histogram);
 
         Self {
             context,
@@ -208,7 +229,7 @@ where
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("deferred_verify")
+            .child("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 // Shared non-reproposal verification:
@@ -307,7 +328,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("propose")
+            .child("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_digest) = consensus_context.parent;
@@ -366,13 +387,13 @@ where
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
                 let build_request = application.propose(
                     (
-                        runtime_context.with_label("app_propose"),
+                        runtime_context.child("app_propose"),
                         consensus_context.clone(),
                     ),
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -390,7 +411,7 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.observe_now(&runtime_context);
 
                 let digest = built_block.digest();
                 {
@@ -419,7 +440,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("optimistic_verify")
+            .child("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
                 let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
@@ -542,7 +563,7 @@ where
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("certify")
+            .child("certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
                 let block = select! {
@@ -681,7 +702,7 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
     use commonware_utils::NZUsize;
     use std::time::Duration;
 
@@ -694,14 +715,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -713,7 +737,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut marshaled = Deferred::new(
-                context.clone(),
+                context.child("deferred"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -820,14 +844,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -842,8 +869,12 @@ mod tests {
                 max_epoch: 0,
             };
 
-            let mut marshaled =
-                Deferred::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mock_app,
+                marshal.clone(),
+                limited_epocher,
+            );
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = Ctx {
@@ -910,14 +941,17 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("deferred"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -929,7 +963,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut marshaled = Deferred::new(
-                context.clone(),
+                context.child("deferred"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),

@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -34,9 +34,9 @@ impl Conformance for QueueConformance {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, page_cache))
+                Queue::<_, Vec<u8>>::init(context.child("queue"), config(seed, page_cache))
                     .await
                     .unwrap();
 
@@ -65,9 +65,9 @@ impl Conformance for QueueConformance {
 
             // Re-open and verify surviving items are readable
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, page_cache))
+                Queue::<_, Vec<u8>>::init(context.child("queue2"), config(seed, page_cache))
                     .await
                     .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {

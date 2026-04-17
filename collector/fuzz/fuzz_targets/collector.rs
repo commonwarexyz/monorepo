@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
-    deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Metrics, Runner,
+    deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor,
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
@@ -431,9 +431,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let (engine, mailbox) = Engine::new(
-                        context
-                            .with_label("engine")
-                            .with_attribute("instance", restarts),
+                        context.child("engine").with_attribute("instance", restarts),
                         config,
                     );
                     restarts += 1;

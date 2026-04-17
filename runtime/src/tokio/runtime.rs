@@ -20,8 +20,8 @@ use crate::{
     utils::{
         self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, SinkOf, Spawner as _, StreamOf,
+    Supervisor as _, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -520,25 +520,6 @@ pub struct Context {
     traced: bool,
 }
 
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        let (child, _) = Tree::child(&self.tree);
-        Self {
-            name: self.name.clone(),
-            attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
-            tree: child,
-            execution: Execution::default(),
-            traced: false,
-        }
-    }
-}
-
 impl Context {
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> &Metrics {
@@ -547,22 +528,23 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
-    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.spawn_with(Execution::default(), f)
+    }
+
+    fn spawn_with<F, Fut, T>(mut self, execution: Execution, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.execution = execution;
+
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
@@ -660,7 +642,7 @@ impl crate::ThreadPooler for Context {
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
                 // task and thus should be provisioned as a dedicated thread.
-                self.with_label("rayon_thread")
+                self.child("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
@@ -670,74 +652,79 @@ impl crate::ThreadPooler for Context {
     }
 }
 
-impl crate::Metrics for Context {
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn with_label(&self, label: &str) -> Self {
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
+impl crate::Supervisor for Context {
+    fn child(&self, label: &'static str) -> Self {
+        let name = if self.name.is_empty() {
+            label.to_string()
+        } else {
+            format!("{}_{}", self.name, label)
         };
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name,
-            ..self.clone()
+            attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
+            tree,
+            execution: Execution::default(),
+            traced: false,
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        let mut attributes = self.attributes.clone();
-        add_attribute(&mut attributes, key, value);
-        Self {
-            attributes,
-            ..self.clone()
-        }
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        add_attribute(&mut self.attributes, key, value);
+        self
     }
 
-    fn with_scope(&self) -> Self {
-        // If already scoped, inherit the existing scope
+    fn name(&self) -> crate::Name {
+        crate::Name {
+            label: self.name.clone(),
+            attributes: self.attributes.clone(),
+        }
+    }
+}
+
+impl crate::Observer for Context {
+    fn with_scope(mut self) -> Self {
+        // If already scoped, inherit the existing scope.
         if self.scope.is_some() {
-            return self.clone();
+            return self;
         }
 
-        // RAII guard removes the scoped registry when all clones drop.
-        // Closure is infallible to avoid panicking in Drop.
+        // RAII guard removes the scoped registry when all handles are dropped.
         let executor = self.executor.clone();
         let scope_id = executor.registry.lock().create_scope();
         let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
             executor.registry.lock().remove_scope(id);
         }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
+        self.scope = Some(guard);
+        self
     }
 
-    fn with_span(&self) -> Self {
-        Self {
-            traced: true,
-            ..self.clone()
-        }
+    fn with_span(mut self) -> Self {
+        self.traced = true;
+        self
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
+    fn register<M: Metric + Clone>(&self, name: &str, help: &str, default: M) -> M {
+        let prefixed_name = if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
         };
 
-        // Route to the appropriate registry (root or scoped)
+        // Route to the appropriate registry (root or scoped).
+        //
+        // prometheus_client's Registry::register is not idempotent at the same key
+        // but it does not panic either; double-registration is silently tolerated
+        // with the first winner. For determinism, the deterministic runtime enforces
+        // get-or-register via its own dedup map. Here we just register on first
+        // sight; duplicate calls return a clone of `default` which is safe because
+        // Metric handles share state internally (they are Arc-based).
         let mut registry = self.executor.registry.lock();
         let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry = self
@@ -746,7 +733,8 @@ impl crate::Metrics for Context {
             .fold(scoped, |reg, (k, v): &(String, String)| {
                 reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
             });
-        sub_registry.register(prefixed_name, help, metric);
+        sub_registry.register(prefixed_name, help, default.clone());
+        default
     }
 
     fn encode(&self) -> String {

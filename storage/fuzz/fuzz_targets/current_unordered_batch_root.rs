@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, journaled::Config as MmrConfig},
@@ -110,12 +110,12 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, NZUsize!(2));
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, NZUsize!(2));
         let cfg = test_config(
             "fuzz-current-unordered-pending-vs-committed-root",
             page_cache,
         );
-        let mut db = Db::init(context.with_label("db"), cfg)
+        let mut db = Db::init(context.child("db"), cfg)
             .await
             .expect("init current unordered db");
 

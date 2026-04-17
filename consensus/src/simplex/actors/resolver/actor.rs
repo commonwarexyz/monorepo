@@ -105,7 +105,7 @@ impl<
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
-            self.context.with_label("resolver"),
+            self.context.child("resolver"),
             p2p::Config {
                 peer_provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
@@ -179,7 +179,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -199,7 +199,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -219,7 +219,11 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
+                if !nullification.verify::<_, D>(
+                    self.context.as_mut(),
+                    &self.scheme,
+                    &self.strategy,
+                ) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

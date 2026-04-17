@@ -645,7 +645,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             codec_config: config.codec_config,
         };
         let mut oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
+            Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -697,7 +697,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
-                    context.with_label("recover_table"),
+                    context.child("recover_table"),
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -722,7 +722,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
-                    context.with_label("recover_table"),
+                    context.child("recover_table"),
                     &table,
                     table_size,
                     config.table_resize_frequency,
@@ -1168,7 +1168,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage, Supervisor,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1206,7 +1206,7 @@ mod tests {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     NZU16!(1024),
                     NZUsize!(10),
                 ),
@@ -1223,7 +1223,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1265,7 +1265,7 @@ mod tests {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     NZU16!(1024),
                     NZUsize!(10),
                 ),
@@ -1283,12 +1283,10 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.with_label("first"),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
                 freezer.put(test_key("key0"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
@@ -1312,7 +1310,7 @@ mod tests {
             // read_latest_entry would then see two "valid" entries with epoch=0 and
             // panic on unreachable!().
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.with_label("second"),
+                context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -54,7 +54,7 @@ fn fuzz(input: FuzzInput) {
             key_partition: "fuzz-key".into(),
             key_write_buffer: NZUsize!(1024 * 1024),
             key_page_cache: CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),
@@ -70,7 +70,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: (),
         };
         let mut freezer =
-            Freezer::<_, FixedBytes<32>, i32>::init(context.with_label("freezer"), cfg.clone())
+            Freezer::<_, FixedBytes<32>, i32>::init(context.child("freezer"), cfg.clone())
                 .await
                 .unwrap();
 

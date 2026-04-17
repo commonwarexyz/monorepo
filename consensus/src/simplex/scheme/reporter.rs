@@ -24,23 +24,24 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
+use commonware_utils::sync::Mutex;
 use rand_core::CryptoRngCore;
+use std::sync::Arc;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///
 /// This wrapper provides scheme-aware activity filtering with automatic verification of peer
 /// activities. It prevents signature forgery attacks on non-attributable schemes while ensuring
 /// all activities are cryptographically valid before reporting.
-#[derive(Clone)]
 pub struct AttributableReporter<
-    E: Clone + CryptoRngCore + Send + 'static,
+    E: CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     T: Strategy,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
-    rng: E,
+    rng: Arc<Mutex<E>>,
     /// Signing scheme for verification
     scheme: S,
     /// Inner reporter that receives filtered activities
@@ -51,8 +52,27 @@ pub struct AttributableReporter<
     verify: bool,
 }
 
+impl<E, S, D, T, R> Clone for AttributableReporter<E, S, D, T, R>
+where
+    E: CryptoRngCore + Send + 'static,
+    S: certificate::Scheme,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            rng: self.rng.clone(),
+            scheme: self.scheme.clone(),
+            reporter: self.reporter.clone(),
+            strategy: self.strategy.clone(),
+            verify: self.verify,
+        }
+    }
+}
+
 impl<
-        E: Clone + CryptoRngCore + Send + 'static,
+        E: CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
         T: Strategy,
@@ -60,9 +80,9 @@ impl<
     > AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub const fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
+    pub fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
         Self {
-            rng,
+            rng: Arc::new(Mutex::new(rng)),
             scheme,
             reporter,
             strategy,
@@ -72,7 +92,7 @@ impl<
 }
 
 impl<
-        E: Clone + CryptoRngCore + Send + 'static,
+        E: CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
         T: Strategy,
@@ -83,12 +103,12 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify
-            && !activity.verified()
-            && !activity.verify(&mut self.rng, &self.scheme, &self.strategy)
-        {
-            // Drop unverified peer activity
-            return;
+        if self.verify && !activity.verified() {
+            let mut rng = self.rng.lock();
+            if !activity.verify(&mut *rng, &self.scheme, &self.strategy) {
+                // Drop unverified peer activity
+                return;
+            }
         }
 
         // Filter based on scheme attributability

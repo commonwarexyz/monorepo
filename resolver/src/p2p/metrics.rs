@@ -1,12 +1,11 @@
 use commonware_runtime::{
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
 use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
-use std::sync::Arc;
 
 /// Metrics for the peer actor.
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics {
     /// Current number of pending fetch requests
     pub fetch_pending: Gauge,
     /// Current number of active fetch requests
@@ -22,14 +21,14 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of serves by status
     pub serve: status::Counter,
     /// Histogram of successful serves
-    pub serve_duration: histogram::Timed<E>,
+    pub serve_duration: histogram::Timed,
     /// Histogram of successful fetches
-    pub fetch_duration: histogram::Timed<E>,
+    pub fetch_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let fetch_pending = Gauge::default();
         context.register(
             "fetch_pending",
@@ -76,7 +75,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of successful fetches",
             fetch_duration.clone(),
         );
-        let clock = Arc::new(context);
 
         Self {
             fetch_pending,
@@ -86,8 +84,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             fetch,
             cancel,
             serve,
-            fetch_duration: histogram::Timed::new(fetch_duration, clock.clone()),
-            serve_duration: histogram::Timed::new(serve_duration, clock),
+            fetch_duration: histogram::Timed::new(fetch_duration),
+            serve_duration: histogram::Timed::new(serve_duration),
         }
     }
 }

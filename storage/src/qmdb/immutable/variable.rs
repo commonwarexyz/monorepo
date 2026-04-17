@@ -49,7 +49,7 @@ impl<
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, K, V, H> = Journal::new(
-            context.clone(),
+            context.child("db"),
             cfg.merkle_config,
             cfg.log,
             Operation::<K, V>::is_commit,
@@ -70,7 +70,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -103,10 +103,9 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = config("partition", page_cache);
-        Db::init(context.with_label("db"), cfg).await.unwrap()
+        Db::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -145,10 +144,9 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = small_sections_config("partition", page_cache);
-        Db::init(context.with_label("db"), cfg).await.unwrap()
+        Db::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]

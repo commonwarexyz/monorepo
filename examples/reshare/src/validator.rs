@@ -14,7 +14,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota, ThreadPooler};
+use commonware_runtime::{tokio, Quota, Supervisor, ThreadPooler};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -82,7 +82,7 @@ pub async fn run<S, L>(
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
-    let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
+    let (mut network, oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
     let vote_limit = Quota::per_second(NZU32!(128));
     let votes = network.register(VOTE_CHANNEL, vote_limit, MESSAGE_BACKLOG);
@@ -114,11 +114,14 @@ pub async fn run<S, L>(
         priority_requests: false,
         priority_responses: false,
     };
-    let marshal = marshal_resolver::init(context.with_label("resolver"), resolver_cfg, marshal);
+    let marshal = marshal_resolver::init(context.child("resolver"), resolver_cfg, marshal);
 
-    let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+    let strategy = context
+        .child("strategy")
+        .create_strategy(NZUsize!(2))
+        .unwrap();
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
-        context.with_label("engine"),
+        context.child("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
             manager: oracle.clone(),
@@ -179,7 +182,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Metrics, Quota, Runner as _, Spawner,
+        Clock, Handle, Observer, Quota, Runner as _, Spawner, Supervisor,
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
@@ -369,7 +372,10 @@ mod test {
             );
 
             let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
-            let validator_ctx = ctx.with_label(&format!("validator_{pk}_{restart_count}"));
+            let validator_ctx = ctx
+                .child("node")
+                .with_attribute("validator", &pk)
+                .with_attribute("restart", *restart_count);
             *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
@@ -383,9 +389,9 @@ mod test {
                 priority_responses: false,
             };
             let marshal =
-                marshal_resolver::init(validator_ctx.with_label("resolver"), resolver_cfg, marshal);
+                marshal_resolver::init(validator_ctx.child("resolver"), resolver_cfg, marshal);
             let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
-                validator_ctx.with_label("consensus"),
+                validator_ctx.child("consensus"),
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),
@@ -603,7 +609,7 @@ mod test {
             info!(participants = self.total, is_dkg, target, "starting test");
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
-                ctx.with_label("network"),
+                ctx.child("network"),
                 simulated::Config {
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -649,7 +655,7 @@ mod test {
             if let Some(Crash::Random { frequency, .. }) = &self.crash {
                 let frequency = *frequency;
                 let crash_sender = crash_sender.clone();
-                ctx.clone().spawn(move |ctx| async move {
+                ctx.child("validator").spawn(move |ctx| async move {
                     loop {
                         ctx.sleep(frequency).await;
                         if crash_sender.send(()).await.is_err() {
@@ -821,7 +827,7 @@ mod test {
                             let restart_sender = restart_sender.clone();
                             let downtime = *downtime;
                             let pk_clone = pk.clone();
-                            ctx.clone().spawn(move |ctx| async move {
+                            ctx.child("validator").spawn(move |ctx| async move {
                                 if downtime > Duration::ZERO {
                                     ctx.sleep(downtime).await;
                                 }
@@ -1475,7 +1481,7 @@ mod test {
     fn reshare_scoped_metrics_cleanup() {
         Runner::seeded(0).start(|mut ctx| async move {
             let (network, mut oracle) = Network::<_, PublicKey>::new(
-                ctx.with_label("network"),
+                ctx.child("network"),
                 simulated::Config {
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),

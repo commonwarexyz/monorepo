@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::merkle::{
     hasher::Standard, journaled::Config, mem::Mem, mmb, mmr, Error, Family as MerkleFamily,
     Location, LocationRangeExt as _, Position,
@@ -115,13 +115,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new();
-            let page_cache = CacheRef::from_pooler(
-                context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            );
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let mut merkle = Journaled::<F, _, _>::init(
-                context.with_label("merkle"),
+                context.child("merkle"),
                 &hasher,
                 test_config(suffix, page_cache.clone()),
             )
@@ -332,9 +329,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         // Init a new merkle structure.
                         drop(merkle);
                         merkle = Journaled::<F, _, _>::init(
-                            context
-                                .with_label("merkle")
-                                .with_attribute("instance", restarts),
+                            context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
                             test_config(suffix, page_cache.clone()),
                         )
@@ -369,9 +364,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         };
 
                         if let Ok(sync_merkle) = Journaled::<F, _, _>::init_sync(
-                            context
-                                .with_label("sync")
-                                .with_attribute("instance", restarts),
+                            context.child("sync").with_attribute("instance", restarts),
                             sync_config,
                             &hasher,
                         )

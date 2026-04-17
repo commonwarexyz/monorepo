@@ -128,7 +128,6 @@ where
 /// This wrapper requires only [`crate::Block`] for `B`, not
 /// [`crate::CertifiableBlock`]. It is designed for applications that cannot
 /// recover consensus context directly from block payloads.
-#[derive(Clone)]
 pub struct Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -137,14 +136,35 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: E,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: LastBuilt<B>,
     available_blocks: AvailableBlocks<B::Digest>,
 
-    build_duration: Timed<E>,
+    build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: Block + Clone,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            last_built: self.last_built.clone(),
+            available_blocks: self.available_blocks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
@@ -165,13 +185,14 @@ where
     /// Registers a `build_duration` histogram for proposal latency and initializes
     /// the shared "last built block" cache used by [`Relay::broadcast`].
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
+        let context = Arc::new(context);
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
             build_histogram.clone(),
         );
-        let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
+        let build_duration = Timed::new(build_histogram);
 
         Self {
             context,
@@ -238,7 +259,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("propose")
+            .child("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_digest) = consensus_context.parent;
@@ -295,13 +316,13 @@ where
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
                 let build_request = application.propose(
                     (
-                        runtime_context.with_label("app_propose"),
+                        runtime_context.child("app_propose"),
                         consensus_context.clone(),
                     ),
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -319,7 +340,7 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.observe_now(&runtime_context);
 
                 let digest = built_block.digest();
                 {
@@ -359,7 +380,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("inline_verify")
+            .child("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 // If block can be fetched, mark it as available.
@@ -450,7 +471,7 @@ where
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("inline_certify")
+            .child("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
                 if await_block_subscription(&mut tx, block_rx, &digest, "certification")
@@ -548,7 +569,7 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
     use commonware_utils::NZUsize;
     use rand::Rng;
     use std::time::Duration;
@@ -586,13 +607,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -603,7 +627,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -664,13 +688,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -681,7 +708,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),

@@ -255,7 +255,7 @@ macro_rules! dispatch_arm {
     ($ctx:expr, $thread_pool:expr, $page_cache:expr, $db:ident, $body:expr, $DbType:ty, $cfg_fn:ident) => {{
         #[allow(unused_mut)]
         let mut $db = <$DbType>::init(
-            $ctx.with_label("db"),
+            $ctx.child("db"),
             $crate::common::$cfg_fn($thread_pool.clone(), $page_cache.clone()),
         )
         .await
@@ -267,9 +267,9 @@ macro_rules! dispatch_arm {
 /// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
 macro_rules! with_fixed_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use commonware_runtime::{Metrics as _, ThreadPooler as _};
+        use commonware_runtime::{Supervisor as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.with_label("cache"),
+            $ctx.child("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
@@ -356,9 +356,9 @@ macro_rules! with_fixed_value_db {
 /// execute `$body`.
 macro_rules! with_var_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use commonware_runtime::{Metrics as _, ThreadPooler as _};
+        use commonware_runtime::{Supervisor as _, ThreadPooler as _};
         let __page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            $ctx.with_label("cache"),
+            $ctx.child("cache"),
             $crate::common::PAGE_SIZE,
             $crate::common::PAGE_CACHE_SIZE,
         );
@@ -413,7 +413,7 @@ pub(crate) use with_var_value_db;
 macro_rules! dispatch_arm_with_cfg {
     ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg:expr) => {{
         #[allow(unused_mut)]
-        let mut $db = <$DbType>::init($ctx.with_label("db"), $cfg.clone())
+        let mut $db = <$DbType>::init($ctx.child("db"), $cfg.clone())
             .await
             .unwrap();
         $body

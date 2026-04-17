@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
@@ -156,7 +156,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
         let mut restarts = 0usize;
         let mut page_cache = CacheRef::from_pooler(
             context
-                .with_label("cache")
+                .child("cache")
                 .with_attribute("instance", restarts),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
@@ -164,7 +164,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
         let cfg = test_config(suffix, page_cache.clone());
         let mut db: Db<F> = Db::init(
             context
-                .with_label("db")
+                .child("db")
                 .with_attribute("instance", restarts),
             cfg,
         )
@@ -315,7 +315,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     restarts += 1;
                     page_cache = CacheRef::from_pooler(
                         context
-                            .with_label("cache")
+                            .child("cache")
                             .with_attribute("instance", restarts),
                         PAGE_SIZE,
                         NZUsize!(PAGE_CACHE_SIZE),
@@ -323,7 +323,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     let cfg = test_config(suffix, page_cache.clone());
                     db = Db::init(
                         context
-                            .with_label("db")
+                            .child("db")
                             .with_attribute("instance", restarts),
                         cfg,
                     )

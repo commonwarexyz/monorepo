@@ -299,7 +299,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
-            context.with_label("data"),
+            context.child("data"),
             variable::Config {
                 partition: data_partition,
                 compression: cfg.compression,
@@ -312,7 +312,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal
         let mut offsets = fixed::Journal::init(
-            context.with_label("offsets"),
+            context.child("offsets"),
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
@@ -346,7 +346,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
-            context.with_label("data"),
+            context.child("data"),
             variable::Config {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
@@ -359,7 +359,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal at the target size
         let offsets = fixed::Journal::init_at_size(
-            context.with_label("offsets"),
+            context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
@@ -423,7 +423,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         );
 
         // Initialize contiguous journal
-        let journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let journal = Self::init(context.child("journal"), cfg.clone()).await?;
 
         let size = journal.size().await;
 
@@ -1071,7 +1071,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner, Storage};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Storage, Supervisor};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -1098,7 +1098,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -1106,7 +1106,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1136,7 +1136,7 @@ mod tests {
                 .expect("Failed to remove offsets metadata partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1158,7 +1158,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -1166,7 +1166,7 @@ mod tests {
             };
 
             // === Setup: Create journal with data ===
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1185,7 +1185,7 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // === Verify init aligns the mismatch ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
 
@@ -1223,7 +1223,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -1231,7 +1231,7 @@ mod tests {
             };
 
             // Initialize journal
-            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
                 .await
                 .unwrap();
 
@@ -1333,7 +1333,10 @@ mod tests {
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String, idx: usize| {
                 let label = test_name.replace('-', "_");
-                let context = context.with_label(&format!("{label}_{idx}"));
+                let context = context
+                    .child("test")
+                    .with_attribute("name", &label)
+                    .with_attribute("index", idx);
                 async move {
                     let cfg = Config {
                         partition: format!("generic-test-{test_name}"),
@@ -1341,13 +1344,13 @@ mod tests {
                         compression: None,
                         codec_config: (),
                         page_cache: CacheRef::from_pooler(
-                            context.with_label("cache"),
+                            context.child("cache"),
                             LARGE_PAGE_SIZE,
                             NZUsize!(10),
                         ),
                         write_buffer: NZUsize!(1024),
                     };
-                    Journal::<_, u64>::init(context.with_label("journal"), cfg).await
+                    Journal::<_, u64>::init(context.child("journal"), cfg).await
                 }
                 .boxed()
             })
@@ -1366,14 +1369,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
                 .await
                 .unwrap();
 
@@ -1458,7 +1461,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -1466,7 +1469,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal and append data ===
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1499,7 +1502,7 @@ mod tests {
             drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1549,14 +1552,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1578,7 +1581,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1616,14 +1619,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1640,7 +1643,7 @@ mod tests {
             drop(variable);
 
             // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1657,14 +1660,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1685,7 +1688,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1718,14 +1721,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1747,7 +1750,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1791,14 +1794,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1818,7 +1821,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1856,7 +1859,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -1864,7 +1867,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with one full section ===
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1896,7 +1899,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
@@ -1930,14 +1933,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1952,7 +1955,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1976,14 +1979,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 0)
+            let journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 0)
                 .await
                 .unwrap();
 
@@ -2013,7 +2016,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2021,9 +2024,10 @@ mod tests {
             };
 
             // Initialize at position 10 (exactly at section 1 boundary with items_per_section=5)
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
 
             // Size should be 10
             let bounds = journal.bounds().await;
@@ -2057,7 +2061,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2065,7 +2069,7 @@ mod tests {
             };
 
             // Initialize at position 7 (middle of section 1 with items_per_section=5)
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 7)
+            let journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 7)
                 .await
                 .unwrap();
 
@@ -2096,7 +2100,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2104,10 +2108,9 @@ mod tests {
             };
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                .await
+                .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -2121,7 +2124,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2154,7 +2157,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2162,10 +2165,9 @@ mod tests {
             };
 
             // Initialize at position 15
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                .await
+                .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 15);
@@ -2175,7 +2177,7 @@ mod tests {
             drop(journal);
 
             // Reopen and verify size persisted
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2203,7 +2205,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2211,10 +2213,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section, 7 % 5 = 2)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 3 items at positions 7, 8, 9 (fills rest of section 1)
             for i in 0..3u64 {
@@ -2231,7 +2232,7 @@ mod tests {
             drop(journal);
 
             // Reopen
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2263,7 +2264,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2271,10 +2272,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 8 items: positions 7-14 (section 1: 3 items, section 2: 5 items)
             for i in 0..8u64 {
@@ -2291,7 +2291,7 @@ mod tests {
             drop(journal);
 
             // Reopen
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2320,7 +2320,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2328,7 +2328,7 @@ mod tests {
             };
 
             // Phase 1: Create data and offsets, then simulate data-only pruning crash.
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..7u64 {
@@ -2341,7 +2341,7 @@ mod tests {
             drop(journal);
 
             // Phase 2: Init triggers data-empty repair and should treat journal as fully pruned at size 7.
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds().await;
@@ -2367,7 +2367,7 @@ mod tests {
             drop(journal);
 
             // Phase 3: Reopen and verify we did not lose the appended item.
-            let journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
             let bounds = journal.bounds().await;
@@ -2390,7 +2390,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2398,10 +2398,9 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append 3 items
             for i in 0..3u64 {
@@ -2414,7 +2413,7 @@ mod tests {
             drop(journal);
 
             // Reopen - should recover by rebuilding offsets from data
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2442,17 +2441,16 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal =
-                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                .await
+                .unwrap();
 
             // Append a few items at positions 7..9
             for i in 0..3u64 {
@@ -2481,7 +2479,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2489,9 +2487,10 @@ mod tests {
             };
 
             // Initialize at a large position (position 1000)
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1000)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 1000);
@@ -2517,7 +2516,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     SMALL_PAGE_SIZE,
                     NZUsize!(2),
                 ),
@@ -2525,9 +2524,10 @@ mod tests {
             };
 
             // Initialize at position 20
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 20)
-                .await
-                .unwrap();
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("journal"), cfg.clone(), 20)
+                    .await
+                    .unwrap();
 
             // Append items 20-29
             for i in 0..10u64 {
@@ -2568,7 +2568,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2577,10 +2577,13 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let journal =
-                Journal::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with sync boundaries");
+            let journal = Journal::init_sync(
+                context.child("journal"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
 
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, lower_bound);
@@ -2611,7 +2614,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2619,7 +2622,7 @@ mod tests {
 
             // Create initial journal with data in multiple sections
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal").with_attribute("instance", 0),
+                context.child("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2637,7 +2640,7 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 31;
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("journal"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2686,7 +2689,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2694,7 +2697,7 @@ mod tests {
 
             #[allow(clippy::reversed_empty_ranges)]
             let _result = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("journal"),
                 cfg,
                 10..5, // invalid range: lower > upper
             )
@@ -2715,7 +2718,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2723,7 +2726,7 @@ mod tests {
 
             // Create initial journal with data exactly matching sync range
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal").with_attribute("instance", 0),
+                context.child("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2740,7 +2743,7 @@ mod tests {
             let lower_bound = 5; // section 1
             let upper_bound = 20; // section 3
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("journal"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2790,19 +2793,17 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
             };
 
             // Create initial journal with data beyond sync range
-            let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("initial"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let journal =
+                Journal::<deterministic::Context, u64>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2815,7 +2816,7 @@ mod tests {
             let lower_bound = 8; // section 1
             for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.with_label(&format!("sync_{i}")),
+                    context.child("sync").with_attribute("index", i),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -2840,19 +2841,17 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
             };
 
             // Create initial journal with stale data
-            let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("first"),
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to create initial journal");
+            let journal =
+                Journal::<deterministic::Context, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
@@ -2865,7 +2864,7 @@ mod tests {
             let lower_bound = 15; // section 3
             let upper_bound = 26; // last element in section 5
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.with_label("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2899,7 +2898,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2907,7 +2906,7 @@ mod tests {
 
             // Create journal with data at section boundaries
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal").with_attribute("instance", 0),
+                context.child("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2924,7 +2923,7 @@ mod tests {
             let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at section boundary (24/5 = 4)
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("journal"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2973,7 +2972,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     PAGE_SIZE,
                     NZUsize!(PAGE_CACHE_SIZE),
                 ),
@@ -2981,7 +2980,7 @@ mod tests {
 
             // Create journal with data in multiple sections
             let journal = Journal::<deterministic::Context, u64>::init(
-                context.with_label("journal").with_attribute("instance", 0),
+                context.child("journal").with_attribute("instance", 0),
                 cfg.clone(),
             )
             .await
@@ -2998,7 +2997,7 @@ mod tests {
             let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (section 2: 14/5 = 2)
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.child("journal"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -3049,7 +3048,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
@@ -3057,7 +3056,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3138,7 +3137,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per section ===
-            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3161,7 +3160,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
             // Fresh journal for this test
-            let journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3181,7 +3180,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, u64>::init(context.with_label("fourth"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("fourth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3204,7 +3203,7 @@ mod tests {
             // === Test 6: Prune all items (edge case) ===
             // This tests the scenario where prune removes everything.
             // Callers must check bounds().is_empty() before reading.
-            let journal = Journal::<_, u64>::init(context.with_label("fifth"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3243,14 +3242,14 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("cache"),
+                    context.child("cache"),
                     LARGE_PAGE_SIZE,
                     NZUsize!(10),
                 ),
                 write_buffer: NZUsize!(1024),
             };
 
-            let journal = Journal::<_, u64>::init(context.with_label("journal"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3280,7 +3279,7 @@ mod tests {
             // Verify size persists after restart without writing any data
             drop(journal);
             let journal =
-                Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
+                Journal::<_, u64>::init(context.child("journal_after_clear"), cfg.clone())
                     .await
                     .unwrap();
             let bounds = journal.bounds().await;
@@ -3305,7 +3304,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.with_label("journal_reopened"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("journal_reopened"), cfg)
                 .await
                 .unwrap();
 

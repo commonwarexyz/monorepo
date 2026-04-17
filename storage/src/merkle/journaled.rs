@@ -255,8 +255,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        let journal =
-            Journal::<E, D>::init(context.with_label("merkle_journal"), journal_cfg).await?;
+        let journal = Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
         let mut journal_size = Position::<F>::new(journal.size().await);
 
         let metadata_cfg = MConfig {
@@ -264,7 +263,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             codec_config: ((0..).into(), ()),
         };
         let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.with_label("merkle_metadata"), metadata_cfg)
+            Metadata::<_, U64, Vec<u8>>::init(context.child("merkle_metadata"), metadata_cfg)
                 .await?;
 
         if journal_size == 0 {
@@ -452,7 +451,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
 
         // Open the journal, performing a rewind if necessary for crash recovery.
         let journal: Journal<E, D> =
-            Journal::init(context.with_label("merkle_journal"), journal_cfg).await?;
+            Journal::init(context.child("merkle_journal"), journal_cfg).await?;
         let mut journal_size = Position::<F>::new(journal.size().await);
 
         // If a crash left the journal at an invalid size (e.g., a leaf was written
@@ -483,8 +482,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
-        let mut metadata =
-            Metadata::init(context.with_label("merkle_metadata"), metadata_cfg).await?;
+        let mut metadata = Metadata::init(context.child("merkle_metadata"), metadata_cfg).await?;
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
@@ -1068,7 +1066,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
     use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
@@ -1095,10 +1093,9 @@ mod tests {
 
     async fn journaled_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let init1_cache =
-            CacheRef::from_pooler(context.with_label("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init1_cache = CacheRef::from_pooler(context.child("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("first"),
+            context.child("first"),
             &hasher,
             test_config(init1_cache),
         )
@@ -1124,10 +1121,9 @@ mod tests {
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
-        let init2_cache =
-            CacheRef::from_pooler(context.with_label("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init2_cache = CacheRef::from_pooler(context.child("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("second"),
+            context.child("second"),
             &hasher,
             test_config(init2_cache),
         )
@@ -1186,10 +1182,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("oob_prune"),
+            context.child("oob_prune"),
             &hasher,
             test_config(page_cache),
         )
@@ -1226,14 +1221,14 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
 
         // Case 1: rewind partially succeeds, then returns ElementPruned.
-        let element_pruned_context = context.with_label("element_pruned_case");
+        let element_pruned_context = context.child("element_pruned_case");
         let ep_cache = CacheRef::from_pooler(
-            element_pruned_context.with_label("cache"),
+            element_pruned_context.child("cache"),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
         );
         let mut mmr = Journaled::<F, _, Digest>::init(
-            element_pruned_context.clone(),
+            element_pruned_context.child("merkle"),
             &hasher,
             test_config(ep_cache),
         )
@@ -1256,12 +1251,9 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 2: rewind partially succeeds, then returns Empty.
-        let empty_context = context.with_label("empty_case");
-        let empty_cache = CacheRef::from_pooler(
-            empty_context.with_label("cache"),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        );
+        let empty_context = context.child("empty_case");
+        let empty_cache =
+            CacheRef::from_pooler(empty_context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(empty_cache);
         let mut mmr = Journaled::<F, _, Digest>::init(empty_context, &hasher, cfg)
             .await
@@ -1293,10 +1285,9 @@ mod tests {
 
     async fn journaled_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.child("merkle"), &hasher, cfg)
             .await
             .unwrap();
         // Build a test structure with 255 leaves
@@ -1366,10 +1357,9 @@ mod tests {
         use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
 
         let hasher: Standard<Sha256> = Standard::new();
-        let init1_cache =
-            CacheRef::from_pooler(context.with_label("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init1_cache = CacheRef::from_pooler(context.child("init1"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("first"),
+            context.child("first"),
             &hasher,
             test_config(init1_cache),
         )
@@ -1398,13 +1388,13 @@ mod tests {
         // extra digest to the journal. This creates an invalid structure size.
         {
             let journal: Journal<_, Digest> = Journal::init(
-                context.with_label("corrupt"),
+                context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(
-                        context.with_label("corrupt_cache"),
+                        context.child("corrupt_cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -1418,10 +1408,9 @@ mod tests {
             assert_eq!(journal.size().await, expected_size + 1);
         }
 
-        let init2_cache =
-            CacheRef::from_pooler(context.with_label("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init2_cache = CacheRef::from_pooler(context.child("init2"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("second"),
+            context.child("second"),
             &hasher,
             test_config(init2_cache),
         )
@@ -1435,10 +1424,9 @@ mod tests {
 
         // Make sure dropping it and re-opening it persists the recovered state.
         drop(mmr);
-        let init3_cache =
-            CacheRef::from_pooler(context.with_label("init3"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init3_cache = CacheRef::from_pooler(context.child("init3"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("third"),
+            context.child("third"),
             &hasher,
             test_config(init3_cache),
         )
@@ -1465,16 +1453,12 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new();
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg_pruned = test_config(page_cache);
-        let mut pruned_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("pruned"),
-            &hasher,
-            cfg_pruned.clone(),
-        )
-        .await
-        .unwrap();
+        let mut pruned_mmr =
+            Journaled::<F, _, Digest>::init(context.child("pruned"), &hasher, cfg_pruned.clone())
+                .await
+                .unwrap();
         let cfg_unpruned = Config {
             journal_partition: "unpruned-journal-partition".into(),
             metadata_partition: "unpruned-metadata-partition".into(),
@@ -1484,7 +1468,7 @@ mod tests {
             page_cache: cfg_pruned.page_cache.clone(),
         };
         let mut mmr =
-            Journaled::<F, _, Digest>::init(context.with_label("unpruned"), &hasher, cfg_unpruned)
+            Journaled::<F, _, Digest>::init(context.child("unpruned"), &hasher, cfg_unpruned)
                 .await
                 .unwrap();
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
@@ -1534,7 +1518,7 @@ mod tests {
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
         let mut pruned_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("pruned_reopen"),
+            context.child("pruned_reopen"),
             &hasher,
             cfg_pruned.clone(),
         )
@@ -1564,7 +1548,7 @@ mod tests {
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
         let mut pruned_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("pruned_reopen2"),
+            context.child("pruned_reopen2"),
             &hasher,
             cfg_pruned.clone(),
         )
@@ -1618,12 +1602,11 @@ mod tests {
         // Build structure with 2000 leaves.
         let hasher: Standard<Sha256> = Standard::new();
         const LEAF_COUNT: usize = 2000;
-        let init_ctx = context.with_label("init");
-        let init_cache =
-            CacheRef::from_pooler(init_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_ctx = context.child("init");
+        let init_cache = CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            init_ctx.with_label("mmr"),
+            init_ctx.child("mmr"),
             &hasher,
             test_config(init_cache),
         )
@@ -1646,12 +1629,12 @@ mod tests {
         // Prune the structure in increments of 50, simulating a partial write after each prune.
         for i in 0usize..200 {
             let iter_cache = CacheRef::from_pooler(
-                context.with_label("cache").with_attribute("iteration", i),
+                context.child("cache").with_attribute("iteration", i),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             );
             let mut mmr = Journaled::<F, _, Digest>::init(
-                context.with_label("merkle").with_attribute("iteration", i),
+                context.child("merkle").with_attribute("iteration", i),
                 &hasher,
                 test_config(iter_cache),
             )
@@ -1693,11 +1676,11 @@ mod tests {
                 .unwrap();
         }
 
-        let final_ctx = context.with_label("final");
+        let final_ctx = context.child("final");
         let final_cache =
-            CacheRef::from_pooler(final_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            CacheRef::from_pooler(final_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            final_ctx.with_label("mmr"),
+            final_ctx.child("mmr"),
             &hasher,
             test_config(final_cache),
         )
@@ -1721,10 +1704,9 @@ mod tests {
     async fn journaled_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.child("merkle"), &hasher, cfg)
             .await
             .unwrap();
         let mut elements = Vec::new();
@@ -1803,10 +1785,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let main_cache =
-            CacheRef::from_pooler(context.with_label("main"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let main_cache = CacheRef::from_pooler(context.child("main"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("main"),
+            context.child("main"),
             &hasher,
             test_config(main_cache),
         )
@@ -1831,7 +1812,7 @@ mod tests {
 
         // Create reference structure for verification to get correct size
         let mut ref_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("ref"),
+            context.child("ref"),
             &hasher,
             Config {
                 journal_partition: "ref-journal-pruned".into(),
@@ -1840,7 +1821,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("ref_cache"),
+                    context.child("ref_cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -1898,7 +1879,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("server"),
+            context.child("server"),
             &hasher,
             Config {
                 journal_partition: "server-journal".into(),
@@ -1907,7 +1888,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("server_cache"),
+                    context.child("server_cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -1931,7 +1912,7 @@ mod tests {
 
         // Only apply elements up to end_loc to the reference structure.
         let mut ref_mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("client"),
+            context.child("client"),
             &hasher,
             Config {
                 journal_partition: "client-journal".into(),
@@ -1940,7 +1921,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(
-                    context.with_label("client_cache"),
+                    context.child("client_cache"),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
                 ),
@@ -1992,10 +1973,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = test_config(page_cache);
-        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("merkle"), &hasher, cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.child("merkle"), &hasher, cfg)
             .await
             .unwrap();
 
@@ -2042,8 +2022,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Test fresh start scenario with completely new structure (no existing data)
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(page_cache),
             range: Location::<F>::new(0)..Location::<F>::new(52),
@@ -2051,7 +2030,7 @@ mod tests {
         };
 
         let mut sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("journal"), sync_cfg, &hasher)
+            Journaled::<F, _, Digest>::init_sync(context.child("journal"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2090,13 +2069,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let init_ctx = context.with_label("init");
-        let init_cache =
-            CacheRef::from_pooler(init_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_ctx = context.child("init");
+        let init_cache = CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // Create initial structure with elements.
         let mut mmr = Journaled::<F, _, Digest>::init(
-            init_ctx.with_label("mmr"),
+            init_ctx.child("mmr"),
             &hasher,
             test_config(init_cache),
         )
@@ -2128,9 +2106,8 @@ mod tests {
         mmr.sync().await.unwrap();
         drop(mmr);
 
-        let sync_ctx = context.with_label("sync");
-        let sync_cache =
-            CacheRef::from_pooler(sync_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let sync_ctx = context.child("sync");
+        let sync_cache = CacheRef::from_pooler(sync_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(sync_cache),
             range: lower_bound_loc..upper_bound_loc,
@@ -2138,7 +2115,7 @@ mod tests {
         };
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(sync_ctx.with_label("journal"), sync_cfg, &hasher)
+            Journaled::<F, _, Digest>::init_sync(sync_ctx.child("journal"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2176,16 +2153,14 @@ mod tests {
     // boundaries.
     async fn journaled_init_sync_partial_overlap_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let init_ctx = context.with_label("init");
-        let init_cache =
-            CacheRef::from_pooler(init_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_ctx = context.child("init");
+        let init_cache = CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let init_cfg = test_config(init_cache);
 
         // Create initial structure with elements.
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(init_ctx.with_label("mmr"), &hasher, init_cfg)
-                .await
-                .unwrap();
+        let mut mmr = Journaled::<F, _, Digest>::init(init_ctx.child("mmr"), &hasher, init_cfg)
+            .await
+            .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..30 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2214,9 +2189,8 @@ mod tests {
         mmr.sync().await.unwrap();
         drop(mmr);
 
-        let sync_ctx = context.with_label("sync");
-        let sync_cache =
-            CacheRef::from_pooler(sync_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let sync_ctx = context.child("sync");
+        let sync_cache = CacheRef::from_pooler(sync_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(sync_cache),
             range: lower_bound_loc..upper_bound_loc,
@@ -2224,7 +2198,7 @@ mod tests {
         };
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(sync_ctx.with_label("journal"), sync_cfg, &hasher)
+            Journaled::<F, _, Digest>::init_sync(sync_ctx.child("journal"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2263,8 +2237,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(page_cache),
@@ -2273,8 +2246,7 @@ mod tests {
         };
 
         let result =
-            Journaled::<F, _, Digest>::init_sync(context.with_label("journal"), sync_cfg, &hasher)
-                .await;
+            Journaled::<F, _, Digest>::init_sync(context.child("journal"), sync_cfg, &hasher).await;
         assert!(matches!(result, Err(Error::InvalidPinnedNodes)));
     }
 
@@ -2297,12 +2269,11 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let init_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let init_cfg = test_config(init_cache);
 
         // Create a structure with some data and prune it
-        let mut mmr = Journaled::<F, _, Digest>::init(context.with_label("mmr"), &hasher, init_cfg)
+        let mut mmr = Journaled::<F, _, Digest>::init(context.child("mmr"), &hasher, init_cfg)
             .await
             .unwrap();
 
@@ -2327,7 +2298,7 @@ mod tests {
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.with_label("meta_tamper"), meta_cfg)
+            Metadata::<_, U64, Vec<u8>>::init(context.child("meta_tamper"), meta_cfg)
                 .await
                 .unwrap();
         metadata.clear();
@@ -2340,13 +2311,10 @@ mod tests {
         // After the fix, it returns MissingNode error (pinned nodes for the lower
         // boundary don't exist since they were pruned from journal and weren't
         // stored in metadata at the lower position)
-        let reopen_cache = CacheRef::from_pooler(
-            context.with_label("cache_reopen"),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        );
+        let reopen_cache =
+            CacheRef::from_pooler(context.child("cache_reopen"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let result = Journaled::<F, _, Digest>::init(
-            context.with_label("reopened"),
+            context.child("reopened"),
             &hasher,
             test_config(reopen_cache),
         )
@@ -2376,17 +2344,13 @@ mod tests {
     // prune the journal to match metadata.
     async fn journaled_init_metadata_ahead_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new();
-        let init_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // Create a structure with some data
-        let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("mmr"),
-            &hasher,
-            test_config(init_cache),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Journaled::<F, _, Digest>::init(context.child("mmr"), &hasher, test_config(init_cache))
+                .await
+                .unwrap();
 
         // Add 50 elements
         let mut batch = mmr.new_batch();
@@ -2406,13 +2370,10 @@ mod tests {
 
         // Reopen the structure - should recover correctly with metadata ahead of
         // journal boundary (metadata says 30, journal is section-aligned to 28)
-        let reopen_cache = CacheRef::from_pooler(
-            context.with_label("cache_reopen"),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        );
+        let reopen_cache =
+            CacheRef::from_pooler(context.child("cache_reopen"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("reopened"),
+            context.child("reopened"),
             &hasher,
             test_config(reopen_cache),
         )
@@ -2448,7 +2409,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let init_ctx = context.with_label("init");
+        let init_ctx = context.child("init");
 
         // Use small items_per_blob to create many sections and trigger pruning.
         let init_cfg = Config {
@@ -2457,18 +2418,13 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(
-                init_ctx.with_label("cache"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache: CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         // Create structure with enough elements to span multiple sections.
-        let mut mmr =
-            Journaled::<F, _, Digest>::init(init_ctx.with_label("mmr"), &hasher, init_cfg)
-                .await
-                .unwrap();
+        let mut mmr = Journaled::<F, _, Digest>::init(init_ctx.child("mmr"), &hasher, init_cfg)
+            .await
+            .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..100 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2486,9 +2442,8 @@ mod tests {
         // Reopen via init_sync with range.start > 0. This will prune the journal, so
         // init_sync must read pinned nodes BEFORE pruning or they'll be lost.
         let prune_loc = Location::<F>::new(32);
-        let sync_ctx = context.with_label("sync");
-        let sync_cache =
-            CacheRef::from_pooler(sync_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let sync_ctx = context.child("sync");
+        let sync_cache = CacheRef::from_pooler(sync_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: Config {
                 journal_partition: "mmr-journal".into(),
@@ -2503,7 +2458,7 @@ mod tests {
         };
 
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(sync_ctx.with_label("journal"), sync_cfg, &hasher)
+            Journaled::<F, _, Digest>::init_sync(sync_ctx.child("journal"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2533,11 +2488,10 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("init"),
+            context.child("init"),
             &hasher,
             test_config(page_cache),
         )
@@ -2601,10 +2555,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("init"),
+            context.child("init"),
             &hasher,
             test_config(page_cache),
         )
@@ -2659,10 +2612,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("init"),
+            context.child("init"),
             &hasher,
             test_config(page_cache),
         )
@@ -2711,10 +2663,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("init"),
+            context.child("init"),
             &hasher,
             test_config(page_cache),
         )
@@ -2760,10 +2711,9 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
 
         // Case 1: Empty structure.
-        let empty_cache =
-            CacheRef::from_pooler(context.with_label("empty"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let empty_cache = CacheRef::from_pooler(context.child("empty"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("empty"),
+            context.child("empty"),
             &hasher,
             test_config(empty_cache),
         )
@@ -2784,13 +2734,10 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 2: Structure has nodes but is fully pruned.
-        let pruned_cache = CacheRef::from_pooler(
-            context.with_label("fully_pruned"),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        );
+        let pruned_cache =
+            CacheRef::from_pooler(context.child("fully_pruned"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("fully_pruned"),
+            context.child("fully_pruned"),
             &hasher,
             test_config(pruned_cache),
         )
@@ -2817,13 +2764,10 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 3: All nodes but one (single leaf) are pruned.
-        let leaf_cache = CacheRef::from_pooler(
-            context.with_label("single_leaf"),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        );
+        let leaf_cache =
+            CacheRef::from_pooler(context.child("single_leaf"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("single_leaf"),
+            context.child("single_leaf"),
             &hasher,
             test_config(leaf_cache),
         )
@@ -2872,15 +2816,11 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
-        let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("oob"),
-            &hasher,
-            test_config(page_cache),
-        )
-        .await
-        .unwrap();
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut mmr =
+            Journaled::<F, _, Digest>::init(context.child("oob"), &hasher, test_config(page_cache))
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..8 {
@@ -2917,10 +2857,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("range_validation"),
+            context.child("range_validation"),
             &hasher,
             test_config(page_cache),
         )
@@ -3008,10 +2947,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("non_size_prune"),
+            context.child("non_size_prune"),
             &hasher,
             test_config(page_cache),
         )
@@ -3075,13 +3013,12 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let init_ctx = context.with_label("init");
-        let init_cache =
-            CacheRef::from_pooler(init_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let init_ctx = context.child("init");
+        let init_cache = CacheRef::from_pooler(init_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // Build a structure with 3 leaves, sync, and drop.
         let mut mmr = Journaled::<F, _, Digest>::init(
-            init_ctx.with_label("mmr"),
+            init_ctx.child("mmr"),
             &hasher,
             test_config(init_cache),
         )
@@ -3102,13 +3039,10 @@ mod tests {
         // leaf (for the 4th element) but not its parent nodes. This makes the
         // journal size invalid.
         {
-            let corrupt_cache = CacheRef::from_pooler(
-                context.with_label("cache_corrupt"),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let corrupt_cache =
+                CacheRef::from_pooler(context.child("cache_corrupt"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let journal: Journal<_, Digest> = Journal::init(
-                context.with_label("corrupt"),
+                context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
@@ -3125,16 +3059,15 @@ mod tests {
         }
 
         // init_sync should recover by rewinding to the last valid size.
-        let sync_ctx = context.with_label("sync");
-        let sync_cache =
-            CacheRef::from_pooler(sync_ctx.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let sync_ctx = context.child("sync");
+        let sync_cache = CacheRef::from_pooler(sync_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let sync_cfg = SyncConfig::<F, Digest> {
             config: test_config(sync_cache),
             range: Location::<F>::new(0)..Location::<F>::new(100),
             pinned_nodes: None,
         };
         let sync_mmr =
-            Journaled::<F, _, Digest>::init_sync(sync_ctx.with_label("journal"), sync_cfg, &hasher)
+            Journaled::<F, _, Digest>::init_sync(sync_ctx.child("journal"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -3158,10 +3091,9 @@ mod tests {
 
     async fn journaled_stale_batch_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.clone(),
+            context.child("merkle"),
             &Standard::<Sha256>::new(),
             test_config(page_cache),
         )
@@ -3204,10 +3136,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("merkle"),
+            context.child("merkle"),
             &hasher,
             test_config(page_cache),
         )
@@ -3239,10 +3170,9 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut mmr = Journaled::<F, _, Digest>::init(
-            context.with_label("merkle"),
+            context.child("merkle"),
             &hasher,
             test_config(page_cache),
         )

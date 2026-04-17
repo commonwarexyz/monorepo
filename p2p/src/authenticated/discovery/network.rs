@@ -60,7 +60,7 @@ impl<
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
-            context.with_label("tracker"),
+            context.child("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
@@ -78,7 +78,7 @@ impl<
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
-            context.with_label("router"),
+            context.child("router"),
             router::Config {
                 mailbox_size: cfg.mailbox_size,
             },
@@ -124,11 +124,7 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self
-            .context
-            .with_label("channel")
-            .with_attribute("idx", channel)
-            .take();
+        let clock = self.context.child("channel").with_attribute("idx", channel);
         self.channels.register(channel, rate, backlog, clock)
     }
 
@@ -148,7 +144,7 @@ impl<
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.context.with_label("spawner"),
+            self.context.child("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
@@ -174,7 +170,7 @@ impl<
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.context.with_label("listener"),
+            self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
@@ -189,7 +185,7 @@ impl<
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.context.with_label("dialer"),
+            self.context.child("dialer"),
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,

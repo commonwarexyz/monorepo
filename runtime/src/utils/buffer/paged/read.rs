@@ -367,7 +367,7 @@ impl<B: Blob> Buf for Replay<B> {
 #[cfg(test)]
 mod tests {
     use super::{super::append::Append, *};
-    use crate::{deterministic, Metrics as _, Runner as _, Storage as _};
+    use crate::{deterministic, Runner as _, Storage as _, Supervisor as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
 
@@ -382,7 +382,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
             );
@@ -423,7 +423,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref = super::super::CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
             );
@@ -455,7 +455,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
             );
@@ -514,7 +514,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
             );
@@ -556,7 +556,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref = super::super::CacheRef::from_pooler(
-                context.with_label("cache"),
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
             );

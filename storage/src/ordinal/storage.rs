@@ -167,9 +167,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
             // Initialize read buffer
             let mut replay_blob = ReadBuffer::from_pooler(
-                context
-                    .with_label("replay")
-                    .with_attribute("section", *section),
+                context.child("replay").with_attribute("section", *section),
                 blob.clone(),
                 *size,
                 config.replay_buffer,
@@ -233,9 +231,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 (
                     index,
                     Write::from_pooler(
-                        context
-                            .with_label("writer")
-                            .with_attribute("section", index),
+                        context.child("writer").with_attribute("section", index),
                         blob,
                         len,
                         config.write_buffer,
@@ -285,7 +281,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 .await?;
             entry.insert(Write::from_pooler(
                 self.context
-                    .with_label("writer")
+                    .child("writer")
                     .with_attribute("section", section),
                 blob,
                 len,

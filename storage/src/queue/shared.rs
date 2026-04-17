@@ -249,7 +249,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, Clock, Runner, Spawner, Supervisor,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -273,9 +273,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_basic", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Enqueue from writer
             let pos = writer.enqueue(b"hello".to_vec()).await.unwrap();
@@ -297,9 +297,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_append_commit", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Append several items without committing
             for i in 0..5u8 {
@@ -333,9 +333,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_bulk", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             let range = writer
                 .enqueue_bulk((0..5u8).map(|i| vec![i]))
@@ -358,12 +358,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_concurrent", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Spawn writer task
-            let writer_handle = context.with_label("writer").spawn(|_ctx| async move {
+            let writer_handle = context.child("writer").spawn(|_ctx| async move {
                 for i in 0..10u8 {
                     writer.enqueue(vec![i]).await.unwrap();
                 }
@@ -393,9 +393,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_select", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Enqueue an item
             writer.enqueue(b"test".to_vec()).await.unwrap();
@@ -421,9 +421,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_writer_dropped", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Enqueue items then drop writer
             writer.enqueue(b"item1".to_vec()).await.unwrap();
@@ -456,9 +456,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_try_recv", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // try_recv on empty queue returns None
             let result = reader.try_recv().await.unwrap();
@@ -479,22 +479,22 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = test_config("test_shared_multi_writer", page_cache);
-            let (writer, mut reader) = init(context.with_label("queue"), cfg).await.unwrap();
+            let (writer, mut reader) = init(context.child("queue"), cfg).await.unwrap();
 
             // Clone writer for second task
             let writer2 = writer.clone();
 
             // Spawn two writer tasks
-            let handle1 = context.with_label("writer1").spawn(|_ctx| async move {
+            let handle1 = context.child("writer1").spawn(|_ctx| async move {
                 for i in 0..5u8 {
                     writer.enqueue(vec![i]).await.unwrap();
                 }
                 writer
             });
 
-            let handle2 = context.with_label("writer2").spawn(|_ctx| async move {
+            let handle2 = context.child("writer2").spawn(|_ctx| async move {
                 for i in 5..10u8 {
                     writer2.enqueue(vec![i]).await.unwrap();
                 }

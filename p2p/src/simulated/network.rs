@@ -430,12 +430,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Get clock for the rate limiter
                 let clock = self
                     .context
-                    .with_label(&format!("rate_limiter_{channel}_{public_key}"))
-                    .take();
+                    .child("rate_limiter")
+                    .with_attribute("idx", channel)
+                    .with_attribute("peer", public_key.clone());
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let (sender, handle) = Sender::new(
-                    self.context.with_label("sender"),
+                    self.context.child("sender"),
                     public_key.clone(),
                     channel,
                     self.max_size,
@@ -525,7 +526,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 let link = Link::new(
-                    &mut self.context,
+                    self.context.as_ref(),
                     sender,
                     receiver,
                     receiver_socket,
@@ -565,7 +566,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Create peer
             let socket = self.get_next_socket();
             let peer = Peer::new(
-                self.context.with_label("peer"),
+                self.context.child("peer"),
                 public_key.clone(),
                 socket,
                 self.max_size,
@@ -750,7 +751,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+            let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
 
             // Determine if the message should be delivered
             let should_deliver = self.context.gen_bool(link.success_rate);
@@ -925,7 +926,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded_channel();
         let (low, mut low_receiver) = mpsc::unbounded_channel();
-        let processor = context.with_label("processor").spawn(move |_| async move {
+        let processor = context.child("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -1196,7 +1197,7 @@ impl<P: PublicKey> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded_channel();
 
         // Spawn router
-        context.with_label("router").spawn(|context| async move {
+        context.child("router").spawn(|context| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -1241,50 +1242,48 @@ impl<P: PublicKey> Peer<P> {
 
         // Spawn a task that accepts new connections and spawns a task for each connection
         let (ready_tx, ready_rx) = oneshot::channel();
-        context
-            .with_label("listener")
-            .spawn(move |context| async move {
-                // Initialize listener
-                let mut listener = context.bind(socket).await.unwrap();
-                let _ = ready_tx.send(());
+        context.child("listener").spawn(move |context| async move {
+            // Initialize listener
+            let mut listener = context.bind(socket).await.unwrap();
+            let _ = ready_tx.send(());
 
-                // Continually accept new connections
-                while let Ok((_, _, mut stream)) = listener.accept().await {
-                    // New connection accepted. Spawn a task for this connection
-                    context.with_label("receiver").spawn({
-                        let inbox_sender = inbox_sender.clone();
-                        move |_| async move {
-                            // Receive dialer's public key as a handshake
-                            let dialer = match recv_frame(&mut stream, max_size).await {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    error!("failed to receive public key from dialer");
-                                    return;
-                                }
-                            };
-                            let Ok(dialer) = P::decode(dialer.coalesce()) else {
-                                error!("received public key is invalid");
+            // Continually accept new connections
+            while let Ok((_, _, mut stream)) = listener.accept().await {
+                // New connection accepted. Spawn a task for this connection
+                context.child("receiver").spawn({
+                    let inbox_sender = inbox_sender.clone();
+                    move |_| async move {
+                        // Receive dialer's public key as a handshake
+                        let dialer = match recv_frame(&mut stream, max_size).await {
+                            Ok(data) => data,
+                            Err(_) => {
+                                error!("failed to receive public key from dialer");
                                 return;
-                            };
+                            }
+                        };
+                        let Ok(dialer) = P::decode(dialer.coalesce()) else {
+                            error!("received public key is invalid");
+                            return;
+                        };
 
-                            // Continually receive messages from the dialer and send them to the inbox
-                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                let data = data.coalesce();
-                                let channel = Channel::from_be_bytes(
-                                    data.as_ref()[..Channel::SIZE].try_into().unwrap(),
-                                );
-                                let message = data.slice(Channel::SIZE..);
-                                if let Err(err) =
-                                    inbox_sender.send((channel, (dialer.clone(), message)))
-                                {
-                                    debug!(?err, "failed to send message to mailbox");
-                                    break;
-                                }
+                        // Continually receive messages from the dialer and send them to the inbox
+                        while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                            let data = data.coalesce();
+                            let channel = Channel::from_be_bytes(
+                                data.as_ref()[..Channel::SIZE].try_into().unwrap(),
+                            );
+                            let message = data.slice(Channel::SIZE..);
+                            if let Err(err) =
+                                inbox_sender.send((channel, (dialer.clone(), message)))
+                            {
+                                debug!(?err, "failed to send message to mailbox");
+                                break;
                             }
                         }
-                    });
-                }
-            });
+                    }
+                });
+            }
+        });
 
         // Wait for listener to start before returning
         let _ = ready_rx.await;
@@ -1326,7 +1325,7 @@ struct Link {
 impl Link {
     #[allow(clippy::too_many_arguments)]
     fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
-        context: &mut E,
+        context: &E,
         dialer: P,
         receiver: P,
         socket: SocketAddr,
@@ -1338,7 +1337,7 @@ impl Link {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
         let (inbox, mut outbox) = mpsc::unbounded_channel::<(Channel, IoBuf, SystemTime)>();
-        context.with_label("link").spawn(move |context| async move {
+        context.child("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
             if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
@@ -1391,7 +1390,7 @@ mod tests {
     use super::*;
     use crate::{Manager as _, Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, Quota, Runner as _};
+    use commonware_runtime::{deterministic, Quota, Runner as _, Supervisor};
     use commonware_utils::{ordered::Set, NZUsize};
     use futures::FutureExt;
     use std::num::NonZeroU32;
@@ -1412,7 +1411,7 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
+            let network_context = context.child("network");
 
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -1420,7 +1419,7 @@ mod tests {
             let peers = [pk1.clone(), pk2.clone()];
 
             let (network, oracle) =
-                Network::new_with_peers(network_context.clone(), cfg, peers).await;
+                Network::new_with_peers(network_context.child("simulated"), cfg, peers).await;
             network_context.spawn(|_| network.run());
 
             let control = oracle.control(pk1.clone());
@@ -1463,12 +1462,12 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
+            let network_context = context.child("network");
             let primary = ed25519::PrivateKey::from_seed(11).public_key();
             let secondary = ed25519::PrivateKey::from_seed(12).public_key();
 
             let (network, oracle) = Network::new_with_split_peers(
-                network_context.clone(),
+                network_context.child("simulated"),
                 cfg,
                 [primary.clone()],
                 [secondary.clone()],
@@ -1511,8 +1510,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus two normal peers
@@ -1560,9 +1559,8 @@ mod tests {
                 });
             let peer_a_for_recv = peer_a.clone();
             let peer_b_for_recv = peer_b.clone();
-            let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver.split_with(
-                context.with_label("split_receiver"),
-                move |(sender, _)| {
+            let (mut twin_primary_recv, mut twin_secondary_recv) =
+                twin_receiver.split_with(context.child("split_receiver"), move |(sender, _)| {
                     if sender == &peer_a_for_recv {
                         SplitTarget::Primary
                     } else if sender == &peer_b_for_recv {
@@ -1570,8 +1568,7 @@ mod tests {
                     } else {
                         panic!("unexpected sender");
                     }
-                },
-            );
+                });
 
             // Establish bidirectional links
             let link = ingress::Link {
@@ -1642,8 +1639,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus a third peer
@@ -1672,9 +1669,7 @@ mod tests {
             let (_twin_primary_sender, _twin_secondary_sender) =
                 twin_sender.split_with(|_origin, recipients, _| Some(recipients.clone()));
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
-                .split_with(context.with_label("split_receiver_both"), |_| {
-                    SplitTarget::Both
-                });
+                .split_with(context.child("split_receiver_both"), |_| SplitTarget::Both);
 
             // Establish bidirectional links
             let link = ingress::Link {
@@ -1718,8 +1713,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus a third peer
@@ -1748,9 +1743,7 @@ mod tests {
             let (mut twin_primary_sender, mut twin_secondary_sender) =
                 twin_sender.split_with(|_origin, _, _| None);
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
-                .split_with(context.with_label("split_receiver_both"), |_| {
-                    SplitTarget::None
-                });
+                .split_with(context.child("split_receiver_both"), |_| SplitTarget::None);
 
             // Establish bidirectional links
             let link = ingress::Link {
@@ -1807,8 +1800,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             // Create two public keys
@@ -1861,8 +1854,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             let pk_a = ed25519::PrivateKey::from_seed(21).public_key();
@@ -1931,7 +1924,7 @@ mod tests {
         runner.start(|context| async move {
             type PublicKey = ed25519::PublicKey;
             let (mut network, _) =
-                Network::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+                Network::<deterministic::Context, PublicKey>::new(context.child("simulated"), cfg);
 
             // Test that the next socket address is incremented correctly
             let mut original = network.next_addr;
@@ -1965,7 +1958,7 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            let (network, oracle) = Network::new(context.child("network"), cfg);
             let network_handle = network.start();
 
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
@@ -2045,7 +2038,7 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            let (network, oracle) = Network::new(context.child("network"), cfg);
             let network_handle = network.start();
 
             let sender_pk = ed25519::PrivateKey::from_seed(42).public_key();
@@ -2140,8 +2133,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -2235,7 +2228,7 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };
-            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            let (network, oracle) = Network::new(context.child("network"), cfg);
             network.start();
 
             let pk_x = ed25519::PrivateKey::from_seed(1).public_key();
@@ -2306,8 +2299,8 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };
-            let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let network_context = context.child("network");
+            let (network, oracle) = Network::new(network_context.child("simulated"), cfg);
             network_context.spawn(|_| network.run());
 
             let primary_0 = ed25519::PrivateKey::from_seed(1).public_key();

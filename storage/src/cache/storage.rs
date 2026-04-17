@@ -86,7 +86,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
         let journal = Journal::<E, Record<V>>::init(
-            context.with_label("journal"),
+            context.child("journal"),
             JConfig {
                 partition: cfg.partition,
                 compression: cfg.compression,

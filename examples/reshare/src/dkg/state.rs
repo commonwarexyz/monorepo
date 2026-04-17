@@ -194,10 +194,10 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         max_supported_mode: ModeVersion,
     ) -> Self {
         let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_CAPACITY);
+            CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
-            context.with_label("states"),
+            context.child("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
                 codec_config: (max_read_size, max_supported_mode),
@@ -207,7 +207,7 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         .expect("should be able to init dkg_states metadata");
 
         let msgs = SVJournal::init(
-            context.with_label("msgs"),
+            context.child("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
                 compression: None,
@@ -658,7 +658,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::{Random, Ring};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor};
     use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1};
 
     const TEST_NAMESPACE: &[u8] = b"test_dkg";
@@ -694,7 +694,7 @@ mod tests {
             let round_info = create_round_info(&signers);
 
             let mut storage = Storage::<_, MinPk, _>::init(
-                context.with_label("storage"),
+                context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
                 crate::dkg::MAX_SUPPORTED_MODE,
@@ -736,7 +736,7 @@ mod tests {
             let round_info = create_round_info(&signers);
 
             let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
-                context.with_label("storage"),
+                context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
                 crate::dkg::MAX_SUPPORTED_MODE,
@@ -778,7 +778,7 @@ mod tests {
             let round_info = create_round_info(&signers);
 
             let mut storage = Storage::<_, MinPk, _>::init(
-                context.with_label("storage"),
+                context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
                 crate::dkg::MAX_SUPPORTED_MODE,
@@ -828,7 +828,7 @@ mod tests {
             let round_info = create_round_info(&signers);
 
             let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
-                context.with_label("storage"),
+                context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
                 crate::dkg::MAX_SUPPORTED_MODE,

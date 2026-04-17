@@ -1,13 +1,12 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
-use std::sync::Arc;
 
 /// Label for sequencer height metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -26,7 +25,7 @@ impl SequencerLabel {
 }
 
 /// Metrics for the [super::Engine]
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,
     /// Number of acks processed by status
@@ -42,14 +41,14 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
-    pub verify_duration: histogram::Timed<E>,
+    pub verify_duration: histogram::Timed,
     /// Histogram of time from new proposal to certificate generation
-    pub e2e_duration: histogram::Timed<E>,
+    pub e2e_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let sequencer_heights = Family::default();
         context.register(
             "sequencer_heights",
@@ -100,7 +99,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of time from new proposal to certificate generation",
             e2e_duration.clone(),
         );
-        let clock = Arc::new(context);
 
         Self {
             sequencer_heights,
@@ -110,8 +108,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             certificates,
             propose,
             rebroadcast,
-            verify_duration: histogram::Timed::new(verify_duration, clock.clone()),
-            e2e_duration: histogram::Timed::new(e2e_duration, clock),
+            verify_duration: histogram::Timed::new(verify_duration),
+            e2e_duration: histogram::Timed::new(e2e_duration),
         }
     }
 }

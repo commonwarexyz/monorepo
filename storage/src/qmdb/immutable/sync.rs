@@ -74,7 +74,7 @@ where
 
         // Initialize Merkle structure for sync
         let merkle = Journaled::init_sync(
-            context.with_label("merkle"),
+            context.child("merkle"),
             journaled::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range,
@@ -93,7 +93,7 @@ where
         .await?;
 
         let mut snapshot: Index<T, mmr::Location> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+            Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let last_commit_loc = {
             // Get the start of the log.
@@ -146,7 +146,9 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{
         channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64,
     };
@@ -202,10 +204,9 @@ mod tests {
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let page_cache =
-            CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let config = create_sync_config(&format!("sync-test-{seed}"), page_cache);
-        ImmutableSyncTest::init(context.with_label("db"), config)
+        ImmutableSyncTest::init(context.child("db"), config)
             .await
             .unwrap()
     }
@@ -265,7 +266,7 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone(), Some(Sha256::fill(1))).await;
             let bounds = target_db.bounds().await;
@@ -282,7 +283,7 @@ mod tests {
             }
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config =
                 create_sync_config(&format!("sync_client_{}", context.next_u64()), page_cache);
 
@@ -294,7 +295,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -356,7 +357,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create an empty target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             // Commit to establish a valid root
             apply_ops(&mut target_db, vec![], Some(Sha256::fill(1))).await;
 
@@ -366,7 +367,7 @@ mod tests {
             let target_root = target_db.root();
 
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config =
                 create_sync_config(&format!("empty_sync_{}", context.next_u64()), page_cache);
             let target_db = Arc::new(target_db);
@@ -377,7 +378,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -408,7 +409,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create and populate a simple target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone(), Some(Sha256::fill(0))).await;
 
@@ -420,9 +421,9 @@ mod tests {
 
             // Perform sync
             let page_cache =
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db_config = create_sync_config("persistence-test", page_cache);
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: db_config.clone(),
@@ -431,7 +432,7 @@ mod tests {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
                 },
-                context: client_context.clone(),
+                context: client_context.child("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -454,7 +455,7 @@ mod tests {
             // Drop & reopen the database to test persistence
             synced_db.sync().await.unwrap();
             drop(synced_db);
-            let reopened_db = ImmutableSyncTest::init(context.with_label("reopened"), db_config)
+            let reopened_db = ImmutableSyncTest::init(context.child("reopened"), db_config)
                 .await
                 .unwrap();
 
@@ -485,7 +486,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate initial target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops.clone(), None).await;
 
@@ -509,14 +510,10 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let client = {
                 let config = Config {
-                    context: context.with_label("client"),
+                    context: context.child("client"),
                     db_config: create_sync_config(
                         &format!("update_test_{}", context.next_u64()),
-                        CacheRef::from_pooler(
-                            context.with_label("cache"),
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                     ),
                     target: Target {
                         root: initial_root,
@@ -592,7 +589,7 @@ mod tests {
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec(), None).await;
@@ -609,14 +606,14 @@ mod tests {
             let config = Config {
                 db_config: create_sync_config(
                     &format!("subset_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
                     range: non_empty_range!(lower_bound, op_count),
                 },
-                context: context.with_label("client"),
+                context: context.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -647,14 +644,14 @@ mod tests {
             let original_ops = create_test_ops(50);
 
             // Create two databases
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let sync_db_config = create_sync_config(
                 &format!("partial_{}", context.next_u64()),
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::variable::Db::init(client_context.clone(), sync_db_config.clone())
+                immutable::variable::Db::init(client_context.child("sync"), sync_db_config.clone())
                     .await
                     .unwrap();
 
@@ -682,7 +679,7 @@ mod tests {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -712,14 +709,14 @@ mod tests {
             let target_ops = create_test_ops(40);
 
             // Create two databases
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let sync_config = create_sync_config(
                 &format!("exact_{}", context.next_u64()),
-                CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             );
-            let client_context = context.with_label("client");
+            let client_context = context.child("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::variable::Db::init(client_context.clone(), sync_config.clone())
+                immutable::variable::Db::init(client_context.child("sync"), sync_config.clone())
                     .await
                     .unwrap();
 
@@ -744,7 +741,7 @@ mod tests {
                     root,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 resolver: resolver.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -771,7 +768,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -787,10 +784,10 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(
                     &format!("lb-dec-{}", context.next_u64()),
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -839,7 +836,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -853,10 +850,10 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(
                     &format!("ub-dec-{}", context.next_u64()),
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -902,7 +899,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops.clone(), None).await;
 
@@ -934,10 +931,10 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(
                     &format!("bounds_inc_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
@@ -984,7 +981,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
+            let mut target_db = create_test_db(context.child("target")).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops, None).await;
 
@@ -998,10 +995,10 @@ mod tests {
             let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(target_db);
             let config = Config {
-                context: context.with_label("client"),
+                context: context.child("client"),
                 db_config: create_sync_config(
                     &format!("done_{}", context.next_u64()),
-                    CacheRef::from_pooler(context.with_label("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 ),
                 fetch_batch_size: NZU64!(20),
                 target: Target {

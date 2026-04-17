@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Metrics, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Supervisor, Observer, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     archive::{
@@ -44,7 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_page_cache: CacheRef::from_pooler(context.with_label("cache"), NZU16!(1024), NZUsize!(10)),
+//!         freezer_key_page_cache: CacheRef::from_pooler(context.child("cache"), NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -145,9 +145,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // First initialization
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let archive: Archive<_, Digest, i32> = Archive::init(
-                first_ctx.with_label("archive"),
+                first_ctx.child("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -156,7 +156,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "test-key2".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        first_ctx.with_label("cache"),
+                        first_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -177,9 +177,9 @@ mod tests {
             drop(archive);
 
             // Second initialization
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let mut archive = Archive::init(
-                second_ctx.with_label("archive"),
+                second_ctx.child("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -188,7 +188,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "test-key2".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        second_ctx.with_label("cache"),
+                        second_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -218,9 +218,9 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let third_ctx = context.with_label("third");
+            let third_ctx = context.child("third");
             let archive = Archive::init(
-                third_ctx.with_label("archive"),
+                third_ctx.child("archive"),
                 Config {
                     metadata_partition: "test-metadata2".into(),
                     freezer_table_partition: "test-table2".into(),
@@ -229,7 +229,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "test-key2".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        third_ctx.with_label("cache"),
+                        third_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -271,9 +271,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize archive, sync without writing anything, then drop
-            let first_ctx = context.with_label("first");
+            let first_ctx = context.child("first");
             let mut archive: Archive<_, Digest, i32> = Archive::init(
-                first_ctx.with_label("archive"),
+                first_ctx.child("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),
@@ -282,7 +282,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "empty-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        first_ctx.with_label("cache"),
+                        first_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -304,9 +304,9 @@ mod tests {
             drop(archive);
 
             // Re-initialize -- should not fail with SectionOutOfRange(0)
-            let second_ctx = context.with_label("second");
+            let second_ctx = context.child("second");
             let mut archive: Archive<_, Digest, i32> = Archive::init(
-                second_ctx.with_label("archive"),
+                second_ctx.child("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),
@@ -315,7 +315,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "empty-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        second_ctx.with_label("cache"),
+                        second_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
@@ -341,9 +341,9 @@ mod tests {
             drop(archive);
 
             // Third init to verify persistence
-            let third_ctx = context.with_label("third");
+            let third_ctx = context.child("third");
             let archive: Archive<_, Digest, i32> = Archive::init(
-                third_ctx.with_label("archive"),
+                third_ctx.child("archive"),
                 Config {
                     metadata_partition: "empty-metadata".into(),
                     freezer_table_partition: "empty-table".into(),
@@ -352,7 +352,7 @@ mod tests {
                     freezer_table_resize_chunk_size: 8192,
                     freezer_key_partition: "empty-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(
-                        third_ctx.with_label("cache"),
+                        third_ctx.child("cache"),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),

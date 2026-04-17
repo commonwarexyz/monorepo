@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
@@ -143,18 +143,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut rng = StdRng::seed_from_u64(input.seed);
 
-            let page_cache = CacheRef::from_pooler(
-                context.with_label("cache"),
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            );
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = db_config(suffix, page_cache);
-            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(
-                context.with_label("db"),
-                cfg,
-            )
-            .await
-            .unwrap();
+            let mut db =
+                Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(context.child("db"), cfg)
+                    .await
+                    .unwrap();
 
             let hasher = Standard::<Sha256>::new();
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();

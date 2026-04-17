@@ -61,7 +61,7 @@ impl<
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(
-            context.with_label("batcher"),
+            context.child("batcher"),
             batcher::Config {
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
@@ -78,7 +78,7 @@ impl<
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            context.with_label("voter"),
+            context.child("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
                 elector: cfg.elector,
@@ -101,7 +101,7 @@ impl<
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            context.with_label("resolver"),
+            context.child("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
