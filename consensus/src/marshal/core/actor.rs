@@ -602,6 +602,7 @@ where
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                                     .await;
                                 self.sync_finalized().await;
+                                self.try_dispatch_blocks(&mut application).await;
                                 debug!(?round, %height, "finalized block stored");
                             }
                         } else {
@@ -786,6 +787,7 @@ where
                 // durability).
                 if needs_sync {
                     self.sync_finalized().await;
+                    self.try_dispatch_blocks(&mut application).await;
                 }
 
                 // Handle produce requests in parallel.
@@ -1234,6 +1236,10 @@ where
     /// arrive and [`Self::handle_block_processed`] calls
     /// [`Self::update_processed_height`].
     ///
+    /// Callers must only invoke this after [`Self::sync_finalized`] has made any
+    /// preceding finalized-archive writes durable. In other words, anything fed
+    /// to the application from this method is already durably persisted in marshal.
+    ///
     /// Acks are processed in FIFO order so `last_processed_height` always
     /// advances sequentially.
     ///
@@ -1247,8 +1253,8 @@ where
     /// ```text
     /// Iteration N (caller):
     ///   store_finalization  ->  Archive::put (buffered)
-    ///   try_dispatch_blocks  ->  sends blocks to app, enqueues pending acks
     ///   sync_finalized      ->  archive durable
+    ///   try_dispatch_blocks  ->  sends blocks to app, enqueues pending acks
     ///
     /// Iteration M (ack handler, M > N):
     ///   handle_block_processed   ->  update_processed_height  ->  metadata buffered
@@ -1352,8 +1358,10 @@ where
     ///
     /// Must be called within the same `select_loop!` arm as any preceding
     /// [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes, before yielding back
-    /// to the loop. This ensures archives are durable before the ack handler
-    /// advances `last_processed_height`. See [`Self::try_dispatch_blocks`] for details.
+    /// to the loop. This is the durability barrier for application delivery:
+    /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
+    /// It also ensures archives are durable before the ack handler advances
+    /// `last_processed_height`. See [`Self::try_dispatch_blocks`] for details.
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1403,7 +1411,10 @@ where
 
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
-    /// After persisting the block, attempt to dispatch the next contiguous block to the application.
+    /// After persisting the block, the caller must sync finalized archives
+    /// before dispatching the next contiguous block to the application. The
+    /// buffered archive writes from this method are not a sufficient durability
+    /// guarantee for downstream application state transitions on their own.
     ///
     /// Writes are buffered and not synced. The caller must call
     /// [sync_finalized](Self::sync_finalized) before yielding to the
@@ -1466,7 +1477,6 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
         buffer.finalized(commitment).await;
-        self.try_dispatch_blocks(application).await;
 
         true
     }

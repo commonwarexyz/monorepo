@@ -57,14 +57,14 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
             resolver::handler,
-            Identifier,
+            Identifier, Update,
         },
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Finalization, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, CertifiableAutomaton, Heightable,
+        Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
     use commonware_broadcast::buffered;
@@ -74,8 +74,11 @@ mod tests {
         sha256::Sha256,
         Digestible, Hasher as _,
     };
-    use commonware_macros::{test_group, test_traced};
-    use commonware_p2p::simulated::{self, Network};
+    use commonware_macros::{select, test_group, test_traced};
+    use commonware_p2p::{
+        simulated::{self, Network},
+        Recipients,
+    };
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
@@ -87,12 +90,13 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        channel::{mpsc, oneshot},
+        channel::{fallible::OneshotExt, mpsc, oneshot},
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+        sync::{Arc, Mutex},
         time::Duration,
     };
 
@@ -1530,7 +1534,17 @@ mod tests {
     /// A no-op resolver used by tests that drive the marshal actor's
     /// resolver_rx channel directly. Outbound fetches/cancellations are dropped.
     #[derive(Clone, Default)]
-    struct NoopResolver;
+    struct NoopResolver {
+        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
+    }
+
+    impl NoopResolver {
+        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
+            Self {
+                _keepalive: Some(sender),
+            }
+        }
+    }
 
     impl Resolver for NoopResolver {
         type Key = handler::Request<D>;
@@ -1552,6 +1566,178 @@ mod tests {
         async fn cancel(&mut self, _key: Self::Key) {}
         async fn clear(&mut self) {}
         async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+    }
+
+    /// A no-op buffer used by tests that do not need marshal's dissemination path.
+    #[derive(Clone, Default)]
+    struct NoopBuffer;
+
+    impl crate::marshal::core::Buffer<Standard<B>> for NoopBuffer {
+        type PublicKey = PublicKey;
+        type CachedBlock = B;
+
+        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
+            None
+        }
+
+        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
+            None
+        }
+
+        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
+            let (_sender, receiver) = oneshot::channel();
+            receiver
+        }
+
+        async fn subscribe_by_commitment(
+            &self,
+            _commitment: D,
+        ) -> oneshot::Receiver<Self::CachedBlock> {
+            let (_sender, receiver) = oneshot::channel();
+            receiver
+        }
+
+        async fn finalized(&self, _commitment: D) {}
+
+        async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {}
+    }
+
+    /// A reporter that blocks inside `Update::Block` so tests can abort marshal
+    /// exactly when application delivery starts.
+    #[derive(Clone)]
+    struct GatedBlockReporter {
+        started: Arc<Mutex<Option<oneshot::Sender<Height>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl GatedBlockReporter {
+        fn new() -> (Self, oneshot::Receiver<Height>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    started: Arc::new(Mutex::new(Some(started_tx))),
+                    release: Arc::new(Mutex::new(Some(release_rx))),
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    impl Reporter for GatedBlockReporter {
+        type Activity = Update<B>;
+
+        async fn report(&mut self, activity: Self::Activity) {
+            match activity {
+                Update::Block(block, _ack) => {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        started.send_lossy(block.height());
+                    }
+                    let release = self.release.lock().unwrap().take();
+                    if let Some(release) = release {
+                        let _ = release.await;
+                    }
+                }
+                Update::Tip(_, _, _) => {}
+            }
+        }
+    }
+
+    async fn start_standard_actor<R: Reporter<Activity = Update<B>>>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        application: R,
+    ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>) {
+        let config = Config {
+            provider,
+            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            mailbox_size: 100,
+            view_retention_timeout: ViewDelta::new(10),
+            max_repair: NZUsize!(10),
+            max_pending_acks: NZUsize!(1),
+            block_codec_config: (),
+            partition_prefix: partition_prefix.to_string(),
+            prunable_items_per_section: NZU64!(10),
+            replay_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
+        };
+        let finalizations_by_height = immutable::Archive::init(
+            context.with_label("finalizations_by_height"),
+            immutable::Config {
+                metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
+                freezer_table_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-table"
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_key_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-key"
+                ),
+                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-value"
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
+                ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
+                items_per_section: NZU64!(10),
+                codec_config: S::certificate_codec_config_unbounded(),
+                replay_buffer: config.replay_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations by height archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.with_label("finalized_blocks"),
+            immutable::Config {
+                metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
+                freezer_table_partition: format!(
+                    "{partition_prefix}-finalized_blocks-freezer-table"
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
+                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{partition_prefix}-finalized_blocks-freezer-value"
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
+                ordinal_partition: format!("{partition_prefix}-finalized_blocks-ordinal"),
+                items_per_section: NZU64!(10),
+                codec_config: config.block_codec_config,
+                replay_buffer: config.replay_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+        let (actor, mailbox, _) = Actor::init(
+            context.clone(),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
+        let (resolver_tx, resolver_rx) = mpsc::channel(100);
+        let actor_handle = actor.start(
+            application,
+            NoopBuffer,
+            (resolver_rx, NoopResolver::holding(resolver_tx)),
+        );
+        (mailbox, actor_handle)
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries
@@ -1656,7 +1842,7 @@ mod tests {
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (resolver_rx, NoopResolver),
+                (resolver_rx, NoopResolver::default()),
             );
 
             // Inject a Finalized delivery with garbage payload. The
@@ -1688,6 +1874,93 @@ mod tests {
                 .await
                 .unwrap();
             assert!(response_rx.await.unwrap());
+        });
+    }
+
+    /// Regression: application delivery of a finalized block must only happen
+    /// after the finalized archives are durably synced. Otherwise a crash in
+    /// the delivery callback can expose a block to another subsystem that then
+    /// persists derived state ahead of marshal's height-indexed finalization.
+    #[test_traced("WARN")]
+    fn test_standard_dispatches_finalized_blocks_after_sync() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("validator-{me}");
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), block.digest()),
+                &schemes,
+                QUORUM,
+            );
+
+            let (application, started, release) = GatedBlockReporter::new();
+            let (mut mailbox, actor_handle) = start_standard_actor(
+                context.with_label("validator_0"),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+            )
+            .await;
+
+            assert!(
+                mailbox.verified(round, block.clone()).await,
+                "verified block should persist to the cache"
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+
+            select! {
+                height = started => {
+                    assert_eq!(
+                        height.expect("delivery signal missing"),
+                        Height::new(1),
+                        "application should observe the first finalized block"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("application should observe block delivery promptly");
+                },
+            }
+
+            actor_handle.abort();
+            let _ = release.send_lossy(());
+            drop(mailbox);
+
+            // Yield once so the aborted actor drops its storage handles before restart.
+            context.sleep(Duration::from_millis(1)).await;
+
+            let (mailbox, _actor_handle) = start_standard_actor(
+                context.with_label("validator_0_restart"),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+            )
+            .await;
+
+            let recovered = mailbox
+                .get_block(Height::new(1))
+                .await
+                .expect("finalized block must be durable before delivery");
+            assert_eq!(
+                recovered.digest(),
+                block.digest(),
+                "restart should recover the delivered finalized block by height"
+            );
+            assert_eq!(
+                mailbox
+                    .get_finalization(Height::new(1))
+                    .await
+                    .expect("finalization must be durable before delivery")
+                    .round(),
+                round,
+                "restart should recover the delivered finalization by height"
+            );
         });
     }
 
