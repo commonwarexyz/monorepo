@@ -13,6 +13,13 @@ TLC_MAPPER=${TLC_MAPPER:-simplex}
 TLA_MAX_VIEW=${TLA_MAX_VIEW:-64}
 TLA_MAX_PAYLOADS=${TLA_MAX_PAYLOADS:-$TLA_MAX_VIEW}
 TLA_EPOCH=${TLA_EPOCH:-0}
+# JVM heap / stack for the TLC server. The simplex state space is large
+# enough that the previous 4G default OOM'd mid-/execute, which the
+# Rust client saw as a transport-level "error sending request" because
+# the JVM crashed before responding. Override with JVM_MAX_HEAP /
+# JVM_STACK_SIZE if needed.
+JVM_MAX_HEAP=${JVM_MAX_HEAP:-16g}
+JVM_STACK_SIZE=${JVM_STACK_SIZE:-64m}
 
 usage() {
     echo "Usage: $0 <command> [args]"
@@ -36,6 +43,8 @@ usage() {
     echo "  TLA_MAX_VIEW   (default: $TLA_MAX_VIEW)"
     echo "  TLA_MAX_PAYLOADS (default: $TLA_MAX_PAYLOADS)"
     echo "  TLA_EPOCH      (default: $TLA_EPOCH)"
+    echo "  JVM_MAX_HEAP   (default: $JVM_MAX_HEAP)   # -Xmx"
+    echo "  JVM_STACK_SIZE (default: $JVM_STACK_SIZE)   # -Xss"
     echo ""
     echo "Examples:"
     echo "  $0 compile main_n4f1b0.qnt"
@@ -212,11 +221,14 @@ run() {
 
     # NOTE: -mapperparams entries are separated by ';', not ','. See
     # tlc2.TLC.handleParameters where it does args[index].split(";").
-    # -Xss64m: Quint compiles variant matches and let-bindings into deeply
-    # nested TLA+ LET-INs; TLC recurses one JVM frame per sub-expression.
-    # -Xmx4g: large state spaces need more heap than the JVM default.
+    # -Xss: Quint compiles variant matches and let-bindings into deeply
+    # nested TLA+ LET-INs; TLC recurses one JVM frame per sub-expression,
+    # so the stack bound has to be generous.
+    # -Xmx: the simplex state space needs a large heap; 4g was OOMing
+    # on /execute calls mid-mbf, which the Rust client surfaced as a
+    # transport-level "error sending request" (the JVM had died).
     cd "$TLC_BUILD_DIR" && exec java \
-        -Xss64m -Xmx4g \
+        "-Xss$JVM_STACK_SIZE" "-Xmx$JVM_MAX_HEAP" \
         "-DTLA-Library=$TLC_TLA_LIB" \
         -cp "$TLC_JAR" \
         tlc2.TLCServer \
