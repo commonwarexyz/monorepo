@@ -233,7 +233,6 @@ where
         mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
-        let is_dkg = output.is_none();
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
 
         // Initialize persistent state
@@ -262,6 +261,7 @@ where
         'actor: loop {
             // Get latest epoch and state
             let (epoch, epoch_state) = storage.epoch().expect("epoch should be initialized");
+            let is_dkg = epoch_state.output.is_none();
 
             // Prune everything older than the previous epoch
             if let Some(prev) = epoch.previous() {
@@ -658,5 +658,253 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{dkg::ContinueOnUpdate, setup::PeerConfig};
+    use commonware_cryptography::{
+        bls12381::{dkg::deal, primitives::variant::MinSig},
+        ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+        transcript::Summary,
+        Sha256, Signer,
+    };
+    use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
+    use commonware_p2p::{CheckedSender, LimitedSender, PeerSetSubscription, Provider, Recipients};
+    use commonware_runtime::{deterministic, IoBuf, IoBufs, Runner};
+    use commonware_utils::sync::Mutex;
+    use commonware_utils::{channel::mpsc, ordered::Set, N3f1, TryCollect, NZU32};
+    use core::{future, marker::PhantomData};
+    use std::{
+        collections::BTreeMap, convert::Infallible, sync::Arc, time::Duration, time::SystemTime,
+    };
+
+    #[derive(Clone, Debug)]
+    struct TestManager<P: PublicKey> {
+        tracked: Arc<Mutex<BTreeMap<u64, TrackedPeers<P>>>>,
+    }
+
+    impl<P: PublicKey> Default for TestManager<P> {
+        fn default() -> Self {
+            Self {
+                tracked: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+    }
+
+    impl<P: PublicKey> TestManager<P> {
+        fn tracked(&self, id: u64) -> Option<TrackedPeers<P>> {
+            self.tracked.lock().get(&id).cloned()
+        }
+    }
+
+    impl<P: PublicKey> Provider for TestManager<P> {
+        type PublicKey = P;
+
+        async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+            self.tracked(id)
+        }
+
+        async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+            let (_, rx) = mpsc::unbounded_channel();
+            rx
+        }
+    }
+
+    impl<P: PublicKey> Manager for TestManager<P> {
+        async fn track<R>(&mut self, id: u64, peers: R)
+        where
+            R: Into<TrackedPeers<Self::PublicKey>> + Send,
+        {
+            self.tracked.lock().insert(id, peers.into());
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct InertSender<P: PublicKey> {
+        peers: Arc<[P]>,
+    }
+
+    #[derive(Debug)]
+    struct InertCheckedSender<P> {
+        recipients: Vec<P>,
+    }
+
+    #[derive(Debug, Default)]
+    struct InertReceiver<P> {
+        _phantom: PhantomData<P>,
+    }
+
+    impl<P: PublicKey> LimitedSender for InertSender<P> {
+        type PublicKey = P;
+        type Checked<'a>
+            = InertCheckedSender<P>
+        where
+            Self: 'a;
+
+        async fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(InertCheckedSender {
+                recipients: match recipients {
+                    Recipients::All => self.peers.iter().cloned().collect(),
+                    Recipients::Some(recipients) => recipients,
+                    Recipients::One(recipient) => vec![recipient],
+                },
+            })
+        }
+    }
+
+    impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
+        type PublicKey = P;
+        type Error = Infallible;
+
+        async fn send(
+            self,
+            _: impl Into<IoBufs> + Send,
+            _: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            Ok(self.recipients)
+        }
+    }
+
+    impl<P: PublicKey> Receiver for InertReceiver<P> {
+        type Error = Infallible;
+        type PublicKey = P;
+
+        async fn recv(&mut self) -> Result<(P, IoBuf), Self::Error> {
+            future::pending().await
+        }
+    }
+
+    fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, InertReceiver<P>) {
+        (
+            InertSender {
+                peers: Arc::from(peers.as_ref()),
+            },
+            InertReceiver {
+                _phantom: PhantomData,
+            },
+        )
+    }
+
+    fn peer_config(
+        total: u64,
+        per_round: Vec<u32>,
+    ) -> (
+        PeerConfig<Ed25519PublicKey>,
+        BTreeMap<Ed25519PublicKey, PrivateKey>,
+    ) {
+        let participants = (0..total)
+            .map(|seed| {
+                let signer = PrivateKey::from_seed(seed);
+                (signer.public_key(), signer)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let peer_config = PeerConfig {
+            num_participants_per_round: per_round,
+            participants: participants.keys().cloned().try_collect().unwrap(),
+        };
+        (peer_config, participants)
+    }
+
+    #[test_traced]
+    fn recovered_storage_controls_dkg_mode_on_restart() {
+        let executor = deterministic::Runner::seeded(8);
+        executor.start(|mut context| async move {
+            let (peer_config, participants) = peer_config(6, vec![4]);
+            let first_player = peer_config
+                .dealers(0)
+                .iter()
+                .next()
+                .cloned()
+                .expect("bootstrap dealer exists");
+            let signer = participants
+                .get(&first_player)
+                .cloned()
+                .expect("signer should exist");
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(&mut context, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
+            let share = shares.get_value(&first_player).cloned();
+            let partition_prefix = format!("recovered_restart_{first_player}");
+
+            // Seed durable state that looks like a completed bootstrap DKG, even though the
+            // restarted actor will be given stale startup inputs below.
+            let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
+                context.with_label("seed_storage"),
+                &partition_prefix,
+                NZU32!(peer_config.max_participants_per_round()),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+            storage
+                .set_epoch(
+                    Epoch::new(1),
+                    EpochState {
+                        round: 1,
+                        rng_seed: Summary::random(&mut context),
+                        output: Some(output),
+                        share,
+                    },
+                )
+                .await;
+            drop(storage);
+
+            // Restart with stale bootstrap inputs and capture the tracked peer set that the
+            // actor derives from the recovered epoch.
+            let manager = TestManager::default();
+            let tracked = manager.clone();
+            let (actor, _mailbox) = Actor::<_, _, Sha256, _, MinSig>::new(
+                context.with_label("actor"),
+                Config {
+                    manager,
+                    signer,
+                    mailbox_size: 8,
+                    partition_prefix,
+                    peer_config: peer_config.clone(),
+                    max_supported_mode: crate::dkg::MAX_SUPPORTED_MODE,
+                },
+            );
+            let (sender, receiver) =
+                inert_channel(peer_config.participants.iter().cloned().collect::<Vec<_>>());
+            let (orchestrator_sender, _orchestrator_receiver) = mpsc::channel(4);
+            actor.start(
+                None,
+                None,
+                orchestrator::Mailbox::new(orchestrator_sender),
+                (sender, receiver),
+                ContinueOnUpdate::boxed(),
+            );
+
+            // The fix should make the actor follow the recovered reshare round instead of
+            // re-entering the initial DKG path with all participants as dealers.
+            let mut tracked_peers = None;
+            for _ in 0..10 {
+                tracked_peers = tracked.tracked(1);
+                if tracked_peers.is_some() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let tracked_peers =
+                tracked_peers.expect("actor should track peers for recovered epoch");
+            assert_eq!(tracked_peers.primary, peer_config.dealers(1));
+            assert_ne!(tracked_peers.primary, peer_config.participants);
+            assert_eq!(
+                tracked_peers.secondary,
+                Set::from_iter_dedup(
+                    peer_config
+                        .dealers(2)
+                        .iter()
+                        .chain(peer_config.dealers(3).iter())
+                        .cloned(),
+                ),
+            );
+        });
     }
 }
