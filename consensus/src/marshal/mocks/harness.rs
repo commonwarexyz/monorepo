@@ -498,6 +498,12 @@ async fn advance_hailstorm_to<H: TestHarness>(
         let height = Height::new(height_value);
         let active = active_validator_indices(validators);
         let proposer_idx = active[context.gen_range(0..active.len())];
+        let verifier_count = usize::min(QUORUM as usize, active.len());
+        let verifier_indices = active
+            .iter()
+            .copied()
+            .filter(|idx| *idx != proposer_idx)
+            .choose_multiple(context, verifier_count.saturating_sub(1));
         let block = H::make_test_block(
             *parent,
             parent_commitment.clone(),
@@ -522,12 +528,18 @@ async fn advance_hailstorm_to<H: TestHarness>(
                 .as_mut()
                 .expect("proposer should be active");
             H::propose(&mut proposer.handle, round, &block).await;
-            H::verify(&mut proposer.handle, round, &block, &mut []).await;
             H::report_notarization(
                 &mut proposer.handle.mailbox,
                 H::make_notarization(proposal, schemes, QUORUM),
             )
             .await;
+        }
+
+        for verifier_idx in verifier_indices.iter().copied() {
+            let verifier = validators[verifier_idx]
+                .as_mut()
+                .expect("verifier should be active");
+            H::verify(&mut verifier.handle, round, &block, &mut []).await;
         }
 
         context.sleep(propagation_delay).await;
@@ -583,7 +595,7 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
             setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
                 .await;
         let propagation_delay = link.latency;
-        setup_network_links(&mut oracle, &participants, link).await;
+        setup_network_links(&mut oracle, &participants, link.clone()).await;
 
         let mut validators = Vec::new();
         for (idx, validator) in participants.iter().enumerate() {
@@ -608,9 +620,11 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut target_height = 0u64;
+        let max_interval = interval.max(1);
 
         for shutdown_idx in 0..shutdowns {
-            target_height += interval;
+            let leadup = context.gen_range(1..=max_interval);
+            target_height += leadup;
             advance_hailstorm_to(
                 target_height,
                 &mut context,
@@ -634,10 +648,15 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
             let _ = crashed.actor_handle.await;
             info!(
                 seed,
-                shutdown_idx, selected, persisted_height, "marshal hailstorm shutdown"
+                shutdown_idx,
+                selected,
+                persisted_height,
+                leadup,
+                "marshal hailstorm shutdown"
             );
 
-            target_height += interval;
+            let downtime = context.gen_range(1..=max_interval);
+            target_height += downtime;
             advance_hailstorm_to(
                 target_height,
                 &mut context,
@@ -699,7 +718,11 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
             assert_active_validators_match_canonical(&validators, &canonical).await;
             info!(
                 seed,
-                shutdown_idx, selected, target_height, "marshal hailstorm recovered"
+                shutdown_idx,
+                selected,
+                target_height,
+                downtime,
+                "marshal hailstorm recovered"
             );
         }
 
