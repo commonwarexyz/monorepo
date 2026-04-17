@@ -48,6 +48,29 @@ use std::{
 
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 
+/// Derive the ed25519 fixture using `Runner::seeded(0)` — the same RNG
+/// source `simplex::replay::trace::rehydrate_keys` uses. This is what
+/// makes recorded traces replayable: the fuzz runtime's own RNG is
+/// driven by `FuzzRng` (input-dependent), so keys derived from it
+/// would not match what `replay(&Trace)` rehydrates.
+fn replay_fixture(
+    n: u32,
+    namespace: &[u8],
+) -> commonware_cryptography::certificate::mocks::Fixture<
+    commonware_consensus::simplex::scheme::ed25519::Scheme,
+> {
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let cc = captured.clone();
+    let ns = namespace.to_vec();
+    let runner = deterministic::Runner::seeded(0);
+    runner.start(|mut ctx| async move {
+        let f = commonware_consensus::simplex::scheme::ed25519::fixture(&mut ctx, &ns, n);
+        *cc.lock().unwrap() = Some(f);
+    });
+    let out = captured.lock().unwrap().take().expect("fixture captured");
+    out
+}
+
 type Ed25519Scheme = <SimplexEd25519 as simplex::Simplex>::Scheme;
 
 fn timing_for_fuzz() -> Timing {
@@ -279,8 +302,14 @@ async fn build_honest_trace(mut context: deterministic::Context, input: FuzzInpu
         byzantine_actor: input.byzantine_actor,
     };
 
+    let fixture = replay_fixture(tracing_input.configuration.n, NAMESPACE);
     let (oracle, participants, schemes, mut registrations) =
-        crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+        crate::setup_network_with_fixture::<SimplexEd25519>(
+            &mut context,
+            &tracing_input,
+            fixture,
+        )
+        .await;
 
     let recorder = Recorder::new(participants.clone());
     let app_relay = Arc::new(relay::Relay::new());
@@ -1095,4 +1124,44 @@ pub fn run_quint_twins_recording(input: FuzzInput, corpus_bytes: &[u8]) {
         let trace = recorder.freeze(topology, snapshot);
         persist_trace("simplex_ed25519_quint_twins", &hash_hex, &trace);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strategy::StrategyChoice;
+    use commonware_consensus::simplex::replay::replay;
+
+    fn minimal_fuzz_input() -> FuzzInput {
+        FuzzInput {
+            raw_bytes: vec![0u8; 256],
+            required_containers: 3,
+            degraded_network: false,
+            configuration: N4F0C4,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::SmallScope {
+                fault_rounds: 0,
+                fault_rounds_bound: 1,
+            },
+            byzantine_actor: ByzantineActor::Disrupter,
+        }
+    }
+
+    /// Regression: the fuzz recorder must produce traces that round-trip
+    /// through `simplex::replay::replay`. Before the
+    /// `replay_fixture`/`setup_network_with_fixture` fix, the fuzz
+    /// runtime's FuzzRng-seeded context derived different ed25519 keys
+    /// than `rehydrate_keys` uses on the replay side, so signatures
+    /// didn't verify and the replay Snapshot never matched the recorded
+    /// `expected`.
+    #[test]
+    fn honest_recording_roundtrips_through_rust_replay() {
+        let input = minimal_fuzz_input();
+        let trace = run_honest_pipeline(input).expect("honest pipeline captured a Trace");
+        let actual = replay(&trace);
+        assert_eq!(
+            actual, trace.expected,
+            "Rust replay must agree with the recorder's embedded expected"
+        );
+    }
 }

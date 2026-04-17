@@ -250,9 +250,10 @@ type NetworkChannels = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-async fn setup_network<P: simplex::Simplex>(
+pub async fn setup_network_with_fixture<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
+    fixture: Fixture<P::Scheme>,
 ) -> (
     Oracle<Ed25519PublicKey, deterministic::Context>,
     Vec<Ed25519PublicKey>,
@@ -274,7 +275,7 @@ async fn setup_network<P: simplex::Simplex>(
         schemes,
         verifier: _,
         ..
-    } = P::fixture(context, NAMESPACE, input.configuration.n);
+    } = fixture;
 
     let registrations = register(&mut oracle, &participants).await;
 
@@ -299,6 +300,22 @@ async fn setup_network<P: simplex::Simplex>(
     }
 
     (oracle, participants, schemes, registrations)
+}
+
+/// Compatibility wrapper: derives the fixture from the fuzz context's
+/// RNG. Non-recording paths (pure fuzz invariants) still use this so
+/// key variety tracks the FuzzRng stream.
+async fn setup_network<P: simplex::Simplex>(
+    context: &mut deterministic::Context,
+    input: &FuzzInput,
+) -> (
+    Oracle<Ed25519PublicKey, deterministic::Context>,
+    Vec<Ed25519PublicKey>,
+    Vec<P::Scheme>,
+    HashMap<Ed25519PublicKey, NetworkChannels>,
+) {
+    let fixture = P::fixture(context, NAMESPACE, input.configuration.n);
+    setup_network_with_fixture::<P>(context, input, fixture).await
 }
 
 /// Start a Disrupter with the given strategy and network channels.

@@ -8,12 +8,19 @@
 //!   cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
 //!       <dest_dir> <src_dir> [<src_dir> ...]
 //!
+//! After Quint validation a Rust replay gate is applied: the trace is
+//! run through [`simplex::replay::replay`] and the resulting snapshot
+//! is compared against the Quint-derived `expected`. Mismatches are
+//! rejected so the mbf seed pool never admits traces that don't
+//! round-trip through the real engine.
+//!
 //! Environment:
 //!   * `MODEL_FAULTS` - optional faults override applied before validation.
 //!   * `APPEND=1`     - if set, do not clear `<dest_dir>`; skip source
 //!                      files whose corresponding output already exists.
+//!   * `SKIP_REPLAY_GATE=1` - bypass the Rust replay gate (for debugging).
 
-use commonware_consensus::simplex::replay::Trace;
+use commonware_consensus::simplex::replay::{replay, Trace};
 use commonware_consensus_fuzz::{quint_model, trace_mutator::find_json_files};
 use sha1::{Digest as _, Sha1};
 use std::{env, fs, path::Path, path::PathBuf, process};
@@ -77,6 +84,7 @@ fn main() {
 
     let append = env::var("APPEND").is_ok();
     let faults_override: Option<u32> = env::var("MODEL_FAULTS").ok().and_then(|s| s.parse().ok());
+    let skip_replay_gate = env::var("SKIP_REPLAY_GATE").is_ok();
 
     if !append {
         let _ = fs::remove_dir_all(&dest_dir);
@@ -139,6 +147,17 @@ fn main() {
             };
             if let Some(exp) = expected {
                 trace.expected = exp;
+            }
+
+            if !skip_replay_gate {
+                let actual = replay(&trace);
+                if actual != trace.expected {
+                    eprintln!(
+                        "  skip (replay gate: Rust replay != Quint expected) {}",
+                        path.display()
+                    );
+                    continue;
+                }
             }
 
             let json = match trace.to_json() {
