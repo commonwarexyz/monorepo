@@ -289,12 +289,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Requests that a proposed block is sent to peers, awaiting the actor's
     /// confirmation that the block has been durably persisted before returning.
-    ///
-    /// Returns `true` once the actor has completed `put_sync`. Returns `false`
-    /// if the marshal actor has shut down before acknowledging (typical during
-    /// graceful shutdown). Callers MUST NOT proceed to vote when this returns
-    /// `false` -- the block is not durably stored.
-    #[must_use = "callers must not proceed to vote on an unpersisted block"]
+    #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Proposed { round, block, ack })
@@ -304,12 +299,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Notifies the actor that a block has been verified, awaiting the actor's
     /// confirmation that the block has been durably persisted before returning.
-    ///
-    /// Returns `true` once the actor has completed `put_sync`. Returns `false`
-    /// if the marshal actor has shut down before acknowledging. Callers MUST
-    /// NOT proceed to resolve consensus's certify task as `true` (which would
-    /// drive a finalize vote) when this returns `false`.
-    #[must_use = "callers must not proceed to certify true on an unpersisted block"]
+    #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
