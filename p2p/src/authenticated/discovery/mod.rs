@@ -275,7 +275,7 @@ mod tests {
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         count_running_tasks, deterministic, tokio, BufferPooler, Clock, Handle, IoBuf, Metrics,
-        Network as RNetwork, Observer, Quota, Resolver, Runner, Spawner, Supervisor,
+        Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor,
     };
     use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
     use rand_core::{CryptoRngCore, RngCore};
@@ -870,6 +870,29 @@ mod tests {
 
     #[test_traced]
     fn test_graceful_shutdown() {
+        fn count_named_running_tasks(metrics: &impl Metrics, name: &str) -> usize {
+            metrics
+                .encode()
+                .lines()
+                .filter_map(|line| {
+                    if !line.starts_with("runtime_tasks_running{")
+                        || !line.contains("kind=\"Task\"")
+                    {
+                        return None;
+                    }
+                    let task_name = line.split("name=\"").nth(1)?.split('"').next()?;
+                    (task_name == name).then(|| {
+                        line.split_whitespace()
+                            .last()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .expect(
+                                "runtime_tasks_running should end with an integer gauge value",
+                            )
+                    })
+                })
+                .sum()
+        }
+
         let base_port = 3000;
         let n: usize = 5;
 
@@ -952,37 +975,12 @@ mod tests {
                 complete_receiver.recv().await.unwrap();
             }
 
-            // Verify that network actors started for all peers
-            let metrics_before = context.encode();
-            let is_running = |name: &str| -> bool {
-                metrics_before.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 1")
-                })
-            };
-            for i in 0..n {
-                let prefix = format!("peer_{i}_network");
-                assert!(
-                    is_running(&format!("{prefix}_tracker")),
-                    "peer_{i} tracker should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_router")),
-                    "peer_{i} router should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_spawner")),
-                    "peer_{i} spawner should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_listener")),
-                    "peer_{i} listener should be running"
-                );
-                assert!(
-                    is_running(&format!("{prefix}_dialer")),
-                    "peer_{i} dialer should be running"
+            // Verify that network actors started for all peers.
+            for task in ["tracker", "router", "spawner", "listener", "dialer"] {
+                assert_eq!(
+                    count_named_running_tasks(&context, &format!("peer_network_{task}")),
+                    n,
+                    "{task} should be running for all peers"
                 );
             }
 
@@ -1006,37 +1004,12 @@ mod tests {
             // Give the runtime a tick to process task completions and update metrics
             context.sleep(Duration::from_millis(100)).await;
 
-            // Verify that all network actors stopped
-            let metrics_after = context.encode();
-            let is_stopped = |name: &str| -> bool {
-                metrics_after.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 0")
-                })
-            };
-            for i in 0..n {
-                let prefix = format!("peer_{i}_network");
-                assert!(
-                    is_stopped(&format!("{prefix}_tracker")),
-                    "peer_{i} tracker should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_router")),
-                    "peer_{i} router should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_spawner")),
-                    "peer_{i} spawner should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_listener")),
-                    "peer_{i} listener should be stopped"
-                );
-                assert!(
-                    is_stopped(&format!("{prefix}_dialer")),
-                    "peer_{i} dialer should be stopped"
+            // Verify that all network actors stopped.
+            for task in ["tracker", "router", "spawner", "listener", "dialer"] {
+                assert_eq!(
+                    count_named_running_tasks(&context, &format!("peer_network_{task}")),
+                    0,
+                    "{task} should be stopped for all peers"
                 );
             }
         });

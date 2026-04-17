@@ -164,25 +164,23 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
     let encoded = metrics.encode();
     encoded
         .lines()
-        .filter_map(|line| {
-            if line.starts_with("runtime_tasks_running{")
-                && line.contains("kind=\"Task\"")
-                && line
-                    .split("name=\"")
-                    .nth(1)
-                    .is_some_and(|s| s.split('"').next().unwrap_or("").starts_with(prefix))
-            {
-                Some(
-                    line.split_whitespace()
-                        .last()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .expect("runtime_tasks_running should end with an integer gauge value"),
-                )
-            } else {
-                None
-            }
-        })
+        .filter_map(parse_running_task_metric)
+        .filter_map(|(name, value)| name.starts_with(prefix).then_some(value))
         .sum()
+}
+
+fn parse_running_task_metric(line: &str) -> Option<(&str, usize)> {
+    if !line.starts_with("runtime_tasks_running{") || !line.contains("kind=\"Task\"") {
+        return None;
+    }
+
+    let name = line.split("name=\"").nth(1)?.split('"').next()?;
+    let value = line
+        .split_whitespace()
+        .last()
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("runtime_tasks_running should end with an integer gauge value");
+    Some((name, value))
 }
 
 /// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
