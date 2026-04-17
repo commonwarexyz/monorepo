@@ -12,7 +12,6 @@ use crate::{
         self,
         any::value::ValueEncoding,
         keyless::{operation::Codec, Keyless, Operation},
-        operation::Committable as _,
         sync,
     },
     Context, Persistable,
@@ -25,14 +24,14 @@ impl<E, V, C, H> sync::Database for Keyless<mmr::Family, E, V, C, H>
 where
     E: Context,
     V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<V>>
+    C: Mutable<Item = Operation<mmr::Family, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<V>>,
+        + sync::Journal<Context = E, Op = Operation<mmr::Family, V>>,
     C::Config: Clone + Send,
     H: Hasher,
-    Operation<V>: EncodeShared,
+    Operation<mmr::Family, V>: EncodeShared,
 {
-    type Op = Operation<V>;
+    type Op = Operation<mmr::Family, V>;
     type Journal = C;
     type Hasher = H;
     type Config = super::Config<C::Config>;
@@ -83,7 +82,7 @@ where
         )
         .await?;
 
-        let last_commit_loc = {
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.reader().await;
             let loc = reader
                 .bounds()
@@ -91,13 +90,16 @@ where
                 .checked_sub(1)
                 .expect("journal should not be empty");
             let op = reader.read(loc).await?;
-            assert!(op.is_commit(), "last operation should be a commit");
-            Location::new(loc)
+            let floor = op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
+            (Location::new(loc), floor)
         };
 
         let db = Self {
             journal,
             last_commit_loc,
+            inactivity_floor_loc,
         };
 
         db.sync().await?;
@@ -142,7 +144,7 @@ mod tests {
     /// Type alias for sync tests with variable-length values.
     type KeylessSyncTest = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256>;
 
-    type VariableOp = Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+    type VariableOp = Operation<mmr::Family, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
 
     // Used by both `create_sync_config` and `test_sync_fixed`.
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -204,20 +206,24 @@ mod tests {
         ops
     }
 
-    /// Applies the given operations and commits the database.
+    /// Applies the given operations and commits the database, advancing the inactivity floor to
+    /// the new commit location so sync tests that exercise pruning can do so freely.
     async fn apply_ops(db: &mut KeylessSyncTest, ops: Vec<VariableOp>, metadata: Option<Vec<u8>>) {
+        let mut appends = 0u64;
         let mut batch = db.new_batch();
         for op in ops {
             match op {
                 Operation::Append(value) => {
                     batch = batch.append(value);
+                    appends += 1;
                 }
-                Operation::Commit(_) => {
+                Operation::Commit(_, _) => {
                     panic!("Commit operation not supported in apply_ops");
                 }
             }
         }
-        let merkleized = batch.merkleize(db, metadata);
+        let new_commit = Location::new(db.last_commit_loc().as_u64() + 1 + appends);
+        let merkleized = batch.merkleize(db, metadata, new_commit);
         db.apply_batch(merkleized).await.unwrap();
     }
 
@@ -957,7 +963,8 @@ mod tests {
             for i in 0..20u64 {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
-            let merkleized = batch.merkleize(&target_db, None);
+            let floor = target_db.inactivity_floor_loc();
+            let merkleized = batch.merkleize(&target_db, None, floor);
             target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();

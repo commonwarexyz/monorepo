@@ -348,7 +348,7 @@ macro_rules! impl_resolver_keyless {
             H: Hasher,
         {
             type Digest = H::Digest;
-            type Op = $op<V>;
+            type Op = $op<mmr::Family, V>;
             type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(
@@ -382,7 +382,7 @@ macro_rules! impl_resolver_keyless {
             H: Hasher,
         {
             type Digest = H::Digest;
-            type Op = $op<V>;
+            type Op = $op<mmr::Family, V>;
             type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(
@@ -416,7 +416,7 @@ macro_rules! impl_resolver_keyless {
             H: Hasher,
         {
             type Digest = H::Digest;
-            type Op = $op<V>;
+            type Op = $op<mmr::Family, V>;
             type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(

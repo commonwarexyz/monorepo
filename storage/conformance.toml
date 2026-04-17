@@ -150,13 +150,13 @@ hash = "cce5f888e506282f861e0e49e176b26c65f92e457f0c5f5353fc9b7196f07478"
 n_cases = 65536
 hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
 
-["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<FixedEncoding<U64>>>"]
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<mmr::Family,FixedEncoding<U64>>>"]
 n_cases = 65536
-hash = "c692a20fa40180844888e7a26401f99a45ce3127faeca5f1228a41b454424623"
+hash = "1ad07a5388e328474b353c153617b6a8a3a4713a9895f3f505148f919c49b86d"
 
-["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<VariableEncoding<U64>>>"]
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<mmr::Family,VariableEncoding<U64>>>"]
 n_cases = 65536
-hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
+hash = "c6702e8b8d2e96438df00786289df9ee4ec92a767974fa1484766a246ebc71b7"
 
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<sha256::Digest>>"]
 n_cases = 65536

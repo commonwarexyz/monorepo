@@ -1,9 +1,9 @@
 //! Keyless database types and helpers for the sync example.
 //!
 //! A `keyless` database is append-only: operations are stored by location rather than by key.
-//! It supports `Append(value)` and `Commit(metadata)` operations. For sync, the engine targets
-//! the Merkle root over all operations, and the client reconstructs the same state by replaying
-//! the fetched operations.
+//! It supports `Append(value)` and `Commit(metadata, floor)` operations. For sync, the engine
+//! targets the Merkle root over all operations, and the client reconstructs the same state by
+//! replaying the fetched operations.
 
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
@@ -28,7 +28,7 @@ use tracing::error;
 pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
 
 /// Operation type alias.
-pub type Operation = fixed::Operation<Value>;
+pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
 pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
@@ -71,12 +71,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Append(value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            operations.push(Operation::Commit(None, Location::new(0)));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), Location::new(0)));
     operations
 }
 
@@ -107,8 +107,8 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata) => {
-                    let merkleized = batch.merkleize(self, metadata);
+                Operation::Commit(metadata, floor) => {
+                    let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
@@ -127,9 +127,7 @@ where
     }
 
     async fn inactivity_floor(&self) -> Location {
-        // Keyless databases have no inactivity floor concept.
-        // Use the pruning boundary, same as immutable.
-        self.bounds().await.start
+        self.inactivity_floor_loc()
     }
 
     async fn historical_proof(
@@ -163,7 +161,7 @@ mod tests {
         let ops = <KeylessDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::Commit(Some(_)) = &ops[5] {
+        if let Operation::Commit(Some(_), _) = &ops[5] {
             // ok
         } else {
             panic!("last operation should be a commit with metadata");
