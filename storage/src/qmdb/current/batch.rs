@@ -44,9 +44,8 @@ use std::{
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
     ///
-    /// `ahash` (fast on integer keys) with `BuildHasherDefault` (fixed compile-time seeds,
-    /// no per-construction RNG sampling). Keys are internal chunk indices, not external
-    /// input, so HashDoS is not a concern. Iteration order is not observed by any consumer.
+    /// `ahash` (fast on integer keys) with `BuildHasherDefault` (no per-construction RNG
+    /// sampling). Iteration order is not observed by any consumer.
     pub(crate) chunks: HashMap<usize, [u8; N], BuildHasherDefault<AHasher>>,
     /// Total number of bits (parent + new operations).
     pub(crate) len: u64,
@@ -671,9 +670,8 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     }
 
     fn get_chunk(&self, idx: usize) -> [u8; N] {
-        // Iterative walk of the layer chain. Each layer's overlay either holds the chunk
-        // (return it) or doesn't (descend). Equivalent to recursing into `layer.parent`
-        // but with no per-level stack frame and no reliance on tail-call optimization.
+        // Walk the layer chain. Each layer's overlay either holds the chunk (return it) or
+        // doesn't (descend).
         let mut current = self;
         loop {
             match current {
