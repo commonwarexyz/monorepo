@@ -86,10 +86,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         response: oneshot::Sender<V::Block>,
     },
     /// A request to broadcast a proposed block to peers.
-    ///
-    /// The `ack` is signaled after the block has been durably persisted
-    /// (`cache.put_verified` returns) so callers can establish
-    /// "voted ⟹ persisted" before broadcasting their own notarize vote.
     Proposed {
         /// The round in which the block was proposed.
         round: Round,
@@ -108,10 +104,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         peers: Vec<S::PublicKey>,
     },
     /// A notification that a block has been verified by the application.
-    ///
-    /// The `ack` is signaled after the block has been durably persisted
-    /// (`cache.put_verified` returns) so callers can establish
-    /// "voted ⟹ persisted" before resolving consensus's certify task.
     Verified {
         /// The round in which the block was verified.
         round: Round,
