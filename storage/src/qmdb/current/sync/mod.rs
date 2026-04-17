@@ -286,6 +286,19 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
+            async fn has_local_target_state(
+                context: Self::Context,
+                config: &Self::Config,
+                target: &qmdb::sync::Target<Self::Digest>,
+            ) -> bool {
+                qmdb::any::sync::has_local_target_state::<_, H>(
+                    context,
+                    config.merkle_config.clone(),
+                    target,
+                )
+                .await
+            }
+
             /// Returns the ops root (not the canonical root), since the sync engine verifies
             /// batches against the ops MMR.
             fn root(&self) -> Self::Digest {

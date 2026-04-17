@@ -23,16 +23,23 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+use commonware_runtime::{deterministic, BufferPooler, Clock, Metrics, Runner as _};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     non_empty_range,
-    sync::AsyncRwLock,
+    sync::{AsyncRwLock, Mutex},
     NZU64,
 };
 use futures::{pin_mut, FutureExt};
 use rand::RngCore as _;
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    num::NonZeroU64,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 /// Type alias for the database type of a harness.
 pub(crate) type DbOf<H> = <H as SyncTestHarness>::Db;
@@ -1661,6 +1668,224 @@ where
     });
 }
 
+/// A resolver wrapper that replays the first fresh boundary request against the retained
+/// historical root, then blocks the retry until the test releases it.
+#[derive(Clone)]
+struct ReplayFreshBoundaryResolver<R> {
+    inner: R,
+    historical_target_size: Location,
+    boundary_start: Location,
+    release_historical_gap: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    release_boundary_retry: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    boundary_attempts: Arc<AtomicUsize>,
+}
+
+impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        if op_count == self.historical_target_size {
+            if include_pinned_nodes {
+                let _ = cancel_rx.await;
+                return self
+                    .inner
+                    .get_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        oneshot::channel().1,
+                    )
+                    .await;
+            }
+
+            let release = self.release_historical_gap.lock().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
+
+        if include_pinned_nodes && start_loc == self.boundary_start {
+            let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt == 0 {
+                let mut result = self
+                    .inner
+                    .get_operations(
+                        self.historical_target_size,
+                        start_loc,
+                        max_ops,
+                        false,
+                        oneshot::channel().1,
+                    )
+                    .await?;
+                result.pinned_nodes = None;
+                return Ok(result);
+            }
+
+            let release = self.release_boundary_retry.lock().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
+
+        self.inner
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+    }
+}
+
+/// Test that reaching the journal target does not report completion while the pruned
+/// boundary retry is still outstanding.
+pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+
+        let mut seed = 0;
+        loop {
+            target_db = H::apply_ops(target_db, H::create_ops_seeded(32, seed)).await;
+            target_db
+                .prune(target_db.inactivity_floor_loc().await)
+                .await
+                .unwrap();
+
+            if target_db.inactivity_floor_loc().await > Location::new(0) {
+                break;
+            }
+
+            seed += 1;
+            assert!(seed < 8, "expected prune floor to advance");
+        }
+
+        let old_target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.inactivity_floor_loc().await,
+                target_db.bounds().await.end
+            ),
+        };
+
+        target_db = H::apply_ops(target_db, H::create_ops_seeded(3, seed + 1)).await;
+        let new_target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.inactivity_floor_loc().await,
+                target_db.bounds().await.end
+            ),
+        };
+        let verification_root = target_db.root();
+
+        assert!(old_target.range.start() > Location::new(0));
+        assert!(new_target.range.end() > old_target.range.end());
+
+        let (release_historical_gap_tx, release_historical_gap_rx) = oneshot::channel();
+        let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
+        let target_db = Arc::new(target_db);
+        let resolver = ReplayFreshBoundaryResolver {
+            inner: target_db.clone(),
+            historical_target_size: old_target.range.end(),
+            boundary_start: new_target.range.start(),
+            release_historical_gap: Arc::new(Mutex::new(Some(release_historical_gap_rx))),
+            release_boundary_retry: Arc::new(Mutex::new(Some(release_boundary_retry_rx))),
+            boundary_attempts: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (finish_sender, finish_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(1),
+            target: old_target.clone(),
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: 2,
+            update_rx: Some(update_receiver),
+            finish_rx: Some(finish_receiver),
+            reached_target_tx: Some(reached_sender),
+            max_retained_roots: 1,
+        };
+
+        let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
+
+        update_sender.send(new_target.clone()).await.unwrap();
+        finish_sender.send(()).await.unwrap();
+
+        engine = match engine.step().await.unwrap() {
+            NextStep::Continue(engine) => engine,
+            NextStep::Complete(_) => panic!("target update should not complete sync"),
+        };
+
+        let _ = release_historical_gap_tx.send(());
+
+        let journal_start = engine.journal().size().await;
+        for step_idx in 0..4 {
+            let next_step = engine.step();
+            pin_mut!(next_step);
+
+            select! {
+                result = next_step.as_mut() => {
+                    engine = match result.unwrap() {
+                        NextStep::Continue(engine) => engine,
+                        NextStep::Complete(_) => panic!("boundary retry should still be required"),
+                    };
+                    assert_eq!(
+                        engine.journal().size().await,
+                        journal_start,
+                        "replayed fresh boundary responses must not advance the journal"
+                    );
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!(
+                        "engine should keep processing fetch results while the boundary retry is blocked: step={step_idx}"
+                    );
+                },
+            }
+        }
+        assert!(
+            reached_receiver.recv().now_or_never().is_none(),
+            "engine should not report reached-target while boundary state is missing"
+        );
+
+        let _ = release_boundary_retry_tx.send(());
+
+        let synced_db = engine.sync().await.unwrap();
+
+        let reached = reached_receiver.recv().await.unwrap();
+        assert_eq!(reached, new_target);
+        assert_eq!(synced_db.root(), verification_root);
+
+        synced_db.destroy().await.unwrap();
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
 mod harnesses {
     use super::SyncTestHarness;
     use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
@@ -2040,6 +2265,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_waits_for_boundary_retry_after_target_update() {
+                super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
             }
 
             #[test_traced("WARN")]

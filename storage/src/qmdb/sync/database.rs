@@ -50,6 +50,30 @@ pub trait Database: Sized + Send {
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 
+    /// Returns whether persisted local state already matches the requested sync target.
+    ///
+    /// Databases can override this to allow the sync engine to complete immediately
+    /// when an on-disk database already matches the target and can be rebuilt without
+    /// fetching fresh boundary pins.
+    ///
+    /// # Caller contract
+    ///
+    /// `target.range.start()` **must** equal the committed inactivity floor of
+    /// the target state (i.e. the floor carried by the last `CommitFloor` op).
+    /// Implementations are free to verify only that the persisted tree size and
+    /// root match and to skip checking the persisted merkle pruning boundary
+    /// directly. Callers that set `target.range.start()` below the committed
+    /// floor (or that prune their own database past the committed floor) can cause
+    /// a later [`Self::from_sync_result`] rebuild to fail with `MissingNode` even
+    /// though this function returned `true`.
+    fn has_local_target_state(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &crate::qmdb::sync::Target<Self::Digest>,
+    ) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
+
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 }

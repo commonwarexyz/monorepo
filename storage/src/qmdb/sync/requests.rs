@@ -1,7 +1,9 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
-//! Each request is assigned a unique ID when added. This prevents stale futures
-//! from colliding with fresh requests at the same location after a target update.
+//! Each request is assigned a unique ID and remembers the tree size it was issued
+//! against. This prevents stale futures from colliding with fresh requests at the
+//! same location after a target update, and lets the engine reject replies that
+//! do not match the requested historical view.
 
 use crate::{mmr::Location, qmdb::sync::engine::IndexedFetchResult};
 use commonware_cryptography::Digest;
@@ -17,6 +19,21 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct Id(u64);
 
+/// Immutable details about a tracked request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RequestInfo {
+    /// The location of the first requested operation.
+    pub start_loc: Location,
+    /// The database size the request asked the resolver to prove against.
+    pub target_size: Location,
+}
+
+/// Mutable request state kept while the request is still tracked.
+struct TrackedRequest {
+    info: RequestInfo,
+    _cancel_tx: oneshot::Sender<()>,
+}
+
 /// Manages outstanding fetch requests.
 pub(super) struct Requests<Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
@@ -28,7 +45,7 @@ pub(super) struct Requests<Op, D: Digest, E> {
 
     /// Active requests keyed by ID. Removing an entry drops the cancel sender,
     /// causing the resolver's `cancel_rx.await` to return `Err`.
-    tracked: HashMap<Id, (Location, oneshot::Sender<()>)>,
+    tracked: HashMap<Id, TrackedRequest>,
 
     /// Reverse index from location to request ID, for gap detection.
     by_location: BTreeMap<Location, Id>,
@@ -59,27 +76,41 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
         &mut self,
         id: Id,
         start_loc: Location,
+        target_size: Location,
         cancel_tx: oneshot::Sender<()>,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
     ) {
         if let Some(old_id) = self.by_location.insert(start_loc, id) {
             self.tracked.remove(&old_id);
         }
-        self.tracked.insert(id, (start_loc, cancel_tx));
+        self.tracked.insert(
+            id,
+            TrackedRequest {
+                info: RequestInfo {
+                    start_loc,
+                    target_size,
+                },
+                _cancel_tx: cancel_tx,
+            },
+        );
         self.futures.push(future);
     }
 
-    /// Complete a request by ID. Returns `true` if it was tracked.
-    pub fn remove(&mut self, id: Id) -> bool {
-        if let Some((loc, _cancel_tx)) = self.tracked.remove(&id) {
+    /// Complete a request by ID. Returns its metadata if it was tracked.
+    pub fn remove(&mut self, id: Id) -> Option<RequestInfo> {
+        if let Some(TrackedRequest {
+            info,
+            _cancel_tx: _,
+        }) = self.tracked.remove(&id)
+        {
             // Only remove from by_location if it still points to this ID.
             // A newer request may have superseded this location.
-            if self.by_location.get(&loc) == Some(&id) {
-                self.by_location.remove(&loc);
+            if self.by_location.get(&info.start_loc) == Some(&id) {
+                self.by_location.remove(&info.start_loc);
             }
-            true
+            Some(info)
         } else {
-            false
+            None
         }
     }
 
