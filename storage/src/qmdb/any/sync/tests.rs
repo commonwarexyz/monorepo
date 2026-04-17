@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    merkle::{mmr, mmr::Location},
+    merkle::{self, Location},
     qmdb::{
         self,
         any::traits::DbAny,
@@ -53,40 +53,56 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 /// Type alias for the journal type of a harness.
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
+/// Type alias for the merkle family used by a harness.
+pub(crate) type FamilyOf<H> = <DbOf<H> as qmdb::sync::Database>::Family;
+
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
+    type Family: merkle::Family;
+
     fn destroy(
         self,
-    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<crate::mmr::Family>>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible for the concrete MMR type used in tests.
+// Implement Destructible once for the generic journaled Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
-    async fn destroy(self) -> Result<(), qmdb::Error<crate::mmr::Family>> {
+impl<F: merkle::Family> Destructible
+    for crate::merkle::journaled::Journaled<F, deterministic::Context, Digest>
+{
+    type Family = F;
+
+    async fn destroy(self) -> Result<(), qmdb::Error<F>> {
         self.destroy().await.map_err(qmdb::Error::Merkle)
     }
 }
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Mmr: Destructible + Send;
+    type Merkle: Destructible<Family = Self::Family> + Send;
 
-    /// Get the MMR and journal from the database
-    fn into_log_components(self) -> (Self::Mmr, Self::Journal);
+    /// Get the Merkle structure and journal from the database.
+    fn into_log_components(self) -> (Self::Merkle, Self::Journal);
 
     /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
         &self,
-        loc: Location,
+        loc: Location<Self::Family>,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
 /// Harness for sync tests.
 pub(crate) trait SyncTestHarness: Sized + 'static {
+    /// The merkle family the database under test uses.
+    type Family: merkle::Family;
+
     /// The database type being tested.
-    type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest, Config: Clone>
-        + DbAny<mmr::Family, Key = Digest, Digest = Digest>;
+    type Db: qmdb::sync::Database<
+            Family = Self::Family,
+            Context = deterministic::Context,
+            Digest = Digest,
+            Config: Clone,
+        > + DbAny<Self::Family, Key = Digest, Digest = Digest>;
 
     /// Return the root the sync engine targets.
     fn sync_target_root(db: &Self::Db) -> Digest;
@@ -120,7 +136,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -165,13 +181,14 @@ where
 /// Test that resolver failure is handled correctly
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
 where
-    resolver::tests::FailResolver<OpOf<H>, Digest>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = resolver::tests::FailResolver::<OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -200,7 +217,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -283,8 +300,8 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -349,8 +366,8 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -444,8 +461,9 @@ where
 /// Uses FailResolver to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    resolver::tests::FailResolver<OpOf<H>, Digest>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
+    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -487,7 +505,7 @@ where
         // sync_db should never ask the resolver for operations
         // because it is already complete. Use a resolver that always fails
         // to ensure that it's not being used.
-        let resolver = resolver::tests::FailResolver::<OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
@@ -532,7 +550,7 @@ where
 /// Test that the client fails to sync if the lower bound is decreased via target update.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -601,7 +619,7 @@ where
 /// Test that the client fails to sync if the upper bound is decreased via target update.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -670,7 +688,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -755,7 +773,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -824,7 +842,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -927,7 +945,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -990,7 +1008,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1039,7 +1057,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1093,7 +1111,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1204,7 +1223,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1278,7 +1297,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1360,7 +1379,7 @@ where
             db_config,
             journal,
             Some(pinned_nodes),
-            sync_lower_bound..sync_upper_bound,
+            non_empty_range!(sync_lower_bound, sync_upper_bound),
             1024,
         )
         .await
@@ -1436,7 +1455,7 @@ where
             sync_db_config,
             journal,
             Some(pinned_nodes),
-            sync_lower_bound..sync_upper_bound,
+            non_empty_range!(sync_lower_bound, sync_upper_bound),
             1024,
         )
         .await
@@ -1498,7 +1517,7 @@ where
             new_db_config,
             journal,
             Some(pinned_nodes),
-            lower_bound..upper_bound,
+            non_empty_range!(lower_bound, upper_bound),
             1024,
         )
         .await
@@ -1543,7 +1562,7 @@ where
             new_db_config,
             journal,
             None,
-            Location::new(0)..Location::new(1),
+            non_empty_range!(Location::new(0), Location::new(1)),
             1024,
         )
         .await
@@ -1574,19 +1593,23 @@ struct CorruptFirstPinnedNodesResolver<R> {
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<R> {
+impl<R> Resolver for CorruptFirstPinnedNodesResolver<R>
+where
+    R: Resolver<Digest = Digest>,
+{
+    type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
     async fn get_operations(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
             .get_operations(
@@ -1617,7 +1640,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
 /// succeeds on retry when the resolver returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1671,28 +1694,29 @@ where
 /// A resolver wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
-struct ReplayFreshBoundaryResolver<R> {
+struct ReplayFreshBoundaryResolver<R: Resolver<Digest = Digest>> {
     inner: R,
-    historical_target_size: Location,
-    boundary_start: Location,
+    historical_target_size: Location<R::Family>,
+    boundary_start: Location<R::Family>,
     release_historical_gap: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     release_boundary_retry: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     boundary_attempts: Arc<AtomicUsize>,
 }
 
 impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
+    type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
     async fn get_operations(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         if op_count == self.historical_target_size {
             if include_pinned_nodes {
                 let _ = cancel_rx.await;
@@ -1753,7 +1777,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1888,15 +1912,126 @@ where
 
 mod harnesses {
     use super::SyncTestHarness;
-    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
+    use crate::{
+        merkle::{self, mmb},
+        qmdb::any::value::VariableEncoding,
+        translator::TwoCap,
+    };
     use commonware_cryptography::sha256::Digest;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_utils::test_rng_seeded;
+    use rand::RngCore;
+
+    // ===== Family-generic op creation helpers =====
+    //
+    // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
+    // are structurally identical across families.
+
+    fn create_ordered_fixed_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
+        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(Operation::Update(Update {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_unordered_fixed_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
+        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(Operation::Update(Update(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_ordered_variable_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Vec<u8>>> {
+        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let len = ((rng.next_u64() % 13) + 7) as usize;
+                let value = vec![(rng.next_u64() % 255) as u8; len];
+                ops.push(Operation::Update(Update {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    fn create_unordered_variable_ops<F: merkle::Family>(
+        n: usize,
+        seed: u64,
+    ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Vec<u8>>> {
+        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
+        let mut rng = test_rng_seeded(seed);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let len = ((rng.next_u64() % 13) + 7) as usize;
+                let value = vec![(rng.next_u64() % 255) as u8; len];
+                ops.push(Operation::Update(Update(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    // ===== MMR harnesses (existing, unchanged) =====
 
     // ----- Ordered/Fixed -----
 
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -1954,6 +2089,7 @@ mod harnesses {
     pub struct OrderedVariableHarness;
 
     impl SyncTestHarness for OrderedVariableHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2018,6 +2154,7 @@ mod harnesses {
     pub struct UnorderedFixedHarness;
 
     impl SyncTestHarness for UnorderedFixedHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2075,6 +2212,7 @@ mod harnesses {
     pub struct UnorderedVariableHarness;
 
     impl SyncTestHarness for UnorderedVariableHarness {
+        type Family = crate::mmr::Family;
         type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2134,6 +2272,323 @@ mod harnesses {
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ===== MMB harnesses =====
+
+    // ----- Ordered/Fixed MMB -----
+
+    pub struct OrderedFixedMmbHarness;
+
+    impl SyncTestHarness for OrderedFixedMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::ordered::fixed::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+            create_ordered_fixed_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+            create_ordered_fixed_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            Self::Db::init(ctx, cfg).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.key, Some(data.value));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Ordered/Variable MMB -----
+
+    pub struct OrderedVariableMmbHarness;
+
+    impl SyncTestHarness for OrderedVariableMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::ordered::variable::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+            crate::qmdb::any::ordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+                pooler,
+            )
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_ordered_variable_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_ordered_variable_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::ordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.key, Some(data.value));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Unordered/Fixed MMB -----
+
+    pub struct UnorderedFixedMmbHarness;
+
+    impl SyncTestHarness for UnorderedFixedMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::unordered::fixed::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            Self::Db::init(ctx, cfg).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.0, Some(data.1));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db
+        }
+    }
+
+    // ----- Unordered/Variable MMB -----
+
+    pub struct UnorderedVariableMmbHarness;
+
+    impl SyncTestHarness for UnorderedVariableMmbHarness {
+        type Family = mmb::Family;
+        type Db = crate::qmdb::any::unordered::variable::Db<
+            mmb::Family,
+            Context,
+            Digest,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            TwoCap,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+            crate::qmdb::any::unordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+                pooler,
+            )
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_unordered_variable_ops(n, 0)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>
+        {
+            create_unordered_variable_ops(n, seed)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let seed = ctx.next_u64();
+            let config =
+                crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            mut db: Self::Db,
+            ops: Vec<
+                crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>,
+            >,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::Operation;
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(data) => {
+                        batch = batch.write(data.0, Some(data.1));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {}
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -2266,6 +2721,17 @@ macro_rules! sync_tests_for_harness {
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
+        }
+    };
+}
+
+/// Additional from_sync_result tests that require `FromSyncTestable`.
+/// Only the MMR harnesses have `FromSyncTestable` impls.
+macro_rules! from_sync_result_tests_for_harness {
+    ($harness:ty, $mod_name:ident) => {
+        mod $mod_name {
+            use super::harnesses;
+            use commonware_macros::test_traced;
 
             #[test_traced]
             fn test_sync_waits_for_boundary_retry_after_target_update() {
@@ -2295,7 +2761,28 @@ macro_rules! sync_tests_for_harness {
     };
 }
 
+// MMR harnesses (all tests including from_sync_result)
 sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
 sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
 sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
 sync_tests_for_harness!(harnesses::UnorderedVariableHarness, unordered_variable);
+
+from_sync_result_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed_from_sync);
+from_sync_result_tests_for_harness!(
+    harnesses::OrderedVariableHarness,
+    ordered_variable_from_sync
+);
+from_sync_result_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed_from_sync);
+from_sync_result_tests_for_harness!(
+    harnesses::UnorderedVariableHarness,
+    unordered_variable_from_sync
+);
+
+// MMB harnesses (sync tests only, no from_sync_result)
+sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
+sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
+sync_tests_for_harness!(
+    harnesses::UnorderedVariableMmbHarness,
+    unordered_variable_mmb
+);

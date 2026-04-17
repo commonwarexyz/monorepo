@@ -126,10 +126,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // Keyless databases have no inactivity floor concept.
-        // Use the pruning boundary, same as immutable.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary().await
     }
 
     async fn historical_proof(

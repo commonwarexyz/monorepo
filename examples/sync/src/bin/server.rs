@@ -160,11 +160,11 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, inactivity_floor, size) = {
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
-            database.inactivity_floor().await,
+            database.sync_boundary().await,
             database.size().await,
         )
     };
@@ -172,7 +172,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: non_empty_range!(inactivity_floor, size),
+            range: non_empty_range!(sync_boundary, size),
         },
     };
 
@@ -430,7 +430,7 @@ where
         .collect::<String>();
     info!(
         size = ?database.size().await,
-        inactivity_floor = ?database.inactivity_floor().await,
+        sync_boundary = ?database.sync_boundary().await,
         root = %root_hex,
         "{} database ready",
         DB::name()

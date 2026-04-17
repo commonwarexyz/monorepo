@@ -215,9 +215,10 @@ async fn commit_pending(
 }
 
 async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
-    db.prune(db.inactivity_floor_loc())
-        .await
-        .expect("prune should not fail");
+    let boundary = db
+        .sync_boundary()
+        .expect("sync_boundary should not overflow");
+    db.prune(boundary).await.expect("prune should not fail");
     assert_matches_reference(db, reference_db, context).await;
 }
 

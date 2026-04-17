@@ -7,7 +7,7 @@ use crate::{
     },
     merkle::{
         journaled::{self, Journaled},
-        mmr, Location,
+        Family, Location,
     },
     qmdb::{
         any::ValueEncoding,
@@ -22,23 +22,25 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
-use std::ops::Range;
+use commonware_utils::range::NonEmptyRange;
 
 type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
-impl<E, K, V, C, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> sync::Database for immutable::Immutable<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<Context = E, Op = Operation<K, V>>,
+        + sync::Journal<F, Context = E, Op = Operation<K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
+    type Family = F;
     type Op = Operation<K, V>;
     type Journal = C;
     type Hasher = H;
@@ -67,9 +69,9 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<mmr::Location>,
+        range: NonEmptyRange<Location<F>>,
         apply_batch_size: usize,
-    ) -> Result<Self, Error<mmr::Family>> {
+    ) -> Result<Self, Error<F>> {
         let hasher = StandardHasher::new();
 
         // Initialize Merkle structure for sync
@@ -92,23 +94,18 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, mmr::Location> =
+        let mut snapshot: Index<T, Location<F>> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let start_loc = mmr::Location::new(bounds.start);
+            let start_loc = Location::<F>::new(bounds.start);
 
             // Build snapshot from the log
-            build_snapshot_from_log::<mmr::Family, _, _, _>(
-                start_loc,
-                &reader,
-                &mut snapshot,
-                |_, _| {},
-            )
-            .await?;
+            build_snapshot_from_log::<F, _, _, _>(start_loc, &reader, &mut snapshot, |_, _| {})
+                .await?;
 
             Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
