@@ -51,9 +51,6 @@ pub(crate) mod tests;
 ///
 /// Shared across [crate::qmdb::any] and [crate::qmdb::current] sync because both
 /// build on the same operations-MMR layout and share the same merkle partition.
-/// Uses a read-only MMR peek: the journal and metadata partitions are opened,
-/// the in-memory MMR is reconstructed from persisted pinned nodes, the root is
-/// computed, and handles are dropped. No disk mutations, no snapshot replay.
 ///
 /// # Caller contract
 ///

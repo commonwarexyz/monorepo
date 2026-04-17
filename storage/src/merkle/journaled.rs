@@ -246,7 +246,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// Read-only peek at the persisted structure's root and boundaries.
     ///
     /// Returns `Ok(None)` when:
-    /// - The journal is empty.
     /// - Journal size is structurally invalid and would require a rewind (i.e.
     ///   a crash left the structure in an unrecoverable state for a read-only
     ///   probe).
@@ -266,7 +265,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let journal_size = Position::<F>::new(journal.size().await);
 
         if journal_size == 0 {
-            return Ok(None);
+            let empty_root = *Mem::new(hasher).root();
+            return Ok(Some((Location::new(0), Location::new(0), empty_root)));
         }
 
         // Bail if the journal would require a rewind to reach a valid size.

@@ -264,10 +264,7 @@ where
         }
 
         // Probe for persisted local state matching the target before opening
-        // any engine-owned handles. `has_local_target_state` opens the full
-        // database to inspect bounds and root; running it before journal
-        // creation ensures its handles are dropped before the engine takes
-        // its own, avoiding concurrent access to the same on-disk partition.
+        // any engine-owned handles.
         let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
                 config.context.with_label("local_target_probe"),
