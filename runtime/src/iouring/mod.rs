@@ -1815,7 +1815,8 @@ mod tests {
     fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
         // Verify timeout-wheel advancement ignores stale entries from a reused waiter slot.
         let cfg = Config {
-            max_request_timeout: Duration::from_millis(100),
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(100),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1868,12 +1869,12 @@ mod tests {
 
         // At tick 1, only the stale old entry should expire. The new waiter must
         // stay active and no cancel should be queued.
-        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert!(iouring.pending_cancels.is_empty());
 
         // At tick 3, the real timeout should queue cancellation.
-        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
+        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert_eq!(iouring.pending_cancels.len(), 1);
     }
