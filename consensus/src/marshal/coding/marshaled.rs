@@ -425,10 +425,7 @@ where
                 };
                 timer.observe();
                 if application_valid && !marshal.verified(round, block).await {
-                    debug!(
-                        ?round,
-                        "marshal unavailable during verified ack; skipping certify resolution"
-                    );
+                    debug!(?round, "marshal unable to accept block");
                     return;
                 }
                 tx.send_lossy(application_valid);
@@ -761,11 +758,7 @@ where
                     // Valid re-proposal: notify the marshal and complete the
                     // verification task for `certify`.
                     if !marshal.verified(round, block).await {
-                        debug!(
-                            ?round,
-                            "marshal unavailable during re-proposal verified ack; \
-                             skipping certify resolution"
-                        );
+                        debug!(?round, "marshal unable to accept block");
                         return;
                     }
                     task_tx.send_lossy(true);
@@ -905,11 +898,7 @@ where
                     // During crash recovery we may call `marshal.verified` twice for
                     // the same block; the call is idempotent.
                     if !marshaled.marshal.verified(round, block).await {
-                        debug!(
-                            ?round,
-                            "marshal unavailable during certify re-proposal verified ack; \
-                             skipping certify resolution"
-                        );
+                        debug!(?round, "marshal unable to accept block");
                         return;
                     }
                     tx.send_lossy(true);
@@ -973,12 +962,7 @@ where
                 };
                 let height = block.height();
                 if !self.marshal.proposed(round, block).await {
-                    warn!(
-                        ?round,
-                        ?commitment,
-                        %height,
-                        "marshal unavailable during proposed broadcast; block not persisted"
-                    );
+                    warn!(?round, ?commitment, %height, "marshal unable to accept block");
                     return false;
                 }
                 debug!(?round, ?commitment, %height, "requested broadcast of built block");

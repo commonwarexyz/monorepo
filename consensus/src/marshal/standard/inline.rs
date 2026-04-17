@@ -506,11 +506,7 @@ where
                     return false;
                 };
                 if !self.marshal.proposed(round, block).await {
-                    warn!(
-                        ?round,
-                        ?digest,
-                        "marshal unavailable during proposed broadcast; block not persisted"
-                    );
+                    warn!(?round, ?digest, "marshal unable to accept block");
                     return false;
                 }
                 true

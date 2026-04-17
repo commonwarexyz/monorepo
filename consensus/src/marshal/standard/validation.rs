@@ -206,10 +206,7 @@ where
     };
 
     if application_valid && !marshal.verified(context.round, block).await {
-        debug!(
-            round = ?context.round,
-            "marshal unavailable during verified ack; aborting verify"
-        );
+        debug!(round = ?context.round, "marshal unable to accept block");
         // Persistence not confirmed: caller MUST NOT signal a positive
         // verdict to consensus. Returning `None` causes verify to exit
         // silently without firing tx.

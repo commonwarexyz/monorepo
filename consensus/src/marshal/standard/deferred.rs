@@ -587,11 +587,7 @@ where
                     // If marshal is gone, do not signal certify-true: the block was not durably
                     // stored.
                     if !marshaled.marshal.verified(round, block).await {
-                        debug!(
-                            ?round,
-                            "marshal unavailable during certify re-proposal verified ack; \
-                             skipping certify resolution"
-                        );
+                        debug!(?round, "marshal unable to accept block");
                         return;
                     }
                     tx.send_lossy(true);
@@ -637,12 +633,7 @@ where
                 };
                 let height = block.height();
                 if !self.marshal.proposed(round, block).await {
-                    warn!(
-                        ?round,
-                        ?digest,
-                        %height,
-                        "marshal unavailable during proposed broadcast; block not persisted"
-                    );
+                    warn!(?round, ?digest, %height, "marshal unable to accept block");
                     return false;
                 }
                 debug!(?round, ?digest, %height, "requested broadcast of built block");
