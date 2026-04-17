@@ -307,7 +307,7 @@ dependencies = [
  "lru",
  "percent-encoding",
  "regex-lite",
- "sha2 0.10.9",
+ "sha2",
  "tracing",
  "url",
 ]
@@ -403,7 +403,7 @@ dependencies = [
  "p256 0.11.1",
  "percent-encoding",
  "ring",
- "sha2 0.10.9",
+ "sha2",
  "subtle",
  "time",
  "tracing",
@@ -437,7 +437,7 @@ dependencies = [
  "md-5",
  "pin-project-lite",
  "sha1",
- "sha2 0.10.9",
+ "sha2",
  "tracing",
 ]
 
@@ -752,15 +752,6 @@ dependencies = [
 
 [[package]]
 name = "block-buffer"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
-name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
@@ -1032,7 +1023,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "prometheus-client",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1085,7 +1076,7 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -1097,7 +1088,7 @@ dependencies = [
  "commonware-codec",
  "libfuzzer-sys",
  "paste",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -1123,7 +1114,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "reed-solomon-simd",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -1153,7 +1144,7 @@ dependencies = [
  "commonware-utils",
  "prometheus-client",
  "rand 0.8.5",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1172,7 +1163,7 @@ dependencies = [
  "futures",
  "libfuzzer-sys",
  "rand 0.8.5",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -1183,7 +1174,7 @@ dependencies = [
  "commonware-macros",
  "futures",
  "serde",
- "sha2 0.10.9",
+ "sha2",
  "toml",
 ]
 
@@ -1226,7 +1217,7 @@ dependencies = [
  "rand_distr",
  "rayon",
  "rstest",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1277,8 +1268,8 @@ dependencies = [
  "crc-fast",
  "criterion",
  "ctutils",
+ "curve25519-dalek",
  "ecdsa 0.16.9",
- "ed25519-consensus",
  "getrandom 0.2.16",
  "num-rational",
  "num-traits",
@@ -1288,8 +1279,8 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "rstest",
- "sha2 0.10.9",
- "thiserror 2.0.17",
+ "sha2",
+ "thiserror",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1312,7 +1303,7 @@ dependencies = [
  "num-rational",
  "p256 0.13.2",
  "rand 0.8.5",
- "sha2 0.10.9",
+ "sha2",
  "zeroize",
 ]
 
@@ -1332,7 +1323,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_yaml",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1519,7 +1510,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rand_distr",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1574,7 +1565,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1597,7 +1588,7 @@ dependencies = [
  "futures",
  "prometheus-client",
  "rand 0.8.5",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1632,9 +1623,9 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rayon",
- "sha2 0.10.9",
+ "sha2",
  "sysinfo",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -1676,7 +1667,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "rstest",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
  "zstd",
@@ -1711,7 +1702,7 @@ dependencies = [
  "futures",
  "rand 0.8.5",
  "rand_core 0.6.4",
- "thiserror 2.0.17",
+ "thiserror",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1748,7 +1739,7 @@ dependencies = [
  "prometheus-client",
  "rand 0.8.5",
  "rstest",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1777,7 +1768,7 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "rstest",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "zeroize",
 ]
@@ -1929,7 +1920,7 @@ version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
 dependencies = [
- "digest 0.10.7",
+ "digest",
  "spin",
 ]
 
@@ -2120,7 +2111,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
- "digest 0.10.7",
+ "digest",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -2136,19 +2127,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "curve25519-dalek-ng"
-version = "4.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c359b7249347e46fb28804470d071c921156ad62b3eef5d34e2ba867533dec8"
-dependencies = [
- "byteorder",
- "digest 0.9.0",
- "rand_core 0.6.4",
- "subtle-ng",
- "zeroize",
 ]
 
 [[package]]
@@ -2264,20 +2242,11 @@ dependencies = [
 
 [[package]]
 name = "digest"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3dd60d1080a57a05ab032377049e0591415d2b31afd7028356dbf3cc6dcb066"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
-name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer 0.10.4",
+ "block-buffer",
  "const-oid",
  "crypto-common",
  "subtle",
@@ -2334,7 +2303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
 dependencies = [
  "der 0.7.10",
- "digest 0.10.7",
+ "digest",
  "elliptic-curve 0.13.8",
  "rfc6979 0.4.0",
  "signature 2.2.0",
@@ -2353,20 +2322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ed25519-consensus"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8465edc8ee7436ffea81d21a019b16676ee3db267aa8d5a8d729581ecf998b"
-dependencies = [
- "curve25519-dalek-ng",
- "hex",
- "rand_core 0.6.4",
- "sha2 0.9.9",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "ed25519-zebra"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2378,7 +2333,7 @@ dependencies = [
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
  "serde",
- "sha2 0.10.9",
+ "sha2",
  "subtle",
  "zeroize",
 ]
@@ -2398,7 +2353,7 @@ dependencies = [
  "base16ct 0.1.1",
  "crypto-bigint 0.4.9",
  "der 0.6.1",
- "digest 0.10.7",
+ "digest",
  "ff 0.12.1",
  "generic-array",
  "group 0.12.1",
@@ -2417,7 +2372,7 @@ checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
 dependencies = [
  "base16ct 0.2.0",
  "crypto-bigint 0.5.5",
- "digest 0.10.7",
+ "digest",
  "ff 0.13.1",
  "generic-array",
  "group 0.13.0",
@@ -2853,7 +2808,7 @@ version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
- "digest 0.10.7",
+ "digest",
 ]
 
 [[package]]
@@ -3419,7 +3374,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if",
- "digest 0.10.7",
+ "digest",
 ]
 
 [[package]]
@@ -3667,7 +3622,7 @@ dependencies = [
  "futures-sink",
  "js-sys",
  "pin-project-lite",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
 ]
 
@@ -3697,7 +3652,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prost",
  "reqwest",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
 ]
 
@@ -3726,7 +3681,7 @@ dependencies = [
  "opentelemetry",
  "percent-encoding",
  "rand 0.9.2",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tokio-stream",
 ]
@@ -3745,7 +3700,7 @@ checksum = "51f44edd08f51e2ade572f141051021c5af22677e42b7dd28a88155151c33594"
 dependencies = [
  "ecdsa 0.14.8",
  "elliptic-curve 0.12.3",
- "sha2 0.10.9",
+ "sha2",
 ]
 
 [[package]]
@@ -3757,7 +3712,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
  "primeorder",
- "sha2 0.10.9",
+ "sha2",
 ]
 
 [[package]]
@@ -4067,7 +4022,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.35",
  "socket2 0.6.1",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tracing",
  "web-time",
@@ -4088,7 +4043,7 @@ dependencies = [
  "rustls 0.23.35",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.17",
+ "thiserror",
  "tinyvec",
  "tracing",
  "web-time",
@@ -4765,20 +4720,7 @@ checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
-version = "0.9.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d58a1e1bf39749807d89cf2d98ac2dfa0ff1cb3faa38fbb64dd88ac8013d800"
-dependencies = [
- "block-buffer 0.9.0",
- "cfg-if",
- "cpufeatures",
- "digest 0.9.0",
- "opaque-debug",
+ "digest",
 ]
 
 [[package]]
@@ -4789,7 +4731,7 @@ checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "digest 0.10.7",
+ "digest",
  "sha2-asm",
 ]
 
@@ -4853,7 +4795,7 @@ version = "1.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74233d3b3b2f6d4b006dc19dee745e73e2a6bfb6f93607cd3b02bd5b00797d7c"
 dependencies = [
- "digest 0.10.7",
+ "digest",
  "rand_core 0.6.4",
 ]
 
@@ -4863,7 +4805,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
- "digest 0.10.7",
+ "digest",
  "rand_core 0.6.4",
 ]
 
@@ -4987,12 +4929,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "subtle-ng"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
-
-[[package]]
 name = "syn"
 version = "2.0.110"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5073,31 +5009,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl 2.0.17",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -5472,7 +5388,7 @@ dependencies = [
  "opentelemetry_sdk",
  "rustversion",
  "smallvec",
- "thiserror 2.0.17",
+ "thiserror",
  "tracing",
  "tracing-core",
  "tracing-log",
