@@ -133,15 +133,15 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
-    /// Marshal only emits this after it has durably persisted the delivered block locally.
-    /// For blocks flowing through the normal finalization path, the corresponding
-    /// height-indexed finalization metadata is also durably synced before delivery.
-    ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
     /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
     /// handling, marshal will exit (assuming the application is shutting down).
     ///
     /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
     /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    ///
+    /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
+    /// that make stateful changes based on a block in other locations can access the same block on restart (often
+    /// some logic on startup attempts on infallible read on the last processed block).
     Block(B, A),
 }
