@@ -48,6 +48,8 @@ pub struct Config {
 
 impl Config {
     /// Returns a config that disables spinning entirely.
+    // TODO (#1045): remove `allow(dead_code)` once iouring config is exposed.
+    #[allow(dead_code)]
     pub const fn disabled() -> Self {
         Self {
             budget_us: 0,
