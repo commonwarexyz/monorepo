@@ -1820,7 +1820,10 @@ mod tests {
                 .await
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
-            marshaled.broadcast(commitment, Plan::Propose).await;
+            assert!(
+                marshaled.broadcast(commitment, Plan::Propose).await,
+                "broadcast should persist the proposed block before returning"
+            );
 
             // Abort marshal immediately after broadcast returns; the propose
             // path must already have persisted the block.

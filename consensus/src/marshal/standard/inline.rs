@@ -387,6 +387,9 @@ where
                 };
                 let block = match decision {
                     Decision::Complete(valid) => {
+                        if valid {
+                            available_blocks.lock().insert((context.round, digest));
+                        }
                         tx.send_lossy(valid);
                         return;
                     }
@@ -732,6 +735,86 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("certify should not hang when block is already available in marshal");
+                },
+            }
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_reproposal_uses_available_blocks_after_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let marshal_actor_handle = setup.actor_handle;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_block = B::new::<Sha256>(
+                Ctx {
+                    round: boundary_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                boundary_height,
+                1900,
+            );
+            let boundary_digest = boundary_block.digest();
+            assert!(marshal.proposed(boundary_round, boundary_block).await);
+
+            let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
+            let reproposal_context = Ctx {
+                round: reproposal_round,
+                leader: me,
+                parent: (View::new(boundary_height.get()), boundary_digest),
+            };
+
+            let verify_rx = inline.verify(reproposal_context, boundary_digest).await;
+            assert!(
+                verify_rx.await.unwrap(),
+                "verify should accept a valid boundary re-proposal"
+            );
+
+            marshal_actor_handle.abort();
+            drop(marshal);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let certify_rx = inline.certify(reproposal_round, boundary_digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify should use the available_blocks fast path for verified re-proposals"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not depend on marshal after verify cached a re-proposal");
                 },
             }
         });
