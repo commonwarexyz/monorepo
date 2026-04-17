@@ -387,11 +387,11 @@ impl Batch {
         let payload = namespace
             .map(|ns| Cow::Owned(union_unique(ns, message)))
             .unwrap_or_else(|| Cow::Borrowed(message));
-        self.verifier.queue(
+        self.verifier.queue((
             public_key.key,
             ed25519_consensus::Signature::from(signature.raw),
             &payload,
-        );
+        ));
         true
     }
 }
