@@ -679,8 +679,6 @@ mod tests {
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 
-    // Satisfies the `Manager + Provider` trait bounds without exercising peer tracking; the
-    // recovered-vs-startup-input divergence is observed via the orchestrator mailbox.
     #[derive(Clone, Debug)]
     struct NoopManager<P: PublicKey>(PhantomData<P>);
 
