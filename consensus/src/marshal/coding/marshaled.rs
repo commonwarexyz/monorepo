@@ -266,9 +266,9 @@ where
             scheme_provider,
             strategy,
             epocher,
+            last_built: Arc::new(Mutex::new(None)),
             verification_tasks: VerificationTasks::new(),
             cached_genesis: Arc::new(OnceLock::new()),
-            last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
             verify_duration,
@@ -503,8 +503,8 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
-        let cached_genesis = self.cached_genesis.clone();
         let last_built = self.last_built.clone();
+        let cached_genesis = self.cached_genesis.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
