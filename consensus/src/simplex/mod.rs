@@ -753,7 +753,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1011,7 +1013,9 @@ mod tests {
                 let is_observer = *validator == public_key_observer;
 
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let signing = if is_observer {
@@ -1178,7 +1182,9 @@ mod tests {
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
                     // Create scheme context
-                    let context = context.child("validator").with_attribute("validator", validator);
+                    let context = context
+                        .child("validator")
+                        .with_attribute("validator", validator);
 
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
@@ -1361,7 +1367,9 @@ mod tests {
                 }
 
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1619,7 +1627,9 @@ mod tests {
                 }
 
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1842,7 +1852,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2022,7 +2034,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2222,7 +2236,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2418,7 +2434,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2658,7 +2676,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -2849,7 +2869,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -3024,7 +3046,9 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
@@ -3203,7 +3227,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3364,7 +3390,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3473,7 +3501,10 @@ mod tests {
 
             // Recreate engine
             info!(idx, ?validator, "restarting validator");
-            let context = context.child("validator").with_attribute("validator", validator).with_attribute("state", "restarted");
+            let context = context
+                .child("validator")
+                .with_attribute("validator", validator)
+                .with_attribute("state", "restarted");
 
             // Start engine
             let reporter_config = mocks::reporter::Config {
@@ -3686,7 +3717,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3845,7 +3878,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -4017,7 +4052,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -4168,7 +4205,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -4546,7 +4585,9 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -4894,7 +4935,9 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -4905,10 +4948,7 @@ mod tests {
                         scheme: schemes[idx].clone(),
                     };
                     let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
-                        mocks::nullify_only::NullifyOnly::new(
-                            context.child("byzantine"),
-                            cfg,
-                        );
+                        mocks::nullify_only::NullifyOnly::new(context.child("byzantine"), cfg);
                     engine.start(pending);
                     // Recovered/resolver channels are unused for byzantine actors.
                     drop(recovered);
@@ -4920,10 +4960,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.child("reporter"),
-                        reporter_config,
-                    );
+                    let reporter =
+                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     honest_reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -5119,7 +5157,9 @@ mod tests {
             let monitor_reporter = Arc::new(Mutex::new(None));
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
@@ -5267,7 +5307,9 @@ mod tests {
             let mut engine_handlers = BTreeMap::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.child("validator").with_attribute("validator", validator);
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -5370,7 +5412,11 @@ mod tests {
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
-                let context = context.child("validator").with_attribute("validator", validator).with_attribute("restart", i).with_attribute("state", "restarted");
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator)
+                    .with_attribute("restart", i)
+                    .with_attribute("state", "restarted");
 
                 // Start engine
                 let (pending, recovered, resolver) =
@@ -5840,7 +5886,9 @@ mod tests {
                         certificate_sender.split_with(make_certificate_forwarder());
                     let (certificate_receiver_primary, certificate_receiver_secondary) =
                         certificate_receiver.split_with(
-                            context.child("recovered_split").with_attribute("split", idx),
+                            context
+                                .child("recovered_split")
+                                .with_attribute("split", idx),
                             make_certificate_router(),
                         );
 
@@ -6016,20 +6064,17 @@ mod tests {
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
                     let required = trailing_finalizations;
-                    finalizers.push(
-                        context
-                            .child("finalizer")
-                            .with_attribute("index", i)
-                            .spawn(move |_| async move {
-                        let mut count = 0usize;
-                        while count < required {
-                            let view = monitor.recv().await.expect("event missing");
-                            if view > prefix_end {
-                                count += 1;
+                    finalizers.push(context.child("finalizer").with_attribute("index", i).spawn(
+                        move |_| async move {
+                            let mut count = 0usize;
+                            while count < required {
+                                let view = monitor.recv().await.expect("event missing");
+                                if view > prefix_end {
+                                    count += 1;
+                                }
                             }
-                        }
-                    }),
-                    );
+                        },
+                    ));
                 }
                 join_all(finalizers).await;
 
