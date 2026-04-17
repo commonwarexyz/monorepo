@@ -271,7 +271,8 @@ where
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its Merkle structure to the historical state
-    /// at `size`.
+    /// at `size`. The inactivity floor is restored from the rewind target commit operation, so
+    /// the post-rewind floor matches the floor that was in effect at that commit.
     ///
     /// # Errors
     ///
@@ -365,6 +366,11 @@ where
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`Error::StaleBatch`].
+    ///
+    /// The batch's declared inactivity floor must be monotonically non-decreasing with respect
+    /// to the current floor and must not exceed the batch's total operation count. Violations
+    /// return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`]. Floor validation happens
+    /// before any journal mutation, so the database is untouched on floor errors.
     ///
     /// Returns the range of locations written.
     ///
@@ -1984,6 +1990,8 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(3));
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        let root_before = db.root();
+        let last_commit_before = db.last_commit_loc();
 
         // Try to commit with a lower floor; apply_batch rejects.
         let merkleized =
@@ -1996,8 +2004,10 @@ pub(crate) mod tests {
             "unexpected error: {err:?}"
         );
 
-        // Current floor unchanged after the rejected batch.
+        // DB state must be untouched: floor, last_commit_loc, and root unchanged.
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.root(), root_before);
 
         db.destroy().await.unwrap();
     }
@@ -2067,6 +2077,123 @@ pub(crate) mod tests {
 
         // Pruning up to the floor works.
         db.prune(floor_a).await.unwrap();
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
+    /// with identical appends but different floors must produce different roots.
+    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H>(
+        mut db_a: Keyless<F, deterministic::Context, V, C, H>,
+        mut db_b: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let appends = [V::Value::make(1), V::Value::make(2)];
+
+        // db_a commits with floor=0.
+        let mut batch_a = db_a.new_batch();
+        for v in appends.iter() {
+            batch_a = batch_a.append(v.clone());
+        }
+        db_a.apply_batch(batch_a.merkleize(&db_a, None, Location::new(0)))
+            .await
+            .unwrap();
+
+        // db_b commits the same appends but with floor=3 (= commit location).
+        let mut batch_b = db_b.new_batch();
+        for v in appends.iter() {
+            batch_b = batch_b.append(v.clone());
+        }
+        db_b.apply_batch(batch_b.merkleize(&db_b, None, Location::new(3)))
+            .await
+            .unwrap();
+
+        assert_ne!(db_a.root(), db_b.root());
+
+        db_a.destroy().await.unwrap();
+        db_b.destroy().await.unwrap();
+    }
+
+    /// A floor equal to the batch's total operation count is on the boundary of acceptance.
+    pub(crate) async fn test_keyless_db_floor_at_total_size_accepted<F: Family, V, C, H>(
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // 2 appends + 1 commit on top of the initial commit: total_size = 4.
+        // Setting floor = 4 is on the boundary (inclusive).
+        let total_size = Location::<F>::new(4);
+        db.apply_batch(
+            db.new_batch()
+                .append(V::Value::make(1))
+                .append(V::Value::make(2))
+                .merkleize(&db, None, total_size),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.inactivity_floor_loc(), total_size);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
+    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<F: Family, V, C, H>(
+        context: deterministic::Context,
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // First commit: 2 appends + commit, floor advances to 3.
+        let floor_a = Location::<F>::new(3);
+        db.apply_batch(
+            db.new_batch()
+                .append(V::Value::make(1))
+                .append(V::Value::make(2))
+                .merkleize(&db, None, floor_a),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+        let rewind_target = Location::new(*db.last_commit_loc() + 1);
+
+        // Second commit: 2 appends + commit, floor advances to 6.
+        let floor_b = Location::<F>::new(6);
+        db.apply_batch(
+            db.new_batch()
+                .append(V::Value::make(3))
+                .append(V::Value::make(4))
+                .merkleize(&db, None, floor_b),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+
+        // Drop & reopen to simulate a crash after both commits were durable.
+        drop(db);
+        let mut db = reopen(context.with_label("reopen")).await;
+        assert_eq!(db.inactivity_floor_loc(), floor_b);
+
+        // Rewind to the first commit; floor should restore to floor_a.
+        db.rewind(rewind_target).await.unwrap();
+        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.last_commit_loc(), Location::new(3));
+
+        // Commit the rewind so it's durable, then reopen and confirm the floor again.
+        db.commit().await.unwrap();
+        drop(db);
+        let db = reopen(context.with_label("reopen2")).await;
+        assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         db.destroy().await.unwrap();
     }

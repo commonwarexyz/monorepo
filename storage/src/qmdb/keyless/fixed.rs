@@ -81,7 +81,14 @@ mod test {
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
-        let cfg = db_config("partition", &context);
+        open_db_with_suffix("partition", context).await
+    }
+
+    async fn open_db_with_suffix<F: crate::merkle::Family>(
+        suffix: &str,
+        context: deterministic::Context,
+    ) -> TestDb<F> {
+        let cfg = db_config(suffix, &context);
         TestDb::init(context, cfg).await.unwrap()
     }
 
@@ -362,6 +369,32 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_changes_root() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db_a = open_db_with_suffix::<mmr::Family>("root-a", ctx.with_label("a")).await;
+            let db_b = open_db_with_suffix::<mmr::Family>("root-b", ctx.with_label("b")).await;
+            tests::test_keyless_db_floor_changes_root(db_a, db_b).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_at_total_size_accepted() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_at_total_size_accepted(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_after_reopen_with_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmr::Family>())
+                .await;
+        });
+    }
+
     // mmb::Family variants
 
     #[test_traced("INFO")]
@@ -634,6 +667,32 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
             tests::test_keyless_db_rewind_restores_floor(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_changes_root_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db_a = open_db_with_suffix::<mmb::Family>("root-a", ctx.with_label("a")).await;
+            let db_b = open_db_with_suffix::<mmb::Family>("root-b", ctx.with_label("b")).await;
+            tests::test_keyless_db_floor_changes_root(db_a, db_b).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_at_total_size_accepted_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_at_total_size_accepted(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_after_reopen_with_floor_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 }

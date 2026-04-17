@@ -205,11 +205,17 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                 }
 
                 Operation::Prune => {
+                    let pending_count = pending_appends.len() as u64;
                     let mut batch = db.new_batch();
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
+                    // Advance the floor to the new commit location so the subsequent prune
+                    // actually removes data. This exercises more of the code path than pruning
+                    // at a stale floor would.
+                    let end = db.bounds().await.end;
+                    let floor = Location::<F>::new(end.as_u64() + pending_count);
+                    let merkleized = batch.merkleize(&db, None, floor);
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     db.prune(db.inactivity_floor_loc())
