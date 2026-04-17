@@ -160,6 +160,24 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_proposed_success_implies_recoverable_after_restart() {
+        harness::proposed_success_implies_recoverable_after_restart::<InlineHarness>();
+        harness::proposed_success_implies_recoverable_after_restart::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verified_success_implies_recoverable_after_restart() {
+        harness::verified_success_implies_recoverable_after_restart::<InlineHarness>();
+        harness::verified_success_implies_recoverable_after_restart::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_delivery_visibility_implies_recoverable_after_restart() {
+        harness::delivery_visibility_implies_recoverable_after_restart::<InlineHarness>();
+        harness::delivery_visibility_implies_recoverable_after_restart::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_sync_height_floor() {
         harness::sync_height_floor::<InlineHarness>();
         harness::sync_height_floor::<DeferredHarness>();

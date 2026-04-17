@@ -40,7 +40,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -314,6 +314,318 @@ pub trait TestHarness: 'static + Sized {
         round: Round,
         block: &Self::TestBlock,
     ) -> impl Future<Output = ()> + Send;
+}
+
+fn contract_runner(seed: u64) -> deterministic::Runner {
+    deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30))),
+    )
+}
+
+fn restart_cycles_for_seed(seed: u64) -> usize {
+    let mut rng = test_rng_seeded(seed);
+    rng.gen_range(2..=4)
+}
+
+/// Contract: `marshal.proposed(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>() {
+    for seed in 0u64..16 {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                H::propose(&mut handle, round, &block).await;
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        assert!(
+                        restarted.mailbox.get_block(&digest).await.is_some(),
+                        "marshal.proposed() returning true must imply the block is recoverable \
+                         after restart (seed={seed}, cycle={cycle})"
+                    );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Contract: `marshal.verified(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>() {
+    for seed in 0u64..16 {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                let mut peers: [ValidatorHandle<H>; 0] = [];
+                H::verify(&mut handle, round, &block, &mut peers).await;
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        assert!(
+                        restarted.mailbox.get_block(&digest).await.is_some(),
+                        "marshal.verified() returning true must imply the block is recoverable \
+                         after restart (seed={seed}, cycle={cycle})"
+                    );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Contract: once marshal has delivered a finalized block to the application,
+/// that finalized block and its certificate must already be durable.
+pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>() {
+    for seed in 0u64..16 {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let finalization = H::make_finalization(
+            Proposal::new(round, View::zero(), H::commitment(&block)),
+            &schemes,
+            QUORUM,
+        );
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let application = application.clone();
+            let block = block.clone();
+            let finalization = finalization.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator_with(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                    NZUsize!(1),
+                    application.clone(),
+                )
+                .await;
+                let mut mailbox = setup.mailbox;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: mailbox.clone(),
+                    extra: setup.extra,
+                };
+                let mut peers: [ValidatorHandle<H>; 0] = [];
+                H::verify(&mut handle, round, &block, &mut peers).await;
+                H::report_finalization(&mut mailbox, finalization.clone()).await;
+
+                let height = application.acknowledged().await;
+                assert_eq!(
+                    height,
+                    Height::new(1),
+                    "expected the first delivered finalized block to become visible at height 1 \
+                     before restart (seed={seed})"
+                );
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let expected_round = finalization.round();
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered = restarted.mailbox.get_block(Height::new(1)).await.expect(
+                            "delivered finalized block must be recoverable after restart \
+                             (seed={seed}, cycle={cycle})",
+                        );
+                        assert_eq!(
+                            recovered.height(),
+                            Height::new(1),
+                            "restart should recover the delivered finalized block by height \
+                         (seed={seed}, cycle={cycle})"
+                        );
+                        assert_eq!(
+                            restarted
+                                .mailbox
+                                .get_finalization(Height::new(1))
+                                .await
+                                .expect(
+                                    "delivered finalization must be recoverable after restart \
+                                 (seed={seed}, cycle={cycle})",
+                                )
+                                .round(),
+                            expected_round,
+                            "restart should recover the delivered finalization by height \
+                         (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
 }
 
 // =============================================================================
