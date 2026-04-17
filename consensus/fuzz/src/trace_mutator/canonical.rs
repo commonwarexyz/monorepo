@@ -1,12 +1,6 @@
-//! Mutations that operate on canonical [`Event`] sequences.
+//! Mutations that operate on [`Event`] sequences.
 //!
-//! Counterpart of the legacy [`super`] mutator that works on
-//! `Vec<TraceEntry>`. The legacy module remains in place during the
-//! migration because its [`super::run`] driver is deeply coupled to
-//! [`TraceData`] and the TLC feedback loop; it will be retired together
-//! with the rest of the legacy trace shape in task #14.
-//!
-//! These canonical mutations rearrange [`Event::Deliver`] entries only.
+//! These mutations rearrange [`Event::Deliver`] entries only.
 //! [`Event::Propose`], [`Event::Construct`], and [`Event::Timeout`]
 //! define the causal skeleton of a trace (a `Propose` produces the
 //! payload that `Construct(Notarize)` and subsequent `Deliver`s refer
@@ -37,11 +31,7 @@ use std::{
     process,
 };
 
-/// All mutations supported by the canonical mutator.
-///
-/// A subset of the legacy `Mutation` enum is supported; the rest
-/// (byzantine-specific mutations like `Duplicate` and `ReverseRange`
-/// that rewrite message content) are left as future work.
+/// All mutations supported by the mutator.
 ///
 /// Crate-private because the only supported way to mutate a trace is
 /// [`mutate_once`], which enforces the honest-trace invariant and
@@ -113,7 +103,7 @@ pub(crate) fn try_mutation<R: RngCore>(
     }
 }
 
-/// Mutate a canonical [`Trace`] and return the result.
+/// Mutate a [`Trace`] and return the result.
 ///
 /// Returns `None` if no mutation was applicable.
 ///
@@ -328,8 +318,8 @@ fn shift_group_later<R: RngCore>(
 // --- Metadata extraction helpers --------------------------------------
 //
 // Exposed crate-publicly so other fuzz-level code (mutation schedulers,
-// corpus deduplicators) can reason about canonical events without
-// re-matching on every variant.
+// corpus deduplicators) can reason about events without re-matching on
+// every variant.
 
 /// Opaque per-event identity used for corpus dedup. Distinguishes
 /// every recorded event, including each receiver of a broadcast
@@ -469,7 +459,7 @@ pub fn preserves_first_broadcast_order(original: &[Event], mutated: &[Event]) ->
     true
 }
 
-// --- Canonical TLC mutator driver -------------------------------------
+// --- TLC mutator driver -----------------------------------------------
 
 const DEFAULT_ITERATIONS: usize = 10_000;
 const DEFAULT_RESEED_FREQ: usize = 100;
@@ -479,18 +469,16 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn canonical_seed_dir() -> PathBuf {
-    env::var("CANONICAL_MUTATION_SEEDS_FOLDER")
-        .or_else(|_| env::var("MUTATION_SEEDS_FOLDER"))
+fn seed_dir() -> PathBuf {
+    env::var("MUTATION_SEEDS_FOLDER")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir().join("artifacts/canonical_tlc_mutator"))
+        .unwrap_or_else(|_| manifest_dir().join("artifacts/tlc_mutator"))
 }
 
-fn canonical_output_dir() -> PathBuf {
-    env::var("CANONICAL_MUTATED_TRACES_DIR")
-        .or_else(|_| env::var("MUTATED_TRACES_DIR"))
+fn output_dir() -> PathBuf {
+    env::var("MUTATED_TRACES_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir().join("artifacts/canonical_mutated_traces"))
+        .unwrap_or_else(|_| manifest_dir().join("artifacts/mutated_traces"))
 }
 
 fn resolve_iterations() -> usize {
@@ -529,14 +517,14 @@ fn resolve_mut_per_trace(rng: &mut StdRng) -> usize {
 
 /// PRNG seed selection. If `MUTATOR_SEED` is set, uses that value.
 /// Otherwise draws a random seed and persists it to
-/// `<seed_dir>/.canonical_tlc_mutator_seed` for reproducibility.
+/// `<seed_dir>/.tlc_mutator_seed` for reproducibility.
 fn resolve_seed(seed_dir: &Path) -> u64 {
     if let Some(seed) = env::var("MUTATOR_SEED").ok().and_then(|s| s.parse().ok()) {
         return seed;
     }
     let seed: u64 = rand::random();
     fs::create_dir_all(seed_dir).ok();
-    let seed_file = seed_dir.join(".canonical_tlc_mutator_seed");
+    let seed_file = seed_dir.join(".tlc_mutator_seed");
     if let Err(e) = fs::write(&seed_file, seed.to_string()) {
         eprintln!(
             "warning: failed to write seed to {}: {e}",
@@ -575,10 +563,9 @@ fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Loads every JSON seed under `dir` as a canonical [`Trace`]. Files that
-/// fail to parse are skipped with a warning (mirrors legacy
-/// `load_seeds` semantics).
-fn load_canonical_seeds(dir: &Path) -> Vec<Trace> {
+/// Loads every JSON seed under `dir` as a [`Trace`]. Files that fail to
+/// parse are skipped with a warning.
+fn load_seeds(dir: &Path) -> Vec<Trace> {
     let mut seeds = Vec::new();
     for path in find_json_files(dir) {
         let json = match fs::read_to_string(&path) {
@@ -600,7 +587,7 @@ fn load_canonical_seeds(dir: &Path) -> Vec<Trace> {
     seeds
 }
 
-fn filter_seeds_for_faults_canonical(
+fn filter_seeds_for_faults(
     mut seeds: Vec<Trace>,
     faults_override: Option<u32>,
 ) -> Vec<Trace> {
@@ -610,20 +597,20 @@ fn filter_seeds_for_faults_canonical(
     seeds
 }
 
-fn with_faults_override_canonical(mut trace: Trace, faults_override: Option<u32>) -> Trace {
+fn with_faults_override(mut trace: Trace, faults_override: Option<u32>) -> Trace {
     if let Some(f) = faults_override {
         trace.topology.faults = f;
     }
     trace
 }
 
-/// Cache key for trace-level Quint-rejection dedup. Uses the canonical
-/// JSON encoding so semantically-identical traces collapse.
-fn trace_cache_key_canonical(trace: &Trace) -> Option<String> {
+/// Cache key for trace-level Quint-rejection dedup. Uses the JSON
+/// encoding so semantically-identical traces collapse.
+fn trace_cache_key(trace: &Trace) -> Option<String> {
     trace.to_json().ok().map(|s| sha256_hex(s.as_bytes()))
 }
 
-/// Hex sha256 of arbitrary bytes. Mirrors the legacy helper.
+/// Hex sha256 of arbitrary bytes.
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256Hasher::hash(bytes);
     let mut hex = String::with_capacity(digest.0.len() * 2);
@@ -633,7 +620,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Sha1 hex of the canonical JSON, used as on-disk filename.
+/// Sha1 hex of the trace JSON, used as on-disk filename.
 fn trace_filename(json: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(json.as_bytes());
@@ -646,27 +633,25 @@ fn trace_filename(json: &str) -> String {
 }
 
 /// Mutate `base` once; optionally fall back to the base itself when no
-/// mutation applies and `allow_base_fallback` is set (mirrors the
-/// legacy `next_candidate_trace`).
-fn next_candidate_trace_canonical(
+/// mutation applies and `allow_base_fallback` is set.
+fn next_candidate_trace(
     base: &Trace,
     rng: &mut StdRng,
     faults_override: Option<u32>,
     allow_base_fallback: bool,
 ) -> Option<Trace> {
     if let Some(m) = mutate_once(base, rng) {
-        return Some(with_faults_override_canonical(m, faults_override));
+        return Some(with_faults_override(m, faults_override));
     }
     if allow_base_fallback {
-        return Some(with_faults_override_canonical(base.clone(), faults_override));
+        return Some(with_faults_override(base.clone(), faults_override));
     }
     None
 }
 
-/// Fill `queue` with `n` freshly-mutated traces drawn from random bases
-/// (mirrors legacy `seed_queue_generated`). Existing queue contents are
-/// cleared.
-fn seed_queue_generated_canonical(
+/// Fill `queue` with `n` freshly-mutated traces drawn from random bases.
+/// Existing queue contents are cleared.
+fn seed_queue_generated(
     queue: &mut VecDeque<Trace>,
     base_seeds: &[Trace],
     rng: &mut StdRng,
@@ -680,13 +665,13 @@ fn seed_queue_generated_canonical(
     for idx in 0..n {
         let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
         if let Some(trace) =
-            next_candidate_trace_canonical(base, rng, faults_override, false)
+            next_candidate_trace(base, rng, faults_override, false)
         {
             queue.push_back(trace);
         }
         if n >= 10 && ((idx + 1) % 10 == 0 || idx + 1 == n) {
             println!(
-                "trace_mutator_canonical: queue generation progress {}/{} (queued {})",
+                "trace_mutator: queue generation progress {}/{} (queued {})",
                 idx + 1,
                 n,
                 queue.len()
@@ -695,45 +680,43 @@ fn seed_queue_generated_canonical(
     }
 }
 
-/// Entry point for the canonical trace-mutator binary
-/// (`trace_mutator_canonical`).
+/// Entry point for the trace-mutator binary (`trace_mutator`).
 ///
-/// Trace-native TLC feedback loop: mirrors the legacy
-/// [`super::run`] driver but operates on [`Trace`] end-to-end
+/// Trace-native TLC feedback loop: operates on [`Trace`] end-to-end
 /// (seeds via [`Trace::from_json`], TLC actions via
 /// [`tlc_encoder::encode_from_trace`], Quint gate via
-/// [`quint_model::validate_and_extract_expected_canonical`], persistence
-/// via [`Trace::to_json`]). The caller is responsible for seeding the
-/// canonical seed directory (e.g. via `generate_canonical_seeds`); this
-/// driver does not auto-copy fixtures.
-pub fn run_canonical() {
+/// [`quint_model::validate_and_extract_expected`], persistence via
+/// [`Trace::to_json`]). The caller is responsible for seeding the seed
+/// directory (e.g. via `generate_seeds`); this driver does not
+/// auto-copy fixtures.
+pub fn run() {
     let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
     let iterations = resolve_iterations();
     let reseed_freq = resolve_reseed_freq().max(1);
     let seed_population_size = resolve_seed_population_size();
     let faults_override = resolve_faults();
 
-    let seed_dir = canonical_seed_dir();
+    let seed_dir = seed_dir();
     let seed = resolve_seed(&seed_dir);
 
     println!(
-        "trace_mutator_canonical: loading seeds from {} (faults={})",
+        "trace_mutator: loading seeds from {} (faults={})",
         seed_dir.display(),
         faults_override.map_or("inherit".to_string(), |f| f.to_string())
     );
 
     let mut rejection_cache: HashSet<String> = HashSet::new();
     let mut base_seeds: Vec<Trace> =
-        filter_seeds_for_faults_canonical(load_canonical_seeds(&seed_dir), faults_override)
+        filter_seeds_for_faults(load_seeds(&seed_dir), faults_override)
             .into_iter()
-            .map(|t| with_faults_override_canonical(t, faults_override))
+            .map(|t| with_faults_override(t, faults_override))
             .collect();
     if base_seeds.is_empty() {
-        eprintln!("no usable canonical seed traces under {}", seed_dir.display());
+        eprintln!("no usable seed traces under {}", seed_dir.display());
         process::exit(1);
     }
 
-    let out_dir = canonical_output_dir();
+    let out_dir = output_dir();
     if let Err(e) = fs::create_dir_all(&out_dir) {
         eprintln!("failed to create {}: {e}", out_dir.display());
         process::exit(1);
@@ -744,7 +727,7 @@ pub fn run_canonical() {
     let mut_per_trace = resolve_mut_per_trace(&mut rng);
 
     println!(
-        "trace_mutator_canonical: base_seeds={} iterations={} seed={} mut_per_trace={} \
+        "trace_mutator: base_seeds={} iterations={} seed={} mut_per_trace={} \
          reseed_freq={} seed_population={} faults={} url={} out={}",
         base_seeds.len(),
         iterations,
@@ -763,10 +746,10 @@ pub fn run_canonical() {
     let mut queue: VecDeque<Trace> = VecDeque::new();
 
     println!(
-        "trace_mutator_canonical: generating initial queue of {} traces",
+        "trace_mutator: generating initial queue of {} traces",
         seed_population_size
     );
-    seed_queue_generated_canonical(
+    seed_queue_generated(
         &mut queue,
         &base_seeds,
         &mut rng,
@@ -774,7 +757,7 @@ pub fn run_canonical() {
         faults_override,
     );
     println!(
-        "trace_mutator_canonical: initial queue ready ({} traces)",
+        "trace_mutator: initial queue ready ({} traces)",
         queue.len()
     );
 
@@ -791,12 +774,12 @@ pub fn run_canonical() {
                 "[iter {iter}] reseed: reloading seeds from {}",
                 seed_dir.display()
             );
-            let refreshed = filter_seeds_for_faults_canonical(
-                load_canonical_seeds(&seed_dir),
+            let refreshed = filter_seeds_for_faults(
+                load_seeds(&seed_dir),
                 faults_override,
             )
             .into_iter()
-            .map(|t| with_faults_override_canonical(t, faults_override))
+            .map(|t| with_faults_override(t, faults_override))
             .collect::<Vec<_>>();
             if !refreshed.is_empty() {
                 base_seeds = refreshed;
@@ -806,7 +789,7 @@ pub fn run_canonical() {
                 seed_population_size,
                 base_seeds.len()
             );
-            seed_queue_generated_canonical(
+            seed_queue_generated(
                 &mut queue,
                 &base_seeds,
                 &mut rng,
@@ -831,7 +814,7 @@ pub fn run_canonical() {
                 for _ in 0..base_seeds.len().max(1) {
                     let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
                     if let Some(trace) =
-                        next_candidate_trace_canonical(base, &mut rng, faults_override, false)
+                        next_candidate_trace(base, &mut rng, faults_override, false)
                     {
                         generated = Some(trace);
                         break;
@@ -902,7 +885,7 @@ pub fn run_canonical() {
             continue;
         }
 
-        let label = trace_cache_key_canonical(&trace).unwrap_or_else(|| format!("iter_{iter}"));
+        let label = trace_cache_key(&trace).unwrap_or_else(|| format!("iter_{iter}"));
         if rejection_cache.contains(&label) {
             println!(
                 "[iter {iter}] tlc=ok-model-rejected-cached (keys={}, new={}, q={}, traces={}, states={})",
@@ -915,7 +898,7 @@ pub fn run_canonical() {
             continue;
         }
 
-        let expected_snapshot = match quint_model::validate_and_extract_expected_canonical(
+        let expected_snapshot = match quint_model::validate_and_extract_expected(
             &trace, &label,
         ) {
             Ok(exp) => exp,
@@ -933,7 +916,7 @@ pub fn run_canonical() {
             }
         };
 
-        let mut trace = with_faults_override_canonical(trace, faults_override);
+        let mut trace = with_faults_override(trace, faults_override);
         if let Some(snap) = expected_snapshot {
             trace.expected = snap;
         }
@@ -960,7 +943,7 @@ pub fn run_canonical() {
         let mut pushed = 0usize;
         for _ in 0..num_mutations {
             if let Some(child) =
-                next_candidate_trace_canonical(&trace, &mut rng, faults_override, true)
+                next_candidate_trace(&trace, &mut rng, faults_override, true)
             {
                 queue.push_back(child);
                 pushed += 1;
@@ -981,7 +964,7 @@ pub fn run_canonical() {
     }
 
     println!(
-        "trace_mutator_canonical done: kept={kept} uninteresting={uninteresting} \
+        "trace_mutator done: kept={kept} uninteresting={uninteresting} \
          empty_actions={empty_actions} errors={errors} \
          mutated_executions={mutated_executions} random_executions={random_executions} \
          traces={} state_traces={} states={}",

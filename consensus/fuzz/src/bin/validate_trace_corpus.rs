@@ -1,18 +1,16 @@
-//! Canonical counterpart of `validate_trace_corpus`.
-//!
-//! Reads canonical `Trace` JSON from one or more source directories,
-//! runs each trace through Quint via
-//! [`commonware_consensus_fuzz::quint_model::validate_and_extract_expected_canonical`],
+//! Reads `Trace` JSON from one or more source directories, runs each
+//! trace through Quint via
+//! [`commonware_consensus_fuzz::quint_model::validate_and_extract_expected`],
 //! embeds the Quint-derived `expected` snapshot, and writes accepted
-//! traces to a destination directory as canonical JSON.
+//! traces to a destination directory as JSON.
 //!
 //! Usage:
-//!   cargo run -p commonware-consensus-fuzz --bin validate_canonical_trace_corpus -- \
+//!   cargo run -p commonware-consensus-fuzz --bin validate_trace_corpus -- \
 //!       <dest_dir> <src_dir> [<src_dir> ...]
 //!
 //! Environment:
-//!   * `MODEL_FAULTS` — optional faults override applied before validation.
-//!   * `APPEND=1`     — if set, do not clear `<dest_dir>`; skip source
+//!   * `MODEL_FAULTS` - optional faults override applied before validation.
+//!   * `APPEND=1`     - if set, do not clear `<dest_dir>`; skip source
 //!                      files whose corresponding output already exists.
 
 use commonware_consensus::simplex::replay::Trace;
@@ -22,7 +20,7 @@ use std::{env, fs, path::Path, path::PathBuf, process};
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: validate_canonical_trace_corpus <dest_dir> <src_dir> [<src_dir> ...]"
+        "Usage: validate_trace_corpus <dest_dir> <src_dir> [<src_dir> ...]"
     );
     process::exit(1);
 }
@@ -46,7 +44,7 @@ fn load_trace(path: &Path, faults_override: Option<u32>) -> Option<Trace> {
     let mut trace = match Trace::from_json(&json) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("  skip (not canonical) {}: {e}", path.display());
+            eprintln!("  skip (parse error) {}: {e}", path.display());
             return None;
         }
     };
@@ -92,13 +90,13 @@ fn main() {
 
     for src in &src_dirs {
         if !src.exists() {
-            eprintln!("validate_canonical_trace_corpus: skipping missing {}", src.display());
+            eprintln!("validate_trace_corpus: skipping missing {}", src.display());
             continue;
         }
         let prefix = normalized_dest_prefix(src);
         let candidates = find_json_files(src);
         eprintln!(
-            "validate_canonical_trace_corpus: source {} -> {} candidate files",
+            "validate_trace_corpus: source {} -> {} candidate files",
             src.display(),
             candidates.len()
         );
@@ -119,7 +117,7 @@ fn main() {
             }
             if seen == 1 || seen == candidates.len() || seen % 10 == 0 {
                 eprintln!(
-                    "validate_canonical_trace_corpus: validating {}/{} from {} (accepted so far {})",
+                    "validate_trace_corpus: validating {}/{} from {} (accepted so far {})",
                     seen,
                     candidates.len(),
                     src.display(),
@@ -132,7 +130,7 @@ fn main() {
             };
 
             let label = out_name.clone();
-            let expected = match quint_model::validate_and_extract_expected_canonical(&trace, &label)
+            let expected = match quint_model::validate_and_extract_expected(&trace, &label)
             {
                 Ok(exp) => exp,
                 Err(_) => {
@@ -159,7 +157,7 @@ fn main() {
         }
 
         eprintln!(
-            "validate_canonical_trace_corpus: {} progress {}/{} accepted={}",
+            "validate_trace_corpus: {} progress {}/{} accepted={}",
             src.display(),
             seen,
             candidates.len(),
@@ -168,7 +166,7 @@ fn main() {
     }
 
     eprintln!(
-        "validate_canonical_trace_corpus: accepted {total_accepted} traces into {}",
+        "validate_trace_corpus: accepted {total_accepted} traces into {}",
         dest_dir.display()
     );
 }

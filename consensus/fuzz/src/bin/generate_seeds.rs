@@ -1,22 +1,22 @@
-//! Populates a canonical seed directory with freshly-recorded honest
-//! traces for the canonical MBF pipeline.
+//! Populates a seed directory with freshly-recorded honest traces for
+//! the MBF pipeline.
 //!
 //! Each generated seed is produced by
 //! [`commonware_consensus::simplex::replay::record_honest`], which runs
 //! a 4-node honest simplex cluster on the simulated p2p network with
-//! the canonical recorder wrappers attached. The resulting `Trace` is
-//! written to disk as canonical JSON (hex-wrapped signed payloads,
-//! `Participant` indices, no `val_bN` aliases).
+//! the recorder wrappers attached. The resulting `Trace` is written to
+//! disk as JSON (hex-wrapped signed payloads, `Participant` indices,
+//! no `val_bN` aliases).
 //!
 //! Variance across seeds comes from varying [`RecordConfig::namespace`]
-//! — the ed25519 fixture is derived from the namespace, so each
+//! - the ed25519 fixture is derived from the namespace, so each
 //! distinct namespace yields distinct keys and therefore a distinct
 //! leader schedule + signed-vote payloads. All other parameters
 //! (`n`, `faults`, `required_containers`, `epoch`, `timing`) are shared
 //! across generated seeds unless overridden via env.
 //!
 //! Usage:
-//!   cargo run -p commonware-consensus-fuzz --bin generate_canonical_seeds -- \
+//!   cargo run -p commonware-consensus-fuzz --bin generate_seeds -- \
 //!       <output_dir> [count]
 //!
 //! Defaults:
@@ -42,7 +42,7 @@ use std::{env, fs, path::PathBuf, process};
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: generate_canonical_seeds <output_dir> [count]\n\
+        "Usage: generate_seeds <output_dir> [count]\n\
          Env: SEED_COUNT, SEED_N, SEED_FAULTS, SEED_CONTAINERS, SEED_NAMESPACE"
     );
     process::exit(1)
@@ -86,7 +86,7 @@ fn main() {
     }
 
     eprintln!(
-        "generate_canonical_seeds: out={} count={} n={} faults={} containers={} base_namespace={:?}",
+        "generate_seeds: out={} count={} n={} faults={} containers={} base_namespace={:?}",
         out_dir.display(),
         count,
         n,
@@ -137,7 +137,7 @@ fn main() {
     }
 
     eprintln!(
-        "generate_canonical_seeds: done — wrote {written}, skipped {skipped} existing"
+        "generate_seeds: done - wrote {written}, skipped {skipped} existing"
     );
 }
 

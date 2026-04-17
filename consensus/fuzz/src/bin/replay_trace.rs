@@ -1,12 +1,10 @@
-//! Canonical counterpart of `replay_trace`.
-//!
-//! Reads a canonical `Trace` JSON file, replays it through
+//! Reads a `Trace` JSON file, replays it through
 //! [`commonware_consensus::simplex::replay::replay`], and compares the
 //! resulting [`Snapshot`] against the trace's embedded
 //! `expected` field. Exit code 0 on match, 1 on mismatch.
 //!
 //! Usage:
-//!   cargo run -p commonware-consensus-fuzz --bin replay_canonical_trace -- <trace.json>
+//!   cargo run -p commonware-consensus-fuzz --bin replay_trace -- <trace.json>
 
 use commonware_consensus::simplex::replay::{replay, Snapshot, Trace};
 use std::{env, fs, process};
@@ -14,7 +12,7 @@ use std::{env, fs, process};
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
-        eprintln!("Usage: replay_canonical_trace <trace.json>");
+        eprintln!("Usage: replay_trace <trace.json>");
         process::exit(1);
     }
     let path = &args[1];
@@ -28,7 +26,7 @@ fn main() {
     });
 
     println!(
-        "Replaying canonical trace: n={} faults={} epoch={} events={}",
+        "Replaying trace: n={} faults={} epoch={} events={}",
         trace.topology.n,
         trace.topology.faults,
         trace.topology.epoch,

@@ -1,8 +1,8 @@
 //! Trace mutation helpers.
 //!
-//! The canonical (Trace-native) mutator lives in [`canonical`]. This module
-//! only exposes a small filesystem utility shared with the canonical driver
-//! and its supporting binaries.
+//! The Trace-native mutator lives in [`canonical`]. This module only
+//! exposes a small filesystem utility shared with the driver and its
+//! supporting binaries.
 
 pub mod canonical;
 

@@ -199,6 +199,34 @@ doc = false
 bench = false
 
 [[bin]]
+name = "trace_mutator"
+path = "src/bin/trace_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_trace"
+path = "src/bin/replay_trace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_trace_corpus"
+path = "src/bin/validate_trace_corpus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "generate_seeds"
+path = "src/bin/generate_seeds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_ed25519_quint_tlc_honest"
 path = "fuzz_targets/simplex_ed25519_quint_tlc_honest.rs"
 test = false

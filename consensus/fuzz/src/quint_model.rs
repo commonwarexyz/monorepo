@@ -1,6 +1,6 @@
-//! Canonical [`Trace`] ↔ Quint `replica.qnt` bridge.
+//! [`Trace`] <-> Quint `replica.qnt` bridge.
 //!
-//! Given a canonical [`Trace`], encode it as a Quint test module
+//! Given a [`Trace`], encode it as a Quint test module
 //! ([`crate::tracing::encoder::encode_from_trace`]), drive `quint test` with
 //! ITF output, then parse the resulting ITF final state into a
 //! [`Snapshot`] keyed by [`Participant`].
@@ -201,12 +201,12 @@ pub fn run_quint_test_module(
 }
 
 // ---------------------------------------------------------------------------
-// Canonical entry point
+// Entry point
 // ---------------------------------------------------------------------------
 
-/// Validates a canonical [`Trace`] against `replica.qnt` and extracts
+/// Validates a [`Trace`] against `replica.qnt` and extracts
 /// expected state from the ITF output as a [`Snapshot`].
-pub fn validate_and_extract_expected_canonical(
+pub fn validate_and_extract_expected(
     trace: &Trace,
     label: &str,
 ) -> Result<Option<Snapshot>, ModelError> {
@@ -215,10 +215,10 @@ pub fn validate_and_extract_expected_canonical(
     let td = temp_dir();
     fs::create_dir_all(&td)
         .map_err(|e| ModelError::new(format!("failed to create {}: {e}", td.display())))?;
-    let stem = unique_stem(label, "itf_canonical");
+    let stem = unique_stem(label, "itf");
     let itf_path = td.join(format!("{stem}.itf.json"));
 
-    run_quint_test_module(label, "canonical_replica", &qnt, Some(&itf_path))?;
+    run_quint_test_module(label, "replica", &qnt, Some(&itf_path))?;
 
     let itf_json = match fs::read_to_string(&itf_path) {
         Ok(s) => {
@@ -758,7 +758,7 @@ fn insert_vote_signer(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod canonical_validation_tests {
+mod validation_tests {
     use super::*;
     use commonware_consensus::simplex::replay::Trace;
     use std::path::PathBuf;
@@ -784,8 +784,8 @@ mod canonical_validation_tests {
             return;
         }
         let json = fs::read_to_string(&path).expect("read fixture");
-        let trace = Trace::from_json(&json).expect("parse canonical trace");
-        let expected = validate_and_extract_expected_canonical(&trace, "canonical_sanity")
+        let trace = Trace::from_json(&json).expect("parse trace");
+        let expected = validate_and_extract_expected(&trace, "sanity")
             .expect("validate + extract");
         let snap = expected.expect("non-empty snapshot");
         assert!(!snap.nodes.is_empty(), "snapshot should have nodes");
