@@ -24,7 +24,6 @@ use commonware_runtime::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
-    hex,
     ordered::Set,
     NZUsize, TryCollect,
 };
@@ -433,7 +432,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     .context
                     .child("rate_limiter")
                     .with_attribute("idx", channel)
-                    .with_attribute("peer", hex(public_key.as_ref()));
+                    .with_attribute("peer", public_key.clone());
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let (sender, handle) = Sender::new(
