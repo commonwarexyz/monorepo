@@ -809,9 +809,7 @@ mod tests {
                         line.split_whitespace()
                             .last()
                             .and_then(|value| value.parse::<usize>().ok())
-                            .expect(
-                                "runtime_tasks_running should end with an integer gauge value",
-                            )
+                            .expect("runtime_tasks_running should end with an integer gauge value")
                     })
                 })
                 .sum()
