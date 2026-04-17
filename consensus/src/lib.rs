@@ -100,13 +100,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
         /// takes too long, the consensus engine may drop the provided proposal.
         ///
+        /// Returning a payload from `propose` commits the local proposer to verifying
+        /// the same `(context, payload)`.
+        ///
         /// For [`CertifiableAutomaton`] implementations, returning a payload from
         /// `propose` also commits the local proposer to certifying that same
-        /// `(round, payload)` if it later becomes notarized. Consensus engines
-        /// may therefore treat durable local evidence of proposal construction
-        /// (for example replay of a local vote on a leader-owned round) as
-        /// sufficient to bypass a later `certify` callback for that exact
-        /// proposal.
+        /// `(round, payload)` if it later becomes notarized.
         fn propose(
             &mut self,
             context: Self::Context,
