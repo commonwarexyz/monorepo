@@ -47,6 +47,45 @@ use std::ops::Range;
 #[cfg(test)]
 pub(crate) mod tests;
 
+/// Returns whether persisted local state already matches the requested sync target.
+///
+/// Shared across [crate::qmdb::any] and [crate::qmdb::current] sync because both
+/// build on the same operations-MMR layout and share the same merkle partition.
+///
+/// # Caller contract
+///
+/// `target.range.start()` **must** equal the committed inactivity floor of the
+/// target state (i.e. the floor carried by the last `CommitFloor` op). Only the
+/// persisted tree size and root are checked; the merkle pruning boundary is not.
+/// Callers that set `target.range.start()` below the committed floor (or that
+/// prune their own database past the committed floor) can cause a later
+/// [`qmdb::sync::Database::from_sync_result`] rebuild to fail with `MissingNode`
+/// even though this function returned `true`.
+pub async fn has_local_target_state<E, H>(
+    context: E,
+    merkle_config: journaled::Config,
+    target: &qmdb::sync::Target<H::Digest>,
+) -> bool
+where
+    E: Context,
+    H: Hasher,
+{
+    let hasher = StandardHasher::<H>::new();
+    let peek = journaled::Mmr::<_, H::Digest>::peek_root(
+        context.child("local_target_probe"),
+        merkle_config,
+        &hasher,
+    )
+    .await;
+    // Size + root match implies the last CommitFloor op (and therefore the
+    // committed inactivity floor) matches, per the caller contract above.
+    matches!(
+        peek,
+        Ok(Some((_, journal_leaves, root)))
+            if journal_leaves == target.range.end() && root == target.root
+    )
+}
+
 /// Shared helper to build a [Db] from sync components.
 async fn build_db<E, O, I, H, U, C, T>(
     context: E,
@@ -132,6 +171,19 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                )
+                .await
+            }
+
+            async fn has_local_target_state(
+                context: Self::Context,
+                config: &Self::Config,
+                target: &qmdb::sync::Target<Self::Digest>,
+            ) -> bool {
+                qmdb::any::sync::has_local_target_state::<_, H>(
+                    context,
+                    config.merkle_config.clone(),
+                    target,
                 )
                 .await
             }

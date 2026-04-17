@@ -187,7 +187,7 @@ where
     /// Returns a [`Handle`] that must be kept alive for the background receiver to continue
     /// running. Dropping the handle will abort the background receiver.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     /// Run the background receiver's event loop.

@@ -38,7 +38,7 @@ where
     }
 
     pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network).await)
+        spawn_cell!(self.context, self.run(vote_network))
     }
 
     async fn run(mut self, vote_network: (impl Sender, impl Receiver)) {

@@ -85,7 +85,7 @@ impl<
         sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
+        spawn_cell!(self.context, self.run(voter, sender, receiver))
     }
 
     async fn run(

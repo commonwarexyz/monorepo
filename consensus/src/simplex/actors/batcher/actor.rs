@@ -274,7 +274,7 @@ where
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter, vote_receiver, certificate_receiver).await
+            self.run(voter, vote_receiver, certificate_receiver)
         )
     }
 

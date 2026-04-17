@@ -10,7 +10,7 @@ use crate::{
     },
     merkle::{
         self, batch::MIN_TO_PARALLELIZE, hasher::Standard as StandardHasher, mem::Mem,
-        storage::Storage as MerkleStorage, Location, Position, Readable,
+        storage::Storage as MerkleStorage, Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -155,6 +155,7 @@ where
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
+            StandardHasher::<H>::new(),
         )
     }
 
@@ -263,6 +264,106 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
+    /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
+    /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
+    /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
+    fn pair_absorption_threshold(pruned_chunks: u64) -> Result<Option<u64>, Error<F>> {
+        if pruned_chunks == 0 {
+            return Ok(None);
+        }
+
+        let grafting_height = grafting::height::<N>();
+        let youngest = pruned_chunks - 1;
+        let youngest_start = youngest
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
+        let youngest_end = (youngest + 1)
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
+        let youngest_pos =
+            F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+
+        // Families without delayed merges: birth_size == chunk_end.
+        if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
+            return Ok(None);
+        }
+
+        let pair_chunk = youngest & !1;
+        let pair_start = pair_chunk
+            .checked_shl(grafting_height)
+            .ok_or(Error::DataCorrupted("pair start overflow"))?;
+        let pair_pos =
+            F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
+        Ok(Some(F::peak_birth_size(pair_pos, grafting_height + 1)))
+    }
+
+    /// Returns the most aggressive bitmap prune boundary that is safe for the current ops
+    /// tree size, accounting for delayed-merge settlement.
+    ///
+    /// Starts from the inactivity floor (the most chunks we could possibly prune) and walks
+    /// backward until two conditions hold for the youngest chunk that would be pruned:
+    ///
+    /// 1. **Settled**: the chunk's ops subtree root at height `gh` has been born in the ops
+    ///    tree (its `peak_birth_size <= ops_leaves`).
+    ///
+    /// 2. **Absorbed**: the chunk-pair parent at height `gh+1` has been born. This guarantees
+    ///    that the ops tree has no individual height-`gh` peaks for pruned chunks, so
+    ///    `compute_grafted_root` never queries a discarded grafted leaf.
+    ///
+    /// Because older chunk-pairs have strictly earlier birth times, checking only the youngest
+    /// pair is sufficient: if the youngest pair's parent is born, all older pairs' parents are
+    /// too. In the worst case the loop decrements twice (once past the unsettled chunk, once
+    /// to land on the older pair boundary).
+    ///
+    /// For families without delayed merges (e.g. MMR), `peak_birth_size` at height `gh`
+    /// equals the chunk's last leaf, so condition (1) always holds and the function returns
+    /// the inactivity floor unchanged.
+    fn settled_bitmap_prune_loc(&self) -> Result<Location<F>, Error<F>> {
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let mut pruned_chunks = *self.any.inactivity_floor_loc / chunk_bits;
+
+        let ops_leaves = (*self.any.last_commit_loc)
+            .checked_add(1)
+            .ok_or(Error::DataCorrupted("ops size overflow"))?;
+        let grafting_height = grafting::height::<N>();
+
+        while pruned_chunks > 0 {
+            let required_ops =
+                Self::pair_absorption_threshold(pruned_chunks)?.unwrap_or_else(|| {
+                    let youngest_start = (pruned_chunks - 1) * chunk_bits;
+                    let pos = F::subtree_root_position(
+                        Location::<F>::new(youngest_start),
+                        grafting_height,
+                    );
+                    F::peak_birth_size(pos, grafting_height)
+                });
+
+            if ops_leaves >= required_ops {
+                break;
+            }
+            pruned_chunks -= 1;
+        }
+
+        let settled_bits = pruned_chunks
+            .checked_mul(chunk_bits)
+            .ok_or(Error::DataCorrupted("bitmap prune boundary overflow"))?;
+        Ok(Location::new(settled_bits))
+    }
+
+    /// Returns the minimum rewind target that keeps delayed-merge grafting queries valid
+    /// for the current bitmap pruning boundary.
+    ///
+    /// This is the same absorption threshold used by [`Self::settled_bitmap_prune_loc`]:
+    /// the `peak_birth_size` of the youngest pruned chunk-pair's height-(gh+1) parent.
+    /// Rewinding below this size would put the ops tree in a state where the parent has not
+    /// been born, re-exposing individual height-`gh` ops peaks for pruned chunks whose
+    /// grafted leaves are no longer available.
+    ///
+    /// Returns `None` for families without delayed merges.
+    fn delayed_merge_rewind_floor(&self) -> Result<Option<u64>, Error<F>> {
+        Self::pair_absorption_threshold(self.status.pruned_chunks() as u64)
+    }
+
     /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
     ///
     /// Each [`Db::apply_batch`] pushes a new `Layer` on the bitmap. These layers are cheap
@@ -278,18 +379,28 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// `prune_loc` controls ops-log pruning only. Bitmap pruning advances to the settled
+    /// portion of the inactivity floor, independent of `prune_loc`.
+    ///
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let inactivity_floor = self.inactivity_floor_loc();
+        if prune_loc > inactivity_floor {
+            return Err(Error::PruneBeyondMinRequired(prune_loc, inactivity_floor));
+        }
+
         self.flatten();
 
-        // Prune bitmap chunks below the inactivity floor.
+        // Prune bitmap chunks below the inactivity floor, but for delayed-merge families only
+        // advance to a rewind-safe settled boundary.
+        let settled_bitmap_floor = self.settled_bitmap_prune_loc()?;
         let BitmapBatch::<N>::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
-        Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
+        Arc::make_mut(base).prune_to_bit(*settled_bitmap_floor);
 
         // Prune the grafted tree to match the bitmap's pruned chunks.
         let pruned_chunks = self.status.pruned_chunks() as u64;
@@ -373,6 +484,11 @@ where
         if rewind_size < pruned_bits {
             return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
+        if let Some(rewind_floor) = self.delayed_merge_rewind_floor()? {
+            if rewind_size < rewind_floor {
+                return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
+            }
+        }
 
         // Ensure the target commit's logical range is fully representable with the current
         // bitmap pruning boundary. Even if the ops log still retains older entries, rewinding
@@ -437,8 +553,12 @@ where
             self.thread_pool.as_ref(),
         )
         .await?;
-        let storage =
-            grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &self.any.log.merkle);
+        let storage = grafting::Storage::new(
+            &grafted_tree,
+            grafting::height::<N>(),
+            &self.any.log.merkle,
+            hasher.clone(),
+        );
         let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
         let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
@@ -637,13 +757,12 @@ pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,
     B: BitmapReadable<N>,
-    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
     status: &B,
-    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
+    storage: &S,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
@@ -673,13 +792,12 @@ pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
     B: BitmapReadable<N>,
-    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
     status: &B,
-    storage: &grafting::Storage<'_, F, H::Digest, G, S>,
+    storage: &S,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)?;
@@ -690,7 +808,7 @@ pub(super) async fn compute_grafted_root<
         let digest = storage
             .get_node(peak_pos)
             .await?
-            .ok_or(merkle::Error::<F>::MissingNode(peak_pos))?;
+            .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?;
         peaks.push(digest);
     }
 

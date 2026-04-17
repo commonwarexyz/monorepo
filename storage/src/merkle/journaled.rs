@@ -151,9 +151,9 @@ pub struct Journaled<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
     /// Stores all unpruned nodes.
     pub(crate) journal: Journal<E, D>,
 
-    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation), and the
-    /// corresponding pruning boundary used to generate them. The metadata remains empty until
-    /// pruning is invoked, and its contents change only when the pruning boundary moves.
+    /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
+    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
+    /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Serializes concurrent sync calls.
@@ -241,6 +241,84 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         mem.add_pinned_nodes(pinned_nodes);
 
         Ok(())
+    }
+
+    /// Read-only peek at the persisted structure's root and boundaries.
+    ///
+    /// Returns `Ok(None)` when:
+    /// - Journal size is structurally invalid and would require a rewind (i.e.
+    ///   a crash left the structure in an unrecoverable state for a read-only
+    ///   probe).
+    pub async fn peek_root(
+        context: E,
+        cfg: Config,
+        hasher: &impl Hasher<F, Digest = D>,
+    ) -> Result<Option<(Location<F>, Location<F>, D)>, Error<F>> {
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            write_buffer: cfg.write_buffer,
+            page_cache: cfg.page_cache,
+        };
+        let journal: Journal<E, D> =
+            Journal::init(context.child("merkle_journal_peek"), journal_cfg).await?;
+        let journal_size = Position::<F>::new(journal.size().await);
+
+        if journal_size == 0 {
+            let empty_root = *Mem::new(hasher).root();
+            return Ok(Some((Location::new(0), Location::new(0), empty_root)));
+        }
+
+        // Bail if the journal would require a rewind to reach a valid size.
+        // Probe is read-only; the caller will handle recovery via `init`.
+        let last_valid_size = F::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            return Ok(None);
+        }
+
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.child("merkle_metadata_peek"), metadata_cfg)
+                .await?;
+
+        let prune_loc = metadata
+            .get(&U64::new(PRUNED_TO_PREFIX, 0))
+            .map(|bytes| -> Result<Location<F>, Error<F>> {
+                let raw: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("metadata pruned_to is not 8 bytes"))?;
+                Ok(Location::<F>::new(u64::from_be_bytes(raw)))
+            })
+            .transpose()?
+            .unwrap_or_else(|| Location::<F>::new(0));
+        let prune_pos = Position::try_from(prune_loc)?;
+
+        let journal_leaves = Location::try_from(journal_size)?;
+        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
+        let mut mem_pinned_nodes = Vec::new();
+        for pos in nodes_to_pin_mem {
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            mem_pinned_nodes.push(digest);
+        }
+        let mut mem = Mem::init(
+            MemConfig {
+                nodes: vec![],
+                pruning_boundary: journal_leaves,
+                pinned_nodes: mem_pinned_nodes,
+            },
+            hasher,
+        )?;
+
+        if prune_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+        }
+
+        let root = *mem.root();
+        Ok(Some((prune_loc, journal_leaves, root)))
     }
 
     /// Initialize a new `Journaled` instance.
@@ -813,10 +891,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     /// Rewind the structure by the given number of leaves.
     ///
     /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to
-    /// O(log n) pinned peaks. A batch pop would expose new peaks that are not in memory, and
-    /// `merkleize` cannot load them because [`Readable::get_node`] is synchronous. `rewind`
-    /// performs async journal I/O to rebuild state at the target position.
+    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
+    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
+    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
+    /// journal I/O to rebuild state at the target position.
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,

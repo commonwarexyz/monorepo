@@ -374,7 +374,7 @@ where
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
+        spawn_cell!(self.context, self.run(application, buffer, resolver))
     }
 
     /// Run the application actor.

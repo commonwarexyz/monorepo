@@ -271,7 +271,7 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
+        spawn_cell!(self.context, self.run(chunk_network, ack_network))
     }
 
     /// Inner run loop called by `start`.

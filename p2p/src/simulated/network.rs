@@ -782,7 +782,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(mut self) {

@@ -102,7 +102,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.

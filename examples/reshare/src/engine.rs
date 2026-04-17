@@ -366,7 +366,6 @@ where
                 marshal,
                 callback
             )
-            .await
         )
     }
 

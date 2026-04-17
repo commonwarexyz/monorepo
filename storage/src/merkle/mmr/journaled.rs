@@ -86,6 +86,22 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_journaled_mmr_peek_root_empty_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new();
+            let cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let peek =
+                Mmr::<_, Digest>::peek_root(context.child("peek"), test_config(cache), &hasher)
+                    .await
+                    .unwrap();
+
+            let empty_root = *mem::Mmr::new(&hasher).root();
+            assert_eq!(peek, Some((Location::new(0), Location::new(0), empty_root)));
+        });
+    }
+
     #[test_traced]
     fn test_journaled_mmr_pop() {
         let executor = deterministic::Runner::default();

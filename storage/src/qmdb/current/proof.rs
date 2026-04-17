@@ -667,8 +667,8 @@ mod tests {
             };
             grafted.apply_batch(&merkleized).unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
-            let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher, &status, &storage, None, &ops_root,
             )
             .await
@@ -770,12 +770,12 @@ mod tests {
             };
             grafted.apply_batch(&merkleized).unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
             let partial = {
                 let (chunk, next_bit) = status.last_chunk();
                 Some((*chunk, next_bit))
             };
-            let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher, &status, &storage, partial, &ops_root,
             )
             .await
@@ -877,12 +877,12 @@ mod tests {
             };
             grafted.apply_batch(&merkleized).unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
             let partial = {
                 let (chunk, next_bit) = status.last_chunk();
                 Some((*chunk, next_bit))
             };
-            let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher, &status, &storage, partial, &ops_root,
             )
             .await
@@ -959,8 +959,8 @@ mod tests {
             };
             grafted.apply_batch(&merkleized).unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
-            let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher, &status, &storage, None, &ops_root,
             )
             .await
@@ -1059,8 +1059,8 @@ mod tests {
             };
             grafted.apply_batch(&merkleized).unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops);
-            let root = db::compute_db_root::<F, Sha256, _, _, _, N>(
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher, &status, &storage, None, &ops_root,
             )
             .await

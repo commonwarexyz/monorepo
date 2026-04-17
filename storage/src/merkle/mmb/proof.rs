@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint},
+        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Family},
         mmb::Location,
     };
     use commonware_cryptography::Sha256;
@@ -26,6 +26,32 @@ mod tests {
         };
         mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
+    }
+
+    /// Regression for the earliest MMB case where a larger tree merges the entire
+    /// `[0, start)` prefix into a new fold-prefix peak that must be reconstructed
+    /// from finer-grained pinned peaks.
+    #[test]
+    fn test_verify_proof_and_pinned_nodes_recursive_fold_prefix_regression() {
+        let (hasher, mmb) = make_mmb(5);
+        let root = *mmb.root();
+        let start = 4;
+
+        let pinned: Vec<D> = crate::merkle::mmb::Family::nodes_to_pin(Location::new(start))
+            .map(|pos| mmb.get_node(pos).unwrap())
+            .collect();
+
+        let proof = mmb
+            .range_proof(&hasher, Location::new(start)..Location::new(start + 1))
+            .unwrap();
+
+        assert!(proof.verify_proof_and_pinned_nodes(
+            &hasher,
+            &[start.to_be_bytes()],
+            Location::new(start),
+            &pinned,
+            &root,
+        ));
     }
 
     #[test]
