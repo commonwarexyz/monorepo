@@ -166,6 +166,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub verify_latency: Latency,
     pub certify_latency: Latency,
 
+    /// Predicate to determine whether a payload should be certified.
     pub should_certify: Certifier<H::Digest>,
 }
 
