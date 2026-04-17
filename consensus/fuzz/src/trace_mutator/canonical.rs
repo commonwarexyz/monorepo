@@ -680,15 +680,147 @@ fn seed_queue_generated(
     }
 }
 
+/// Directory (relative to `CARGO_MANIFEST_DIR`) where canonical
+/// [`Trace`] fixtures live, grouped by faults count.
+///
+/// Layout:
+///
+/// ```text
+/// src/tracing/tests/fixtures/
+///     honest/    # topology.faults == 0
+///     byzantine/ # topology.faults == 1
+///     twins/     # topology.faults == 1
+/// ```
+///
+/// [`bootstrap_fixtures`] copies these into
+/// [`MUTATION_SEEDS_FOLDER`][seed_dir] on startup (idempotent —
+/// existing destination files are left alone).
+const FIXTURE_SUBDIRS: &[&str] = &["honest", "byzantine", "twins"];
+
+/// Expected faults count for fixtures in each subdirectory. Kept in
+/// lock-step with [`FIXTURE_SUBDIRS`] so we can skip subdirectories
+/// whose faults do not match `MUTATOR_FAULTS` without parsing every
+/// JSON file. Values must match the `Topology.faults` field encoded
+/// in the fixtures themselves — [`bootstrap_fixtures`] also parses
+/// each fixture's JSON and double-checks the match before copying.
+const FIXTURE_SUBDIR_FAULTS: &[u32] = &[0, 1, 1];
+
+/// Root of the bundled fixture tree, resolved at compile time.
+fn fixtures_root() -> PathBuf {
+    manifest_dir().join("src/tracing/tests/fixtures")
+}
+
+/// Copy bundled canonical [`Trace`] fixtures from
+/// `src/tracing/tests/fixtures/{honest,byzantine,twins}/` into
+/// `seed_dir` before the mutator loads seeds.
+///
+/// Honors `MUTATOR_FAULTS`: only subdirectories whose declared faults
+/// count (see [`FIXTURE_SUBDIR_FAULTS`]) matches `faults_override`
+/// contribute fixtures — this keeps `load_seeds` from reading, and
+/// `filter_seeds_for_faults` from later discarding, fixtures that
+/// cannot be used for the current run.
+///
+/// Idempotent: destination files are only written if they do not
+/// already exist. Fault-tolerant: all I/O and parse errors are
+/// logged and swallowed — a missing or malformed fixture must not
+/// abort the driver.
+///
+/// Returns the number of fixtures copied (informational).
+fn bootstrap_fixtures(seed_dir: &Path, faults_override: Option<u32>) -> usize {
+    if let Err(e) = fs::create_dir_all(seed_dir) {
+        eprintln!(
+            "bootstrap_fixtures: cannot create {}: {e}",
+            seed_dir.display()
+        );
+        return 0;
+    }
+    let root = fixtures_root();
+    if !root.is_dir() {
+        // Missing tree is not fatal — the mutator runs fine on
+        // whatever pre-existing seeds the caller has already staged.
+        return 0;
+    }
+    let mut copied = 0usize;
+    for (sub, sub_faults) in FIXTURE_SUBDIRS.iter().zip(FIXTURE_SUBDIR_FAULTS.iter()) {
+        if let Some(f) = faults_override {
+            if f != *sub_faults {
+                continue;
+            }
+        }
+        let sub_dir = root.join(sub);
+        if !sub_dir.is_dir() {
+            continue;
+        }
+        for path in find_json_files(&sub_dir) {
+            let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let dest = seed_dir.join(&file_name);
+            if dest.exists() {
+                continue;
+            }
+            // Parse and re-verify the faults field — belt-and-braces
+            // check that subdirectory placement and content agree.
+            let json = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "bootstrap_fixtures: skip {} (read error): {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let trace = match Trace::from_json(&json) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "bootstrap_fixtures: skip {} (parse error): {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if trace.topology.faults != *sub_faults {
+                eprintln!(
+                    "bootstrap_fixtures: skip {} (faults mismatch: dir={}, file={})",
+                    path.display(),
+                    sub_faults,
+                    trace.topology.faults
+                );
+                continue;
+            }
+            if let Some(f) = faults_override {
+                if trace.topology.faults != f {
+                    continue;
+                }
+            }
+            let tmp = dest.with_extension("json.tmp");
+            if let Err(e) = fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &dest)) {
+                eprintln!(
+                    "bootstrap_fixtures: write error {} -> {}: {e}",
+                    path.display(),
+                    dest.display()
+                );
+                continue;
+            }
+            copied += 1;
+        }
+    }
+    copied
+}
+
 /// Entry point for the trace-mutator binary (`trace_mutator`).
 ///
 /// Trace-native TLC feedback loop: operates on [`Trace`] end-to-end
 /// (seeds via [`Trace::from_json`], TLC actions via
 /// [`tlc_encoder::encode_from_trace`], Quint gate via
 /// [`quint_model::validate_and_extract_expected`], persistence via
-/// [`Trace::to_json`]). The caller is responsible for seeding the seed
-/// directory (e.g. via `generate_seeds`); this driver does not
-/// auto-copy fixtures.
+/// [`Trace::to_json`]). Before loading seeds, the driver copies any
+/// bundled fixtures under `src/tracing/tests/fixtures/` into the
+/// seed directory ([`bootstrap_fixtures`]) so the pipeline works out
+/// of the box; pre-existing seeds are left alone.
 pub fn run() {
     let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
     let iterations = resolve_iterations();
@@ -698,6 +830,14 @@ pub fn run() {
 
     let seed_dir = seed_dir();
     let seed = resolve_seed(&seed_dir);
+
+    let copied = bootstrap_fixtures(&seed_dir, faults_override);
+    if copied > 0 {
+        println!(
+            "trace_mutator: bootstrapped {copied} fixture(s) into {}",
+            seed_dir.display()
+        );
+    }
 
     println!(
         "trace_mutator: loading seeds from {} (faults={})",
@@ -1231,6 +1371,166 @@ mod tests {
         let item = mutated.remove(3);
         mutated.insert(0, item);
         assert!(!preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn bootstrap_fixtures_copies_matching_and_skips_others() {
+        use std::path::PathBuf;
+        let tmp = std::env::temp_dir().join(format!(
+            "commonware_fuzz_bootstrap_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // faults_override=Some(0) must copy `honest/` only.
+        let copied = bootstrap_fixtures(&tmp, Some(0));
+        let copied_files: Vec<PathBuf> = find_json_files(&tmp);
+        let all_honest = copied_files
+            .iter()
+            .all(|p| p.file_name().and_then(|s| s.to_str()).map_or(false, |n| n.starts_with("honest_")));
+        assert!(
+            copied >= 2 && !copied_files.is_empty() && all_honest,
+            "expected honest-only copy (copied={copied}, files={copied_files:?})"
+        );
+        // Re-run: idempotent (no new files).
+        let again = bootstrap_fixtures(&tmp, Some(0));
+        assert_eq!(again, 0, "second bootstrap must copy nothing");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // faults_override=Some(1) must copy byzantine + twins only.
+        let copied = bootstrap_fixtures(&tmp, Some(1));
+        let copied_files: Vec<PathBuf> = find_json_files(&tmp);
+        let all_f1 = copied_files.iter().all(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map_or(false, |n| {
+                    n.starts_with("byzantine_") || n.starts_with("twins_")
+                })
+        });
+        assert!(
+            copied >= 3 && all_f1,
+            "expected f=1 copy (copied={copied}, files={copied_files:?})"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Regenerates the bundled canonical fixture set under
+    /// `src/tracing/tests/fixtures/{honest,byzantine,twins}/`.
+    ///
+    /// `#[ignore]` because it writes to the source tree. Run on demand:
+    ///
+    /// ```text
+    /// cargo test -p commonware-consensus-fuzz --lib \
+    ///     trace_mutator::canonical::tests::write_fixture_set -- --ignored
+    /// ```
+    ///
+    /// Strategy:
+    /// - 2 honest fixtures (`n=4, faults=0`) via [`record_honest`] with
+    ///   distinct namespaces so keys + leader schedules differ.
+    /// - 2 byzantine fixtures (`faults=1`): record honest, set
+    ///   `topology.faults = 1`, then re-run [`replay`] to rebuild a
+    ///   3-node `expected` snapshot consistent with the byzantine
+    ///   topology. Byzantine node 0's events are still in the trace
+    ///   (the replayer skips deliveries targeting index < faults) but
+    ///   node 0's broadcasts to followers still drive the honest
+    ///   cluster to the same observable state. This makes
+    ///   `replay(&trace) == trace.expected` by construction.
+    /// - 1 twins fixture (`faults=1`): same construction as byzantine,
+    ///   different namespace. A "placeholder" in that it's not
+    ///   actually a twins recording — the mbf pipeline flips `faults`
+    ///   dynamically and is happy with any structurally-valid
+    ///   `faults=1` seed.
+    #[test]
+    #[ignore]
+    fn write_fixture_set() {
+        use commonware_consensus::simplex::replay::{
+            record_honest, replay, trace::Timing, RecordConfig,
+        };
+        use std::path::PathBuf;
+
+        fn sha1_hex(bytes: &[u8]) -> String {
+            let mut h = Sha1::new();
+            h.update(bytes);
+            h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+        }
+
+        fn record_one(namespace: &str) -> Trace {
+            record_honest(RecordConfig {
+                n: 4,
+                required_containers: 3,
+                namespace: namespace.as_bytes().to_vec(),
+                epoch: 0,
+                timing: Timing::default(),
+            })
+        }
+
+        /// Record an honest trace then rewrite it as a faults=1
+        /// topology, regenerating `expected` via [`replay`] so the
+        /// on-disk snapshot matches what the byzantine-topology
+        /// replayer actually produces.
+        fn record_with_faults_one(namespace: &str) -> Trace {
+            let mut trace = record_one(namespace);
+            trace.topology.faults = 1;
+            trace.expected = replay(&trace);
+            trace
+        }
+
+        fn write_fixture(dir: &PathBuf, prefix: &str, trace: &Trace) {
+            std::fs::create_dir_all(dir).expect("create dir");
+            let json = trace.to_json().expect("encode");
+            // Sanity: round-trip before writing.
+            let actual = replay(trace);
+            assert_eq!(
+                actual, trace.expected,
+                "{prefix} fixture: replay != trace.expected before write"
+            );
+            let name = format!("{prefix}_{}.json", sha1_hex(json.as_bytes()));
+            let path = dir.join(&name);
+            std::fs::write(&path, &json).expect("write fixture");
+            eprintln!(
+                "wrote {} ({} events, topology.n={}, topology.faults={})",
+                path.display(),
+                trace.events.len(),
+                trace.topology.n,
+                trace.topology.faults,
+            );
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tracing/tests/fixtures");
+
+        let honest_dir = root.join("honest");
+        let byzantine_dir = root.join("byzantine");
+        let twins_dir = root.join("twins");
+
+        // Fresh run: clear any stale fixtures so sha1-named files
+        // don't accumulate with each regeneration.
+        for d in [&honest_dir, &byzantine_dir, &twins_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+
+        // Honest: 2 distinct namespaces.
+        write_fixture(&honest_dir, "honest", &record_one("fixture_honest_0"));
+        write_fixture(&honest_dir, "honest", &record_one("fixture_honest_1"));
+
+        // Byzantine placeholders: faults=1, honest event stream,
+        // regenerated snapshot.
+        write_fixture(
+            &byzantine_dir,
+            "byzantine",
+            &record_with_faults_one("fixture_byzantine_0"),
+        );
+        write_fixture(
+            &byzantine_dir,
+            "byzantine",
+            &record_with_faults_one("fixture_byzantine_1"),
+        );
+
+        // Twins placeholder: same construction, distinct namespace.
+        write_fixture(
+            &twins_dir,
+            "twins_placeholder",
+            &record_with_faults_one("fixture_twins_0"),
+        );
     }
 
     #[test]
