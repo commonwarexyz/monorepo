@@ -112,8 +112,14 @@ mod tests {
     }
 
     fn assert_hailstorm_deterministic<H: TestHarness>(seed: u64) {
-        let r1 = harness::hailstorm::<H>(seed, 4, 4, LINK);
-        let r2 = harness::hailstorm::<H>(seed, 4, 4, LINK);
+        let r1 = harness::hailstorm::<H>(seed, 4, 4, 1, LINK);
+        let r2 = harness::hailstorm::<H>(seed, 4, 4, 1, LINK);
+        assert_eq!(r1, r2);
+    }
+
+    fn assert_hailstorm_multi_deterministic<H: TestHarness>(seed: u64) {
+        let r1 = harness::hailstorm::<H>(seed, 4, 4, 2, LINK);
+        let r2 = harness::hailstorm::<H>(seed, 4, 4, 2, LINK);
         assert_eq!(r1, r2);
     }
 
@@ -159,6 +165,15 @@ mod tests {
         for seed in 0..2 {
             assert_hailstorm_deterministic::<InlineHarness>(seed);
             assert_hailstorm_deterministic::<DeferredHarness>(seed);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_standard_hailstorm_multi_restarts() {
+        for seed in 0..2 {
+            assert_hailstorm_multi_deterministic::<InlineHarness>(seed);
+            assert_hailstorm_multi_deterministic::<DeferredHarness>(seed);
         }
     }
 

@@ -579,7 +579,13 @@ async fn advance_hailstorm_to<H: TestHarness>(
 
 /// Stress marshal with repeated validator crashes and recoveries while a
 /// canonical finalized chain continues to advance.
-pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, link: Link) -> String {
+pub fn hailstorm<H: TestHarness>(
+    seed: u64,
+    shutdowns: usize,
+    interval: u64,
+    max_down: usize,
+    link: Link,
+) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
             .with_seed(seed)
@@ -621,6 +627,7 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut target_height = 0u64;
         let max_interval = interval.max(1);
+        let max_down = max_down.max(1);
 
         for shutdown_idx in 0..shutdowns {
             let leadup = context.gen_range(1..=max_interval);
@@ -639,17 +646,27 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
             .await;
 
             let active = active_validator_indices(&validators);
-            let selected = active[context.gen_range(0..active.len())];
+            let down_limit = usize::min(max_down, active.len().saturating_sub(1));
+            let down_count = down_limit.max(1);
+            let down_count = context.gen_range(1..=down_count);
+            let mut selected = active
+                .iter()
+                .copied()
+                .choose_multiple(&mut context, down_count);
+            selected.sort_unstable();
             let persisted_height = target_height;
-            let crashed = validators[selected]
-                .take()
-                .expect("selected validator should be active");
-            crashed.actor_handle.abort();
-            let _ = crashed.actor_handle.await;
+            for idx in selected.iter().copied() {
+                let crashed = validators[idx]
+                    .take()
+                    .expect("selected validator should be active");
+                crashed.actor_handle.abort();
+                let _ = crashed.actor_handle.await;
+            }
             info!(
                 seed,
                 shutdown_idx,
-                selected,
+                ?selected,
+                down_count,
                 persisted_height,
                 leadup,
                 "marshal hailstorm shutdown"
@@ -670,56 +687,56 @@ pub fn hailstorm<H: TestHarness>(seed: u64, shutdowns: usize, interval: u64, lin
             )
             .await;
 
-            let restarted = H::setup_validator(
-                context.with_label(&format!("validator_{selected}_restart_{shutdown_idx}")),
-                &mut oracle,
-                participants[selected].clone(),
-                ConstantProvider::new(schemes[selected].clone()),
-            )
-            .await;
-            assert_eq!(
-                restarted.height,
-                Height::new(persisted_height),
-                "validator {selected} should recover its persisted finalized height before replay"
-            );
+            for idx in selected.iter().copied() {
+                let restarted = H::setup_validator(
+                    context.with_label(&format!("validator_{idx}_restart_{shutdown_idx}")),
+                    &mut oracle,
+                    participants[idx].clone(),
+                    ConstantProvider::new(schemes[idx].clone()),
+                )
+                .await;
+                assert_eq!(
+                    restarted.height,
+                    Height::new(persisted_height),
+                    "validator {idx} should recover its persisted finalized height before replay"
+                );
 
-            let mut restarted = HailstormValidator::<H> {
-                application: restarted.application,
-                handle: ValidatorHandle {
-                    mailbox: restarted.mailbox,
-                    extra: restarted.extra,
-                },
-                actor_handle: restarted.actor_handle,
-            };
-            for (_, _, finalization) in canonical.iter().skip(persisted_height as usize) {
-                H::report_finalization(&mut restarted.handle.mailbox, finalization.clone()).await;
+                let mut restarted = HailstormValidator::<H> {
+                    application: restarted.application,
+                    handle: ValidatorHandle {
+                        mailbox: restarted.mailbox,
+                        extra: restarted.extra,
+                    },
+                    actor_handle: restarted.actor_handle,
+                };
+                for (_, _, finalization) in canonical.iter().skip(persisted_height as usize) {
+                    H::report_finalization(&mut restarted.handle.mailbox, finalization.clone())
+                        .await;
+                }
+                validators[idx] = Some(restarted);
             }
-            validators[selected] = Some(restarted);
 
-            let expected_digest = canonical
-                .last()
-                .map(|(_, digest, _)| *digest)
-                .expect("canonical chain should be non-empty");
-            let expected_finalization = canonical
-                .last()
-                .map(|(_, _, finalization)| finalization.clone())
-                .expect("canonical chain should be non-empty");
-            wait_for_validator_height(
-                &mut context,
-                validators[selected]
+            for idx in selected.iter().copied() {
+                let validator = validators[idx]
                     .as_ref()
-                    .expect("restarted validator should be active"),
-                Height::new(target_height),
-                expected_digest,
-                &expected_finalization,
-                &format!("validator_{selected}_restarted"),
-            )
-            .await;
+                    .expect("restarted validator should be active");
+                for (height, digest, finalization) in canonical.iter() {
+                    wait_for_validator_height(
+                        &mut context,
+                        validator,
+                        *height,
+                        *digest,
+                        finalization,
+                        &format!("validator_{idx}_restarted"),
+                    )
+                    .await;
+                }
+            }
             assert_active_validators_match_canonical(&validators, &canonical).await;
             info!(
                 seed,
                 shutdown_idx,
-                selected,
+                ?selected,
                 target_height,
                 downtime,
                 "marshal hailstorm recovered"
