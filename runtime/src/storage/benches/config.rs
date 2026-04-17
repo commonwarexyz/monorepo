@@ -153,7 +153,7 @@ pub struct Config {
     #[arg(long, value_parser = parse_byte_size)]
     pub file_size: Option<u64>,
 
-    /// Parent directory under which a unique benchmark directory is created.
+    /// Existing parent directory under which a unique benchmark directory is created.
     #[arg(long, default_value = "/tmp")]
     pub root: PathBuf,
 

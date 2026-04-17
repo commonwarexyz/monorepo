@@ -1,6 +1,6 @@
 //! Timed I/O loops and helpers.
 
-use crate::{config::SyncMode, report::Stats};
+use crate::{config::SyncMode, error::Result, report::Stats};
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::time::Instant;
@@ -48,11 +48,11 @@ pub async fn warm_read_loop(
     io_size: usize,
     ops: u64,
     mut next_block: impl FnMut() -> u64,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut buffer = IoBufMut::with_capacity(io_size).into();
     for _ in 0..ops {
         let offset = next_block() * io_size as u64;
-        buffer = blob.read_at_buf(offset, io_size, buffer).await.str_err()?;
+        buffer = blob.read_at_buf(offset, io_size, buffer).await?;
     }
     Ok(())
 }
@@ -64,13 +64,13 @@ pub async fn run_read_loop(
     deadline: Instant,
     io_size: usize,
     mut next_block: impl FnMut() -> u64,
-) -> Result<Stats, String> {
+) -> Result<Stats> {
     let mut stats = Stats::default();
     let mut buffer = IoBufMut::with_capacity(io_size).into();
     while should_continue(deadline, stats.ops) {
         let offset = next_block() * io_size as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        buffer = blob.read_at_buf(offset, io_size, buffer).await.str_err()?;
+        buffer = blob.read_at_buf(offset, io_size, buffer).await?;
         stats.record(io_size as u64, started.map(|s| s.elapsed()));
     }
     Ok(stats)
@@ -91,14 +91,14 @@ pub async fn run_write_loop(
     sync_mode: SyncMode,
     mut next_block: impl FnMut() -> u64,
     mut after_write: impl FnMut(u64),
-) -> Result<Stats, String> {
+) -> Result<Stats> {
     let mut stats = Stats::default();
     let mut writes_since_sync = 0u64;
     let io_size = io_size as u64;
     while should_continue(deadline, stats.ops) {
         let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone()).await.str_err()?;
+        blob.write_at(offset, payload.clone()).await?;
 
         // Record latency before sync so percentiles reflect pure write cost.
         stats.record(io_size, started.map(|s| s.elapsed()));
@@ -107,7 +107,7 @@ pub async fn run_write_loop(
         writes_since_sync += 1;
         if let SyncMode::Every(every) = sync_mode {
             if writes_since_sync == every {
-                blob.sync().await.str_err()?;
+                blob.sync().await?;
                 writes_since_sync = 0;
             }
         }
@@ -134,15 +134,4 @@ fn should_continue(deadline: Instant, completed_ops: u64) -> bool {
 #[inline(always)]
 const fn should_sample_latency(completed_ops: u64) -> bool {
     completed_ops.is_multiple_of(LATENCY_SAMPLE_STRIDE)
-}
-
-/// Convert any `Display`-able error into `String`.
-pub trait ResultExt<T> {
-    fn str_err(self) -> Result<T, String>;
-}
-
-impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
-    fn str_err(self) -> Result<T, String> {
-        self.map_err(|e| e.to_string())
-    }
 }
