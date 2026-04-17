@@ -872,10 +872,7 @@ mod tests {
         let mut handles = Vec::new();
 
         for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
-            let ctx = context
-                .child("peer")
-                .with_attribute("index", idx)
-                .child("engine");
+            let ctx = context.child("engine").with_attribute("index", idx);
             let (mon, _) = MockMonitor::new();
             let (handler, _) = MockHandler::new(true);
             let (engine, mailbox) = Engine::new(

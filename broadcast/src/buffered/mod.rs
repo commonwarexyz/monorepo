@@ -786,10 +786,7 @@ mod tests {
         let mut mailboxes = BTreeMap::new();
         let mut handles = Vec::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let ctx = context
-                .child("peer")
-                .with_attribute("peer", &peer)
-                .child("engine");
+            let ctx = context.child("engine").with_attribute("peer", &peer);
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
