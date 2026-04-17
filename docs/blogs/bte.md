@@ -1,6 +1,6 @@
 ---
 title: "Minimal Extractable Value"
-description: ""
+description: "A threshold encryption scheme is a cryptographic primitive that allows users to encrypt messages to a committee of n parties such that any t out of n members can non-interactively decrypt the message."
 date: "April 17th, 2026"
 published-time: "2026-04-17T00:00:00Z"
 modified-time: "2026-04-17T00:00:00Z"
@@ -20,10 +20,12 @@ A popular application of threshold encryption are encrypted mempools, to protect
 It enables the committee to decrypt a *batch* of $B$ ciphertexts using sub-linear communication $o(nB)$. A long line of work has shown that it's in fact possible to design BTE schemes with communication complexity $O(n)$ which is *independent* of the batch size.
 
 Up until recently, all constructions of BTE suffered from one of two issues:
+
 - ***Epoch restriction***: ciphertexts must be encrypted to a certain batch number (epoch). Failure to be included in the chosen epoch would result in the ciphertext never being decrypted.
 - ***Censorship issues***: users must pick a *position* in the batch. This leaves transactions vulnerable to censorship: an attacker can outbid a victim for a conflicting position and thereby block inclusion of the victim's transaction.
 
 These issues have been addressed, with some caveats:
+
 - [FPTX25](https://eprint.iacr.org/2025/2032) increases the CRS size to $O(kB)$ where $k$ is the number of batches that can be decrypted before the public key must be refreshed. The setup is a simple DKG protocol and the decryption complexity is $O(B\log^2{B})$.
 - [BNRT26](https://eprint.iacr.org/2026/674) uses partial fraction techniques to avoid the epoch restriction and censorship issues but comes at the cost of a more complicated setup phase which requires secure inversions in MPC and the size of secret keys held by each party to grow with the batch size. Although the current version of the [paper](https://eprint.iacr.org/archive/2026/674/20260406:214807) describes a construction with $O(B^2)$ decryption complexity, the authors have communicated privately to us that they have a more efficient decryption algorithm with $O(B\log{B})$ complexity.
 
