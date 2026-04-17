@@ -183,8 +183,8 @@ stability_scope!(BETA {
         /// of self's tree node.
         ///
         /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is
-        /// not permitted for any implementation to use [`METRICS_PREFIX`] as the
-        /// start of a label (reserved for metrics for the runtime).
+        /// not permitted for any implementation to use `runtime` as the start of a
+        /// label (reserved for metrics for the runtime).
         ///
         /// Duplicate sibling labels are allowed. Each call creates an independent
         /// supervision node. Children at the same label path share metrics via
