@@ -121,7 +121,7 @@ impl<
                         let mut router = router.clone();
 
                         // Spawn peer
-                        self.context.child("peer")
+                        self.context.child("connection")
                             .with_attribute("peer", &peer)
                             .spawn(move |context| async move {
                                 // Create peer

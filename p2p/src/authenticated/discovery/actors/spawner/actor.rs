@@ -124,7 +124,7 @@ impl<
                         reservation,
                     } => {
                         // Spawn peer
-                        self.context.child("peer")
+                        self.context.child("connection")
                             .with_attribute("peer", &peer)
                             .spawn({
                             let sent_messages = self.sent_messages.clone();

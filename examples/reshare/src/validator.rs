@@ -373,7 +373,7 @@ mod test {
 
             let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
             let validator_ctx = ctx
-                .child("validator")
+                .child("node")
                 .with_attribute("validator", &pk)
                 .with_attribute("restart", *restart_count);
             *restart_count += 1;
