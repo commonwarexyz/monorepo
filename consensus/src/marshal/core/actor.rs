@@ -1326,25 +1326,36 @@ where
     // -------------------- Prunable Storage --------------------
 
     /// Add a verified block to the prunable archive.
+    ///
+    /// Persists the block durably before waking subscribers so that any waiter (e.g.
+    /// `Inline::certify`) that resolves on this notification is guaranteed to observe
+    /// a block that survives a crash. Reversing the order would let a certify waiter
+    /// emit a finalize vote for a block that is not yet on disk.
     async fn cache_verified(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
     ) {
+        self.cache
+            .put_verified(round, digest, block.clone().into())
+            .await;
         self.notify_subscribers(&block);
-        self.cache.put_verified(round, digest, block.into()).await;
     }
 
     /// Add a notarized block to the prunable archive.
+    ///
+    /// Persists before notifying for the same reason as [`Self::cache_verified`].
     async fn cache_block(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
     ) {
+        self.cache
+            .put_block(round, digest, block.clone().into())
+            .await;
         self.notify_subscribers(&block);
-        self.cache.put_block(round, digest, block.into()).await;
     }
 
     /// Sync both finalization archives to durable storage.
