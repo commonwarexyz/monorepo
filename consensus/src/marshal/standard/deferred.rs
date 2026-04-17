@@ -472,6 +472,8 @@ where
                             task_tx.send_lossy(true);
                             marshaled.verification_tasks.insert(round, digest, task_rx);
                         }
+                        // `Complete` means either immediate rejection or successful
+                        // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
                         return;
                     }
@@ -582,10 +584,8 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // NOTE: It is possible that, during crash recovery, we call `marshal.verified`
+                    // It is possible that, during crash recovery, we call `marshal.verified`
                     // twice for the same block. That function is idempotent, so this is safe.
-                    // If marshal is gone, do not signal certify-true: the block was not durably
-                    // stored.
                     if !marshaled.marshal.verified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
