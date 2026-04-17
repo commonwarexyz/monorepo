@@ -590,6 +590,7 @@ where
     // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        pruned_chunks: bitmap_parent.pruned_chunks(),
         parent: bitmap_parent.clone(),
         overlay: Arc::new(overlay),
     }));
@@ -648,6 +649,10 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     pub(crate) parent: BitmapBatch<N>,
     /// Chunk-level overlay: materialized bytes for every chunk that differs from parent.
     pub(crate) overlay: Arc<ChunkOverlay<N>>,
+    /// Pruned-chunk count, copied from `parent` at construction. Invariant across the whole
+    /// layer chain (pruning only happens on the committed base), so caching here lets
+    /// `BitmapBatch::pruned_chunks` return in O(1) instead of walking to the Base.
+    pub(crate) pruned_chunks: usize,
 }
 
 impl<const N: usize> BitmapBatch<N> {
@@ -691,7 +696,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     fn pruned_chunks(&self) -> usize {
         match self {
             Self::Base(bm) => bm.pruned_chunks(),
-            Self::Layer(layer) => layer.parent.pruned_chunks(),
+            Self::Layer(layer) => layer.pruned_chunks,
         }
     }
 
@@ -723,8 +728,13 @@ impl<const N: usize> BitmapBatch<N> {
         }
 
         // Slow path: create a new layer.
+        let pruned_chunks = self.pruned_chunks();
         let parent = self.clone();
-        *self = Self::Layer(Arc::new(BitmapBatchLayer { parent, overlay }));
+        *self = Self::Layer(Arc::new(BitmapBatchLayer {
+            parent,
+            overlay,
+            pruned_chunks,
+        }));
     }
 
     /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
