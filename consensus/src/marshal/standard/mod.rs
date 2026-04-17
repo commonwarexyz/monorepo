@@ -91,12 +91,13 @@ mod tests {
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, mpsc, oneshot},
+        sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
 
@@ -1631,10 +1632,10 @@ mod tests {
         async fn report(&mut self, activity: Self::Activity) {
             match activity {
                 Update::Block(block, _ack) => {
-                    if let Some(started) = self.started.lock().unwrap().take() {
+                    if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
-                    let release = self.release.lock().unwrap().take();
+                    let release = self.release.lock().take();
                     if let Some(release) = release {
                         let _ = release.await;
                     }

@@ -562,6 +562,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
+        sync::Mutex,
         NZUsize,
     };
     use rand::Rng;
@@ -943,8 +944,8 @@ mod tests {
     #[derive(Clone)]
     struct GatedVerifyingApp {
         genesis: B,
-        started: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<std::sync::Mutex<Option<oneshot::Receiver<()>>>>,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     }
 
     impl GatedVerifyingApp {
@@ -954,8 +955,8 @@ mod tests {
             (
                 Self {
                     genesis,
-                    started: Arc::new(std::sync::Mutex::new(Some(started_tx))),
-                    release: Arc::new(std::sync::Mutex::new(Some(release_rx))),
+                    started: Arc::new(Mutex::new(Some(started_tx))),
+                    release: Arc::new(Mutex::new(Some(release_rx))),
                 },
                 started_rx,
                 release_tx,
@@ -987,13 +988,12 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
         ) -> bool {
-            if let Some(started) = self.started.lock().unwrap().take() {
+            if let Some(started) = self.started.lock().take() {
                 started.send_lossy(());
             }
             let release = self
                 .release
                 .lock()
-                .unwrap()
                 .take()
                 .expect("release receiver missing");
             let _ = release.await;
@@ -1045,7 +1045,7 @@ mod tests {
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = Ctx {
                 round: child_round,
-                leader: me,
+                leader: me.clone(),
                 parent: (View::new(1), parent_digest),
             };
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
@@ -1093,6 +1093,25 @@ mod tests {
                     panic!("certify should terminate after marshal abort");
                 },
             }
+
+            drop(inline);
+            drop(marshal);
+            drop(buffer);
+
+            let setup2 = StandardHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal2 = setup2.mailbox;
+
+            let post_restart = marshal2.get_block(&child_digest).await;
+            assert!(
+                post_restart.is_none(),
+                "failed marshal.verified ack must not leave a durably recoverable block"
+            );
         });
     }
 }

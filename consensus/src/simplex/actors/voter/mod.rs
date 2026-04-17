@@ -63,8 +63,8 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -84,8 +84,9 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
-    use futures::FutureExt;
+    use futures::{pin_mut, FutureExt, StreamExt};
     use std::{
         num::{NonZeroU16, NonZeroU32},
         sync::Arc,
@@ -170,8 +171,10 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(
+                context.with_label("reporter"),
+                reporter_cfg.clone(),
+            );
 
             let app_relay = Arc::new(mocks::relay::Relay::new());
             let app_cfg = mocks::application::Config {
@@ -196,7 +199,7 @@ mod tests {
                 automaton: application.clone(),
                 relay,
                 reporter,
-                partition,
+                partition: partition.clone(),
                 epoch: Epoch::new(4),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
@@ -269,6 +272,30 @@ mod tests {
                     }
                     batcher::Message::Constructed(_) => {}
                 }
+            }
+
+            let journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+                context.with_label("journal_check"),
+                JConfig {
+                    partition,
+                    compression: None,
+                    codec_config: schemes[0].certificate_codec_config(),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024 * 1024),
+                },
+            )
+            .await
+            .expect("unable to open voter journal");
+            let stream = journal
+                .replay(0, 0, NZUsize!(1024 * 1024))
+                .await
+                .expect("unable to replay voter journal");
+            pin_mut!(stream);
+            if let Some(entry) = stream.next().await {
+                let (_, _, _, artifact) = entry.expect("unable to decode voter journal artifact");
+                panic!(
+                    "failed propose broadcast must not leave durable vote remnants, found {artifact:?}"
+                );
             }
         });
     }
