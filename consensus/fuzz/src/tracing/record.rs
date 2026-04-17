@@ -48,10 +48,10 @@ use std::{
 
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 
-/// Derive the ed25519 fixture using `Runner::seeded(0)` — the same RNG
-/// source `simplex::replay::trace::rehydrate_keys` uses. This is what
-/// makes recorded traces replayable: the fuzz runtime's own RNG is
-/// driven by `FuzzRng` (input-dependent), so keys derived from it
+/// Derive the ed25519 fixture using `Runner::seeded(0)`, matching the
+/// RNG source `simplex::replay::trace::rehydrate_keys` uses. This is
+/// what makes recorded traces replayable: the fuzz runtime's own RNG
+/// is driven by `FuzzRng` (input-dependent), so keys derived from it
 /// would not match what `replay(&Trace)` rehydrates.
 fn replay_fixture(
     n: u32,
@@ -462,8 +462,14 @@ pub fn run_quint_byzantine_recording(
             byzantine_actor: input.byzantine_actor,
         };
 
+        let fixture = replay_fixture(tracing_input.configuration.n, NAMESPACE);
         let (oracle, participants, schemes, mut registrations) =
-            crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+            crate::setup_network_with_fixture::<SimplexEd25519>(
+                &mut context,
+                &tracing_input,
+                fixture,
+            )
+            .await;
 
         let recorder = Recorder::new(participants.clone());
         let app_relay = Arc::new(relay::Relay::new());
@@ -724,8 +730,14 @@ pub fn run_quint_twins_recording(input: FuzzInput, corpus_bytes: &[u8]) {
             byzantine_actor: input.byzantine_actor,
         };
 
+        let fixture = replay_fixture(tracing_input.configuration.n, NAMESPACE);
         let (oracle, participants, schemes, mut registrations) =
-            crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+            crate::setup_network_with_fixture::<SimplexEd25519>(
+                &mut context,
+                &tracing_input,
+                fixture,
+            )
+            .await;
         let participants_arc: Arc<[_]> = participants.clone().into();
 
         let recorder = Recorder::new(participants.clone());

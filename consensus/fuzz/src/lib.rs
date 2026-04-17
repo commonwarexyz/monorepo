@@ -250,7 +250,7 @@ type NetworkChannels = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-pub async fn setup_network_with_fixture<P: simplex::Simplex>(
+pub(crate) async fn setup_network_with_fixture<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
     fixture: Fixture<P::Scheme>,
