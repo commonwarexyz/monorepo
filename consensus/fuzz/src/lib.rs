@@ -839,4 +839,24 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_honest_tracing(input, corpus_bytes);
 }
 
+pub fn run_quint_twins_recording(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_twins_recording(input, corpus_bytes);
+}
+
+pub fn run_quint_disrupter_recording(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_disrupter_recording(input, corpus_bytes);
+}
+
+pub fn run_quint_byzantine_recording(
+    actor: ByzantineActor,
+    input: FuzzInput,
+    corpus_bytes: &[u8],
+) {
+    tracing::run_quint_byzantine_recording(actor, input, corpus_bytes);
+}
+
+pub fn run_quint_honest_recording(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_honest_recording(input, corpus_bytes);
+}
+
 pub use tlc::run_quint_tlc_honest_model;

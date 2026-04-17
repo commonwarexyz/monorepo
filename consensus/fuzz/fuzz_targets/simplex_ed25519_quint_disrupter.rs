@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_consensus_fuzz::{run_quint_disrupter_tracing, FuzzInput};
+use commonware_consensus_fuzz::{run_quint_disrupter_recording, FuzzInput};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -9,5 +9,5 @@ fuzz_target!(|data: &[u8]| {
     let Ok(input) = FuzzInput::arbitrary(&mut u) else {
         return;
     };
-    run_quint_disrupter_tracing(input, data);
+    run_quint_disrupter_recording(input, data);
 });
