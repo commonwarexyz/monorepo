@@ -3,8 +3,9 @@
 //! # Changes vs. Upstream
 //!
 //! - Uses [`curve25519_dalek`] rather than [`curve25519_dalek_ng`] to support AVX2/AVX512 on x86 platforms.
-//! - Moved from `Scalar::from_bits` -> [`Scalar::from_bytes_mod_order`]. See `Scalar::from_bits`' deprecation
-//!   notice.
+//! - Uses clamped bits for Ed25519 public-key derivation, but reduces the signing scalar with
+//!   [`Scalar::from_bytes_mod_order`] before scalar-scalar arithmetic. See `Scalar::from_bits`'
+//!   deprecation notice.
 //! - Removed `serde` dependency.
 //! - Swapped `hex` dependency to [`commonware_utils::hex()`].
 //! - Adapted code to `commonware`'s clippy rules.
