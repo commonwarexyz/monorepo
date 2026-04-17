@@ -162,7 +162,8 @@ where
 {
     /// Creates a new inline-verification wrapper.
     ///
-    /// Registers a `build_duration` histogram for proposal latency.
+    /// Registers a `build_duration` histogram for proposal latency and initializes
+    /// the shared "last built block" cache used by [`Relay::broadcast`].
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
@@ -231,8 +232,8 @@ where
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let last_built = self.last_built.clone();
+        let epocher = self.epocher.clone();
         let build_duration = self.build_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -321,12 +322,10 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
-
                 {
                     let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, built_block));
                 }
-
                 let success = tx.send_lossy(digest);
                 debug!(
                     round = ?consensus_context.round,
@@ -447,8 +446,6 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        //
-        // TODO(#3393): Avoid fetching the block just to check if it's available.
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
