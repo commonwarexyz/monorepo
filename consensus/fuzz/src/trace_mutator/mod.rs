@@ -1,18 +1,1129 @@
-//! Trace mutation helpers.
+//! Mutations that operate on [`Event`] sequences.
 //!
-//! The Trace-native mutator lives in [`canonical`]. This module only
-//! exposes a small filesystem utility shared with the driver and its
-//! supporting binaries.
+//! These mutations rearrange [`Event::Deliver`] entries only.
+//! [`Event::Propose`], [`Event::Construct`], and [`Event::Timeout`]
+//! define the causal skeleton of a trace (a `Propose` produces the
+//! payload that `Construct(Notarize)` and subsequent `Deliver`s refer
+//! to; a `Construct` must precede its corresponding `Deliver`s from
+//! that sender) and are left in place. Mutations that disturb this
+//! skeleton are either rejected or never attempted.
 
-pub mod canonical;
-
+use crate::{
+    quint_model,
+    tlc::{terminate_actions, TlcClient, DEFAULT_TLC_URL},
+    tracing::tlc_encoder,
+};
+use commonware_consensus::{
+    simplex::{
+        replay::{Event, Trace, Wire},
+        types::{Attributable, Certificate, Vote},
+    },
+    Viewable,
+};
+use commonware_cryptography::{sha256::Sha256 as Sha256Hasher, Hasher};
+use commonware_utils::Participant;
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
+use sha1::{Digest as Sha1Digest, Sha1};
 use std::{
-    fs,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    env, fs,
     path::{Path, PathBuf},
+    process,
 };
 
-/// Recursively walks `dir` and returns every `*.json` path under it,
-/// sorted lexicographically for deterministic ordering across platforms.
+/// All mutations supported by the mutator.
+///
+/// Crate-private because the only supported way to mutate a trace is
+/// [`mutate_once`], which enforces the honest-trace invariant and
+/// clears stale `expected` snapshots. Tests and higher-level mutation
+/// schedulers inside this crate may reach in; external drivers must go
+/// through [`mutate_once`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mutation {
+    /// Swap two adjacent `Deliver` entries.
+    SwapAdjacent,
+    /// Reverse a contiguous run of `Deliver` entries.
+    ReverseRange,
+    /// Delay a single `sender -> receiver` link (all `Deliver` events
+    /// matching that pair shift later within a random window).
+    DelayLink,
+    /// Delay all `Deliver` events with a chosen `from` sender.
+    DelaySender,
+    /// Delay all `Deliver` events with a chosen `to` receiver.
+    DelayRecipient,
+    /// Byzantine-only: raw swap of two random `Deliver` entries. May
+    /// reorder distinct broadcasts and therefore is never applied to
+    /// honest traces (filtered out of [`HONEST_MUTATIONS`]).
+    Swap,
+    /// Byzantine-only: clone one `Deliver` and insert the clone later.
+    /// Only applied to Byzantine traces because it changes the
+    /// number-of-broadcasts skeleton.
+    Duplicate,
+    /// Honest-safe: swap two `Deliver` entries with distinct receivers.
+    SwapByRecipient,
+    /// Honest-safe: split a contiguous same-receiver run by
+    /// interleaving a different-receiver delivery into the middle.
+    BatchSplit,
+    /// Honest-safe: delay a strict subset of the receivers of a single
+    /// broadcast past their siblings.
+    FanoutSkew,
+    /// Honest-safe: delay a chosen `(to, channel)` group (vote vs
+    /// certificate deliveries to a specific receiver).
+    ChannelSkew,
+    /// Honest-safe: hold several scattered deliveries to a single
+    /// receiver and re-insert them as a contiguous burst later.
+    BurstRelease,
+    /// Honest-safe: interleave two receivers' delivery subsequences.
+    InterleaveReceivers,
+    /// Honest-safe: delay a leader's delivery past a competing
+    /// same-view non-leader delivery.
+    TimeoutEdge,
+    /// Honest-safe: swap the relative order of two deliveries of the
+    /// same logical certificate from different relays.
+    RelayPreference,
+}
+
+/// Mutations eligible to run on honest traces.
+///
+/// SAFETY: membership here does NOT mean the mutation is safe against
+/// the first-broadcast-order invariant by construction. Several of
+/// these (SwapAdjacent, ReverseRange, SwapByRecipient, TimeoutEdge,
+/// RelayPreference) can individually violate the invariant on some
+/// inputs; they are only safe because [`mutate_once`] retries up to
+/// 32 times and rejects any attempt that fails the
+/// [`preserves_first_broadcast_order`] gate. Do not bypass that gate
+/// based on the honest/Byzantine split alone.
+///
+/// What this list DOES guarantee: no entry here fabricates a new
+/// delivery or mutates wire content, so the gate can reject a bad
+/// attempt cheaply and retry with a different mutation.
+/// [`Mutation::Swap`] and [`Mutation::Duplicate`] are excluded because
+/// `Swap` reorders distinct broadcasts unconditionally, and
+/// `Duplicate` fabricates a delivery.
+pub(crate) const HONEST_MUTATIONS: &[Mutation] = &[
+    Mutation::SwapAdjacent,
+    Mutation::ReverseRange,
+    Mutation::DelayLink,
+    Mutation::DelaySender,
+    Mutation::DelayRecipient,
+    Mutation::SwapByRecipient,
+    Mutation::BatchSplit,
+    Mutation::FanoutSkew,
+    Mutation::ChannelSkew,
+    Mutation::BurstRelease,
+    Mutation::InterleaveReceivers,
+    Mutation::TimeoutEdge,
+    Mutation::RelayPreference,
+];
+
+/// All supported mutations, including the Byzantine-only ones
+/// ([`Mutation::Swap`] and [`Mutation::Duplicate`]) that are unsound on
+/// honest traces.
+pub(crate) const ALL_MUTATIONS: &[Mutation] = &[
+    Mutation::SwapAdjacent,
+    Mutation::ReverseRange,
+    Mutation::DelayLink,
+    Mutation::DelaySender,
+    Mutation::DelayRecipient,
+    Mutation::SwapByRecipient,
+    Mutation::BatchSplit,
+    Mutation::FanoutSkew,
+    Mutation::ChannelSkew,
+    Mutation::BurstRelease,
+    Mutation::InterleaveReceivers,
+    Mutation::TimeoutEdge,
+    Mutation::RelayPreference,
+    Mutation::Swap,
+    Mutation::Duplicate,
+];
+
+/// Returns the set of mutations appropriate for `trace`'s topology.
+///
+/// Honest traces (faults == 0) use [`HONEST_MUTATIONS`]; Byzantine
+/// traces use [`ALL_MUTATIONS`] which adds [`Mutation::Swap`] and
+/// [`Mutation::Duplicate`].
+pub(crate) fn mutation_candidates(trace: &Trace) -> &'static [Mutation] {
+    if trace.topology.faults == 0 {
+        HONEST_MUTATIONS
+    } else {
+        ALL_MUTATIONS
+    }
+}
+
+/// Applies a single randomly-picked mutation in place.
+///
+/// **Raw primitive - does not enforce
+/// [`preserves_first_broadcast_order`] and does not touch
+/// [`Trace::expected`].** Use [`mutate_once`] as the safe entry point;
+/// this function is `pub(crate)` so it can be unit-tested and composed
+/// by future schedulers inside the crate without external callers
+/// accidentally producing invalid candidate traces.
+///
+/// Returns `true` if a mutation succeeded, `false` if no candidate
+/// applied (e.g. the trace has fewer than 2 `Deliver` events).
+///
+/// Callers pass the candidate set explicitly (typically
+/// [`HONEST_MUTATIONS`] or [`ALL_MUTATIONS`] chosen via
+/// [`mutation_candidates`]) so that the Byzantine-only mutations are
+/// never tried against honest traces.
+pub(crate) fn apply_mutation<R: RngCore>(
+    events: &mut Vec<Event>,
+    rng: &mut R,
+    candidates: &[Mutation],
+) -> bool {
+    let mut shuffled: Vec<Mutation> = candidates.to_vec();
+    shuffled.shuffle(rng);
+    for m in shuffled {
+        if try_mutation(events, rng, m) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Applies the named mutation.
+///
+/// **Raw primitive - see [`apply_mutation`] safety notes.** Exposed
+/// `pub(crate)` so tests can force a specific mutation type; drivers
+/// outside this crate must use [`mutate_once`].
+pub(crate) fn try_mutation<R: RngCore>(
+    events: &mut Vec<Event>,
+    rng: &mut R,
+    m: Mutation,
+) -> bool {
+    match m {
+        Mutation::SwapAdjacent => swap_adjacent(events, rng),
+        Mutation::ReverseRange => reverse_range(events, rng),
+        Mutation::DelayLink => delay_link(events, rng),
+        Mutation::DelaySender => delay_sender(events, rng),
+        Mutation::DelayRecipient => delay_recipient(events, rng),
+        Mutation::Swap => swap(events, rng),
+        Mutation::Duplicate => duplicate(events, rng),
+        Mutation::SwapByRecipient => swap_by_recipient(events, rng),
+        Mutation::BatchSplit => batch_split(events, rng),
+        Mutation::FanoutSkew => fanout_skew(events, rng),
+        Mutation::ChannelSkew => channel_skew(events, rng),
+        Mutation::BurstRelease => burst_release(events, rng),
+        Mutation::InterleaveReceivers => interleave_receivers(events, rng),
+        Mutation::TimeoutEdge => timeout_edge(events, rng),
+        Mutation::RelayPreference => relay_preference(events, rng),
+    }
+}
+
+/// Mutate a [`Trace`] and return the result.
+///
+/// Returns `None` if no mutation was applicable.
+///
+/// ## Safety: `expected` is cleared
+///
+/// Reordering events changes the model's final state, so the
+/// parent's [`Trace::expected`] snapshot is **not valid** for the
+/// mutated event sequence. This function sets the returned trace's
+/// [`Trace::expected`] to [`Snapshot::default`] - it's explicitly a
+/// candidate that must be re-validated (e.g., via Quint/TLC feedback
+/// and a fresh replay) before `expected` is re-populated.
+///
+/// An empty `expected` reliably fails strict replay comparison,
+/// surfacing any accidental attempt to compare a bare candidate
+/// against a replay result.
+pub fn mutate_once<R: RngCore>(trace: &Trace, rng: &mut R) -> Option<Trace> {
+    use commonware_consensus::simplex::replay::Snapshot;
+    const MAX_ATTEMPTS: usize = 32;
+
+    let original_events = trace.events.clone();
+    let mut mutated = trace.clone();
+    let mut accepted = false;
+    // Retry internally: a single random mutation may violate
+    // preserves_first_broadcast_order, but a different one on the same
+    // trace usually passes. Without this retry the overall mutation
+    // success rate on honest traces drops to ~30%, which drains the
+    // driver's candidate queue too fast.
+    let candidates = mutation_candidates(trace);
+    for _ in 0..MAX_ATTEMPTS {
+        mutated.events = original_events.clone();
+        if !apply_mutation(&mut mutated.events, rng, candidates) {
+            continue;
+        }
+        if preserves_first_broadcast_order(&original_events, &mutated.events) {
+            accepted = true;
+            break;
+        }
+    }
+    if !accepted {
+        return None;
+    }
+    // Candidate trace - `expected` is stale and must be revalidated.
+    mutated.expected = Snapshot::default();
+    Some(mutated)
+}
+
+// --- Mutations ---------------------------------------------------------
+
+/// Indices of `Event::Deliver` entries in `events`.
+fn deliver_indices(events: &[Event]) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, Event::Deliver { .. }).then_some(i))
+        .collect()
+}
+
+/// Extract (from, to) for a Deliver event. Panics for non-Deliver.
+fn deliver_pair(events: &[Event], idx: usize) -> (Participant, Participant) {
+    match &events[idx] {
+        Event::Deliver { from, to, .. } => (*from, *to),
+        _ => panic!("expected Deliver at idx {idx}"),
+    }
+}
+
+fn swap_adjacent<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    // Find an adjacent pair of Deliver indices (i, j) where j > i.
+    let mut adjacent_pairs: Vec<(usize, usize)> = Vec::new();
+    for w in delivers.windows(2) {
+        if w[1] == w[0] + 1 {
+            adjacent_pairs.push((w[0], w[1]));
+        }
+    }
+    if adjacent_pairs.is_empty() {
+        return false;
+    }
+    adjacent_pairs.shuffle(rng);
+    let (i, j) = adjacent_pairs[0];
+    events.swap(i, j);
+    true
+}
+
+fn reverse_range<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.len() < 2 {
+        return false;
+    }
+    // Pick a contiguous run of Deliver indices (unbroken by non-Deliver
+    // events) and reverse it.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut run_start = delivers[0];
+    let mut last = delivers[0];
+    for &idx in &delivers[1..] {
+        if idx == last + 1 {
+            last = idx;
+        } else {
+            if last > run_start {
+                runs.push((run_start, last));
+            }
+            run_start = idx;
+            last = idx;
+        }
+    }
+    if last > run_start {
+        runs.push((run_start, last));
+    }
+    if runs.is_empty() {
+        return false;
+    }
+    runs.shuffle(rng);
+    let (lo, hi) = runs[0];
+    events[lo..=hi].reverse();
+    true
+}
+
+fn delay_link<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.is_empty() {
+        return false;
+    }
+    // Group Deliver indices by (from, to). BTreeMap + into_iter
+    // (sorted) keeps candidate order deterministic for MUTATOR_SEED
+    // reproducibility.
+    let mut groups: BTreeMap<(Participant, Participant), Vec<usize>> = BTreeMap::new();
+    for idx in &delivers {
+        let pair = deliver_pair(events, *idx);
+        groups.entry(pair).or_default().push(*idx);
+    }
+    let candidates: Vec<_> = groups
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let pick_idx = rng.gen_range(0..candidates.len());
+    let (_pair, indices) = &candidates[pick_idx];
+    shift_group_later(events, indices, rng)
+}
+
+fn delay_sender<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.is_empty() {
+        return false;
+    }
+    let mut groups: BTreeMap<Participant, Vec<usize>> = BTreeMap::new();
+    for idx in &delivers {
+        let (from, _) = deliver_pair(events, *idx);
+        groups.entry(from).or_default().push(*idx);
+    }
+    let senders: Vec<_> = groups.keys().copied().collect();
+    if senders.is_empty() {
+        return false;
+    }
+    let sender = senders[rng.gen_range(0..senders.len())];
+    let idxs = groups.remove(&sender).unwrap();
+    shift_group_later(events, &idxs, rng)
+}
+
+fn delay_recipient<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.is_empty() {
+        return false;
+    }
+    let mut groups: BTreeMap<Participant, Vec<usize>> = BTreeMap::new();
+    for idx in &delivers {
+        let (_, to) = deliver_pair(events, *idx);
+        groups.entry(to).or_default().push(*idx);
+    }
+    let receivers: Vec<_> = groups.keys().copied().collect();
+    if receivers.is_empty() {
+        return false;
+    }
+    let receiver = receivers[rng.gen_range(0..receivers.len())];
+    let idxs = groups.remove(&receiver).unwrap();
+    shift_group_later(events, &idxs, rng)
+}
+
+/// Shift all events at `indices` forward by the same random distance
+/// while preserving their relative order. The shift distance is bounded
+/// by the distance between the last index and the trace's tail, so the
+/// last-in-group stays within bounds.
+///
+/// Returns `true` if any shift occurred; `false` when the group is
+/// empty or already at the tail.
+fn shift_group_later<R: RngCore>(
+    events: &mut Vec<Event>,
+    indices: &[usize],
+    rng: &mut R,
+) -> bool {
+    if indices.is_empty() {
+        return false;
+    }
+    // Sorted ascending - contract with callers who build via iteration.
+    debug_assert!(indices.windows(2).all(|w| w[0] < w[1]));
+    let n = events.len();
+    let last = *indices.last().unwrap();
+    if last + 1 >= n {
+        return false;
+    }
+    let max_shift = n - last - 1;
+    let shift = rng.gen_range(1..=max_shift);
+
+    // Extract the matching events (in reverse so earlier indices don't
+    // shift), then re-insert each at its original position + shift.
+    // Re-insertion is done in ascending order so earlier items land
+    // before later ones, preserving relative order.
+    let mut extracted: Vec<(usize, Event)> = Vec::with_capacity(indices.len());
+    for &i in indices.iter().rev() {
+        let e = events.remove(i);
+        extracted.push((i, e));
+    }
+    extracted.reverse(); // back to ascending by original index
+    for (orig, e) in extracted {
+        // After removals preceding this index, the current target is
+        // `orig + shift` minus the number of already-re-inserted items
+        // ahead of us - but we haven't re-inserted any yet for this
+        // iteration because we reverse-extracted. The vector has
+        // shrunk by `indices.len()` from the removals; we re-insert at
+        // `orig + shift`, clamped to the current length.
+        let target = (orig + shift).min(events.len());
+        events.insert(target, e);
+    }
+    true
+}
+
+// --- Channel + grouping helpers ---------------------------------------
+
+/// Logical channel an `Event::Deliver` rides on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Channel {
+    Vote,
+    Certificate,
+}
+
+/// Channel the wire payload rides on.
+pub(crate) fn wire_channel(wire: &Wire) -> Channel {
+    match wire {
+        Wire::Vote(_) => Channel::Vote,
+        Wire::Cert(_) => Channel::Certificate,
+    }
+}
+
+/// Returns the view carried by `wire`, if any (every simplex wire
+/// payload currently carries a view so this is always `Some`; the
+/// `Option` return keeps the signature future-proof).
+pub(crate) fn wire_view(wire: &Wire) -> Option<u64> {
+    match wire {
+        Wire::Vote(v) => Some(v.view().get()),
+        Wire::Cert(c) => Some(c.view().get()),
+    }
+}
+
+/// Identity of a [`Certificate`] that ignores who relayed it. Two
+/// deliveries of the same logical certificate from different senders
+/// share this key - used by [`Mutation::RelayPreference`] to group
+/// relay duplicates.
+pub(crate) fn logical_cert_identity(
+    cert: &Certificate<
+        commonware_consensus::simplex::scheme::ed25519::Scheme,
+        commonware_cryptography::sha256::Digest,
+    >,
+) -> String {
+    // The existing [`cert_identity`] already only reads fields of the
+    // certificate itself (view, payload, signer set), not any notion of
+    // a relay sender, so it is exactly the right "logical" key for
+    // purposes of relay dedup.
+    cert_identity(cert)
+}
+
+/// Opaque key for "same broadcast": same `from`, same message
+/// identity. Two `Event::Deliver` entries with the same
+/// [`deliver_broadcast_key`] differ only in their `to`. Returns `None`
+/// for non-`Deliver` events so grouping callers can ignore them.
+pub(crate) fn deliver_broadcast_key(event: &Event) -> Option<String> {
+    match event {
+        Event::Deliver { .. } => Some(broadcast_identity(event)),
+        _ => None,
+    }
+}
+
+/// Group `Deliver` indices of `events` by the key produced by `key`.
+/// Non-`Deliver` events (and `Deliver` events for which `key` returns
+/// `None`) are skipped. Preserves input order within each group.
+///
+/// Returns a `BTreeMap` rather than `HashMap` so that downstream
+/// mutations iterating over groups and picking one via RNG produce
+/// the same output for the same `MUTATOR_SEED` across runs. Rust
+/// `HashMap`'s per-process random seeding breaks reproducibility.
+fn group_deliver_indices_by<K, F>(events: &[Event], key: F) -> BTreeMap<K, Vec<usize>>
+where
+    K: Ord,
+    F: Fn(&Event) -> Option<K>,
+{
+    let mut out: BTreeMap<K, Vec<usize>> = BTreeMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if !matches!(e, Event::Deliver { .. }) {
+            continue;
+        }
+        if let Some(k) = key(e) {
+            out.entry(k).or_default().push(i);
+        }
+    }
+    out
+}
+
+// --- Byzantine-only raw mutations -------------------------------------
+
+/// Swap two random `Deliver` entries outright. May reorder distinct
+/// broadcasts, so only emitted by [`mutation_candidates`] for
+/// Byzantine traces.
+fn swap<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.len() < 2 {
+        return false;
+    }
+    let i = rng.gen_range(0..delivers.len());
+    let mut j = rng.gen_range(0..delivers.len());
+    if i == j {
+        j = (j + 1) % delivers.len();
+    }
+    let a = delivers[i];
+    let b = delivers[j];
+    if a == b {
+        return false;
+    }
+    events.swap(a, b);
+    true
+}
+
+/// Clone one `Deliver` and insert the clone at a random later
+/// position. Duplicates a delivery without mutating any payload.
+fn duplicate<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.is_empty() {
+        return false;
+    }
+    let src = delivers[rng.gen_range(0..delivers.len())];
+    if src + 1 >= events.len() {
+        // Source is at the tail - still valid: insert immediately
+        // after it (which lands at events.len(), appending).
+        let cloned = events[src].clone();
+        events.push(cloned);
+        return true;
+    }
+    let cloned = events[src].clone();
+    let insert_at = rng.gen_range(src + 1..=events.len());
+    events.insert(insert_at, cloned);
+    true
+}
+
+// --- Honest-safe structural mutations ---------------------------------
+
+fn swap_by_recipient<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    let delivers = deliver_indices(events);
+    if delivers.len() < 2 {
+        return false;
+    }
+    // Build candidate index pairs where the two deliveries go to
+    // distinct receivers. Pair count is O(n^2) in the number of
+    // Delivers, but traces are small so this is fine.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (ai, &a) in delivers.iter().enumerate() {
+        for &b in &delivers[ai + 1..] {
+            let (_, to_a) = deliver_pair(events, a);
+            let (_, to_b) = deliver_pair(events, b);
+            if to_a != to_b {
+                pairs.push((a, b));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return false;
+    }
+    pairs.shuffle(rng);
+    let (i, j) = pairs[0];
+    events.swap(i, j);
+    true
+}
+
+fn batch_split<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    // Find contiguous same-receiver runs of `Deliver` entries (length
+    // >= 2). A run is a sequence of adjacent event indices (no
+    // non-Deliver gaps) all sharing the same `to`.
+    let mut runs: Vec<(usize, usize, Participant)> = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        let Event::Deliver { to, .. } = &events[i] else {
+            i += 1;
+            continue;
+        };
+        let run_to = *to;
+        let start = i;
+        let mut end = i;
+        let mut j = i + 1;
+        while j < events.len() {
+            if let Event::Deliver { to: to2, .. } = &events[j] {
+                if *to2 == run_to {
+                    end = j;
+                    j += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        if end > start {
+            runs.push((start, end, run_to));
+        }
+        i = j;
+    }
+    if runs.is_empty() {
+        return false;
+    }
+    runs.shuffle(rng);
+    let (run_start, run_end, run_to) = runs[0];
+
+    // Find a Deliver outside the run with a different `to` to splice
+    // into the middle.
+    let candidates: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| match e {
+            Event::Deliver { to, .. } if *to != run_to && (idx < run_start || idx > run_end) => {
+                Some(idx)
+            }
+            _ => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let splice_src = candidates[rng.gen_range(0..candidates.len())];
+
+    // Remove the splice source first. This shifts run indices if
+    // splice_src < run_start.
+    let extracted = events.remove(splice_src);
+    let adj_run_start = if splice_src < run_start { run_start - 1 } else { run_start };
+    let adj_run_end = if splice_src < run_end { run_end - 1 } else { run_end };
+    // Pick an interior position in the run: between adj_run_start+1
+    // and adj_run_end (inclusive) so the splice lands strictly
+    // inside.
+    let lo = adj_run_start + 1;
+    let hi = adj_run_end;
+    let pos = if lo >= hi { lo } else { rng.gen_range(lo..=hi) };
+    events.insert(pos, extracted);
+    true
+}
+
+fn fanout_skew<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let groups = group_deliver_indices_by(events, deliver_broadcast_key);
+    // Pick a broadcast with >= 2 receivers.
+    let mut eligible: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|v| v.len() >= 2)
+        .collect();
+    if eligible.is_empty() {
+        return false;
+    }
+    eligible.shuffle(rng);
+    let group = &eligible[0];
+    // Pick a strict non-empty subset of the group.
+    // Shuffle indices, then keep a prefix of length in [1, len-1].
+    let mut shuffled = group.clone();
+    shuffled.shuffle(rng);
+    let subset_len = rng.gen_range(1..group.len());
+    let mut subset = shuffled[..subset_len].to_vec();
+    subset.sort_unstable();
+    shift_group_later(events, &subset, rng)
+}
+
+fn channel_skew<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let groups = group_deliver_indices_by(events, |e| match e {
+        Event::Deliver { to, msg, .. } => Some((to.get(), wire_channel(msg))),
+        _ => None,
+    });
+    let mut eligible: Vec<Vec<usize>> = groups.into_values().filter(|v| !v.is_empty()).collect();
+    if eligible.is_empty() {
+        return false;
+    }
+    eligible.shuffle(rng);
+    shift_group_later(events, &eligible[0], rng)
+}
+
+fn burst_release<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    // Group by receiver and pick one that has >= 2 scattered entries
+    // (i.e. not already contiguous).
+    let groups = group_deliver_indices_by(events, |e| match e {
+        Event::Deliver { to, .. } => Some(to.get()),
+        _ => None,
+    });
+    let mut eligible: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|v| {
+            if v.len() < 2 {
+                return false;
+            }
+            // Scattered = not all consecutive.
+            v.windows(2).any(|w| w[1] != w[0] + 1)
+        })
+        .collect();
+    if eligible.is_empty() {
+        return false;
+    }
+    eligible.shuffle(rng);
+    let mut indices = eligible.pop().unwrap();
+    indices.sort_unstable();
+
+    // Choose how many to pull together (2..=len).
+    let k = rng.gen_range(2..=indices.len());
+    // Pick k indices, preserving their relative order.
+    // Simplest: take the last k (ensures the earlier ones in `indices`
+    // stay, we just regroup the tail). This still scatters-to-burst
+    // because we then re-insert them contiguously later.
+    let pull: Vec<usize> = indices[indices.len() - k..].to_vec();
+
+    // Extract events at pull positions (in reverse to preserve
+    // earlier-index validity).
+    let mut extracted: Vec<Event> = Vec::with_capacity(pull.len());
+    for &idx in pull.iter().rev() {
+        extracted.push(events.remove(idx));
+    }
+    extracted.reverse();
+
+    // Pick an insertion position at or after the earliest pulled
+    // index's original position, clamped to current length.
+    let earliest = *pull.first().unwrap();
+    let lo = earliest;
+    let hi = events.len();
+    if lo > hi {
+        // Re-insert extracted events back where they came from to
+        // avoid losing them, then fail.
+        for (offset, e) in extracted.into_iter().enumerate() {
+            let pos = (pull[offset]).min(events.len());
+            events.insert(pos, e);
+        }
+        return false;
+    }
+    let insert_at = if lo == hi { lo } else { rng.gen_range(lo..=hi) };
+    // Insert each extracted event contiguously starting at
+    // insert_at, preserving their relative order.
+    for (offset, e) in extracted.into_iter().enumerate() {
+        events.insert(insert_at + offset, e);
+    }
+    true
+}
+
+fn interleave_receivers<R: RngCore>(events: &mut Vec<Event>, rng: &mut R) -> bool {
+    let groups = group_deliver_indices_by(events, |e| match e {
+        Event::Deliver { to, .. } => Some(to.get()),
+        _ => None,
+    });
+    let mut eligible: Vec<(u32, Vec<usize>)> = groups
+        .into_iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .collect();
+    if eligible.len() < 2 {
+        return false;
+    }
+    eligible.shuffle(rng);
+    let (_, a_positions) = eligible[0].clone();
+    let (_, b_positions) = eligible[1].clone();
+    let k = a_positions.len().min(b_positions.len());
+    if k < 1 {
+        return false;
+    }
+    let a_prefix: Vec<usize> = a_positions[..k].to_vec();
+    let b_prefix: Vec<usize> = b_positions[..k].to_vec();
+
+    // Collect the union of positions, sorted, and the interleaved
+    // event sequence (a[0], b[0], a[1], b[1], ...).
+    let mut union: Vec<usize> = a_prefix.iter().chain(b_prefix.iter()).copied().collect();
+    union.sort_unstable();
+
+    // Extract all events at those positions (reverse order so earlier
+    // indices remain valid).
+    let mut extracted: HashMap<usize, Event> = HashMap::new();
+    for &pos in union.iter().rev() {
+        extracted.insert(pos, events.remove(pos));
+    }
+
+    // Build interleaved sequence preserving each receiver's original
+    // relative order.
+    let mut interleaved: Vec<Event> = Vec::with_capacity(union.len());
+    for i in 0..k {
+        interleaved.push(extracted.remove(&a_prefix[i]).expect("a event"));
+        interleaved.push(extracted.remove(&b_prefix[i]).expect("b event"));
+    }
+    // Determine the re-insert positions. After all removals, the
+    // vector has shrunk; we re-insert `interleaved` into the gaps
+    // that the original sorted positions had occupied. Sorted
+    // positions `union[i]` correspond to target slots; we re-insert
+    // them in order so each one lands at its adjusted slot.
+    // Conceptually: for each target position t[i] in `union`
+    // (ascending), insert interleaved[i] at min(t[i], events.len()).
+    for (i, &orig_pos) in union.iter().enumerate() {
+        let target = orig_pos.min(events.len());
+        events.insert(target, interleaved[i].clone());
+    }
+    true
+}
+
+fn timeout_edge<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    // Collect Propose events (view -> leader).
+    let mut leader_for_view: HashMap<u64, Participant> = HashMap::new();
+    for e in events.iter() {
+        if let Event::Propose { leader, proposal } = e {
+            leader_for_view.insert(proposal.view().get(), *leader);
+        }
+    }
+    if leader_for_view.is_empty() {
+        return false;
+    }
+
+    // For each view v with a known leader L, find Deliver events from
+    // L at view v, and competing same-view Delivers from a different
+    // sender that appear later. Swap their positions.
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    for (idx, e) in events.iter().enumerate() {
+        let Event::Deliver { from, msg, .. } = e else {
+            continue;
+        };
+        let Some(v) = wire_view(msg) else { continue };
+        let Some(&leader) = leader_for_view.get(&v) else {
+            continue;
+        };
+        if *from != leader {
+            continue;
+        }
+        // Find a later Deliver at the same view from a non-leader
+        // sender.
+        for (jdx, e2) in events.iter().enumerate().skip(idx + 1) {
+            let Event::Deliver { from: from2, msg: msg2, .. } = e2 else {
+                continue;
+            };
+            if wire_view(msg2) != Some(v) {
+                continue;
+            }
+            if *from2 == leader {
+                continue;
+            }
+            candidates.push((idx, jdx));
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+    candidates.shuffle(rng);
+    let (i, j) = candidates[0];
+    events.swap(i, j);
+    true
+}
+
+fn relay_preference<R: RngCore>(events: &mut [Event], rng: &mut R) -> bool {
+    // Group certificate Deliver indices by (receiver,
+    // logical_cert_identity).
+    let groups = group_deliver_indices_by(events, |e| match e {
+        Event::Deliver { to, msg, .. } => match msg {
+            Wire::Cert(c) => Some((to.get(), logical_cert_identity(c))),
+            Wire::Vote(_) => None,
+        },
+        _ => None,
+    });
+    let mut eligible: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() >= 2).collect();
+    if eligible.is_empty() {
+        return false;
+    }
+    eligible.shuffle(rng);
+    let indices = &eligible[0];
+    // Earliest entry is at indices[0]. Find any later entry whose
+    // `from` differs and swap their positions.
+    let first_idx = indices[0];
+    let Event::Deliver { from: first_from, .. } = &events[first_idx] else {
+        return false;
+    };
+    let first_from = *first_from;
+    let mut later: Vec<usize> = Vec::new();
+    for &i in &indices[1..] {
+        if let Event::Deliver { from, .. } = &events[i] {
+            if *from != first_from {
+                later.push(i);
+            }
+        }
+    }
+    if later.is_empty() {
+        return false;
+    }
+    later.shuffle(rng);
+    events.swap(first_idx, later[0]);
+    true
+}
+
+// --- Metadata extraction helpers --------------------------------------
+//
+// Exposed crate-publicly so other fuzz-level code (mutation schedulers,
+// corpus deduplicators) can reason about events without re-matching on
+// every variant.
+
+/// Opaque per-event identity used for corpus dedup. Distinguishes
+/// every recorded event, including each receiver of a broadcast
+/// (`Deliver { to, from, msg }` entries with the same `from` and `msg`
+/// but different `to` are *different* identities here).
+///
+/// Use [`broadcast_identity`] instead when you want to reason about
+/// broadcast-level order (what the sender produced), not per-delivery
+/// position.
+pub fn event_identity(event: &Event) -> String {
+    match event {
+        Event::Deliver { to, from, msg } => match msg {
+            Wire::Vote(v) => format!("D:{}:{}:{}", from.get(), to.get(), vote_identity(v)),
+            Wire::Cert(c) => format!("D:{}:{}:{}", from.get(), to.get(), cert_identity(c)),
+        },
+        Event::Construct { node, vote } => {
+            format!("C:{}:{}", node.get(), vote_identity(vote))
+        }
+        Event::Propose { leader, proposal } => format!(
+            "P:{}:{}:{}",
+            leader.get(),
+            proposal.view().get(),
+            payload_hex(&proposal.payload)
+        ),
+        Event::Timeout { node, view, reason } => {
+            format!("T:{}:{}:{:?}", node.get(), view.get(), reason)
+        }
+    }
+}
+
+/// Broadcast-level identity: collapses all `Deliver` events of a given
+/// `(sender, message)` to the same key regardless of receiver. Used by
+/// [`preserves_first_broadcast_order`] so reordering deliveries (fine
+/// for honest traces) does not spuriously violate the invariant.
+///
+/// For non-`Deliver` events this coincides with [`event_identity`].
+pub fn broadcast_identity(event: &Event) -> String {
+    match event {
+        Event::Deliver { from, msg, .. } => match msg {
+            Wire::Vote(v) => format!("B:{}:{}", from.get(), vote_identity(v)),
+            Wire::Cert(c) => format!("B:{}:{}", from.get(), cert_identity(c)),
+        },
+        _ => event_identity(event),
+    }
+}
+
+fn vote_identity(vote: &Vote<commonware_consensus::simplex::scheme::ed25519::Scheme, commonware_cryptography::sha256::Digest>) -> String {
+    match vote {
+        Vote::Notarize(n) => format!(
+            "N:{}:{}:{}",
+            n.signer().get(),
+            n.view().get(),
+            payload_hex(&n.proposal.payload)
+        ),
+        Vote::Nullify(n) => format!("U:{}:{}", n.signer().get(), n.view().get()),
+        Vote::Finalize(f) => format!(
+            "F:{}:{}:{}",
+            f.signer().get(),
+            f.view().get(),
+            payload_hex(&f.proposal.payload)
+        ),
+    }
+}
+
+fn cert_identity(cert: &Certificate<commonware_consensus::simplex::scheme::ed25519::Scheme, commonware_cryptography::sha256::Digest>) -> String {
+    match cert {
+        Certificate::Notarization(n) => {
+            let signers: Vec<u32> = n.certificate.signers.iter().map(|p| p.get()).collect();
+            format!(
+                "CN:{}:{}:{:?}",
+                n.view().get(),
+                payload_hex(&n.proposal.payload),
+                signers
+            )
+        }
+        Certificate::Nullification(n) => {
+            let signers: Vec<u32> = n.certificate.signers.iter().map(|p| p.get()).collect();
+            format!("CU:{}:{:?}", n.view().get(), signers)
+        }
+        Certificate::Finalization(f) => {
+            let signers: Vec<u32> = f.certificate.signers.iter().map(|p| p.get()).collect();
+            format!(
+                "CF:{}:{}:{:?}",
+                f.view().get(),
+                payload_hex(&f.proposal.payload),
+                signers
+            )
+        }
+    }
+}
+
+fn payload_hex(d: &commonware_cryptography::sha256::Digest) -> String {
+    d.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Whether the mutated event sequence preserves the first-broadcast
+/// order present in `original`. Uses [`broadcast_identity`] so that
+/// reorderings *across receivers of the same broadcast* do not count
+/// as a violation - only the relative order of distinct broadcasts
+/// (distinct `(sender, message)` pairs) must be preserved.
+///
+/// This is an honest-trace invariant: a mutated trace that still
+/// satisfies it can only have disturbed network-level delivery order
+/// within a given broadcast, not the causal order of distinct
+/// broadcasts themselves.
+pub fn preserves_first_broadcast_order(original: &[Event], mutated: &[Event]) -> bool {
+    let first_seen = |events: &[Event]| -> HashMap<String, usize> {
+        let mut out = HashMap::new();
+        for (idx, e) in events.iter().enumerate() {
+            let id = broadcast_identity(e);
+            out.entry(id).or_insert(idx);
+        }
+        out
+    };
+    let orig_order: Vec<String> = {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for e in original {
+            let id = broadcast_identity(e);
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+        }
+        out
+    };
+    let mutated_first = first_seen(mutated);
+    let mut prev_idx: Option<usize> = None;
+    for id in orig_order {
+        let Some(&idx) = mutated_first.get(&id) else {
+            return false;
+        };
+        if prev_idx.is_some_and(|p| idx <= p) {
+            return false;
+        }
+        prev_idx = Some(idx);
+    }
+    true
+}
+
+// --- TLC mutator driver -----------------------------------------------
+
+const DEFAULT_ITERATIONS: usize = 10_000;
+const DEFAULT_RESEED_FREQ: usize = 100;
+const DEFAULT_SEED_POPULATION_SIZE: usize = 100;
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn seed_dir() -> PathBuf {
+    env::var("MUTATION_SEEDS_FOLDER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest_dir().join("artifacts/tlc_mutator"))
+}
+
+fn output_dir() -> PathBuf {
+    env::var("MUTATED_TRACES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest_dir().join("artifacts/mutated_traces"))
+}
+
+fn resolve_iterations() -> usize {
+    env::var("MUTATOR_ITERATIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_ITERATIONS)
+}
+
+fn resolve_reseed_freq() -> usize {
+    env::var("MUTATOR_RESEED_FREQ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_RESEED_FREQ)
+}
+
+fn resolve_seed_population_size() -> usize {
+    env::var("MUTATOR_SEED_POPULATION_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SEED_POPULATION_SIZE)
+}
+
+fn resolve_faults() -> Option<u32> {
+    env::var("MUTATOR_FAULTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
+fn resolve_mut_per_trace(rng: &mut StdRng) -> usize {
+    env::var("MUTATOR_MUT_PER_TRACE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| rng.gen_range(1..=4))
+}
+
+/// PRNG seed selection. If `MUTATOR_SEED` is set, uses that value.
+/// Otherwise draws a random seed and persists it to
+/// `<seed_dir>/.tlc_mutator_seed` for reproducibility.
+fn resolve_seed(seed_dir: &Path) -> u64 {
+    if let Some(seed) = env::var("MUTATOR_SEED").ok().and_then(|s| s.parse().ok()) {
+        return seed;
+    }
+    let seed: u64 = rand::random();
+    fs::create_dir_all(seed_dir).ok();
+    let seed_file = seed_dir.join(".tlc_mutator_seed");
+    if let Err(e) = fs::write(&seed_file, seed.to_string()) {
+        eprintln!(
+            "warning: failed to write seed to {}: {e}",
+            seed_file.display()
+        );
+    }
+    seed
+}
+
+/// Recursively returns every `*.json` path under `dir`, lexicographically
+/// sorted. Hidden subdirectories are skipped.
 pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -26,7 +1137,6 @@ pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
     children.sort();
     for path in children {
         if path.is_dir() {
-            // Skip hidden directories (e.g. .seen marker dir)
             if path
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with('.'))
@@ -34,9 +1144,1440 @@ pub fn find_json_files(dir: &Path) -> Vec<PathBuf> {
                 continue;
             }
             out.extend(find_json_files(&path));
-        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+        } else if path.extension().is_some_and(|ext| ext == "json") {
             out.push(path);
         }
     }
     out
+}
+
+/// Loads every JSON seed under `dir` as a [`Trace`]. Files that fail to
+/// parse are skipped with a warning.
+fn load_seeds(dir: &Path) -> Vec<Trace> {
+    let mut seeds = Vec::new();
+    for path in find_json_files(dir) {
+        let json = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("warning: skipping {}: read error: {e}", path.display());
+                continue;
+            }
+        };
+        match Trace::from_json(&json) {
+            Ok(trace) if !trace.events.is_empty() => seeds.push(trace),
+            Ok(_) => {}
+            Err(e) => eprintln!(
+                "warning: skipping {}: trace parse error: {e}",
+                path.display()
+            ),
+        }
+    }
+    seeds
+}
+
+fn filter_seeds_for_faults(
+    mut seeds: Vec<Trace>,
+    faults_override: Option<u32>,
+) -> Vec<Trace> {
+    if let Some(f) = faults_override {
+        seeds.retain(|trace| trace.topology.faults == f);
+    }
+    seeds
+}
+
+fn with_faults_override(mut trace: Trace, faults_override: Option<u32>) -> Trace {
+    if let Some(f) = faults_override {
+        trace.topology.faults = f;
+    }
+    trace
+}
+
+/// Cache key for trace-level Quint-rejection dedup. Uses the JSON
+/// encoding so semantically-identical traces collapse.
+fn trace_cache_key(trace: &Trace) -> Option<String> {
+    trace.to_json().ok().map(|s| sha256_hex(s.as_bytes()))
+}
+
+/// Hex sha256 of arbitrary bytes.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256Hasher::hash(bytes);
+    let mut hex = String::with_capacity(digest.0.len() * 2);
+    for byte in digest.0 {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+/// Sha1 hex of the trace JSON, used as on-disk filename.
+fn trace_filename(json: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(json.as_bytes());
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("{hex}.json")
+}
+
+/// Mutate `base` once; optionally fall back to the base itself when no
+/// mutation applies and `allow_base_fallback` is set.
+fn next_candidate_trace(
+    base: &Trace,
+    rng: &mut StdRng,
+    faults_override: Option<u32>,
+    allow_base_fallback: bool,
+) -> Option<Trace> {
+    if let Some(m) = mutate_once(base, rng) {
+        return Some(with_faults_override(m, faults_override));
+    }
+    if allow_base_fallback {
+        return Some(with_faults_override(base.clone(), faults_override));
+    }
+    None
+}
+
+/// Per-base-seed attempt budget used by
+/// [`exhaustive_candidate_lookup`]. Larger than the
+/// `mutate_once` internal retry (32) so we still distinguish "one
+/// specific seed happens to be unlucky" from "this seed has no
+/// admissible mutations at all".
+pub(crate) const EXHAUSTIVE_PER_SEED_BUDGET: usize = 128;
+
+/// Try to produce at least one valid mutated candidate from the seed
+/// pool, with a fair per-seed budget so we don't exit while other
+/// seeds still have admissible mutations.
+///
+/// Iterates over all base seeds in a shuffled order, giving each seed
+/// up to [`EXHAUSTIVE_PER_SEED_BUDGET`] independent `mutate_once`
+/// attempts. Short-circuits on the first success. Returns `None` only
+/// when every seed has been given its full budget and none produced a
+/// candidate - i.e. the seed corpus is genuinely degenerate (e.g. all
+/// seeds have fewer than two `Deliver` events and no mutation can
+/// apply).
+fn exhaustive_candidate_lookup(
+    base_seeds: &[Trace],
+    rng: &mut StdRng,
+    faults_override: Option<u32>,
+) -> Option<Trace> {
+    if base_seeds.is_empty() {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..base_seeds.len()).collect();
+    order.shuffle(rng);
+    for &idx in &order {
+        let base = &base_seeds[idx];
+        for _ in 0..EXHAUSTIVE_PER_SEED_BUDGET {
+            if let Some(t) = next_candidate_trace(base, rng, faults_override, false) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Fill `queue` with `n` freshly-mutated traces drawn from random bases.
+/// Existing queue contents are cleared.
+fn seed_queue_generated(
+    queue: &mut VecDeque<Trace>,
+    base_seeds: &[Trace],
+    rng: &mut StdRng,
+    n: usize,
+    faults_override: Option<u32>,
+) {
+    queue.clear();
+    if base_seeds.is_empty() {
+        return;
+    }
+    for idx in 0..n {
+        let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
+        if let Some(trace) =
+            next_candidate_trace(base, rng, faults_override, false)
+        {
+            queue.push_back(trace);
+        }
+        if n >= 10 && ((idx + 1) % 10 == 0 || idx + 1 == n) {
+            println!(
+                "trace_mutator: queue generation progress {}/{} (queued {})",
+                idx + 1,
+                n,
+                queue.len()
+            );
+        }
+    }
+}
+
+/// Directory (relative to `CARGO_MANIFEST_DIR`) where canonical
+/// [`Trace`] fixtures live, grouped by faults count.
+///
+/// Layout:
+///
+/// ```text
+/// src/tracing/tests/fixtures/
+///     honest/    # topology.faults == 0
+///     byzantine/ # topology.faults == 1
+///     twins/     # topology.faults == 1
+/// ```
+///
+/// [`bootstrap_fixtures`] copies these into
+/// [`MUTATION_SEEDS_FOLDER`][seed_dir] on startup (idempotent -
+/// existing destination files are left alone).
+const FIXTURE_SUBDIRS: &[&str] = &["honest", "byzantine", "twins"];
+
+/// Expected faults count for fixtures in each subdirectory. Kept in
+/// lock-step with [`FIXTURE_SUBDIRS`] so we can skip subdirectories
+/// whose faults do not match `MUTATOR_FAULTS` without parsing every
+/// JSON file. Values must match the `Topology.faults` field encoded
+/// in the fixtures themselves - [`bootstrap_fixtures`] also parses
+/// each fixture's JSON and double-checks the match before copying.
+const FIXTURE_SUBDIR_FAULTS: &[u32] = &[0, 1, 1];
+
+/// Root of the bundled fixture tree, resolved at compile time.
+fn fixtures_root() -> PathBuf {
+    manifest_dir().join("src/tracing/tests/fixtures")
+}
+
+/// Copy bundled canonical [`Trace`] fixtures from
+/// `src/tracing/tests/fixtures/{honest,byzantine,twins}/` into
+/// `seed_dir` before the mutator loads seeds.
+///
+/// Honors `MUTATOR_FAULTS`: only subdirectories whose declared faults
+/// count (see [`FIXTURE_SUBDIR_FAULTS`]) matches `faults_override`
+/// contribute fixtures - this keeps `load_seeds` from reading, and
+/// `filter_seeds_for_faults` from later discarding, fixtures that
+/// cannot be used for the current run.
+///
+/// Idempotent: destination files are only written if they do not
+/// already exist. Fault-tolerant: all I/O and parse errors are
+/// logged and swallowed - a missing or malformed fixture must not
+/// abort the driver.
+///
+/// Returns the number of fixtures copied (informational).
+fn bootstrap_fixtures(seed_dir: &Path, faults_override: Option<u32>) -> usize {
+    if let Err(e) = fs::create_dir_all(seed_dir) {
+        eprintln!(
+            "bootstrap_fixtures: cannot create {}: {e}",
+            seed_dir.display()
+        );
+        return 0;
+    }
+    let root = fixtures_root();
+    if !root.is_dir() {
+        // Missing tree is not fatal - the mutator runs fine on
+        // whatever pre-existing seeds the caller has already staged.
+        return 0;
+    }
+    let mut copied = 0usize;
+    for (sub, sub_faults) in FIXTURE_SUBDIRS.iter().zip(FIXTURE_SUBDIR_FAULTS.iter()) {
+        if let Some(f) = faults_override {
+            if f != *sub_faults {
+                continue;
+            }
+        }
+        let sub_dir = root.join(sub);
+        if !sub_dir.is_dir() {
+            continue;
+        }
+        for path in find_json_files(&sub_dir) {
+            let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let dest = seed_dir.join(&file_name);
+            if dest.exists() {
+                continue;
+            }
+            // Parse and re-verify the faults field - belt-and-braces
+            // check that subdirectory placement and content agree.
+            let json = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "bootstrap_fixtures: skip {} (read error): {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let trace = match Trace::from_json(&json) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "bootstrap_fixtures: skip {} (parse error): {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if trace.topology.faults != *sub_faults {
+                eprintln!(
+                    "bootstrap_fixtures: skip {} (faults mismatch: dir={}, file={})",
+                    path.display(),
+                    sub_faults,
+                    trace.topology.faults
+                );
+                continue;
+            }
+            if let Some(f) = faults_override {
+                if trace.topology.faults != f {
+                    continue;
+                }
+            }
+            let tmp = dest.with_extension("json.tmp");
+            if let Err(e) = fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &dest)) {
+                eprintln!(
+                    "bootstrap_fixtures: write error {} -> {}: {e}",
+                    path.display(),
+                    dest.display()
+                );
+                continue;
+            }
+            copied += 1;
+        }
+    }
+    copied
+}
+
+/// Entry point for the trace-mutator binary (`trace_mutator`).
+///
+/// Trace-native TLC feedback loop: operates on [`Trace`] end-to-end
+/// (seeds via [`Trace::from_json`], TLC actions via
+/// [`tlc_encoder::encode_from_trace`], Quint gate via
+/// [`quint_model::validate_and_extract_expected`], persistence via
+/// [`Trace::to_json`]). Before loading seeds, the driver copies any
+/// bundled fixtures under `src/tracing/tests/fixtures/` into the
+/// seed directory ([`bootstrap_fixtures`]) so the pipeline works out
+/// of the box; pre-existing seeds are left alone.
+pub fn run() {
+    let url = env::var("TLC_URL").unwrap_or_else(|_| DEFAULT_TLC_URL.to_string());
+    let iterations = resolve_iterations();
+    let reseed_freq = resolve_reseed_freq().max(1);
+    let seed_population_size = resolve_seed_population_size();
+    let faults_override = resolve_faults();
+
+    let seed_dir = seed_dir();
+    let seed = resolve_seed(&seed_dir);
+
+    let copied = bootstrap_fixtures(&seed_dir, faults_override);
+    if copied > 0 {
+        println!(
+            "trace_mutator: bootstrapped {copied} fixture(s) into {}",
+            seed_dir.display()
+        );
+    }
+
+    println!(
+        "trace_mutator: loading seeds from {} (faults={})",
+        seed_dir.display(),
+        faults_override.map_or("inherit".to_string(), |f| f.to_string())
+    );
+
+    let mut rejection_cache: HashSet<String> = HashSet::new();
+    let mut base_seeds: Vec<Trace> =
+        filter_seeds_for_faults(load_seeds(&seed_dir), faults_override)
+            .into_iter()
+            .map(|t| with_faults_override(t, faults_override))
+            .collect();
+    if base_seeds.is_empty() {
+        eprintln!("no usable seed traces under {}", seed_dir.display());
+        process::exit(1);
+    }
+
+    let out_dir = output_dir();
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        eprintln!("failed to create {}: {e}", out_dir.display());
+        process::exit(1);
+    }
+
+    let client = TlcClient::new(&url);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut_per_trace = resolve_mut_per_trace(&mut rng);
+
+    println!(
+        "trace_mutator: base_seeds={} iterations={} seed={} mut_per_trace={} \
+         reseed_freq={} seed_population={} faults={} url={} out={}",
+        base_seeds.len(),
+        iterations,
+        seed,
+        mut_per_trace,
+        reseed_freq,
+        seed_population_size,
+        faults_override.map_or("inherit".to_string(), |f| f.to_string()),
+        url,
+        out_dir.display(),
+    );
+
+    let mut states_map: HashSet<i64> = HashSet::new();
+    let mut traces_map: HashSet<String> = HashSet::new();
+    let mut state_traces_map: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<Trace> = VecDeque::new();
+
+    println!(
+        "trace_mutator: generating initial queue of {} traces",
+        seed_population_size
+    );
+    seed_queue_generated(
+        &mut queue,
+        &base_seeds,
+        &mut rng,
+        seed_population_size,
+        faults_override,
+    );
+    println!(
+        "trace_mutator: initial queue ready ({} traces)",
+        queue.len()
+    );
+
+    let mut kept = 0usize;
+    let mut empty_actions = 0usize;
+    let mut errors = 0usize;
+    let mut uninteresting = 0usize;
+    let mut mutated_executions = 0usize;
+    let mut random_executions = 0usize;
+
+    for iter in 0..iterations {
+        if iter > 0 && iter % reseed_freq == 0 {
+            println!(
+                "[iter {iter}] reseed: reloading seeds from {}",
+                seed_dir.display()
+            );
+            let refreshed = filter_seeds_for_faults(
+                load_seeds(&seed_dir),
+                faults_override,
+            )
+            .into_iter()
+            .map(|t| with_faults_override(t, faults_override))
+            .collect::<Vec<_>>();
+            if !refreshed.is_empty() {
+                base_seeds = refreshed;
+            }
+            println!(
+                "[iter {iter}] reseed: generating {} fresh traces from {} seed bases",
+                seed_population_size,
+                base_seeds.len()
+            );
+            seed_queue_generated(
+                &mut queue,
+                &base_seeds,
+                &mut rng,
+                seed_population_size,
+                faults_override,
+            );
+            println!(
+                "[iter {iter}] reseed: generated {} fresh traces from {} base seeds",
+                seed_population_size,
+                base_seeds.len(),
+            );
+        }
+
+        // Queue-empty handling in three tiers:
+        //   1. Refill via seed_queue_generated (population_size attempts
+        //      spread randomly across base seeds).
+        //   2. If the refill is still empty, an exhaustive per-base-seed
+        //      sweep: EXHAUSTIVE_PER_SEED_BUDGET attempts against each
+        //      base seed, short-circuiting on the first success.
+        //   3. If every seed has failed its full budget, the seed
+        //      corpus is genuinely degenerate (e.g. all seeds lack any
+        //      admissible mutation) - log and break out of the loop so
+        //      the driver finishes cleanly with its summary. Not a
+        //      fatal process::exit(1): other fuzz workers, watchers,
+        //      and subsequent make targets should keep running.
+        let trace = match queue.pop_front() {
+            Some(t) => {
+                mutated_executions += 1;
+                t
+            }
+            None => {
+                random_executions += 1;
+                println!(
+                    "[iter {iter}] queue drained, refilling from {} base seeds (population={})",
+                    base_seeds.len(),
+                    seed_population_size
+                );
+                seed_queue_generated(
+                    &mut queue,
+                    &base_seeds,
+                    &mut rng,
+                    seed_population_size,
+                    faults_override,
+                );
+                if let Some(t) = queue.pop_front() {
+                    t
+                } else {
+                    match exhaustive_candidate_lookup(&base_seeds, &mut rng, faults_override) {
+                        Some(t) => t,
+                        None => {
+                            eprintln!(
+                                "[iter {iter}] queue permanently exhausted: every one of {} \
+                                 base seeds failed {} mutation attempts. Stopping the mutator \
+                                 loop cleanly (not a fatal error).",
+                                base_seeds.len(),
+                                EXHAUSTIVE_PER_SEED_BUDGET,
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        if let Ok(json) = trace.to_json() {
+            traces_map.insert(sha256_hex(json.as_bytes()));
+        }
+
+        let mut actions = tlc_encoder::encode_from_trace(&trace);
+        if actions.is_empty() {
+            empty_actions += 1;
+            println!(
+                "[iter {iter}] tlc=skip-empty (q={}, traces={}, states={})",
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
+            continue;
+        }
+        terminate_actions(&mut actions);
+
+        let response = match client.execute_full(&actions) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("tlc oracle error at iter {iter}: {e}");
+                process::exit(1);
+            }
+        };
+
+        let mut num_new_states = 0usize;
+        for key in &response.keys {
+            if states_map.insert(*key) {
+                num_new_states += 1;
+            }
+        }
+
+        let pairs: Vec<(&String, i64)> = response
+            .states
+            .iter()
+            .zip(response.keys.iter().copied())
+            .collect();
+        if let Ok(bytes) = serde_json::to_vec(&pairs) {
+            state_traces_map.insert(sha256_hex(&bytes));
+        }
+
+        if num_new_states == 0 {
+            uninteresting += 1;
+            println!(
+                "[iter {iter}] tlc=ok-uninteresting (keys={}, q={}, traces={}, states={})",
+                response.keys.len(),
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
+            continue;
+        }
+
+        let label = trace_cache_key(&trace).unwrap_or_else(|| format!("iter_{iter}"));
+        if rejection_cache.contains(&label) {
+            println!(
+                "[iter {iter}] tlc=ok-model-rejected-cached (keys={}, new={}, q={}, traces={}, states={})",
+                response.keys.len(),
+                num_new_states,
+                queue.len(),
+                traces_map.len(),
+                states_map.len(),
+            );
+            continue;
+        }
+
+        let expected_snapshot = match quint_model::validate_and_extract_expected(
+            &trace, &label,
+        ) {
+            Ok(exp) => exp,
+            Err(_) => {
+                rejection_cache.insert(label);
+                println!(
+                    "[iter {iter}] tlc=ok-model-rejected (keys={}, new={}, q={}, traces={}, states={})",
+                    response.keys.len(),
+                    num_new_states,
+                    queue.len(),
+                    traces_map.len(),
+                    states_map.len(),
+                );
+                continue;
+            }
+        };
+
+        let mut trace = with_faults_override(trace, faults_override);
+        if let Some(snap) = expected_snapshot {
+            trace.expected = snap;
+        }
+
+        let json = match trace.to_json() {
+            Ok(s) => s,
+            Err(e) => {
+                errors += 1;
+                println!("[iter {iter}] tlc=ok-serialize-error: {e}");
+                continue;
+            }
+        };
+        let path = out_dir.join(trace_filename(&json));
+        if let Err(e) = fs::write(&path, &json) {
+            errors += 1;
+            println!(
+                "[iter {iter}] tlc=ok-write-error (path={}): {e}",
+                path.display()
+            );
+            continue;
+        }
+
+        let num_mutations = num_new_states * mut_per_trace;
+        let mut pushed = 0usize;
+        for _ in 0..num_mutations {
+            if let Some(child) =
+                next_candidate_trace(&trace, &mut rng, faults_override, true)
+            {
+                queue.push_back(child);
+                pushed += 1;
+            }
+        }
+
+        kept += 1;
+        println!(
+            "[iter {iter}] tlc=ok-kept {} (keys={}, new={}, pushed={}, q={}, traces={}, states={})",
+            path.file_name().unwrap().to_string_lossy(),
+            response.keys.len(),
+            num_new_states,
+            pushed,
+            queue.len(),
+            traces_map.len(),
+            states_map.len(),
+        );
+    }
+
+    println!(
+        "trace_mutator done: kept={kept} uninteresting={uninteresting} \
+         empty_actions={empty_actions} errors={errors} \
+         mutated_executions={mutated_executions} random_executions={random_executions} \
+         traces={} state_traces={} states={}",
+        traces_map.len(),
+        state_traces_map.len(),
+        states_map.len(),
+    );
+}
+
+// --- Tests ------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::{
+        simplex::{
+            replay::trace::{Timing, Topology},
+            scheme::ed25519::Scheme,
+            types::{Notarize, Proposal, Vote},
+        },
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_runtime::{deterministic, Runner};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn fixture() -> commonware_cryptography::certificate::mocks::Fixture<Scheme> {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let cc = captured.clone();
+        let runner = deterministic::Runner::seeded(0);
+        runner.start(|mut ctx| async move {
+            let fx = commonware_consensus::simplex::scheme::ed25519::fixture(
+                &mut ctx,
+                b"consensus_fuzz",
+                4,
+            );
+            *cc.lock().unwrap() = Some(fx);
+        });
+        let mut g = captured.lock().unwrap();
+        g.take().unwrap()
+    }
+
+    fn make_deliver(
+        fx: &commonware_cryptography::certificate::mocks::Fixture<Scheme>,
+        from: u32,
+        to: u32,
+        view: u64,
+        payload_seed: u8,
+    ) -> Event {
+        let round = Round::new(Epoch::new(0), View::new(view));
+        let proposal = Proposal::new(
+            round,
+            View::new(view.saturating_sub(1)),
+            Sha256Digest([payload_seed; 32]),
+        );
+        let notarize =
+            Notarize::<Scheme, Sha256Digest>::sign(&fx.schemes[from as usize], proposal)
+                .unwrap();
+        Event::Deliver {
+            to: Participant::new(to),
+            from: Participant::new(from),
+            msg: Wire::Vote(Vote::Notarize(notarize)),
+        }
+    }
+
+    fn sample_events(fx: &commonware_cryptography::certificate::mocks::Fixture<Scheme>) -> Vec<Event> {
+        vec![
+            make_deliver(fx, 0, 1, 1, 1),
+            make_deliver(fx, 0, 2, 1, 1),
+            make_deliver(fx, 0, 3, 1, 1),
+            make_deliver(fx, 1, 0, 1, 2),
+            make_deliver(fx, 1, 2, 1, 2),
+            make_deliver(fx, 1, 3, 1, 2),
+            make_deliver(fx, 2, 0, 1, 3),
+            make_deliver(fx, 2, 1, 1, 3),
+            make_deliver(fx, 2, 3, 1, 3),
+        ]
+    }
+
+    fn identities(events: &[Event]) -> Vec<String> {
+        events.iter().map(event_identity).collect()
+    }
+
+    #[test]
+    fn swap_adjacent_changes_order() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let original_ids = identities(&events);
+        let mut rng = StdRng::seed_from_u64(42);
+        assert!(try_mutation(&mut events, &mut rng, Mutation::SwapAdjacent));
+        let new_ids = identities(&events);
+        assert_ne!(new_ids, original_ids);
+        assert_eq!(events.len(), original_ids.len());
+    }
+
+    #[test]
+    fn reverse_range_changes_order() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let original_ids = identities(&events);
+        let mut rng = StdRng::seed_from_u64(7);
+        assert!(try_mutation(&mut events, &mut rng, Mutation::ReverseRange));
+        let new_ids = identities(&events);
+        assert_ne!(new_ids, original_ids);
+        assert_eq!(events.len(), original_ids.len());
+    }
+
+    #[test]
+    fn delay_link_preserves_length() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let original_len = events.len();
+        let mut rng = StdRng::seed_from_u64(1234);
+        let _ = try_mutation(&mut events, &mut rng, Mutation::DelayLink);
+        assert_eq!(events.len(), original_len);
+    }
+
+    #[test]
+    fn delay_sender_preserves_length() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let original_len = events.len();
+        let mut rng = StdRng::seed_from_u64(55);
+        let _ = try_mutation(&mut events, &mut rng, Mutation::DelaySender);
+        assert_eq!(events.len(), original_len);
+    }
+
+    #[test]
+    fn delay_recipient_preserves_length() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let original_len = events.len();
+        let mut rng = StdRng::seed_from_u64(98);
+        let _ = try_mutation(&mut events, &mut rng, Mutation::DelayRecipient);
+        assert_eq!(events.len(), original_len);
+    }
+
+    #[test]
+    fn apply_mutation_eventually_succeeds() {
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        let mut rng = StdRng::seed_from_u64(2026);
+        // Over many tries at least one mutation must succeed.
+        let mut any = false;
+        for _ in 0..50 {
+            if apply_mutation(&mut events, &mut rng, ALL_MUTATIONS) {
+                any = true;
+                break;
+            }
+        }
+        assert!(any);
+    }
+
+    #[test]
+    fn apply_mutation_fails_on_empty_and_singleton() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut empty: Vec<Event> = Vec::new();
+        assert!(!apply_mutation(&mut empty, &mut rng, ALL_MUTATIONS));
+        // Singleton under the honest candidate set: all honest
+        // mutations need ≥2 Deliver events to produce a change.
+        // (The Byzantine `Duplicate` can succeed on a singleton, so
+        // we scope this check to HONEST_MUTATIONS.)
+        let fx = fixture();
+        let mut one = vec![make_deliver(&fx, 0, 1, 1, 1)];
+        assert!(!apply_mutation(&mut one, &mut rng, HONEST_MUTATIONS));
+    }
+
+    #[test]
+    fn mutate_once_preserves_topology_and_clears_expected() {
+        use commonware_consensus::simplex::replay::trace::{CertStateSnapshot, NodeSnapshot};
+        use commonware_consensus::simplex::replay::Snapshot;
+        use commonware_consensus::types::View;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        let fx = fixture();
+        // Build a non-default `expected` snapshot to prove mutate_once
+        // clears it.
+        let mut nodes = std::collections::BTreeMap::new();
+        let mut node = NodeSnapshot::default();
+        node.notarizations.insert(
+            View::new(1),
+            CertStateSnapshot {
+                payload: Sha256Digest([9u8; 32]),
+                signature_count: Some(3),
+            },
+        );
+        nodes.insert(Participant::new(0), node);
+        let expected = Snapshot { nodes };
+
+        let trace = Trace {
+            topology: Topology {
+                n: 4,
+                faults: 0,
+                epoch: 0,
+                namespace: b"consensus_fuzz".to_vec(),
+                timing: Timing::default(),
+            },
+            events: sample_events(&fx),
+            expected,
+        };
+        let mut rng = StdRng::seed_from_u64(42);
+        let mutated = mutate_once(&trace, &mut rng).expect("mutation must succeed");
+        assert_eq!(mutated.topology.n, trace.topology.n);
+        assert_eq!(mutated.topology.namespace, trace.topology.namespace);
+        assert_eq!(mutated.events.len(), trace.events.len());
+        assert!(
+            mutated.expected.nodes.is_empty(),
+            "mutate_once must clear expected (stale after reordering)"
+        );
+    }
+
+    #[test]
+    fn event_identity_distinguishes_senders() {
+        let fx = fixture();
+        let a = make_deliver(&fx, 0, 1, 1, 7);
+        let b = make_deliver(&fx, 2, 1, 1, 7); // different sender
+        assert_ne!(event_identity(&a), event_identity(&b));
+    }
+
+    #[test]
+    fn event_identity_distinguishes_receivers_but_broadcast_identity_does_not() {
+        let fx = fixture();
+        let to1 = make_deliver(&fx, 0, 1, 1, 7);
+        let to2 = make_deliver(&fx, 0, 2, 1, 7); // same broadcast, different receiver
+        assert_ne!(
+            event_identity(&to1),
+            event_identity(&to2),
+            "event_identity distinguishes per-receiver"
+        );
+        assert_eq!(
+            broadcast_identity(&to1),
+            broadcast_identity(&to2),
+            "broadcast_identity collapses across receivers"
+        );
+    }
+
+    #[test]
+    fn preserves_first_broadcast_order_true_for_noop() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        assert!(preserves_first_broadcast_order(&events, &events));
+    }
+
+    #[test]
+    fn preserves_first_broadcast_order_allows_per_receiver_reorder() {
+        // Rearranging deliveries OF THE SAME broadcast (same sender,
+        // same vote) is allowed - broadcast identity ignores `to`.
+        let fx = fixture();
+        let events = sample_events(&fx);
+        // Swap two adjacent deliveries of the first broadcast
+        // (from n0 to n1, n2, n3 → rearrange to n2, n1, n3).
+        let mut mutated = events.clone();
+        mutated.swap(0, 1);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn preserves_first_broadcast_order_rejects_distinct_broadcast_swap() {
+        // Reordering the first appearance of DISTINCT broadcasts
+        // (n0's and n1's notarizes) is a violation.
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let mut mutated = events.clone();
+        // Move n1's first broadcast (index 3) before any of n0's.
+        let item = mutated.remove(3);
+        mutated.insert(0, item);
+        assert!(!preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn bootstrap_fixtures_copies_matching_and_skips_others() {
+        use std::path::PathBuf;
+        let tmp = std::env::temp_dir().join(format!(
+            "commonware_fuzz_bootstrap_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // faults_override=Some(0) must copy `honest/` only.
+        let copied = bootstrap_fixtures(&tmp, Some(0));
+        let copied_files: Vec<PathBuf> = find_json_files(&tmp);
+        let all_honest = copied_files
+            .iter()
+            .all(|p| p.file_name().and_then(|s| s.to_str()).map_or(false, |n| n.starts_with("honest_")));
+        assert!(
+            copied >= 2 && !copied_files.is_empty() && all_honest,
+            "expected honest-only copy (copied={copied}, files={copied_files:?})"
+        );
+        // Re-run: idempotent (no new files).
+        let again = bootstrap_fixtures(&tmp, Some(0));
+        assert_eq!(again, 0, "second bootstrap must copy nothing");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // faults_override=Some(1) must copy byzantine + twins only.
+        let copied = bootstrap_fixtures(&tmp, Some(1));
+        let copied_files: Vec<PathBuf> = find_json_files(&tmp);
+        let all_f1 = copied_files.iter().all(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map_or(false, |n| {
+                    n.starts_with("byzantine_") || n.starts_with("twins_")
+                })
+        });
+        assert!(
+            copied >= 3 && all_f1,
+            "expected f=1 copy (copied={copied}, files={copied_files:?})"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Regenerates the bundled canonical fixture set under
+    /// `src/tracing/tests/fixtures/{honest,byzantine,twins}/`.
+    ///
+    /// `#[ignore]` because it writes to the source tree. Run on demand:
+    ///
+    /// ```text
+    /// cargo test -p commonware-consensus-fuzz --lib \
+    ///     trace_mutator::tests::write_fixture_set -- --ignored
+    /// ```
+    ///
+    /// Strategy:
+    /// - 2 honest fixtures (`n=4, faults=0`) via [`record_honest`] with
+    ///   distinct namespaces so keys + leader schedules differ.
+    /// - 2 byzantine fixtures (`faults=1`): record honest, set
+    ///   `topology.faults = 1`, then re-run [`replay`] to rebuild a
+    ///   3-node `expected` snapshot consistent with the byzantine
+    ///   topology. Byzantine node 0's events are still in the trace
+    ///   (the replayer skips deliveries targeting index < faults) but
+    ///   node 0's broadcasts to followers still drive the honest
+    ///   cluster to the same observable state. This makes
+    ///   `replay(&trace) == trace.expected` by construction.
+    /// - 1 twins fixture (`faults=1`): same construction as byzantine,
+    ///   different namespace. A "placeholder" in that it's not
+    ///   actually a twins recording - the mbf pipeline flips `faults`
+    ///   dynamically and is happy with any structurally-valid
+    ///   `faults=1` seed.
+    #[test]
+    #[ignore]
+    fn write_fixture_set() {
+        use commonware_consensus::simplex::replay::{
+            record_honest, replay, trace::Timing, RecordConfig,
+        };
+        use std::path::PathBuf;
+
+        fn sha1_hex(bytes: &[u8]) -> String {
+            let mut h = Sha1::new();
+            h.update(bytes);
+            h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+        }
+
+        fn record_one(namespace: &str) -> Trace {
+            record_honest(RecordConfig {
+                n: 4,
+                required_containers: 3,
+                namespace: namespace.as_bytes().to_vec(),
+                epoch: 0,
+                timing: Timing::default(),
+            })
+        }
+
+        /// Record an honest trace then rewrite it as a faults=1
+        /// topology, regenerating `expected` via [`replay`] so the
+        /// on-disk snapshot matches what the byzantine-topology
+        /// replayer actually produces.
+        fn record_with_faults_one(namespace: &str) -> Trace {
+            let mut trace = record_one(namespace);
+            trace.topology.faults = 1;
+            trace.expected = replay(&trace);
+            trace
+        }
+
+        fn write_fixture(dir: &PathBuf, prefix: &str, trace: &Trace) {
+            std::fs::create_dir_all(dir).expect("create dir");
+            let json = trace.to_json().expect("encode");
+            // Sanity: round-trip before writing.
+            let actual = replay(trace);
+            assert_eq!(
+                actual, trace.expected,
+                "{prefix} fixture: replay != trace.expected before write"
+            );
+            let name = format!("{prefix}_{}.json", sha1_hex(json.as_bytes()));
+            let path = dir.join(&name);
+            std::fs::write(&path, &json).expect("write fixture");
+            eprintln!(
+                "wrote {} ({} events, topology.n={}, topology.faults={})",
+                path.display(),
+                trace.events.len(),
+                trace.topology.n,
+                trace.topology.faults,
+            );
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tracing/tests/fixtures");
+
+        let honest_dir = root.join("honest");
+        let byzantine_dir = root.join("byzantine");
+        let twins_dir = root.join("twins");
+
+        // Fresh run: clear any stale fixtures so sha1-named files
+        // don't accumulate with each regeneration.
+        for d in [&honest_dir, &byzantine_dir, &twins_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+
+        // Honest: 2 distinct namespaces.
+        write_fixture(&honest_dir, "honest", &record_one("fixture_honest_0"));
+        write_fixture(&honest_dir, "honest", &record_one("fixture_honest_1"));
+
+        // Byzantine placeholders: faults=1, honest event stream,
+        // regenerated snapshot.
+        write_fixture(
+            &byzantine_dir,
+            "byzantine",
+            &record_with_faults_one("fixture_byzantine_0"),
+        );
+        write_fixture(
+            &byzantine_dir,
+            "byzantine",
+            &record_with_faults_one("fixture_byzantine_1"),
+        );
+
+        // Twins placeholder: same construction, distinct namespace.
+        write_fixture(
+            &twins_dir,
+            "twins_placeholder",
+            &record_with_faults_one("fixture_twins_0"),
+        );
+    }
+
+    #[test]
+    fn shift_group_later_shifts_all_matching_indices() {
+        // Regression for the low-severity bug: delay_* mutations must
+        // shift every matching delivery by the same amount, not just
+        // one. Test `shift_group_later` directly so we're not subject
+        // to which sender `delay_sender`'s random group selection
+        // happens to pick.
+        let fx = fixture();
+        let mut events = sample_events(&fx);
+        // n0's three deliveries are at indices 0, 1, 2.
+        let group = vec![0usize, 1, 2];
+        let mut rng = StdRng::seed_from_u64(123);
+        assert!(shift_group_later(&mut events, &group, &mut rng));
+
+        let n0_positions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                Event::Deliver { from, .. } if from.get() == 0 => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(n0_positions.len(), 3, "all three n0 deliveries present");
+        // All three must have shifted by the same offset - still
+        // consecutive (indices differ by 1).
+        assert_eq!(
+            n0_positions[1] - n0_positions[0],
+            1,
+            "n0 deliveries not contiguous after group shift"
+        );
+        assert_eq!(
+            n0_positions[2] - n0_positions[1],
+            1,
+            "n0 deliveries not contiguous after group shift"
+        );
+        // And they must have moved forward: not still at 0..=2.
+        assert!(
+            n0_positions[0] > 0,
+            "group shift did not actually move the group"
+        );
+    }
+
+    // --- Candidate-set visibility tests ------------------------------
+
+    #[test]
+    fn mutation_candidates_honest_omits_byzantine_only() {
+        let fx = fixture();
+        let trace = Trace {
+            topology: Topology {
+                n: 4,
+                faults: 0,
+                epoch: 0,
+                namespace: b"consensus_fuzz".to_vec(),
+                timing: Timing::default(),
+            },
+            events: sample_events(&fx),
+            expected: commonware_consensus::simplex::replay::Snapshot::default(),
+        };
+        let cands = mutation_candidates(&trace);
+        assert!(!cands.contains(&Mutation::Swap));
+        assert!(!cands.contains(&Mutation::Duplicate));
+        // Sanity: honest-safe mutations are present.
+        assert!(cands.contains(&Mutation::SwapAdjacent));
+        assert!(cands.contains(&Mutation::RelayPreference));
+    }
+
+    #[test]
+    fn mutation_candidates_byzantine_includes_all() {
+        let fx = fixture();
+        let trace = Trace {
+            topology: Topology {
+                n: 4,
+                faults: 1,
+                epoch: 0,
+                namespace: b"consensus_fuzz".to_vec(),
+                timing: Timing::default(),
+            },
+            events: sample_events(&fx),
+            expected: commonware_consensus::simplex::replay::Snapshot::default(),
+        };
+        let cands = mutation_candidates(&trace);
+        assert!(cands.contains(&Mutation::Swap));
+        assert!(cands.contains(&Mutation::Duplicate));
+        assert!(cands.contains(&Mutation::SwapAdjacent));
+    }
+
+    // --- Per-mutation regressions -------------------------------------
+    //
+    // Invariant each test checks: the non-Deliver skeleton (Propose /
+    // Construct / Timeout events in order) is preserved across any
+    // successful mutation. For honest-safe mutations we additionally
+    // require the chosen attempt to pass the first-broadcast-order
+    // gate, matching what mutate_once enforces at the driver level.
+
+    /// Non-Deliver event identities in order. Mutations must not touch
+    /// Propose/Construct/Timeout, so this projection is invariant.
+    fn skeleton(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| !matches!(e, Event::Deliver { .. }))
+            .map(event_identity)
+            .collect()
+    }
+
+    /// Try `m` with RNG seeded from each seed in `seeds` until one
+    /// succeeds. Returns the mutated vec on success.
+    fn try_until<I>(events: &[Event], m: Mutation, seeds: I) -> Option<Vec<Event>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        for s in seeds {
+            let mut rng = StdRng::seed_from_u64(s);
+            let mut cloned = events.to_vec();
+            if try_mutation(&mut cloned, &mut rng, m) {
+                return Some(cloned);
+            }
+        }
+        None
+    }
+
+    /// Like `try_until` but requires the result to preserve
+    /// first-broadcast order as well.
+    fn try_until_honest_safe<I>(events: &[Event], m: Mutation, seeds: I) -> Option<Vec<Event>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        for s in seeds {
+            let mut rng = StdRng::seed_from_u64(s);
+            let mut cloned = events.to_vec();
+            if try_mutation(&mut cloned, &mut rng, m)
+                && preserves_first_broadcast_order(events, &cloned)
+            {
+                return Some(cloned);
+            }
+        }
+        None
+    }
+
+    fn make_cert_deliver(
+        fx: &commonware_cryptography::certificate::mocks::Fixture<Scheme>,
+        from: u32,
+        to: u32,
+        view: u64,
+        payload_seed: u8,
+    ) -> Event {
+        use commonware_consensus::simplex::types::{Certificate, Notarization};
+        use commonware_parallel::Sequential;
+        let round = Round::new(Epoch::new(0), View::new(view));
+        let proposal = Proposal::new(
+            round,
+            View::new(view.saturating_sub(1)),
+            Sha256Digest([payload_seed; 32]),
+        );
+        let notarizes: Vec<_> = (0u32..3)
+            .map(|i| {
+                Notarize::<Scheme, Sha256Digest>::sign(&fx.schemes[i as usize], proposal.clone())
+                    .unwrap()
+            })
+            .collect();
+        let cert = Notarization::from_notarizes(&fx.schemes[0], &notarizes, &Sequential)
+            .expect("cert");
+        Event::Deliver {
+            to: Participant::new(to),
+            from: Participant::new(from),
+            msg: Wire::Cert(Certificate::Notarization(cert)),
+        }
+    }
+
+    #[test]
+    fn swap_mutation_reorders_delivers_and_preserves_skeleton() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let original_skel = skeleton(&events);
+        let mutated = try_until(&events, Mutation::Swap, 0..256)
+            .expect("Swap should succeed on a 9-Deliver trace");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+    }
+
+    #[test]
+    fn duplicate_adds_one_deliver_event_and_preserves_skeleton() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let original_skel = skeleton(&events);
+        let mutated = try_until(&events, Mutation::Duplicate, 0..64)
+            .expect("Duplicate should succeed on a trace with >=1 Deliver");
+        assert_eq!(mutated.len(), events.len() + 1);
+        assert_eq!(skeleton(&mutated), original_skel);
+        let extra_is_deliver = mutated
+            .iter()
+            .filter(|e| matches!(e, Event::Deliver { .. }))
+            .count()
+            == events
+                .iter()
+                .filter(|e| matches!(e, Event::Deliver { .. }))
+                .count()
+                + 1;
+        assert!(extra_is_deliver, "duplicate must produce one extra Deliver");
+    }
+
+    #[test]
+    fn swap_by_recipient_preserves_skeleton() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::SwapByRecipient, 0..1024)
+            .expect("SwapByRecipient should eventually produce an honest-safe swap");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn batch_split_preserves_skeleton() {
+        let fx = fixture();
+        // Contiguous same-receiver run (to=0) and a different-receiver
+        // delivery that can be spliced into the run. The raw mutation
+        // may reorder distinct broadcasts — honest-safety is enforced
+        // at mutate_once, not try_mutation.
+        let events = vec![
+            make_deliver(&fx, 1, 0, 1, 1),
+            make_deliver(&fx, 1, 0, 1, 2),
+            make_deliver(&fx, 1, 0, 1, 3),
+            make_deliver(&fx, 1, 2, 1, 4),
+        ];
+        let original_skel = skeleton(&events);
+        let mutated = try_until(&events, Mutation::BatchSplit, 0..1024)
+            .expect("BatchSplit should split a same-receiver run");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+    }
+
+    #[test]
+    fn fanout_skew_preserves_skeleton() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::FanoutSkew, 0..1024)
+            .expect("FanoutSkew should eventually delay a subset of same-broadcast receivers");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn channel_skew_preserves_skeleton() {
+        let fx = fixture();
+        // Mix Vote and Cert deliveries to the same receiver. The raw
+        // mutation moves a whole (to, channel) group forward and can
+        // reorder distinct broadcasts; honest-safety is handled at
+        // mutate_once.
+        let events = vec![
+            make_deliver(&fx, 0, 1, 1, 1),
+            make_cert_deliver(&fx, 0, 1, 1, 5),
+            make_deliver(&fx, 0, 1, 2, 2),
+            make_cert_deliver(&fx, 0, 1, 2, 6),
+        ];
+        let original_skel = skeleton(&events);
+        let mutated = try_until(&events, Mutation::ChannelSkew, 0..1024)
+            .expect("ChannelSkew should delay one (to, channel) group");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+    }
+
+    #[test]
+    fn burst_release_preserves_skeleton() {
+        let fx = fixture();
+        // Receiver 0 has scattered deliveries at positions 0, 2, 4.
+        let events = vec![
+            make_deliver(&fx, 1, 0, 1, 1),
+            make_deliver(&fx, 1, 2, 1, 1),
+            make_deliver(&fx, 2, 0, 1, 2),
+            make_deliver(&fx, 2, 3, 1, 2),
+            make_deliver(&fx, 3, 0, 1, 3),
+            make_deliver(&fx, 3, 1, 1, 3),
+        ];
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::BurstRelease, 0..1024)
+            .expect("BurstRelease should regroup scattered same-receiver deliveries");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn interleave_receivers_preserves_skeleton() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::InterleaveReceivers, 0..1024)
+            .expect("InterleaveReceivers should interleave two receivers' prefixes");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn timeout_edge_preserves_skeleton() {
+        let fx = fixture();
+        // A Propose (view=1, leader=0) then leader-sender and
+        // non-leader-sender deliveries at the same view.
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round, View::new(0), Sha256Digest([7u8; 32]));
+        let events = vec![
+            Event::Propose {
+                leader: Participant::new(0),
+                proposal,
+            },
+            make_deliver(&fx, 0, 1, 1, 1),
+            make_deliver(&fx, 2, 1, 1, 2),
+            make_deliver(&fx, 0, 2, 1, 1),
+            make_deliver(&fx, 3, 2, 1, 3),
+        ];
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::TimeoutEdge, 0..1024)
+            .expect("TimeoutEdge should find a leader/non-leader pair to swap");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    #[test]
+    fn relay_preference_preserves_skeleton() {
+        let fx = fixture();
+        // Two identical cert deliveries to each of two receivers so
+        // swapping the deliveries-to-3 cannot move either broadcast's
+        // first appearance.
+        let events = vec![
+            make_cert_deliver(&fx, 1, 0, 1, 5),
+            make_cert_deliver(&fx, 2, 0, 1, 5),
+            make_cert_deliver(&fx, 1, 3, 1, 5),
+            make_cert_deliver(&fx, 2, 3, 1, 5),
+        ];
+        let original_skel = skeleton(&events);
+        let mutated = try_until_honest_safe(&events, Mutation::RelayPreference, 0..1024)
+            .expect("RelayPreference should swap a same-cert-different-relay pair");
+        assert_eq!(mutated.len(), events.len());
+        assert_eq!(skeleton(&mutated), original_skel);
+        assert!(preserves_first_broadcast_order(&events, &mutated));
+    }
+
+    // Deterministic-grouping regression: with the BTreeMap-based
+    // group_deliver_indices_by, two independent runs with the same
+    // MUTATOR_SEED must produce byte-identical output. This would fail
+    // under the old HashMap-based grouping because HashMap iteration
+    // order is per-process random.
+    #[test]
+    fn delay_sender_is_reproducible_under_fixed_rng() {
+        let fx = fixture();
+        let events = sample_events(&fx);
+        let run = |seed: u64| {
+            let mut cloned = events.clone();
+            let mut rng = StdRng::seed_from_u64(seed);
+            let ok = try_mutation(&mut cloned, &mut rng, Mutation::DelaySender);
+            (ok, cloned)
+        };
+        let (ok_a, a) = run(0x1234);
+        let (ok_b, b) = run(0x1234);
+        assert_eq!(ok_a, ok_b, "mutation success must be reproducible");
+        assert_eq!(
+            identities(&a),
+            identities(&b),
+            "mutation output must be reproducible for fixed RNG seed"
+        );
+    }
+
+    // --- Queue-exhaustion regression ----------------------------------
+
+    #[test]
+    fn queue_exhaustion_returns_none_not_process_exit() {
+        // A degenerate seed (no Deliver events) admits no mutation.
+        // exhaustive_candidate_lookup must return None, not abort.
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round, View::new(0), Sha256Digest([0u8; 32]));
+        let degenerate = Trace {
+            topology: Topology {
+                n: 4,
+                faults: 0,
+                epoch: 0,
+                namespace: b"consensus_fuzz".to_vec(),
+                timing: Timing::default(),
+            },
+            events: vec![Event::Propose {
+                leader: Participant::new(0),
+                proposal,
+            }],
+            expected: commonware_consensus::simplex::replay::Snapshot::default(),
+        };
+        let base_seeds = vec![degenerate.clone(), degenerate];
+        let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF);
+        let result = exhaustive_candidate_lookup(&base_seeds, &mut rng, None);
+        assert!(
+            result.is_none(),
+            "all-degenerate seeds must yield None, not a candidate"
+        );
+    }
 }
