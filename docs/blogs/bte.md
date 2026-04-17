@@ -114,7 +114,7 @@ $$
   \mathsf{pd}_j \circ g_2 = \sum_{i\in[B]} \mathsf{ct}_{i,1}\circ v_j^i
   $$
 
-A more formal presentation can be found in the [paper](/imgs/bte.pdf).
+A more formal presentation can be found in the [paper](https://github.com/commonwarexyz/simple-bte/blob/main/bte-paper.pdf).
 
 ## Accelerating Decryption via FFT
 
@@ -177,8 +177,6 @@ decryption on an M5 MacBook Pro in single-threaded mode (available [here](https:
 
 </div>
 
-_[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against._
+_[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against. We expect decryption to scale well with parallelization but have not yet implemented or benchmarked such an implementation._
 
-We expect decryption to scale well with parallelization but have not yet implemented or benchmarked such an implementation. Despite the interactive setup phase, we only need to carry it out once, and rotation of committees can be achieved via resharing of secrets.
-
-In conclusion, our construction is a conceptually simple and efficient BTE scheme with no caveats of epoch restrictions or censorship issues coupled with a performance win!
+Chop down the [Dark Forest](https://www.paradigm.xyz/2020/08/ethereum-is-a-dark-forest).
