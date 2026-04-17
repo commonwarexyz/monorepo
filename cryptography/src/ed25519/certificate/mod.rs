@@ -233,7 +233,7 @@ impl<N: Namespace> Generic<N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
-            let signature = signature.get().cloned()?;
+            signature.get()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
@@ -244,7 +244,6 @@ impl<N: Namespace> Generic<N> {
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
-        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Some(Certificate {
             signers,
