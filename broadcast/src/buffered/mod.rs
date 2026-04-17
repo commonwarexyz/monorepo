@@ -146,7 +146,7 @@ mod tests {
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let context = context.child(&format!("peer_{}", peer));
+            let context = context.child("peer").with_attribute("peer", &peer);
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
@@ -786,7 +786,10 @@ mod tests {
         let mut mailboxes = BTreeMap::new();
         let mut handles = Vec::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let ctx = context.child(&format!("peer_{}", peer)).child("engine");
+            let ctx = context
+                .child("peer")
+                .with_attribute("peer", &peer)
+                .child("engine");
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
@@ -952,7 +955,7 @@ mod tests {
             let mut mailboxes = BTreeMap::new();
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
-                let ctx = context.child(&format!("peer_{}", peer));
+                let ctx = context.child("peer").with_attribute("peer", &peer);
                 let config = Config {
                     public_key: peer.clone(),
                     mailbox_size: 1024,
@@ -1065,7 +1068,7 @@ mod tests {
             let mut mailboxes = BTreeMap::new();
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
-                let ctx = context.child(&format!("peer_{}", peer));
+                let ctx = context.child("peer").with_attribute("peer", &peer);
                 let config = Config {
                     public_key: peer.clone(),
                     mailbox_size: 1024,
@@ -1183,7 +1186,7 @@ mod tests {
 
             let mut mailboxes = BTreeMap::new();
             for (peer, network) in registrations {
-                let ctx = context.child(&format!("peer_{}", peer));
+                let ctx = context.child("peer").with_attribute("peer", &peer);
                 let config = Config {
                     public_key: peer.clone(),
                     mailbox_size: 1024,
@@ -1313,7 +1316,7 @@ mod tests {
 
             let mut mailboxes = BTreeMap::new();
             for (peer, network) in registrations {
-                let ctx = context.child(&format!("peer_{}", peer));
+                let ctx = context.child("peer").with_attribute("peer", &peer);
                 let config = Config {
                     public_key: peer.clone(),
                     mailbox_size: 1024,
@@ -1396,7 +1399,7 @@ mod tests {
             let mut mailboxes = BTreeMap::new();
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
-                let ctx = context.child(&format!("peer_{}", peer));
+                let ctx = context.child("peer").with_attribute("peer", &peer);
                 let config = Config {
                     public_key: peer.clone(),
                     mailbox_size: 1024,

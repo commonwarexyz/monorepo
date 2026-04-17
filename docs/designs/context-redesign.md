@@ -107,14 +107,14 @@ pub trait Supervisor: Send + Sync + 'static {
     ///                    context exit cascades X1, X2, X3
     /// ```
     #[must_use]
-    fn child(&self, label: &str) -> Self;
+    fn child(&self, label: &'static str) -> Self;
 
     /// Add a key-value attribute to this context's identity. Affects
     /// metric label dimensions and tracing span attributes (when
     /// `with_span` is active). Consuming. Does not create a tree edge:
     /// the returned handle shares `self`'s tree node.
     #[must_use]
-    fn with_attribute(self, key: &str, value: impl std::fmt::Display) -> Self;
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
 
     /// Get the current identity: the label prefix (joined `child`
     /// labels) and the attributes accumulated via `with_attribute`.
@@ -357,6 +357,9 @@ struct NamespaceGuard {
 
 On `child(label)`:
 
+`label` is a static role name. Dynamic identity belongs in
+`with_attribute(..., value)`, not in the child label itself.
+
 ```rust
 // No registered metric at this level should be prefixed by this child's namespace
 for name in &guard.registered_names {
@@ -403,8 +406,8 @@ performs plain get-or-register with no cross-checks.
 
 | Method | Trait | Consumes? | Tree edge? |
 |---|---|---|---|
-| `child(&self, label)` | Supervisor | No | Yes |
-| `with_attribute(self, k, v)` | Supervisor | Yes | No |
+| `child(&self, label: &'static str)` | Supervisor | No | Yes |
+| `with_attribute(self, k: &'static str, v)` | Supervisor | Yes | No |
 | `name(&self)` | Supervisor | No | No |
 | `spawn(self, f)` | Spawner | Yes | Terminal |
 | `shared(self, b)` | Spawner | Yes | Terminal (builder) |

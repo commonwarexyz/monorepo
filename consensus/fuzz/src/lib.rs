@@ -428,7 +428,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
-            let ctx = context.child(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("validator", &validator);
             spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
         }
 
@@ -436,7 +438,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
-            let ctx = context.child(&format!("validator_{validator}"));
+            let ctx = context
+                .child("validator")
+                .with_attribute("validator", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
@@ -503,7 +507,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
-            let context = context.child(&format!("twin_{idx}"));
+            let context = context.child("twin").with_attribute("twin", idx);
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(validator)
@@ -570,26 +574,29 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let (vote_sender_primary, vote_sender_secondary) =
                 vote_sender.split_with(make_vote_forwarder());
             let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                context.child(&format!("pending_split_{idx}")),
+                context.child("pending_split").with_attribute("split", idx),
                 make_vote_router(),
             );
             let (certificate_sender_primary, certificate_sender_secondary) =
                 certificate_sender.split_with(make_certificate_forwarder());
             let (certificate_receiver_primary, certificate_receiver_secondary) =
                 certificate_receiver.split_with(
-                    context.child(&format!("recovered_split_{idx}")),
+                    context
+                        .child("recovered_split")
+                        .with_attribute("split", idx),
                     make_certificate_router(),
                 );
             let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
                 .split_with(|_origin, recipients, _message| Some(recipients.clone()));
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.child(&format!("resolver_split_{idx}")), |_| {
-                    SplitTarget::Both
-                });
+                .split_with(
+                    context.child("resolver_split").with_attribute("split", idx),
+                    |_| SplitTarget::Both,
+                );
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
-            let primary_context = context.child(&primary_label);
+            let primary_context = context.child("primary");
             let primary_elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 participants: participants
@@ -649,7 +656,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             // Secondary: Disrupter
             start_disrupter::<P>(
-                context.child(&format!("twin_{idx}_secondary")),
+                context.child("secondary"),
                 scheme.clone(),
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
@@ -660,7 +667,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
-            let ctx = context.child(&format!("honest_{idx}"));
+            let ctx = context.child("honest").with_attribute("validator", idx);
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");

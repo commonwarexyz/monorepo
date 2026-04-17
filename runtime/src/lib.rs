@@ -182,7 +182,8 @@ stability_scope!(BETA {
         /// `self.name().label + "_" + label`. The child's tree node is a new child
         /// of self's tree node.
         ///
-        /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is
+        /// Labels are static role names. They must start with `[a-zA-Z]` and
+        /// contain only `[a-zA-Z0-9_]`. It is
         /// not permitted for any implementation to use `runtime` as the start of a
         /// label (reserved for metrics for the runtime).
         ///
@@ -190,7 +191,7 @@ stability_scope!(BETA {
         /// supervision node. Children at the same label path share metrics via
         /// get-or-register semantics.
         #[must_use]
-        fn child(&self, label: &str) -> Self
+        fn child(&self, label: &'static str) -> Self
         where
             Self: Sized;
 
@@ -199,10 +200,10 @@ stability_scope!(BETA {
         /// is active). Consuming. Does not create a tree edge: the returned handle
         /// shares `self`'s tree node.
         ///
-        /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values
-        /// can be any string.
+        /// Keys are static dimension names. They must start with `[a-zA-Z]` and
+        /// contain only `[a-zA-Z0-9_]`. Values can be any string.
         #[must_use]
-        fn with_attribute(self, key: &str, value: impl std::fmt::Display) -> Self
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
         where
             Self: Sized;
 

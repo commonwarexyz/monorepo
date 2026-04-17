@@ -333,7 +333,7 @@ mod tests {
         let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
         for (i, peer) in peers.iter().enumerate() {
             // Create peer context
-            let context = context.child(&format!("peer_{i}"));
+            let context = context.child("peer").with_attribute("peer", i);
 
             // Derive port
             let port = base_port + i as u16;
@@ -572,7 +572,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
                 // Create peer context
-                let context = context.child(&format!("peer_{i}"));
+                let context = context.child("peer").with_attribute("peer", i);
 
                 // Derive port
                 let port = base_port + i as u16;
@@ -885,7 +885,7 @@ mod tests {
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child(&format!("peer_{i}"));
+                let peer_context = context.child("peer").with_attribute("peer", i);
                 let port = base_port + i as u16;
 
                 // Create bootstrappers (everyone connects to peer 0)
@@ -1154,7 +1154,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let context = context.child(&format!("peer_{i}"));
+                let context = context.child("peer").with_attribute("peer", i);
                 let port = base_port + i as u16;
 
                 // Create bootstrappers - use DNS for non-zero peers
@@ -1392,7 +1392,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let context = context.child(&format!("peer_{i}"));
+                let context = context.child("peer").with_attribute("peer", i);
                 let port = base_port + i as u16;
 
                 // Use DNS for bootstrapper
@@ -1684,7 +1684,7 @@ mod tests {
 
             // Create networks for all peers (peer 0 is bootstrapper)
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child(&format!("peer_{i}"));
+                let peer_context = context.child("peer").with_attribute("peer", i);
 
                 // Non-bootstrapper peers point to peer 0
                 let mut bootstrappers = Vec::new();
@@ -1764,8 +1764,10 @@ mod tests {
                     receivers[restart_peer_idx] = None;
 
                     // Restart the peer with new port (uses bootstrapper for discovery)
-                    let peer_context =
-                        context.child(&format!("peer_{restart_peer_idx}_round_{round}"));
+                    let peer_context = context
+                        .child("peer")
+                        .with_attribute("peer", restart_peer_idx)
+                        .with_attribute("round", round);
                     let bootstrappers = vec![(
                         addresses[0].clone(),
                         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
@@ -1873,7 +1875,7 @@ mod tests {
 
             // Create networks for all peers (peer 0 is bootstrapper)
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child(&format!("peer_{i}"));
+                let peer_context = context.child("peer").with_attribute("peer", i);
 
                 // Non-bootstrapper peers point to peer 0
                 let mut bootstrappers = Vec::new();
@@ -1956,7 +1958,10 @@ mod tests {
 
             // Restart all peers with new ports (uses bootstrapper for discovery)
             for &idx in &restart_peers {
-                let peer_context = context.child(&format!("peer_{idx}_restarted"));
+                let peer_context = context
+                    .child("peer")
+                    .with_attribute("peer", idx)
+                    .with_attribute("state", "restarted");
                 let bootstrappers = vec![(
                     addresses[0].clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
@@ -2045,7 +2050,7 @@ mod tests {
             let wrong_address_peer_idx = 2;
 
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.child(&format!("peer_{i}"));
+                let peer_context = context.child("peer").with_attribute("peer", i);
                 let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]);
 
                 // Peer 2 advertises wrong IP, others advertise correct addresses
@@ -2130,7 +2135,10 @@ mod tests {
             receivers[restart_peer_idx] = None;
 
             // Restart the peer with a NEW port and CORRECT dialable address
-            let peer_context = context.child(&format!("peer_{restart_peer_idx}_restarted"));
+            let peer_context = context
+                .child("peer")
+                .with_attribute("peer", restart_peer_idx)
+                .with_attribute("state", "restarted");
             let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), new_port);
             let bootstrappers = vec![(
                 addresses[0].clone(),

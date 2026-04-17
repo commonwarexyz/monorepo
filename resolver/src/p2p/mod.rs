@@ -208,7 +208,7 @@ mod tests {
     ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.child(&format!("actor_{public_key}")),
+            context.child("actor").with_attribute("peer", &public_key),
             Config {
                 peer_provider: provider,
                 blocker,
@@ -2293,7 +2293,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.child(&format!("peer_{idx}"));
+            let ctx = actor_context.child("peer").with_attribute("peer", idx);
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,

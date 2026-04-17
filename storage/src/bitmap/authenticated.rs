@@ -1135,7 +1135,7 @@ mod tests {
                     .unwrap();
                 bitmap.write_pruned().await.unwrap();
                 bitmap = TestMerkleizedBitMap::init(
-                    context.child(&format!("restore_{i}")),
+                    context.child("restore").with_attribute("index", i),
                     PARTITION,
                     None,
                     &hasher,

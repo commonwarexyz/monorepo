@@ -653,7 +653,7 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Supervisor for Context {
-    fn child(&self, label: &str) -> Self {
+    fn child(&self, label: &'static str) -> Self {
         let name = if self.name.is_empty() {
             label.to_string()
         } else {
@@ -675,7 +675,7 @@ impl crate::Supervisor for Context {
         }
     }
 
-    fn with_attribute(mut self, key: &str, value: impl std::fmt::Display) -> Self {
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
         add_attribute(&mut self.attributes, key, value);
         self
     }

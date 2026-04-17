@@ -252,7 +252,7 @@ where
         ctx: &R,
         cfg: &Config,
         epoch: Epoch,
-        name: &str,
+        name: &'static str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
         let start = ctx.current();

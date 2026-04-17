@@ -16,11 +16,11 @@ pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 pub(crate) struct DummyMetrics;
 
 impl Supervisor for DummyMetrics {
-    fn child(&self, _: &str) -> Self {
+    fn child(&self, _: &'static str) -> Self {
         Self
     }
 
-    fn with_attribute(self, _: &str, _: impl std::fmt::Display) -> Self {
+    fn with_attribute(self, _: &'static str, _: impl std::fmt::Display) -> Self {
         Self
     }
 

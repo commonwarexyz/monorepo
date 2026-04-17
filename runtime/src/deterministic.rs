@@ -1303,7 +1303,7 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Supervisor for Context {
-    fn child(&self, label: &str) -> Self {
+    fn child(&self, label: &'static str) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
 
@@ -1346,7 +1346,7 @@ impl crate::Supervisor for Context {
         }
     }
 
-    fn with_attribute(mut self, key: &str, value: impl std::fmt::Display) -> Self {
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
 

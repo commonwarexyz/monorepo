@@ -1789,7 +1789,7 @@ mod tests {
                         .expect("peer should be registered");
 
                     let participant = Participant::new(idx as u32);
-                    let engine_context = context.child(&format!("peer_{}", idx));
+                    let engine_context = context.child("peer").with_attribute("peer", idx);
 
                     let scheme = Scheme::signer(
                         SCHEME_NAMESPACE,
@@ -1831,7 +1831,7 @@ mod tests {
                         .remove(np_key)
                         .expect("non-participant should be registered");
 
-                    let engine_context = context.child(&format!("non_participant_{}", idx));
+                    let engine_context = context.child("non_participant").with_attribute("peer", idx);
 
                     let scheme = Scheme::verifier(SCHEME_NAMESPACE, participants.clone());
                     let scheme_provider: Prov = MultiEpochProvider::single(scheme);

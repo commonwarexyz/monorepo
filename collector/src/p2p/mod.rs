@@ -167,7 +167,7 @@ mod tests {
     ) -> Mailbox<PublicKey, Request> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.child(&format!("engine_{public_key}")),
+            context.child("engine").with_attribute("peer", &public_key),
             Config {
                 blocker,
                 monitor,
@@ -685,7 +685,9 @@ mod tests {
             let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
             let (sender2, receiver2) = conn.1; // Response channel
             let (engine, mut mailbox) = Engine::new(
-                context.child(&format!("engine_{}", scheme.public_key())),
+                context
+                    .child("engine")
+                    .with_attribute("peer", scheme.public_key()),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -726,7 +728,9 @@ mod tests {
             let (sender1, receiver1) = conn.0; // Request channel
             let (sender2, receiver2) = conn.1; // Response channel
             let (engine, mut mailbox) = Engine::new(
-                context.child(&format!("engine_{}", scheme.public_key())),
+                context
+                    .child("engine")
+                    .with_attribute("peer", scheme.public_key()),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -868,7 +872,10 @@ mod tests {
         let mut handles = Vec::new();
 
         for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
-            let ctx = context.child(&format!("peer_{idx}")).child("engine");
+            let ctx = context
+                .child("peer")
+                .with_attribute("peer", idx)
+                .child("engine");
             let (mon, _) = MockMonitor::new();
             let (handler, _) = MockHandler::new(true);
             let (engine, mailbox) = Engine::new(

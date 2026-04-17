@@ -372,7 +372,10 @@ mod test {
             );
 
             let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
-            let validator_ctx = ctx.child(&format!("validator_{pk}_{restart_count}"));
+            let validator_ctx = ctx
+                .child("validator")
+                .with_attribute("validator", &pk)
+                .with_attribute("restart", *restart_count);
             *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),

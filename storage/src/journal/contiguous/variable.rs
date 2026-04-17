@@ -1333,7 +1333,10 @@ mod tests {
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String, idx: usize| {
                 let label = test_name.replace('-', "_");
-                let context = context.child(&format!("{label}_{idx}"));
+                let context = context
+                    .child("test")
+                    .with_attribute("name", &label)
+                    .with_attribute("index", idx);
                 async move {
                     let cfg = Config {
                         partition: format!("generic-test-{test_name}"),
@@ -2813,7 +2816,7 @@ mod tests {
             let lower_bound = 8; // section 1
             for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.child(&format!("sync_{i}")),
+                    context.child("sync").with_attribute("index", i),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )

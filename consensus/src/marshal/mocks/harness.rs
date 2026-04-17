@@ -1515,7 +1515,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -1854,7 +1854,7 @@ pub fn sync_height_floor<H: TestHarness>() {
         // Skip first validator
         for (i, validator) in participants.iter().enumerate().skip(1) {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -2313,7 +2313,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -2390,7 +2390,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -2486,7 +2486,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -2573,7 +2573,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -3382,7 +3382,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate().take(2) {
             let setup = H::setup_validator(
-                context.child(&format!("validator_{i}")),
+                context.child("validator").with_attribute("validator", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
