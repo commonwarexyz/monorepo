@@ -521,8 +521,8 @@ where
                     Message::Proposed { round, block, ack } => {
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;
-                        ack.send_lossy(());
                         buffer.send(round, block, Recipients::All).await;
+                        ack.send_lossy(());
                     }
                     Message::Forward {
                         round,

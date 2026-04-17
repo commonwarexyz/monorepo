@@ -82,7 +82,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -1651,6 +1651,67 @@ mod tests {
         async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {}
     }
 
+    /// A buffer whose `send` blocks until released, and signals when entered.
+    /// Used to verify `proposed` only resolves after `buffer.send` completes.
+    #[derive(Clone)]
+    struct GatingBuffer {
+        send_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl GatingBuffer {
+        fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    send_entered: Arc::new(Mutex::new(Some(entered_tx))),
+                    release: Arc::new(Mutex::new(Some(release_rx))),
+                },
+                entered_rx,
+                release_tx,
+            )
+        }
+    }
+
+    impl crate::marshal::core::Buffer<Standard<B>> for GatingBuffer {
+        type PublicKey = PublicKey;
+        type CachedBlock = B;
+
+        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
+            None
+        }
+
+        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
+            None
+        }
+
+        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
+            let (_sender, receiver) = oneshot::channel();
+            receiver
+        }
+
+        async fn subscribe_by_commitment(
+            &self,
+            _commitment: D,
+        ) -> oneshot::Receiver<Self::CachedBlock> {
+            let (_sender, receiver) = oneshot::channel();
+            receiver
+        }
+
+        async fn finalized(&self, _commitment: D) {}
+
+        async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {
+            if let Some(entered) = self.send_entered.lock().take() {
+                entered.send_lossy(());
+            }
+            let release = self.release.lock().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
+    }
+
     /// A reporter that blocks inside `Update::Block` so tests can abort marshal
     /// exactly when application delivery starts.
     #[derive(Clone)]
@@ -1699,6 +1760,27 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
         application: R,
     ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>) {
+        start_standard_actor_with_buffer(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            NoopBuffer,
+        )
+        .await
+    }
+
+    async fn start_standard_actor_with_buffer<R, Buf>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        application: R,
+        buffer: Buf,
+    ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>)
+    where
+        R: Reporter<Activity = Update<B>>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey, CachedBlock = B>,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1783,10 +1865,74 @@ mod tests {
         let (resolver_tx, resolver_rx) = mpsc::channel(100);
         let actor_handle = actor.start(
             application,
-            NoopBuffer,
+            buffer,
             (resolver_rx, NoopResolver::holding(resolver_tx)),
         );
         (mailbox, actor_handle)
+    }
+
+    /// Regression: `marshal.proposed` must not ack until the block has been
+    /// handed off to the provided buffer.
+    #[test_traced("WARN")]
+    fn test_standard_proposed_waits_for_buffer_send() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("proposed-waits-buffer-{me}");
+
+            let (buffer, send_entered, release) = GatingBuffer::new();
+            let (mailbox, actor_handle) = start_standard_actor_with_buffer(
+                context.with_label("validator_0"),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                buffer,
+            )
+            .await;
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+
+            // Drive `proposed` from a spawned task so we can observe its state
+            // from the main task via a completion channel.
+            let (done_tx, done_rx) = oneshot::channel();
+            context
+                .with_label("proposed_caller")
+                .spawn(move |_| async move {
+                    let ok = mailbox.proposed(round, block).await;
+                    done_tx.send_lossy(ok);
+                });
+
+            // Wait for the marshal actor to enter `buffer.send`.
+            send_entered
+                .await
+                .expect("buffer.send should be entered after cache_verified");
+
+            // With the buffer held in `send`, `proposed` must remain pending.
+            // Poll it against a generous timer; the timer should always win.
+            futures::pin_mut!(done_rx);
+            select! {
+                _ = context.sleep(Duration::from_millis(500)) => {},
+                _ = &mut done_rx => {
+                    panic!("proposed returned before buffer.send released");
+                },
+            }
+
+            // Releasing the gate lets `send` complete; `proposed` must then ack.
+            release.send_lossy(());
+            let ok = select! {
+                result = &mut done_rx => result.expect("proposed channel closed"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("proposed did not complete after buffer release");
+                },
+            };
+            assert!(ok, "proposed should return true after durable dispatch");
+        });
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries
