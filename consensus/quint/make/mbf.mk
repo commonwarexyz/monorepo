@@ -10,7 +10,7 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
-MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
+MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_canonical
 MBF_TRACE_STATIC_MAX_VIEWS ?= 3
 MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
 MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
@@ -20,9 +20,7 @@ MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
 	MUTATOR_RESEED_FREQ=$(MUTATOR_RESEED_FREQ) \
-	MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 	MUTATOR_FAULTS=$(MBF_FAULTS) \
-	MUTATOR_DEBUG=true \
 	cargo run -p commonware-consensus-fuzz --bin trace_mutator
 
 replay_mutated_traces:
@@ -34,10 +32,9 @@ replay_mutated_traces:
 	for f in $$(find $(MUTATED_TRACES_DIR) -name "*.json" -not -path "*/.*"); do \
 		[ -f "$$f" ] || continue; \
 		[ -s "$$f" ] || continue; \
-		case "$$f" in *_expected.json) continue;; esac; \
 		total=$$((total + 1)); \
 		echo "=== Replaying $$f ==="; \
-		if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
+		if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 			echo "PASS"; \
 		else \
 			echo "FAIL"; \
@@ -94,12 +91,11 @@ mbf_live_watch:
 			for f in $$(find "$$dir" -name "*.json" -not -path "*/.*" 2>/dev/null); do \
 				[ -f "$$f" ] || continue; \
 				[ -s "$$f" ] || continue; \
-				case "$$f" in *_expected.json) continue;; esac; \
 				mkdir -p "$$seen_dir" "$$failed_dir"; \
 				name=$$(basename "$$f"); \
 				[ -f "$$seen_dir/$$name" ] && continue; \
 				echo "=== Replaying $$f ==="; \
-				if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
+				if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 					echo "PASS (archived to $$seen_dir/$$name)"; \
 					mv "$$f" "$$seen_dir/$$name"; \
 				else \
@@ -149,12 +145,9 @@ mbf_live: clean_mutated_traces
 
 mbf_live_trace_fuzz_gen:
 	@bash -eu -o pipefail -c '\
-		src="$(MBF_TRACE_GEN_SRC)"; \
+		src="$(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_canonical"; \
 		dst="$(MUTATION_SEEDS_FOLDER)"; \
 		mkdir -p "$$dst"; \
-		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
-		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
-		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
 		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" -- -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) & \
 		fuzz=$$!; \
 		cleanup() { \
@@ -254,7 +247,7 @@ mbf_prepare_validated_seeds:
 
 # Runs the simplex_ed25519_quint_honest libfuzzer target concurrently with
 # Quint validation. The fuzzer writes traces into
-# $(FUZZ_TRACES_ROOT)/<target>_<strategy>/, and validate_trace_corpus
+# $(FUZZ_TRACES_ROOT)/<target>_canonical/, and validate_trace_corpus
 # (in APPEND mode) repeatedly picks them up, validates them through
 # replica.qnt, and appends accepted traces with expected_state embedded
 # into $(MBF_VALIDATED_SEEDS_FOLDER) (i.e., the existing seed pool is
@@ -265,7 +258,7 @@ mbf_prepare_validated_seeds:
 mbf_augment_seeds_from_fuzz:
 	@bash -eu -o pipefail -c '\
 		target="$(MBF_TRACE_GEN_TARGET)"; \
-		src="$(FUZZ_TRACES_ROOT)/$${target}_$(TRACE_SELECTION_STRATEGY)"; \
+		src="$(FUZZ_TRACES_ROOT)/$${target}_canonical"; \
 		dst="$(MBF_VALIDATED_SEEDS_FOLDER)"; \
 		rm -rf "$$src"; \
 		mkdir -p "$$src" "$$dst"; \
@@ -279,10 +272,7 @@ mbf_augment_seeds_from_fuzz:
 		trap cleanup EXIT INT TERM; \
 		echo "starting fuzz target $$target (FUZZ_RUNS=$(FUZZ_RUNS))"; \
 		echo "appending validated traces to $$dst (poll every $(VALIDATE_INTERVAL)s)"; \
-		env TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
-			MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
-			MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
-			cargo +nightly fuzz run "$$target" -- -runs=$(FUZZ_RUNS) & \
+		cargo +nightly fuzz run "$$target" -- -runs=$(FUZZ_RUNS) & \
 		fuzz=$$!; \
 		before=$$(find "$$dst" -name "*.json" -not -path "*/.*" 2>/dev/null | wc -l); \
 		while kill -0 $$fuzz 2>/dev/null; do \
@@ -307,4 +297,3 @@ mbf_augment_seeds_from_fuzz:
 		echo "augmented seed corpus at $$dst (before=$$before after=$$after)"; \
 		echo "use it with: make mbf_live_fuzz MUTATION_SEEDS_FOLDER=$$dst"; \
 	'
-

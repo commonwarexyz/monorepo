@@ -30,11 +30,9 @@ replay_itf:
 	@failed=0; total=0; \
 	for f in $(ITF_DIR)/converted/*.json; do \
 		[ -f "$$f" ] || continue; \
-		case "$$f" in *_expected.json) continue;; esac; \
-		expected="$${f%.json}_expected.json"; \
 		total=$$((total + 1)); \
 		echo "=== Replaying $$f ==="; \
-		if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f" "$$expected"; then \
+		if cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
 			echo "PASS"; \
 		else \
 			echo "FAIL"; \

@@ -1,11 +1,11 @@
 # Trace validation(tv): get traces from the real implementation, encode them into quint tests, run the test in the Quint simulator.
 
+TRACE_TARGET ?= simplex_ed25519_quint_honest
+TRACE_TARGETS ?= simplex_ed25519_quint_honest simplex_ed25519_quint_byzantine simplex_ed25519_quint_twins simplex_ed25519_quint_disrupter
+
 .PHONY: get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces clean_traces tv tv_live tv_live_fuzz tv_live_watch test_encoder
 
 get_fuzz_traces:
-	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
-	MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
-	MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
 	cargo +nightly fuzz run $(TRACE_TARGET) -- -runs=$(FUZZ_RUNS)
 
 build_quint_tests_from_fuzz_traces:
@@ -16,7 +16,6 @@ build_quint_tests_from_fuzz_traces:
 	done
 
 test_traces:
-	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/test_traces.sh
 
 clean_fuzz_traces:
@@ -30,7 +29,6 @@ tv: clean_fuzz_traces clean_traces get_fuzz_traces build_quint_tests_from_fuzz_t
 
 tv_live: clean_fuzz_traces clean_traces
 	@bash -eu -o pipefail -c '\
-		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
 		./scripts/watch_new_traces.sh "$(TRACES_DIR)" "$(FUZZ_TRACES_ROOT)" & \
 		watcher=$$!; \
 		cleanup() { \
@@ -38,9 +36,6 @@ tv_live: clean_fuzz_traces clean_traces
 			wait $$watcher 2>/dev/null || true; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
-		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
-		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
 		cargo +nightly fuzz run "$(TRACE_TARGET)" -- -runs=$(FUZZ_RUNS) & \
 		fuzz=$$!; \
 		while kill -0 $$watcher 2>/dev/null && kill -0 $$fuzz 2>/dev/null; do \
@@ -62,9 +57,6 @@ tv_live_fuzz:
 	rm -rf $(FUZZ_TRACES_ROOT)
 	@bash -eu -c '\
 		set -m; \
-		raw="$(TRACE_TARGETS)"; \
-		raw="$${raw#[}"; raw="$${raw%]}"; \
-		IFS=", " read -ra targets <<< "$$raw"; \
 		pids=(); \
 		cleanup() { \
 			for pid in "$${pids[@]}"; do \
@@ -75,10 +67,7 @@ tv_live_fuzz:
 			done; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		for target in "$${targets[@]}"; do \
-			TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
-			MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
-			MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+		for target in $(TRACE_TARGETS); do \
 			cargo +nightly fuzz run "$$target" -- -runs=$(FUZZ_RUNS) & \
 			pids+=($$!); \
 		done; \
@@ -90,8 +79,7 @@ tv_live_fuzz:
 	'
 
 tv_live_watch: clean_traces
-	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
-	./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)"
+	./scripts/watch_new_traces.sh "$(TRACES_DIR)" "$(FUZZ_TRACES_ROOT)"
 
 test_encoder:
 	cargo test -p commonware-consensus-fuzz -- test_encoder_roundtrip
