@@ -662,6 +662,45 @@ fn next_candidate_trace(
     None
 }
 
+/// Per-base-seed attempt budget used by
+/// [`exhaustive_candidate_lookup`]. Larger than the
+/// `mutate_once` internal retry (32) so we still distinguish "one
+/// specific seed happens to be unlucky" from "this seed has no
+/// admissible mutations at all".
+pub(crate) const EXHAUSTIVE_PER_SEED_BUDGET: usize = 128;
+
+/// Try to produce at least one valid mutated candidate from the seed
+/// pool, with a fair per-seed budget so we don't exit while other
+/// seeds still have admissible mutations.
+///
+/// Iterates over all base seeds in a shuffled order, giving each seed
+/// up to [`EXHAUSTIVE_PER_SEED_BUDGET`] independent `mutate_once`
+/// attempts. Short-circuits on the first success. Returns `None` only
+/// when every seed has been given its full budget and none produced a
+/// candidate — i.e. the seed corpus is genuinely degenerate (e.g. all
+/// seeds have fewer than two `Deliver` events and no mutation can
+/// apply).
+fn exhaustive_candidate_lookup(
+    base_seeds: &[Trace],
+    rng: &mut StdRng,
+    faults_override: Option<u32>,
+) -> Option<Trace> {
+    if base_seeds.is_empty() {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..base_seeds.len()).collect();
+    order.shuffle(rng);
+    for &idx in &order {
+        let base = &base_seeds[idx];
+        for _ in 0..EXHAUSTIVE_PER_SEED_BUDGET {
+            if let Some(t) = next_candidate_trace(base, rng, faults_override, false) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
 /// Fill `queue` with `n` freshly-mutated traces drawn from random bases.
 /// Existing queue contents are cleared.
 fn seed_queue_generated(
@@ -956,14 +995,18 @@ pub fn run() {
             );
         }
 
-        // Queue-empty handling: a valid mutation can reasonably fail
-        // (mutate_once may return None when the chosen random mutation
-        // violates preserves_first_broadcast_order), so treat drain as
-        // "refill the queue via seed_queue_generated", not a fatal
-        // error. seed_queue_generated already tolerates per-attempt
-        // None; if after a full regeneration attempt the queue is
-        // still empty, fall back to a generously-sized retry loop
-        // before exiting.
+        // Queue-empty handling in three tiers:
+        //   1. Refill via seed_queue_generated (population_size attempts
+        //      spread randomly across base seeds).
+        //   2. If the refill is still empty, an exhaustive per-base-seed
+        //      sweep: EXHAUSTIVE_PER_SEED_BUDGET attempts against each
+        //      base seed, short-circuiting on the first success.
+        //   3. If every seed has failed its full budget, the seed
+        //      corpus is genuinely degenerate (e.g. all seeds lack any
+        //      admissible mutation) — log and break out of the loop so
+        //      the driver finishes cleanly with its summary. Not a
+        //      fatal process::exit(1): other fuzz workers, watchers,
+        //      and subsequent make targets should keep running.
         let trace = match queue.pop_front() {
             Some(t) => {
                 mutated_executions += 1;
@@ -986,31 +1029,17 @@ pub fn run() {
                 if let Some(t) = queue.pop_front() {
                     t
                 } else {
-                    // Refill produced nothing (unusual). Try up to
-                    // seed_population_size single-shot fallbacks
-                    // before giving up, so we don't exit on the
-                    // probabilistic tail of a 30-40% per-attempt
-                    // success rate.
-                    let mut generated = None;
-                    for _ in 0..seed_population_size.max(64) {
-                        let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
-                        if let Some(trace) =
-                            next_candidate_trace(base, &mut rng, faults_override, false)
-                        {
-                            generated = Some(trace);
-                            break;
-                        }
-                    }
-                    match generated {
+                    match exhaustive_candidate_lookup(&base_seeds, &mut rng, faults_override) {
                         Some(t) => t,
                         None => {
                             eprintln!(
-                                "failed to produce any mutation after {} refill + {} single-shot attempts from {} seed bases",
-                                seed_population_size,
-                                seed_population_size.max(64),
-                                base_seeds.len()
+                                "[iter {iter}] queue permanently exhausted: every one of {} \
+                                 base seeds failed {} mutation attempts. Stopping the mutator \
+                                 loop cleanly (not a fatal error).",
+                                base_seeds.len(),
+                                EXHAUSTIVE_PER_SEED_BUDGET,
                             );
-                            process::exit(1);
+                            break;
                         }
                     }
                 }
