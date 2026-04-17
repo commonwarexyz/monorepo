@@ -3,9 +3,12 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
-use commonware_storage::journal::contiguous::{
-    fixed::{Config as JournalConfig, Journal},
-    Many, Mutable as _, Reader,
+use commonware_storage::journal::{
+    contiguous::{
+        fixed::{Config as JournalConfig, Journal},
+        Many, Mutable as _, Reader,
+    },
+    Error,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -146,9 +149,6 @@ fn fuzz(input: FuzzInput) {
                                 return None;
                             }
                             let len = bounds.end - bounds.start;
-                            if len == 0 {
-                                return None;
-                            }
                             Some(bounds.start + (*p % len))
                         })
                         .collect();
@@ -242,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                     if *count == 0 {
                         // Exercise the EmptyAppend error path
                         let err = journal.append_many(Many::Flat(&[])).await;
-                        assert!(err.is_err());
+                        assert!(matches!(err, Err(Error::EmptyAppend)));
                     } else {
                         let items: Vec<_> = (0..*count)
                             .map(|_| {
@@ -265,7 +265,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::AppendNested { count_a, count_b } => {
                     if *count_a == 0 && *count_b == 0 {
                         let err = journal.append_many(Many::Nested(&[&[], &[]])).await;
-                        assert!(err.is_err());
+                        assert!(matches!(err, Err(Error::EmptyAppend)));
                     } else {
                         let items_a: Vec<_> = (0..*count_a)
                             .map(|_| {
