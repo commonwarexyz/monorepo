@@ -501,9 +501,9 @@ where
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
+        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
-        let last_built = self.last_built.clone();
         let cached_genesis = self.cached_genesis.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
