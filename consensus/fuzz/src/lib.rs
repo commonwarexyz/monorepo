@@ -310,24 +310,6 @@ fn start_disrupter<P: simplex::Simplex>(
     }
 }
 
-/// Spawn a Disrupter for a Byzantine node.
-fn spawn_disrupter<P: simplex::Simplex>(
-    context: deterministic::Context,
-    scheme: P::Scheme,
-    input: &FuzzInput,
-    channels: NetworkChannels,
-) {
-    let (vote_network, certificate_network, resolver_network) = channels;
-    start_disrupter::<P>(
-        context.child("disrupter"),
-        scheme,
-        &input.strategy,
-        vote_network,
-        certificate_network,
-        resolver_network,
-    );
-}
-
 /// Spawn an honest validator with application, reporter, and engine.
 #[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator<
@@ -427,11 +409,19 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
+            let (vote_network, certificate_network, resolver_network) =
+                registrations.remove(&validator).unwrap();
             let ctx = context
-                .child("validator")
+                .child("disrupter")
                 .with_attribute("validator", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            start_disrupter::<P>(
+                ctx,
+                schemes[i].clone(),
+                &input.strategy,
+                vote_network,
+                certificate_network,
+                resolver_network,
+            );
         }
 
         // Spawn honest validators
