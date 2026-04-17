@@ -13,6 +13,7 @@ commonware_macros::stability_scope!(ALPHA {
         pub mod goldilocks;
     }
     pub mod ntt;
+    pub mod tangle;
 });
 commonware_macros::stability_scope!(BETA {
     pub mod algebra;
@@ -36,6 +37,7 @@ commonware_macros::stability_scope!(ALPHA {
             Goldilocks(crate::fields::goldilocks::fuzz::Plan),
             Test(crate::test::fuzz::Plan),
             Ntt(crate::ntt::fuzz::Plan),
+            Tangle(crate::tangle::fuzz::Plan),
         }
 
         impl Plan {
@@ -46,6 +48,7 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::Goldilocks(plan) => plan.run(u),
                     Self::Test(plan) => plan.run(u),
                     Self::Ntt(plan) => plan.run(u),
+                    Self::Tangle(plan) => plan.run(u),
                 }
             }
         }
