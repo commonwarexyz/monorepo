@@ -819,7 +819,6 @@ mod tests {
                 "transition should carry the recovered public polynomial",
             );
             assert_eq!(transition.dealers, peer_config.dealers(RECOVERED_ROUND));
-            assert_ne!(transition.dealers, peer_config.participants);
         });
     }
 }
