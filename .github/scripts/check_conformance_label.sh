@@ -7,11 +7,13 @@ required_labels=(
   breaking-api
 )
 
-# Get changed files
-diff=$(gh pr diff "$PR_NUMBER" --name-only)
+# GitHub may refuse to render full PR diffs once they exceed the API's line cap.
+# Use the paginated files API instead so large PRs still work.
+repo="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq '.nameWithOwner')}"
+files=$(gh api --paginate --slurp "/repos/${repo}/pulls/${PR_NUMBER}/files")
 
 # Filter for conformance.toml files
-changed=$(echo "$diff" | grep 'conformance\.toml$' || true)
+changed=$(jq -r '.[] | .[] | select(.filename | endswith("conformance.toml")) | .filename' <<<"$files")
 
 if [ -z "$changed" ]; then
   echo "No conformance.toml files changed"
@@ -22,21 +24,39 @@ echo "Conformance files changed:"
 echo "$changed"
 echo ""
 
-# Check if any conformance.toml changes include deletions
+# Check if any conformance.toml changes include deletions or other non-additive edits.
+# If GitHub omits the patch for an existing file, require a label conservatively since
+# we can no longer prove the change is additive.
 has_deletions=false
-current_file=""
-while IFS= read -r line; do
-  # Track which file we're in
-  if [[ "$line" =~ ^diff\ --git\ a/(.*)\ b/ ]]; then
-    current_file="${BASH_REMATCH[1]}"
-  fi
-  # If we're in a conformance.toml file and see a deletion line (starts with - but not ---)
-  if [[ "$current_file" == *conformance.toml ]] && [[ "$line" =~ ^-[^-] ]]; then
+while IFS= read -r file; do
+  filename=$(jq -r '.filename' <<<"$file")
+  status=$(jq -r '.status' <<<"$file")
+  patch_present=$(jq -r 'has("patch")' <<<"$file")
+
+  if [[ "$status" == "removed" || "$status" == "renamed" ]]; then
     has_deletions=true
-    echo "Deletion/modification found in: $current_file"
+    echo "Deletion/modification found in: $filename ($status)"
     break
   fi
-done < <(gh pr diff "$PR_NUMBER")
+
+  if [[ "$status" != "added" && "$patch_present" != "true" ]]; then
+    has_deletions=true
+    echo "Unable to inspect patch for existing conformance file: $filename"
+    break
+  fi
+
+  if jq -e '
+    (.patch // "")
+    | split("\n")
+    | any(startswith("-") and (startswith("---") | not))
+  ' <<<"$file" >/dev/null; then
+    has_deletions=true
+    echo "Deletion/modification found in: $filename"
+    break
+  fi
+done < <(
+  jq -c '.[] | .[] | select(.filename | endswith("conformance.toml"))' <<<"$files"
+)
 
 if [ "$has_deletions" = "false" ]; then
   echo "All conformance.toml changes are additive, no label required"
