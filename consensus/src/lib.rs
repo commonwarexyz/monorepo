@@ -152,12 +152,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// This is particularly useful for applications that employ erasure coding, which
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
-        /// Payloads produced locally by [`Automaton::propose`] are the exception:
-        /// the proposer must treat them as certifiable-by-construction for that
-        /// same round, allowing consensus to skip `certify` once it has durable
-        /// local evidence that the proposal originated here.
         ///
-        /// Like [`Automaton::verify`], certification is single-shot for the given
+        /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
+        /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request.
         ///
