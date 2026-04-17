@@ -1097,6 +1097,8 @@ impl<
                 }
             },
         }
+
+        // Sync and drop the journal
         self.journal
             .take()
             .expect("journal missing on voter exit")
