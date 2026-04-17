@@ -179,6 +179,6 @@ Despite the interactive setup phase, we only need to carry it out once, and rota
 
 </div>
 
-[BNRT26](https://eprint.iacr.org/2026/674) does not have a public implementation to compare against.
+_[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against._
 
 In conclusion, our construction is a conceptually simple and efficient BTE scheme with no caveats of epoch restrictions or censorship issues coupled with a performance win!
