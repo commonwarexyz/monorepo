@@ -2,7 +2,10 @@ use super::ipa;
 use crate::transcript::Transcript;
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, Write};
-use commonware_math::algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space};
+use commonware_math::{
+    algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space},
+    tangle::Tangle,
+};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 use std::{
@@ -174,22 +177,6 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
     }
 }
 
-fn tweak_ipa_setup<F: Field, G: CryptoGroup<Scalar = F>>(
-    setup: &Setup<G>,
-    y_inv_powers: &[F],
-) -> ipa::Setup<G> {
-    ipa::Setup::new(
-        setup.ipa.product_generator().clone(),
-        setup.ipa.g()[..y_inv_powers.len()].iter().cloned().zip(
-            setup.ipa.h()[..y_inv_powers.len()]
-                .iter()
-                .cloned()
-                .zip(y_inv_powers.iter().cloned())
-                .map(|(h_i, y_inv_i)| h_i * &y_inv_i),
-        ),
-    )
-}
-
 #[allow(dead_code)]
 pub struct Witness<F> {
     values: Vec<F>,
@@ -224,6 +211,7 @@ pub struct Proof<F, G> {
     s_tilde: F,
     t_x: F,
     t_tilde_x: F,
+    p_big: G,
     ipa_proof: ipa::Proof<F, G>,
 }
 
@@ -402,15 +390,15 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     //  ~M := <~l_i, G_i> + <~r_i, H_i> + ~m ~B
     //
     // It seems like we're stuck here, because <r_i, H_i> doesn't match the <y^i r_i, H_i>
-    // that we need inside of S_1. However, there's nothing forcing us to use H_i
-    // to commit to things. The IPA protocol will work just fine using a different basis.
-    // So, we define H'_i := y^-i H_i, giving us:
+    // that we need inside of S_1. However, the IPA already lets us treat the right-side
+    // basis as y^-i H_i by setting claim.y = y^-1. In terms of the original H_i that this
+    // implementation uses in its MSMs, the public pieces become:
     //
     //   P_0 = <y^-i ω_i - 1, H_i>
     //   P_1 = <y^-i ρ_i, G_i> + <y^-i λ_i, H_i>
-    //   M   = <l_i, G_i> + <y^i r_i, H'_i> + m ~B
+    //   M   = <l_i, G_i> + <r_i, H_i> + m ~B
     //   O   = <o_i, G_i> + ~o ~B
-    //  ~M   = <~l_i, G_i> + <y^i ~r_i, H'_i> + ~m ~B
+    //  ~M   = <~l_i, G_i> + <~r_i, H_i> + ~m ~B
     //
     // but, the bottom three are equal to:
     //
@@ -421,7 +409,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     // Thus, we can reveal ~s := x m + x^2 ~o + x^3 ~m, and have the verifier calculate
     //
     //   P := -~s ~B + P_0 + x (P_1 + M) + x^2 O + x^3 ~M
-    //      = <f_i(x) G_i> + <g_i(x), H'_i>
+    //      = <f_i(x), G_i> + <g_i(x), y^-i H_i>
     //
     // (Rather than the verifier calculating this, the prover can provide it, and the verifier
     // can check this equation. This turns it into an MSM check, which can be more efficiently
@@ -431,9 +419,9 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     // and P as the commitment to the vectors, and G_i, H'_i as the generators
     // for this commitment.
     //
-    // In the implementation below, we derive a tweaked IPA setup for this proof,
-    // replacing each H_i with H'_i := y^-i H_i. That keeps the algebra above
-    // literal, while still reusing the same IPA code.
+    // Concretely, we reuse the ordinary IPA setup and set ipa_claim.y = y^-1.
+    // This keeps the right-side basis change inside the IPA, while the public MSM
+    // checks above stay written against the original H_i.
     //
     // # Padding
     //
@@ -486,7 +474,6 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let y_inv_powers = powers(F::one(), &y_inv)
         .take(padded_vars)
         .collect::<Vec<_>>();
-    let ipa_setup = tweak_ipa_setup(setup, &y_inv_powers);
     let z = F::random(transcript.noise(b"z"));
     let z_powers = powers(z.clone(), &z)
         .take(circuit.weights.height())
@@ -537,6 +524,18 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         .cloned()
         .zip(&rho)
         .map(|(y_inv_i, rho_i)| y_inv_i * rho_i)
+        .collect::<Vec<_>>();
+    let y_inv_lambda = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&lambda)
+        .map(|(y_inv_i, lambda_i)| y_inv_i * lambda_i)
+        .collect::<Vec<_>>();
+    let y_inv_omega_minus_y = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&omega_minus_y)
+        .map(|(y_inv_i, omega_minus_y_i)| y_inv_i * omega_minus_y_i)
         .collect::<Vec<_>>();
     let y_r = y_powers
         .iter()
@@ -591,9 +590,10 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         setup.pedersen_value.clone() * &t[i] + &(setup.pedersen_blinding.clone() * &t_tilde[i])
     });
 
-    let p_0 = G::msm(ipa_setup.h(), &omega_minus_y, strategy);
-    let h_internal = &ipa_setup.h()[..circuit.internal_vars];
-    let p_1 = G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &lambda, strategy);
+    let p_0 = G::msm(setup.ipa.h(), &y_inv_omega_minus_y, strategy);
+    let h_internal = &setup.ipa.h()[..circuit.internal_vars];
+    let p_1 =
+        G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &y_inv_lambda, strategy);
 
     // Now, we can commit the t commitments, along with the secret commitments.
     // The public commitments will be recomputed by the verifier.
@@ -611,9 +611,9 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let t_x = <F as Space<F>>::msm(&t, &x, strategy);
     let t_tilde_x = <F as Space<F>>::msm(&t_tilde, &x, strategy);
     let ipa_claim = ipa::Claim {
-        commitment: p,
+        commitment: p.clone(),
         product: t_x.clone(),
-        y: F::one(),
+        y: y_inv,
         log_len: padded_vars.ilog2().try_into().ok()?,
     };
     let mut f_x = (0..circuit.internal_vars)
@@ -633,7 +633,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         .collect::<Vec<_>>();
     g_x.extend_from_slice(&omega_minus_y[circuit.internal_vars..]);
     let witness = ipa::Witness::new(f_x.into_iter().zip(g_x.into_iter()))?;
-    let ipa_proof = ipa::prove(transcript, &ipa_setup, &ipa_claim, witness, strategy)?;
+    let ipa_proof = ipa::prove(transcript, &setup.ipa, &ipa_claim, witness, strategy)?;
     Some(Proof {
         m_big,
         o_big,
@@ -642,13 +642,14 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         s_tilde,
         t_x,
         t_tilde_x,
+        p_big: p,
         ipa_proof,
     })
 }
 
 #[must_use]
 pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    _rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRngCore,
     transcript: &mut Transcript,
     setup: &Setup<G>,
     circuit: &Circuit<F>,
@@ -665,6 +666,7 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         t_x,
         t_tilde_x,
         ipa_proof,
+        p_big: p,
     } = proof;
     circuit.commit(transcript);
     transcript.commit(claim.encode());
@@ -678,7 +680,6 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let y_inv_powers = powers(F::one(), &y_inv)
         .take(padded_vars)
         .collect::<Vec<_>>();
-    let ipa_setup = tweak_ipa_setup(setup, &y_inv_powers);
     let z = F::random(transcript.noise(b"z"));
     let z_powers = powers(z.clone(), &z)
         .take(circuit.weights.height())
@@ -730,6 +731,18 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         .zip(&rho)
         .map(|(y_inv_i, rho_i)| y_inv_i * rho_i)
         .collect::<Vec<_>>();
+    let y_inv_lambda = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&lambda)
+        .map(|(y_inv_i, lambda_i)| y_inv_i * lambda_i)
+        .collect::<Vec<_>>();
+    let y_inv_omega_minus_y = y_inv_powers
+        .iter()
+        .cloned()
+        .zip(&omega_minus_y)
+        .map(|(y_inv_i, omega_minus_y_i)| y_inv_i * omega_minus_y_i)
+        .collect::<Vec<_>>();
 
     let delta_y_z = <F as Space<F>>::msm(&y_inv_rho, &lambda, strategy);
 
@@ -739,39 +752,87 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     let x = F::random(transcript.noise(b"x"));
     let x = powers(x.clone(), &x).take(6).collect::<Vec<_>>();
 
-    {
-        let lhs =
-            setup.pedersen_value.clone() * &t_x + &(setup.pedersen_blinding.clone() * &t_tilde_x);
-        let mut rhs = setup.pedersen_value.clone() * &((-kappa + &delta_y_z) * &x[1])
-            - &(G::msm(&claim.commitments, &theta, strategy) * &x[1]);
-        for (x_i, t_big_i) in std::iter::once(&x[0]).chain(&x[2..]).zip(t_big.into_iter()) {
-            rhs += &(t_big_i * x_i);
-        }
-        if lhs != rhs {
-            return false;
-        }
-    }
+    let t_check = Tangle::free_row(3, [t_x.clone(), t_tilde_x])
+        - &(Tangle::free_row(3, [(-kappa + &delta_y_z)]) * &x[1])
+        + &(Tangle::tethered(theta.iter().cloned().zip(claim.commitments.iter().cloned())) * &x[1])
+        - &Tangle::tethered(std::iter::once(&x[0]).chain(&x[2..]).cloned().zip(t_big));
 
-    let p_0 = G::msm(ipa_setup.h(), &omega_minus_y, strategy);
-    let g_internal = &ipa_setup.g()[..circuit.internal_vars];
-    let h_internal = &ipa_setup.h()[..circuit.internal_vars];
-    let p_1 = G::msm(g_internal, &y_inv_rho, strategy) + &G::msm(h_internal, &lambda, strategy);
-    let p = setup.pedersen_blinding.clone() * &(-s_tilde)
-        + &p_0
-        + &((p_1 + &m_big) * &x[0])
-        + &(o_big * &x[1])
-        + &(m_big_tilde * &x[2]);
+    let p_check = {
+        let p_0 = Tangle::free_row(1, y_inv_omega_minus_y);
+        let p_1 = Tangle::free_row(0, y_inv_rho) + &Tangle::free_row(1, y_inv_lambda);
+        Tangle::tethered([
+            (F::one(), p.clone()),
+            (-x[0].clone(), m_big),
+            (-x[1].clone(), o_big),
+            (-x[2].clone(), m_big_tilde),
+        ]) - &p_0
+            - &(p_1 * &x[0])
+            + &Tangle::free_point((3, 1), s_tilde)
+    };
+
     let ipa_claim = ipa::Claim {
         commitment: p,
         product: t_x,
-        y: F::one(),
+        y: y_inv,
         log_len: padded_vars
             .ilog2()
             .try_into()
             .expect("should be less than 2^256 rows"),
     };
 
-    ipa::verify(transcript, &ipa_setup, &ipa_claim, ipa_proof, strategy)
+    let Some(ipa_check) = ipa::verify(transcript, &ipa_claim, ipa_proof) else {
+        return false;
+    };
+
+    let final_check =
+        ipa_check + &(p_check * &F::random(&mut *rng)) + &(t_check * &F::random(&mut *rng));
+    final_check
+        .eval(
+            std::iter::once(((2, 0), setup.ipa.product_generator().clone()))
+                .chain(
+                    setup
+                        .ipa
+                        .g()
+                        .iter()
+                        .take(padded_vars)
+                        .cloned()
+                        .enumerate()
+                        .map(|(i, g_i)| {
+                            (
+                                (
+                                    0,
+                                    i.try_into().expect("generator index should fit in u32"),
+                                ),
+                                g_i,
+                            )
+                        }),
+                )
+                .chain(
+                    setup
+                        .ipa
+                        .h()
+                        .iter()
+                        .take(padded_vars)
+                        .cloned()
+                        .enumerate()
+                        .map(|(i, h_i)| {
+                            (
+                                (
+                                    1,
+                                    i.try_into().expect("generator index should fit in u32"),
+                                ),
+                                h_i,
+                            )
+                        }),
+                )
+                .chain([
+                    ((3, 0), setup.pedersen_value.clone()),
+                    ((3, 1), setup.pedersen_blinding.clone()),
+                ]),
+            strategy,
+        )
+        .expect("should be enough setup points for bulletproof verification")
+        == G::zero()
 }
 
 #[commonware_macros::stability(ALPHA)]
@@ -807,8 +868,8 @@ pub mod fuzz {
                         .chunks_exact(2)
                         .map(|chunk| (chunk[0], chunk[1])),
                 ),
-                pedersen_value: generators[1 + 2 * MAX_INTERNAL_VARS],
-                pedersen_blinding: generators[2 + 2 * MAX_INTERNAL_VARS],
+                pedersen_value: generators[1 + 2 * MAX_PADDED_INTERNAL_VARS],
+                pedersen_blinding: generators[2 + 2 * MAX_PADDED_INTERNAL_VARS],
             }
         })
     }
