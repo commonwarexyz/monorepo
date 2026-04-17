@@ -164,16 +164,25 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
     let encoded = metrics.encode();
     encoded
         .lines()
-        .filter(|line| {
-            line.starts_with("runtime_tasks_running{")
+        .filter_map(|line| {
+            if line.starts_with("runtime_tasks_running{")
                 && line.contains("kind=\"Task\"")
-                && line.trim_end().ends_with(" 1")
                 && line
                     .split("name=\"")
                     .nth(1)
                     .is_some_and(|s| s.split('"').next().unwrap_or("").starts_with(prefix))
+            {
+                Some(
+                    line.split_whitespace()
+                        .last()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .expect("runtime_tasks_running should end with an integer gauge value"),
+                )
+            } else {
+                None
+            }
         })
-        .count()
+        .sum()
 }
 
 /// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
@@ -955,6 +964,24 @@ b_total 2
             let count = count_running_tasks(&context, "worker");
             assert_eq!(count, 2, "both worker and worker_child should be counted");
 
+            // Tasks with the same label but different attributes share one
+            // runtime task metric series, so the helper must sum the gauge
+            // value rather than count matching lines.
+            let attr_worker_a = context
+                .child("attr_worker")
+                .with_attribute("worker", "a")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
+            let attr_worker_b = context
+                .child("attr_worker")
+                .with_attribute("worker", "b")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
+            let count = count_running_tasks(&context, "attr_worker");
+            assert_eq!(count, 2, "both attribute-distinguished workers should be counted");
+
             // Abort parent task
             handle1.abort();
             let _ = handle1.await;
@@ -966,12 +993,21 @@ b_total 2
             // Abort nested task
             handle2.abort();
             let _ = handle2.await;
+            attr_worker_a.abort();
+            let _ = attr_worker_a.await;
+            attr_worker_b.abort();
+            let _ = attr_worker_b.await;
 
             // All tasks stopped
             assert_eq!(
                 count_running_tasks(&context, "worker"),
                 0,
                 "all worker tasks should be stopped"
+            );
+            assert_eq!(
+                count_running_tasks(&context, "attr_worker"),
+                0,
+                "all attribute-distinguished workers should be stopped"
             );
         });
     }
