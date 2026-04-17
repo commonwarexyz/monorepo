@@ -172,7 +172,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             let Ok(bp) = Blueprint::new(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
-            node_positions.extend(&bp.fold_prefix);
+            node_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
             node_positions.extend(&bp.fetch_nodes);
             blueprints.insert(*loc, bp);
         }
@@ -196,12 +196,14 @@ impl<F: Family, D: Digest> Proof<F, D> {
             let mut digests = Vec::with_capacity(
                 if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
             );
-            if let Some((&first_pos, rest)) = bp.fold_prefix.split_first() {
+            if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
                 let first = *node_digests
-                    .get(&first_pos)
+                    .get(&first_sub.pos)
                     .expect("must exist by construction");
-                let acc = rest.iter().fold(first, |acc, &pos| {
-                    let d = node_digests.get(&pos).expect("must exist by construction");
+                let acc = rest.iter().fold(first, |acc, sub| {
+                    let d = node_digests
+                        .get(&sub.pos)
+                        .expect("must exist by construction");
                     hasher.fold(&acc, d)
                 });
                 digests.push(acc);
@@ -274,17 +276,32 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
     ///
     /// The `pinned_nodes` are the peak digests of the sub-structure at `start_loc`, in the order
-    /// returned by `Family::nodes_to_pin`.
-    ///
-    /// These pins may be finer-grained than the prefix structure authenticated by the proof itself.
-    /// In particular, when the larger `self.leaves`-sized tree has merged smaller peaks into larger
-    /// subtrees, the proof authenticates:
+    /// returned by `Family::nodes_to_pin`. The proof authenticates the prefix `[0, start_loc)` via:
     ///
     /// - fold-prefix peaks of the larger tree, and
-    /// - any sibling subtrees inside the first range peak that lie wholly before `start_loc`
+    /// - sibling subtrees inside the first range peak that lie wholly before `start_loc`.
     ///
-    /// This verifier reconstructs those authenticated prefix subtrees from the finer-grained pins
-    /// and compares the resulting digests against the proof.
+    /// When the larger tree has merged smaller subtrees into a bigger parent, the pins sit below
+    /// these authenticated subtrees. The verifier hashes pairs of pins up to each authenticated
+    /// subtree's root and compares against the proof.
+    ///
+    /// For example, in MMB at `leaves=5, start_loc=4`, the proof describes `[0, 4)` as one
+    /// height-2 subtree `p7`, while the pins cover the same leaves as two height-1 subtrees
+    /// `p2`, `p5`:
+    ///
+    /// ```text
+    ///     proof authenticates:         pins contain:
+    ///
+    ///             p7
+    ///           /    \
+    ///          p2    p5                p2         p5
+    ///         / \    / \              / \        / \
+    ///        L0 L1  L2 L3            L0 L1      L2 L3
+    /// ```
+    ///
+    /// The verifier walks down from `p7` via `F::children`, pulls the pins for `p2` and `p5`, and
+    /// hashes them back up (`node_digest(p7, pin[p2], pin[p5])`) to compare against the `p7`
+    /// digest the proof authenticates.
     ///
     /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
     /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
@@ -300,118 +317,81 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        let collected = match self
+        self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
+            .is_some()
+    }
+
+    /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
+    ///
+    /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
+    /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
+    /// `bool` via `.is_some()`.
+    fn try_verify_proof_and_pinned_nodes<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        pinned_nodes: &[D],
+        root: &D,
+    ) -> Option<()>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        let collected = self
             .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+            .ok()?;
 
         if elements.is_empty() {
-            return pinned_nodes.is_empty();
+            return pinned_nodes.is_empty().then_some(());
         }
 
         if !start_loc.is_valid() || start_loc > self.leaves {
-            return false;
+            return None;
         }
 
-        let pinned_positions: alloc::vec::Vec<_> = F::nodes_to_pin(start_loc).collect();
+        let pinned_positions: Vec<_> = F::nodes_to_pin(start_loc).collect();
         if pinned_positions.len() != pinned_nodes.len() {
-            return false;
+            return None;
         }
 
-        let Some(end_loc) = start_loc.checked_add(elements.len() as u64) else {
-            return false;
-        };
-        let Ok(bp) = Blueprint::new(self.leaves, start_loc..end_loc) else {
-            return false;
-        };
-        let fold_prefix = bp.fold_prefix;
+        let end_loc = start_loc.checked_add(elements.len() as u64)?;
+        let bp = Blueprint::new(self.leaves, start_loc..end_loc).ok()?;
 
-        let mut pinned_map: alloc::collections::BTreeMap<Position<F>, D> = pinned_positions
+        let mut pinned_map: BTreeMap<Position<F>, D> = pinned_positions
             .into_iter()
             .zip(pinned_nodes.iter().copied())
             .collect();
 
-        /// Reconstruct the digest at `pos` from the pinned node map.
-        ///
-        /// If `pos` is directly in the map, returns its digest. Otherwise, recurses into `F::children(pos,
-        /// height)` and hashes the results. This bridges the gap between `F::nodes_to_pin(start_loc)`
-        /// positions (peaks of the smaller tree) and the coarser prefix subtrees authenticated by the
-        /// proof, which can differ when the larger tree has merged smaller peaks.
-        fn reconstruct_from_pins<F: Family, D: Digest, H: Hasher<F, Digest = D>>(
-            hasher: &H,
-            pos: Position<F>,
-            pinned_map: &mut alloc::collections::BTreeMap<Position<F>, D>,
-        ) -> Option<D> {
-            if let Some(d) = pinned_map.remove(&pos) {
-                return Some(d);
+        // Fold-prefix peaks of the larger tree may have merged several pins together. Reconstruct
+        // each peak's digest by hashing the pins beneath it up to the peak, then compare the
+        // folded accumulator against the one the proof carries.
+        if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
+            let &expected = self.digests.first()?;
+            let mut acc = first_sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+            for sub in rest {
+                let d = sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+                acc = hasher.fold(&acc, &d);
             }
-            let height = F::pos_to_height(pos);
-            if height == 0 {
+            if acc != expected {
                 return None;
             }
-            let (left, right) = F::children(pos, height);
-            let left_d = reconstruct_from_pins(hasher, left, pinned_map)?;
-            let right_d = reconstruct_from_pins(hasher, right, pinned_map)?;
-            Some(hasher.node_digest(pos, &left_d, &right_d))
         }
 
-        // Verify fold-prefix pinned nodes by recomputing the accumulator.
-        //
-        // The fold_prefix positions are peaks of the `self.leaves`-sized tree that lie entirely
-        // before `start_loc`. The pinned_map positions are peaks of the `start_loc`-sized tree.
-        // These can differ when the larger tree has merged smaller peaks into bigger ones. To
-        // handle this, we reconstruct each fold_prefix peak's digest from the finer-grained pinned
-        // peaks by walking the tree via `F::children`, while tracking exactly which pinned
-        // positions were consumed by that reconstruction.
-        if let Some((&first_pos, rest)) = fold_prefix.split_first() {
-            if self.digests.is_empty() {
-                return false;
-            }
-            let Some(first) = reconstruct_from_pins(hasher, first_pos, &mut pinned_map) else {
-                return false;
-            };
-            let mut acc = first;
-            for &pos in rest {
-                let Some(digest) = reconstruct_from_pins(hasher, pos, &mut pinned_map) else {
-                    return false;
-                };
-                acc = hasher.fold(&acc, &digest);
-            }
-            if acc != self.digests[0] {
-                return false;
+        // Sibling subtrees inside the first range peak that lie wholly before `start_loc` are
+        // authenticated directly by the proof (their digests appear in `extracted`). Rebuild each
+        // from the pins and compare.
+        let extracted: BTreeMap<Position<F>, D> = collected.into_iter().collect();
+        for sibling in bp.prefix_siblings() {
+            let &expected = extracted.get(&sibling.pos)?;
+            let d = sibling.reconstruct_from_pins(hasher, &mut pinned_map)?;
+            if d != expected {
+                return None;
             }
         }
 
-        // Verify any sibling subtrees that lie wholly before `start_loc`. These are the coarser
-        // prefix targets authenticated directly by the proof inside the first range peak. The
-        // provided pinned nodes may be a finer partition of the same prefix, so we reconstruct
-        // each authenticated prefix subtree from pins and compare digests.
-        let extracted: alloc::collections::BTreeMap<Position<F>, D> =
-            collected.into_iter().collect();
-
-        // Only the first range peak can contain siblings wholly before `start_loc`; later peaks are
-        // entirely at or after `start_loc` by `Blueprint::new`'s classification.
-        let mut prefix_siblings = Vec::new();
-        if let Some(peak) = bp.range_peaks.first() {
-            peak.collect_prefix_siblings(&bp.range, &mut prefix_siblings);
-        }
-        for pos in prefix_siblings {
-            let Some(&expected_digest) = extracted.get(&pos) else {
-                return false;
-            };
-            let Some(digest) = reconstruct_from_pins(hasher, pos, &mut pinned_map) else {
-                return false;
-            };
-            if digest != expected_digest {
-                return false;
-            }
-        }
-
-        // Every pin must have been consumed by either a fold-prefix peak reconstruction or a prefix
-        // sibling reconstruction.
-        pinned_map.is_empty()
+        // Every pin must have been consumed by one of the two reconstructions above.
+        pinned_map.is_empty().then_some(())
     }
 
     /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`, every
@@ -525,6 +505,16 @@ impl<F: Family> Subtree<F> {
         self.leaf_start + (1u64 << self.height)
     }
 
+    /// True if this subtree's leaves lie wholly before `range.start`.
+    fn is_before(&self, range: &Range<Location<F>>) -> bool {
+        self.leaf_end() <= range.start
+    }
+
+    /// True if this subtree's leaves lie wholly outside `range` (either before it or after it).
+    fn is_outside(&self, range: &Range<Location<F>>) -> bool {
+        self.is_before(range) || self.leaf_start >= range.end
+    }
+
     fn children(&self) -> (Self, Self) {
         let (left_pos, right_pos) = F::children(self.pos, self.height);
         let child_height = self.height - 1;
@@ -549,7 +539,7 @@ impl<F: Family> Subtree<F> {
     /// At each node: if the subtree is entirely outside the range, its root position is emitted. If
     /// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children.
     fn collect_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
-        if self.leaf_end() <= range.start || self.leaf_start >= range.end {
+        if self.is_outside(range) {
             out.push(self.pos);
             return;
         }
@@ -561,16 +551,16 @@ impl<F: Family> Subtree<F> {
         }
     }
 
-    /// Collect sibling positions that lie wholly before the proven range, in the same
+    /// Collect sibling subtrees that lie wholly before the proven range, in the same
     /// left-first DFS order as [`collect_siblings`](Self::collect_siblings).
     ///
     /// Only `range.start` is consulted: the `range.end` side doesn't matter for prefix
     /// siblings. Pruning on `range.start` also keeps the traversal O(height) per peak —
     /// pruning only by `range.end` would recurse into both children whenever a subtree
     /// sits entirely inside the proven range, costing O(2^height) per such peak.
-    fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
-        if self.leaf_end() <= range.start {
-            out.push(self.pos);
+    fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Self>) {
+        if self.is_before(range) {
+            out.push(*self);
             return;
         }
 
@@ -583,6 +573,36 @@ impl<F: Family> Subtree<F> {
             left.collect_prefix_siblings(range, out);
             right.collect_prefix_siblings(range, out);
         }
+    }
+
+    /// Reconstruct this subtree's digest from a set of finer-grained pinned positions, consuming
+    /// each pin as it is used.
+    ///
+    /// Walks down via [`Self::children`] until each recursion hits a pin, then hashes back up with
+    /// [`Hasher::node_digest`] for position-keyed domain separation. Returns `None` if any required
+    /// pin is missing.
+    ///
+    /// On failure, `pinned_map` may have been partially consumed. Callers are expected to return
+    /// immediately without inspecting it further.
+    fn reconstruct_from_pins<D, H>(
+        &self,
+        hasher: &H,
+        pinned_map: &mut BTreeMap<Position<F>, D>,
+    ) -> Option<D>
+    where
+        D: Digest,
+        H: Hasher<F, Digest = D>,
+    {
+        if let Some(d) = pinned_map.remove(&self.pos) {
+            return Some(d);
+        }
+        if self.height == 0 {
+            return None;
+        }
+        let (left, right) = self.children();
+        let left_d = left.reconstruct_from_pins(hasher, pinned_map)?;
+        let right_d = right.reconstruct_from_pins(hasher, pinned_map)?;
+        Some(hasher.node_digest(self.pos, &left_d, &right_d))
     }
 
     /// Reconstruct the digest of this subtree from a range of elements and sibling digests,
@@ -610,7 +630,7 @@ impl<F: Family> Subtree<F> {
         E: Iterator<Item: AsRef<[u8]>>,
     {
         // Entirely outside the range: consume a sibling digest.
-        if self.leaf_end() <= range.start || self.leaf_start >= range.end {
+        if self.is_outside(range) {
             let Some(digest) = siblings.get(*cursor).copied() else {
                 return Err(ReconstructionError::MissingDigests);
             };
@@ -628,9 +648,6 @@ impl<F: Family> Subtree<F> {
 
         // Recurse into children.
         let (left, right) = self.children();
-        let left_pos = left.pos;
-        let right_pos = right.pos;
-
         let left_d = left.reconstruct_digest(
             hasher,
             range,
@@ -649,8 +666,8 @@ impl<F: Family> Subtree<F> {
         )?;
 
         if let Some(ref mut cd) = collected {
-            cd.push((left_pos, left_d));
-            cd.push((right_pos, right_d));
+            cd.push((left.pos, left_d));
+            cd.push((right.pos, right_d));
         }
 
         Ok(hasher.node_digest(self.pos, &left_d, &right_d))
@@ -663,8 +680,8 @@ pub(crate) struct Blueprint<F: Family> {
     leaves: Location<F>,
     /// The location range this blueprint was built for.
     pub range: Range<Location<F>>,
-    /// Peak positions that precede the proven range (to be folded into a single accumulator).
-    pub fold_prefix: Vec<Position<F>>,
+    /// Peaks that precede the proven range (to be folded into a single accumulator).
+    pub fold_prefix: Vec<Subtree<F>>,
     /// Peak positions entirely after the proven range.
     pub after_peaks: Vec<Position<F>>,
     /// The peaks that overlap the proven range.
@@ -726,7 +743,11 @@ impl<F: Family> Blueprint<F> {
             let leaf_end = leaf_start + (1u64 << height);
 
             if leaf_end <= range.start {
-                fold_prefix.push(peak_pos);
+                fold_prefix.push(Subtree {
+                    pos: peak_pos,
+                    height,
+                    leaf_start,
+                });
             } else if leaf_start >= range.end {
                 after_peaks.push(peak_pos);
             } else {
@@ -759,6 +780,18 @@ impl<F: Family> Blueprint<F> {
         })
     }
 
+    /// Sibling subtrees of the first range peak that lie wholly before `self.range.start`.
+    ///
+    /// Only the first range peak can contain such siblings; later range peaks are entirely at or
+    /// after `range.start` by this blueprint's classification.
+    pub(crate) fn prefix_siblings(&self) -> Vec<Subtree<F>> {
+        let mut out = Vec::new();
+        if let Some(peak) = self.range_peaks.first() {
+            peak.collect_prefix_siblings(&self.range, &mut out);
+        }
+        out
+    }
+
     /// Build a range proof from this blueprint and a node-fetching closure.
     ///
     /// The prover folds prefix peak digests into a single accumulator. The resulting proof
@@ -780,10 +813,10 @@ impl<F: Family> Blueprint<F> {
             if self.fold_prefix.is_empty() { 0 } else { 1 } + self.fetch_nodes.len(),
         );
 
-        if let Some((&first_pos, rest)) = self.fold_prefix.split_first() {
-            let first = get_node(first_pos).ok_or_else(|| element_pruned(first_pos))?;
-            let acc = rest.iter().try_fold(first, |acc, &pos| {
-                let d = get_node(pos).ok_or_else(|| element_pruned(pos))?;
+        if let Some((first_sub, rest)) = self.fold_prefix.split_first() {
+            let first = get_node(first_sub.pos).ok_or_else(|| element_pruned(first_sub.pos))?;
+            let acc = rest.iter().try_fold(first, |acc, sub| {
+                let d = get_node(sub.pos).ok_or_else(|| element_pruned(sub.pos))?;
                 Ok(hasher.fold(&acc, &d))
             })?;
             digests.push(acc);
@@ -842,7 +875,7 @@ pub(crate) fn nodes_required_for_multi_proof<F: Family>(
             return Err(super::Error::LocationOverflow(*loc));
         }
         let bp = Blueprint::new(leaves, *loc..*loc + 1)?;
-        acc.extend(bp.fold_prefix);
+        acc.extend(bp.fold_prefix.into_iter().map(|s| s.pos));
         acc.extend(bp.fetch_nodes);
         Ok(acc)
     })
@@ -1819,7 +1852,7 @@ mod tests {
                 let loc = Location::new(loc);
                 let bp = Blueprint::<F>::new(leaves, loc..loc + 1).unwrap();
                 let mut positions: Vec<Position<F>> = Vec::new();
-                positions.extend(&bp.fold_prefix);
+                positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
                 positions.extend(&bp.fetch_nodes);
                 let set: BTreeSet<_> = positions.iter().copied().collect();
                 assert_eq!(
