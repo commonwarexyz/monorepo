@@ -547,7 +547,7 @@ mod tests {
                 default_leader, make_raw_block, setup_network_with_participants, Ctx,
                 StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
-            verifying::MockVerifyingApp,
+            verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
@@ -560,13 +560,9 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{
-        channel::{fallible::OneshotExt, oneshot},
-        sync::Mutex,
-        NZUsize,
-    };
+    use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
     use rand::Rng;
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
@@ -941,66 +937,6 @@ mod tests {
         });
     }
 
-    #[derive(Clone)]
-    struct GatedVerifyingApp {
-        genesis: B,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    }
-
-    impl GatedVerifyingApp {
-        fn new(genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    genesis,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                started_rx,
-                release_tx,
-            )
-        }
-    }
-
-    impl crate::Application<deterministic::Context> for GatedVerifyingApp {
-        type Block = B;
-        type Context = Ctx;
-        type SigningScheme = S;
-
-        async fn genesis(&mut self) -> Self::Block {
-            self.genesis.clone()
-        }
-
-        async fn propose<A: crate::marshal::ancestry::BlockProvider<Block = Self::Block>>(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
-        ) -> Option<Self::Block> {
-            None
-        }
-    }
-
-    impl crate::VerifyingApplication<deterministic::Context> for GatedVerifyingApp {
-        async fn verify<A: crate::marshal::ancestry::BlockProvider<Block = Self::Block>>(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _ancestry: crate::marshal::ancestry::AncestorStream<A, Self::Block>,
-        ) -> bool {
-            if let Some(started) = self.started.lock().take() {
-                started.send_lossy(());
-            }
-            let release = self
-                .release
-                .lock()
-                .take()
-                .expect("release receiver missing");
-            let _ = release.await;
-            true
-        }
-    }
-
     #[test_traced("WARN")]
     fn test_inline_certify_does_not_bypass_failed_verify_persistence() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1030,7 +966,7 @@ mod tests {
             let marshal_actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let (mock_app, verify_started, release_verify) =
+            let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
                 context.clone(),

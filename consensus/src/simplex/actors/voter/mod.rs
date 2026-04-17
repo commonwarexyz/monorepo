@@ -103,12 +103,6 @@ mod tests {
         proposes: Arc<Mutex<Vec<Sha256Digest>>>,
     }
 
-    impl FailingRelay {
-        fn new() -> Self {
-            Self::default()
-        }
-    }
-
     impl crate::Relay for FailingRelay {
         type Digest = Sha256Digest;
         type PublicKey = PublicKey;
@@ -190,7 +184,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
             app_actor.start();
 
-            let relay = FailingRelay::new();
+            let relay = FailingRelay::default();
             let propose_attempts = relay.proposes.clone();
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),

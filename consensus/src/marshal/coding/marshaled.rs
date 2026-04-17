@@ -424,18 +424,12 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid {
-                    // The block is only persisted at this point. If the marshal
-                    // actor is gone, do NOT signal certify-true: the block was
-                    // not durably stored and consensus must not finalize-vote
-                    // on it.
-                    if !marshal.verified(round, block).await {
-                        debug!(
-                            ?round,
-                            "marshal unavailable during verified ack; skipping certify resolution"
-                        );
-                        return;
-                    }
+                if application_valid && !marshal.verified(round, block).await {
+                    debug!(
+                        ?round,
+                        "marshal unavailable during verified ack; skipping certify resolution"
+                    );
+                    return;
                 }
                 tx.send_lossy(application_valid);
             });
@@ -764,10 +758,8 @@ where
                         return;
                     }
 
-                    // Valid re-proposal. Notify the marshal and complete the
-                    // verification task for `certify`. If marshal is gone, do
-                    // not signal certify-true: the block was not durably
-                    // stored.
+                    // Valid re-proposal: notify the marshal and complete the
+                    // verification task for `certify`.
                     if !marshal.verified(round, block).await {
                         debug!(
                             ?round,
@@ -910,10 +902,8 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // NOTE: It is possible that, during crash recovery, we call
-                    // `marshal.verified` twice for the same block. That function is
-                    // idempotent, so this is safe. If marshal is gone, do not
-                    // signal certify-true: the block was not durably stored.
+                    // During crash recovery we may call `marshal.verified` twice for
+                    // the same block; the call is idempotent.
                     if !marshaled.marshal.verified(round, block).await {
                         debug!(
                             ?round,
@@ -1079,7 +1069,7 @@ where
 }
 
 /// Constructs the [`Commitment`] for the genesis block.
-fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
+pub(super) fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),
         block.digest(),

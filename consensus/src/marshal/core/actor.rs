@@ -519,9 +519,6 @@ where
                         response.send_lossy(info);
                     }
                     Message::Proposed { round, block, ack } => {
-                        // Persist before acknowledging so the caller can rely on
-                        // "voted ⟹ persisted" before broadcasting their own
-                        // notarize vote on this proposal.
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;
                         ack.send_lossy(());
@@ -543,10 +540,6 @@ where
                         buffer.send(round, block, Recipients::Some(peers)).await;
                     }
                     Message::Verified { round, block, ack } => {
-                        // Persist before acknowledging so the caller (typically
-                        // `Marshaled::deferred_verify`) can rely on
-                        // "verify-ack ⟹ persisted", which in turn lets
-                        // `certify` resolve true only after disk persistence.
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }

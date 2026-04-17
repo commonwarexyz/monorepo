@@ -828,7 +828,6 @@ impl<
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
-        let mut stopped_after_broadcast_failure = false;
         select_loop! {
             self.context,
             on_start => {
@@ -860,11 +859,6 @@ impl<
                     let view = round.view();
                     debug!(%view, "attempting certification");
                     let result = if is_local {
-                        // Locally proposed payloads are certifiable-by-construction
-                        // for their proposer. We only apply this shortcut when we
-                        // have explicit local evidence for the exact proposal,
-                        // either from this process or from replaying our durable
-                        // local notarize vote.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;
@@ -931,7 +925,6 @@ impl<
                         round = ?context.round,
                         "failed to broadcast proposed payload, stopping voter"
                     );
-                    stopped_after_broadcast_failure = true;
                     break;
                 }
             },
@@ -1105,11 +1098,11 @@ impl<
                 }
             },
         }
-        if stopped_after_broadcast_failure {
-            debug!("stopped voter after failed proposal broadcast");
-        }
-        if let Some(journal) = self.journal.take() {
-            journal.sync_all().await.expect("unable to sync journal");
-        }
+        self.journal
+            .take()
+            .expect("journal missing on voter exit")
+            .sync_all()
+            .await
+            .expect("unable to sync journal");
     }
 }

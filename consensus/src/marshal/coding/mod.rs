@@ -66,7 +66,8 @@ mod tests {
     use crate::{
         marshal::{
             coding::{
-                types::{coding_config_for_participants, hash_context, CodedBlock},
+                marshaled::genesis_coding_commitment,
+                types::{coding_config_for_participants, CodedBlock},
                 Marshaled, MarshaledConfig,
             },
             mocks::{
@@ -83,7 +84,7 @@ mod tests {
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan,
         },
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, CertifiableBlock, Relay,
+        Automaton, CertifiableAutomaton, Relay,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -1768,15 +1769,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
-
-            // Compute the genesis commitment as Marshaled would (mirrors the
-            // private `genesis_coding_commitment` helper in marshaled.rs).
-            let genesis_parent_commitment = Commitment::from((
-                genesis.digest(),
-                genesis.digest(),
-                hash_context::<Sha256, _>(&genesis.context()),
-                harness::GENESIS_CODING_CONFIG,
-            ));
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
             // uses the proper genesis commitment so fetch_parent matches the
