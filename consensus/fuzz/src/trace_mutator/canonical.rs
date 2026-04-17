@@ -457,6 +457,27 @@ pub fn preserves_first_broadcast_order(original: &[Event], mutated: &[Event]) ->
     true
 }
 
+// --- Canonical TLC mutator driver -------------------------------------
+
+/// Entry point for the canonical trace-mutator binary
+/// (`trace_mutator_canonical`).
+///
+/// Stage 1 stub: the Trace-native TLC feedback loop is implemented in
+/// Stage 5 (task #37). Today the legacy driver in `super::run` is the
+/// only functional mutator and operates on `TraceData`; this stub is
+/// only wired up so the `trace_mutator_canonical` binary compiles and
+/// the other three canonical binaries (`replay_canonical_trace`,
+/// `validate_canonical_trace_corpus`, `generate_canonical_seeds`) are
+/// usable end-to-end.
+pub fn run_canonical() -> ! {
+    panic!(
+        "trace_mutator::canonical::run_canonical is not implemented yet; \
+         the Trace-native TLC feedback loop arrives in Stage 5 (task #37). \
+         For now use the legacy driver via `cargo run --bin trace_mutator` \
+         with canonical seeds produced by `generate_canonical_seeds`."
+    );
+}
+
 // --- Tests ------------------------------------------------------------
 
 #[cfg(test)]

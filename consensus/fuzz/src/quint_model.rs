@@ -1,10 +1,19 @@
 use crate::{
-    replayer::compare::ExpectedState,
+    replayer::compare::{ExpectedNodeState, ExpectedState},
     tracing::{data::TraceData, decoder, encoder},
 };
+use commonware_consensus::{
+    simplex::replay::{
+        trace::{CertStateSnapshot, NodeSnapshot, NullStateSnapshot, Snapshot},
+        Trace,
+    },
+    types::View,
+};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_utils::Participant;
 use sha1::{Digest, Sha1};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt::{self, Display},
     fs,
@@ -222,5 +231,231 @@ fn parse_itf_expected_state(
         &correct_nodes,
         &block_map,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Canonical (Trace-native) validation path
+// ---------------------------------------------------------------------------
+
+/// Validates a canonical [`Trace`] against `replica.qnt` and extracts
+/// expected state from the ITF output as a [`Snapshot`].
+///
+/// Mirrors [`validate_and_extract_expected`] but takes the canonical
+/// [`Trace`] type throughout: encodes via
+/// [`encoder::encode_from_trace`], parses the ITF via the shared
+/// [`decoder::extract_expected_state`] (which is already TraceData-free),
+/// and converts the resulting [`ExpectedState`] into a
+/// [`Snapshot`] keyed by [`Participant`].
+pub fn validate_and_extract_expected_canonical(
+    trace: &Trace,
+    label: &str,
+) -> Result<Option<Snapshot>, ModelError> {
+    let qnt = encoder::encode_from_trace(trace, 0);
+
+    let td = temp_dir();
+    fs::create_dir_all(&td)
+        .map_err(|e| ModelError::new(format!("failed to create {}: {e}", td.display())))?;
+    let stem = unique_stem(label, "itf_canonical");
+    let itf_path = td.join(format!("{stem}.itf.json"));
+
+    run_quint_test_module(label, "canonical_replica", &qnt, Some(&itf_path))?;
+
+    let itf_json = match fs::read_to_string(&itf_path) {
+        Ok(s) => {
+            let _ = fs::remove_file(&itf_path);
+            let _ = fs::remove_dir(&td);
+            s
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&itf_path);
+            let _ = fs::remove_dir(&td);
+            return Err(ModelError::new(format!(
+                "failed to read ITF output for {label}: {e}"
+            )));
+        }
+    };
+
+    let itf: serde_json::Value = serde_json::from_str(&itf_json)
+        .map_err(|e| ModelError::new(format!("failed to parse ITF JSON: {e}")))?;
+
+    let states = itf["states"]
+        .as_array()
+        .ok_or_else(|| ModelError::new("ITF JSON missing 'states' array".to_string()))?;
+    let final_state = states
+        .last()
+        .ok_or_else(|| ModelError::new("ITF 'states' array is empty".to_string()))?;
+
+    // Build block map: encoder produces (hex, "val_bN") pairs; invert.
+    let block_pairs = encoder::build_block_map_from_events(&trace.events);
+    let block_map: HashMap<String, String> = block_pairs
+        .into_iter()
+        .map(|(hash, name)| (name, hash))
+        .collect();
+
+    let correct_nodes = decoder::identify_correct_nodes(final_state);
+    let expected = decoder::extract_expected_state(final_state, &correct_nodes, &block_map);
+
+    let snapshot = expected_state_to_snapshot(&expected)?;
+    Ok(Some(snapshot))
+}
+
+/// Converts the Quint-level [`ExpectedState`] (keyed by `"nX"` strings
+/// with hex payloads) into a [`Snapshot`] keyed by [`Participant`] with
+/// typed payload digests. Returns `ModelError` if any payload hex is
+/// malformed or any node ID is not the expected `"nN"` shape.
+fn expected_state_to_snapshot(es: &ExpectedState) -> Result<Snapshot, ModelError> {
+    let mut nodes: BTreeMap<Participant, NodeSnapshot> = BTreeMap::new();
+    for (id, ns) in &es.nodes {
+        let participant = node_id_to_participant(id)?;
+        let snap = node_state_to_node_snapshot(ns)?;
+        nodes.insert(participant, snap);
+    }
+    Ok(Snapshot { nodes })
+}
+
+fn node_state_to_node_snapshot(ns: &ExpectedNodeState) -> Result<NodeSnapshot, ModelError> {
+    let notarizations = cert_map_to_snapshot(
+        &ns.notarizations,
+        &ns.notarization_signature_counts,
+        "notarization",
+    )?;
+    let finalizations = cert_map_to_snapshot(
+        &ns.finalizations,
+        &ns.finalization_signature_counts,
+        "finalization",
+    )?;
+    let nullifications: BTreeMap<View, NullStateSnapshot> = ns
+        .nullifications
+        .iter()
+        .map(|view| {
+            let signature_count = ns
+                .nullification_signature_counts
+                .get(view)
+                .copied()
+                .flatten()
+                .map(|c| c as u32);
+            (View::new(*view), NullStateSnapshot { signature_count })
+        })
+        .collect();
+    let certified: BTreeSet<View> = ns.certified.iter().copied().map(View::new).collect();
+    let notarize_signers = signer_map_to_snapshot(&ns.notarize_signers)?;
+    let nullify_signers = signer_map_to_snapshot(&ns.nullify_signers)?;
+    let finalize_signers = signer_map_to_snapshot(&ns.finalize_signers)?;
+    Ok(NodeSnapshot {
+        notarizations,
+        nullifications,
+        finalizations,
+        certified,
+        notarize_signers,
+        nullify_signers,
+        finalize_signers,
+        last_finalized: View::new(ns.last_finalized),
+    })
+}
+
+fn cert_map_to_snapshot(
+    payloads: &BTreeMap<u64, String>,
+    sig_counts: &BTreeMap<u64, Option<usize>>,
+    kind: &'static str,
+) -> Result<BTreeMap<View, CertStateSnapshot>, ModelError> {
+    let mut out = BTreeMap::new();
+    for (view, hex) in payloads {
+        let payload = hex_to_digest(hex).map_err(|e| {
+            ModelError::new(format!("invalid {kind} payload hex at view {view}: {e}"))
+        })?;
+        let signature_count = sig_counts
+            .get(view)
+            .copied()
+            .flatten()
+            .map(|c| c as u32);
+        out.insert(
+            View::new(*view),
+            CertStateSnapshot {
+                payload,
+                signature_count,
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn signer_map_to_snapshot(
+    in_map: &BTreeMap<u64, BTreeSet<String>>,
+) -> Result<BTreeMap<View, BTreeSet<Participant>>, ModelError> {
+    let mut out: BTreeMap<View, BTreeSet<Participant>> = BTreeMap::new();
+    for (view, signers) in in_map {
+        let mut set = BTreeSet::new();
+        for s in signers {
+            set.insert(node_id_to_participant(s)?);
+        }
+        out.insert(View::new(*view), set);
+    }
+    Ok(out)
+}
+
+fn node_id_to_participant(id: &str) -> Result<Participant, ModelError> {
+    let idx_str = id
+        .strip_prefix('n')
+        .ok_or_else(|| ModelError::new(format!("node id '{id}' missing 'n' prefix")))?;
+    let idx: u32 = idx_str
+        .parse()
+        .map_err(|e| ModelError::new(format!("node id '{id}' not a u32: {e}")))?;
+    Ok(Participant::new(idx))
+}
+
+const DIGEST_BYTES: usize = 32;
+
+fn hex_to_digest(hex: &str) -> Result<Sha256Digest, String> {
+    if hex.len() != DIGEST_BYTES * 2 {
+        return Err(format!(
+            "expected {} hex chars, got {}",
+            DIGEST_BYTES * 2,
+            hex.len()
+        ));
+    }
+    let mut bytes = [0u8; DIGEST_BYTES];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        let pair = &hex[i * 2..i * 2 + 2];
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|e| format!("invalid hex pair '{pair}' at offset {i}: {e}"))?;
+    }
+    Ok(Sha256Digest::from(bytes))
+}
+
+#[cfg(test)]
+mod canonical_validation_tests {
+    use super::*;
+    use commonware_consensus::simplex::replay::Trace;
+    use std::path::PathBuf;
+
+    fn fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("src/simplex/replay/fixtures/strict")
+    }
+
+    #[test]
+    fn validate_and_extract_expected_canonical_on_honest_fixture() {
+        if std::env::var("SKIP_QUINT_TESTS").is_ok() {
+            return;
+        }
+        let dir = fixtures_dir();
+        if !dir.exists() {
+            // Fixture dir is optional in non-replay builds.
+            return;
+        }
+        let path = dir.join("honest_n4_f0_c3.json");
+        if !path.exists() {
+            return;
+        }
+        let json = fs::read_to_string(&path).expect("read fixture");
+        let trace = Trace::from_json(&json).expect("parse canonical trace");
+        let expected =
+            validate_and_extract_expected_canonical(&trace, "canonical_sanity")
+                .expect("validate + extract");
+        let snap = expected.expect("non-empty snapshot");
+        assert!(!snap.nodes.is_empty(), "snapshot should have nodes");
+    }
 }
 
