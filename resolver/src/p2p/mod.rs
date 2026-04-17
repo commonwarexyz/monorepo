@@ -228,6 +228,15 @@ mod tests {
         mailbox
     }
 
+    fn assert_fetch_success_total(metrics: &str, peer: &PublicKey, count: usize) {
+        assert!(
+            metrics.contains(&format!(
+                "actor_fetch_total{{peer=\"{peer}\",status=\"Success\"}} {count}"
+            )),
+            "expected fetch success metric for peer {peer}: {metrics}"
+        );
+    }
+
     /// Tests that fetching a key from another peer succeeds when data is available.
     /// This test sets up two peers, where Peer 1 requests data that Peer 2 has,
     /// and verifies that the data is correctly delivered to Peer 1's consumer.
@@ -1044,7 +1053,7 @@ mod tests {
 
             // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 1"));
+            assert_fetch_success_total(&metrics, &peers[0], 1);
         });
     }
 
@@ -1248,7 +1257,7 @@ mod tests {
 
             // Verify metrics: 3 successful fetches
             let metrics = context.encode();
-            assert!(metrics.contains("_fetch_total{status=\"Success\"} 3"));
+            assert_fetch_success_total(&metrics, &peers[0], 3);
         });
     }
 
