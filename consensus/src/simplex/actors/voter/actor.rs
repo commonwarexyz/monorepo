@@ -694,7 +694,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(batcher, resolver, vote_sender, certificate_sender)
-                .await
         )
     }
 

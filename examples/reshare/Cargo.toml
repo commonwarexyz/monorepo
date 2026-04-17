@@ -38,6 +38,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-p2p = { workspace = true, features = ["mocks"] }
 tracing-subscriber.workspace = true
 
 [[bin]]

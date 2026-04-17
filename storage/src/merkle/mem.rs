@@ -29,10 +29,9 @@ pub struct Config<F: Family, D: Digest> {
 
 /// A basic, `no_std`-compatible Merkle structure where all nodes are stored in-memory.
 ///
-/// Nodes are either _retained_, _pruned_, or _pinned_. Retained nodes are stored in the main
-/// deque. Pruned nodes precede `pruning_boundary` and are no longer stored unless they are still
-/// required for root computation or proof generation, in which case they are kept in
-/// `pinned_nodes`.
+/// Nodes are either _retained_, _pruned_, or _pinned_. Retained nodes are stored in the main deque.
+/// Pruned nodes precede `pruning_boundary` and are no longer stored unless they are part of the
+/// pruning-boundary pinned-node set, in which case they are kept in `pinned_nodes`.
 ///
 /// The structure is always merkleized (its root is always computed). Mutations go through the
 /// batch API: create an [`UnmerkleizedBatch`](batch::UnmerkleizedBatch) via [`Self::new_batch`],

@@ -223,7 +223,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.

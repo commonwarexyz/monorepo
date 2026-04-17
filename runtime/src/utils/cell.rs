@@ -13,8 +13,8 @@ use std::{
 const MISSING_CONTEXT: &str = "runtime context missing";
 const DUPLICATE_CONTEXT: &str = "runtime context already present";
 
-/// Spawn a task using a [`Cell`] by taking its context, executing the provided
-/// async block, and restoring the context before the block completes.
+/// Spawn a task using a [`Cell`] by taking its context, restoring the context synchronously
+/// in the spawned closure, and returning the provided future directly to the runtime.
 ///
 /// The macro uses the context's default spawn configuration (supervised, shared executor with
 /// `blocking == false`). If you need to mark the task as blocking or request a dedicated thread,
@@ -23,7 +23,7 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
         let __commonware_context = $cell.take();
-        __commonware_context.spawn(move |context| async move {
+        __commonware_context.spawn(move |context| {
             $cell.restore(context);
             $body
         })
