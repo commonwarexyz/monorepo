@@ -299,8 +299,8 @@ where
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let last_built = self.last_built.clone();
+        let epocher = self.epocher.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
