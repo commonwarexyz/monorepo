@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 /// to [`ActionItem`] is 1:1, so this is just a rendering pass.
 pub fn encode_from_trace(trace: &Trace) -> Vec<Value> {
     let block_map = build_block_map_from_events(&trace.events);
-    let items = lower_events_to_actions(&trace.events, &block_map);
+    let items = lower_events_to_actions(&trace.events, &block_map, trace.topology.faults);
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         out.push(render_item(item));

@@ -244,12 +244,31 @@ fn map_block(hash: &str, block_map: &[(String, String)]) -> String {
     hash.to_string()
 }
 
-/// Builds the leader map: view -> replica ID using round-robin.
-fn build_leader_map_to(cfg: &EncoderConfig, max_view: u64) -> Vec<(u64, String)> {
+/// Builds the leader map: view -> replica ID.
+///
+/// Prefers the leader recorded in each `Event::Propose` (so that
+/// non-round-robin electors, including twins scenarios and Random/VRF, produce
+/// valid .qnt tests). Falls back to `(epoch + view) % n` for views
+/// that have no `Propose` in the trace (timed-out or absent).
+fn build_leader_map_to(
+    cfg: &EncoderConfig,
+    max_view: u64,
+    events: &[Event],
+) -> Vec<(u64, String)> {
+    let mut recorded: HashMap<u64, u32> = HashMap::new();
+    for e in events {
+        if let Event::Propose { leader, proposal } = e {
+            let view = proposal.view().get();
+            recorded.entry(view).or_insert(leader.get());
+        }
+    }
     let mut map = Vec::new();
     for view in 0..=max_view {
-        let leader_idx = (cfg.epoch + view) as usize % cfg.n;
-        map.push((view, format!("n{}", leader_idx)));
+        let idx = match recorded.get(&view) {
+            Some(&idx) => idx as usize,
+            None => (cfg.epoch + view) as usize % cfg.n,
+        };
+        map.push((view, format!("n{}", idx)));
     }
     map
 }
@@ -409,6 +428,19 @@ pub(crate) fn build_proposals_from_events(
 /// 1:1 mapping — no causal reconstruction, no dedup, no Byzantine-sig
 /// normalization (canonical events carry real signed payloads).
 ///
+/// `faults` is the number of Byzantine replicas (indices `0..faults`);
+/// these are not modeled in Quint. Applied filters:
+///   - `Event::Propose { leader }` with `leader.get() < faults` is
+///     dropped — the Quint model has no such leader. The proposal is
+///     introduced by the following `Event::Construct` (the Byzantine
+///     leader's own notarize vote lowers to a `SendNotarizeVote`
+///     barrier that carries the proposal).
+///   - `Event::Deliver { to }` with `to.get() < faults` is dropped —
+///     the Byzantine receiver has no modeled state in Quint. For
+///     certificate deliveries only the `OnCertificate` is skipped; the
+///     `SendCertificate` barrier is still emitted so correct receivers
+///     that later see the same cert can deliver it.
+///
 /// The only dedup this does is for `send_certificate`: a certificate
 /// may be `Deliver`ed multiple times (once per receiver), but the TLC
 /// / Quint action set expects `send_certificate` to be emitted once per
@@ -417,13 +449,18 @@ pub(crate) fn build_proposals_from_events(
 pub fn lower_events_to_actions(
     events: &[Event],
     block_map: &[(String, String)],
+    faults: u32,
 ) -> Vec<ActionItem> {
     let mut out = Vec::new();
     let mut cert_sent: HashSet<String> = HashSet::new();
+    let is_byz = |p: commonware_utils::Participant| p.get() < faults;
 
     for event in events {
         match event {
             Event::Propose { leader, proposal } => {
+                if is_byz(*leader) {
+                    continue;
+                }
                 let payload = map_block(&digest_hex(&proposal.payload), block_map);
                 out.push(ActionItem::Propose {
                     leader: node_id(*leader),
@@ -488,10 +525,14 @@ pub fn lower_events_to_actions(
                 }
             }
             Event::Deliver { to, from, msg } => {
+                let byz_receiver = is_byz(*to);
                 let receiver = node_id(*to);
                 let ghost_sender = node_id(*from);
                 match msg {
                     Wire::Vote(Vote::Notarize(n)) => {
+                        if byz_receiver {
+                            continue;
+                        }
                         out.push(ActionItem::OnNotarize {
                             receiver,
                             view: n.proposal.view().get(),
@@ -501,6 +542,9 @@ pub fn lower_events_to_actions(
                         });
                     }
                     Wire::Vote(Vote::Nullify(n)) => {
+                        if byz_receiver {
+                            continue;
+                        }
                         out.push(ActionItem::OnNullify {
                             receiver,
                             view: n.view().get(),
@@ -508,6 +552,9 @@ pub fn lower_events_to_actions(
                         });
                     }
                     Wire::Vote(Vote::Finalize(f)) => {
+                        if byz_receiver {
+                            continue;
+                        }
                         out.push(ActionItem::OnFinalize {
                             receiver,
                             view: f.proposal.view().get(),
@@ -517,12 +564,18 @@ pub fn lower_events_to_actions(
                         });
                     }
                     Wire::Cert(cert) => {
+                        // SendCertificate is a network-availability
+                        // barrier and fires regardless of receiver; only
+                        // the OnCertificate delivery is gated.
                         let item = cert_to_item_canonical(cert, &ghost_sender, block_map);
                         let key = format!("{}:{}", item.ghost_sender(), item.dedup_key());
                         if cert_sent.insert(key) {
                             out.push(ActionItem::SendCertificate {
                                 cert: item.clone(),
                             });
+                        }
+                        if byz_receiver {
+                            continue;
                         }
                         out.push(ActionItem::OnCertificate {
                             receiver,
@@ -662,9 +715,16 @@ pub fn encode_from_trace(trace: &Trace, required_containers: u64) -> String {
     };
     let block_map = build_block_map_from_events(&trace.events);
     let proposals = build_proposals_from_events(&trace.events, &block_map);
-    let actions = lower_events_to_actions(&trace.events, &block_map);
+    let actions = lower_events_to_actions(&trace.events, &block_map, trace.topology.faults);
     let reporter_states = snapshot_to_reporter_states(&trace.expected);
-    render_quint_from_actions(&cfg, &block_map, &proposals, &actions, &reporter_states)
+    render_quint_from_actions(
+        &cfg,
+        &trace.events,
+        &block_map,
+        &proposals,
+        &actions,
+        &reporter_states,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -674,12 +734,13 @@ pub fn encode_from_trace(trace: &Trace, required_containers: u64) -> String {
 /// Core rendering: given already-prepared inputs, emit the Quint test module.
 fn render_quint_from_actions(
     cfg: &EncoderConfig,
+    events: &[Event],
     block_map: &[(String, String)],
     proposals: &HashSet<ProposalKey>,
     action_items: &[ActionItem],
     reporter_states: &BTreeMap<String, ReporterStateData>,
 ) -> String {
-    let leader_map = build_leader_map_to(cfg, cfg.max_view);
+    let leader_map = build_leader_map_to(cfg, cfg.max_view, events);
     let block_names: Vec<&str> = block_map.iter().map(|(_, n)| n.as_str()).collect();
     let f = (cfg.n - 1) / 3;
     let q = cfg.n - f;
@@ -1427,6 +1488,12 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // send_notarize_vote:
+    //   - always add to the global sent_notarize_votes (network/barrier)
+    //   - if vote.sig is a correct replica, mirror the vote into that
+    //     replica's local store_notarize_votes (Rust Event::Construct
+    //     for a correct node updates the node's local state, not just
+    //     the network)
     writeln!(
         out,
         "    action send_notarize_vote(vote: NotarizeVote): bool = all {{"
@@ -1440,7 +1507,17 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
     writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
-    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(
+        out,
+        "        store_notarize_votes' = if (CORRECT.contains(vote.sig))"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            store_notarize_votes.set(vote.sig, store_notarize_votes.get(vote.sig).union(Set(vote)))"
+    )
+    .unwrap();
+    writeln!(out, "            else store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
@@ -1470,7 +1547,17 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
-    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(
+        out,
+        "        store_nullify_votes' = if (CORRECT.contains(vote.sig))"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            store_nullify_votes.set(vote.sig, store_nullify_votes.get(vote.sig).union(Set(vote)))"
+    )
+    .unwrap();
+    writeln!(out, "            else store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
     writeln!(
@@ -1500,7 +1587,17 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
-    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(
+        out,
+        "        store_finalize_votes' = if (CORRECT.contains(vote.sig))"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            store_finalize_votes.set(vote.sig, store_finalize_votes.get(vote.sig).union(Set(vote)))"
+    )
+    .unwrap();
+    writeln!(out, "            else store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
     writeln!(
         out,
@@ -1647,7 +1744,152 @@ mod canonical_tests {
     #[test]
     fn lower_empty_events_is_empty() {
         let block_map: Vec<(String, String)> = Vec::new();
-        let items = lower_events_to_actions(&[], &block_map);
+        let items = lower_events_to_actions(&[], &block_map, 0);
         assert!(items.is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // Byzantine-filter regression coverage for the canonical lowering.
+    //
+    // Uses a honest record_honest trace as the raw event source, then
+    // flips trace.topology.faults = 1 so the first participant becomes
+    // "Byzantine" in the encoder's view. The assertions verify that:
+    //   - no .qnt `on_*("n0", ...)` line survives for a faults=1 render
+    //   - no .qnt `propose("n0", ...)` line survives either
+    //   - no TLC action targets id="n0"
+    // Stage-10 follow-up: task #43.
+    // ---------------------------------------------------------------------
+
+    fn fixture_trace() -> Trace {
+        use commonware_consensus::simplex::replay::{record_honest, RecordConfig};
+        let cfg = RecordConfig {
+            n: 4,
+            required_containers: 2,
+            namespace: b"byz_filter_regression".to_vec(),
+            epoch: 0,
+            timing: Timing::default(),
+        };
+        record_honest(cfg)
+    }
+
+    #[test]
+    fn byz_receiver_deliveries_are_filtered_from_quint() {
+        let mut trace = fixture_trace();
+        trace.topology.faults = 1;
+        let qnt = encode_from_trace(&trace, 0);
+        assert!(
+            !qnt.contains("on_notarize(\"n0\""),
+            "on_notarize(\"n0\", ...) leaked into .qnt for faults=1"
+        );
+        assert!(
+            !qnt.contains("on_nullify(\"n0\""),
+            "on_nullify(\"n0\", ...) leaked into .qnt for faults=1"
+        );
+        assert!(
+            !qnt.contains("on_finalize(\"n0\""),
+            "on_finalize(\"n0\", ...) leaked into .qnt for faults=1"
+        );
+        assert!(
+            !qnt.contains("on_certificate(\"n0\""),
+            "on_certificate(\"n0\", ...) leaked into .qnt for faults=1"
+        );
+    }
+
+    #[test]
+    fn byz_leader_propose_is_filtered_from_quint() {
+        let mut trace = fixture_trace();
+        trace.topology.faults = 1;
+        let qnt = encode_from_trace(&trace, 0);
+        assert!(
+            !qnt.contains("propose(\"n0\""),
+            "propose(\"n0\", ...) leaked into .qnt for faults=1"
+        );
+    }
+
+    #[test]
+    fn byz_receiver_deliveries_are_filtered_from_tlc() {
+        use crate::tracing::tlc_encoder;
+        let mut trace = fixture_trace();
+        trace.topology.faults = 1;
+        let actions = tlc_encoder::encode_from_trace(&trace);
+        for action in &actions {
+            let name = action
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if name.starts_with("on_") {
+                let id = action
+                    .get("params")
+                    .and_then(|p| p.get("id"))
+                    .and_then(|v| v.as_str());
+                assert_ne!(
+                    id,
+                    Some("n0"),
+                    "TLC action {name} targeted Byzantine id=n0 with params {action}"
+                );
+            }
+        }
+    }
+
+    /// Regression for the send_*_vote helper semantics.
+    ///
+    /// A correct replica's `send_nullify_vote(...)` must also insert the
+    /// vote into that replica's local `store_nullify_votes` so that a
+    /// subsequent pair of received peer nullifies is enough to form a
+    /// nullification quorum locally — without requiring an explicit
+    /// `on_certificate(id, nullification(...))` to carry the cert in.
+    /// This mirrors Rust semantics where Event::Construct for a correct
+    /// node updates that node's state, not just the network.
+    #[test]
+    fn send_nullify_vote_helper_updates_signer_local_store() {
+        let trace = fixture_trace();
+        let qnt = encode_from_trace(&trace, 0);
+        let marker = "action send_nullify_vote(vote: NullifyVote): bool";
+        let start = qnt
+            .find(marker)
+            .expect("send_nullify_vote helper present in render");
+        let rest = &qnt[start..];
+        let end = rest.find("    }\n").expect("helper body terminated") + 6;
+        let body = &rest[..end];
+        assert!(
+            body.contains("CORRECT.contains(vote.sig)"),
+            "send_nullify_vote must gate local-store update on CORRECT membership; helper body:\n{body}"
+        );
+        assert!(
+            body.contains("store_nullify_votes.set(vote.sig"),
+            "send_nullify_vote must insert the vote into store_nullify_votes[vote.sig]; helper body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn send_notarize_vote_helper_updates_signer_local_store() {
+        let trace = fixture_trace();
+        let qnt = encode_from_trace(&trace, 0);
+        let marker = "action send_notarize_vote(vote: NotarizeVote): bool";
+        let start = qnt.find(marker).expect("send_notarize_vote helper present");
+        let rest = &qnt[start..];
+        let end = rest.find("    }\n").expect("helper body terminated") + 6;
+        let body = &rest[..end];
+        assert!(
+            body.contains("CORRECT.contains(vote.sig)")
+                && body.contains("store_notarize_votes.set(vote.sig"),
+            "send_notarize_vote must mirror the vote into store_notarize_votes[vote.sig] when signer is correct; body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn send_finalize_vote_helper_updates_signer_local_store() {
+        let trace = fixture_trace();
+        let qnt = encode_from_trace(&trace, 0);
+        let marker = "action send_finalize_vote(vote: FinalizeVote): bool";
+        let start = qnt.find(marker).expect("send_finalize_vote helper present");
+        let rest = &qnt[start..];
+        let end = rest.find("    }\n").expect("helper body terminated") + 6;
+        let body = &rest[..end];
+        assert!(
+            body.contains("CORRECT.contains(vote.sig)")
+                && body.contains("store_finalize_votes.set(vote.sig"),
+            "send_finalize_vote must mirror the vote into store_finalize_votes[vote.sig] when signer is correct; body:\n{body}"
+        );
     }
 }
