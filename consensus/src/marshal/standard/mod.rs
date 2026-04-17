@@ -1618,8 +1618,13 @@ mod tests {
     }
 
     /// A no-op buffer used by tests that do not need marshal's dissemination path.
+    ///
+    /// Subscription senders are retained so marshal-local subscriptions stay live
+    /// until the actor drops the buffer.
     #[derive(Clone, Default)]
-    struct NoopBuffer;
+    struct NoopBuffer {
+        subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
+    }
 
     impl crate::marshal::core::Buffer<Standard<B>> for NoopBuffer {
         type PublicKey = PublicKey;
@@ -1634,7 +1639,8 @@ mod tests {
         }
 
         async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
+            self.subscriptions.lock().push(sender);
             receiver
         }
 
@@ -1642,7 +1648,8 @@ mod tests {
             &self,
             _commitment: D,
         ) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
+            self.subscriptions.lock().push(sender);
             receiver
         }
 
@@ -1783,7 +1790,7 @@ mod tests {
         let (resolver_tx, resolver_rx) = mpsc::channel(100);
         let actor_handle = actor.start(
             application,
-            NoopBuffer,
+            NoopBuffer::default(),
             (resolver_rx, NoopResolver::holding(resolver_tx)),
         );
         (mailbox, actor_handle)
@@ -2009,6 +2016,69 @@ mod tests {
                     .round(),
                 round,
                 "restart should recover the delivered finalization by height"
+            );
+        });
+    }
+
+    /// Regression: a block subscription must not resolve until the corresponding
+    /// verified-block write has completed successfully. Otherwise a waiter can
+    /// act on a block that marshal immediately loses to a fatal storage error.
+    #[test_traced("WARN")]
+    fn test_standard_verified_write_failure_does_not_notify_subscribers() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_timeout(Some(Duration::from_secs(30)))
+                .with_catch_panics(true),
+        );
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("verified-write-failure-{me}");
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, actor_handle) = start_standard_actor(
+                context.with_label("validator_0"),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+            )
+            .await;
+
+            let subscription = mailbox.subscribe_by_digest(Some(round), digest).await;
+
+            *context.storage_fault_config().write() =
+                deterministic::FaultConfig::default().write(1.0);
+
+            assert!(
+                !mailbox.verified(round, block.clone()).await,
+                "verified should fail when marshal cannot persist the block"
+            );
+            assert!(
+                actor_handle.await.is_err(),
+                "fatal verified write failure should terminate the marshal actor"
+            );
+            assert!(
+                subscription.await.is_err(),
+                "subscription must not resolve before verified persistence succeeds"
+            );
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let (mailbox, _actor_handle) = start_standard_actor(
+                context.with_label("validator_0_restart"),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+            )
+            .await;
+            assert!(
+                mailbox.get_block(&digest).await.is_none(),
+                "failed verified write must not survive restart"
             );
         });
     }
