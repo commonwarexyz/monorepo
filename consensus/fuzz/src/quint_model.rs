@@ -469,28 +469,69 @@ pub fn identify_correct_nodes(state: &Value) -> Vec<String> {
     nodes
 }
 
-/// Collects the `store_certificate` map from the ITF state, keyed by node ID.
+/// Collects the per-node certificate store from the ITF state.
+///
+/// Reads the current split name `store_certificates` (plural); also
+/// accepts the legacy monolithic name `store_certificate` if a fixture
+/// predates the split. Values are already variant-tagged in ITF
+/// (`{"tag":"Notarization"|"Nullification"|"Finalization","value":…}`).
 fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
     let mut out: HashMap<String, Vec<Value>> = HashMap::new();
-    for (k, v) in parse_map(get_var(state, "store_certificate")) {
-        let Some(node) = k.as_str() else {
+    for name in &["store_certificates", "store_certificate"] {
+        let map_val = get_var(state, name);
+        if map_val.is_null() {
             continue;
-        };
-        let certs = parse_set(v);
-        out.insert(node.to_string(), certs.into_iter().cloned().collect());
+        }
+        for (k, v) in parse_map(map_val) {
+            let Some(node) = k.as_str() else { continue };
+            let certs = parse_set(v);
+            out.entry(node.to_string())
+                .or_default()
+                .extend(certs.into_iter().cloned());
+        }
     }
     out
 }
 
-/// Collects the `store_vote` map from the ITF state, keyed by node ID.
+/// Collects the per-node vote store from the ITF state, keyed by node
+/// ID. Reads the current split maps `store_notarize_votes`,
+/// `store_nullify_votes`, `store_finalize_votes` (values are untagged
+/// votes and get tagged here so downstream code sees the same
+/// `{"tag":"Notarize|Nullify|Finalize","value":…}` shape `sent_*`
+/// extraction produces); also accepts the legacy monolithic
+/// `store_vote` map whose values were already variant-tagged.
 fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
     let mut out: HashMap<String, Vec<Value>> = HashMap::new();
-    for (k, v) in parse_map(get_var(state, "store_vote")) {
-        let Some(node) = k.as_str() else {
+    // Legacy monolithic map: values are already tagged.
+    let legacy = get_var(state, "store_vote");
+    if !legacy.is_null() {
+        for (k, v) in parse_map(legacy) {
+            let Some(node) = k.as_str() else { continue };
+            let votes = parse_set(v);
+            out.entry(node.to_string())
+                .or_default()
+                .extend(votes.into_iter().cloned());
+        }
+    }
+    // Split maps: tag each vote with its kind to match the shape
+    // `insert_vote_signer` expects.
+    for (name, tag) in [
+        ("store_notarize_votes", "Notarize"),
+        ("store_nullify_votes", "Nullify"),
+        ("store_finalize_votes", "Finalize"),
+    ] {
+        let map_val = get_var(state, name);
+        if map_val.is_null() {
             continue;
-        };
-        let votes = parse_set(v);
-        out.insert(node.to_string(), votes.into_iter().cloned().collect());
+        }
+        for (k, v) in parse_map(map_val) {
+            let Some(node) = k.as_str() else { continue };
+            let votes = parse_set(v);
+            let entry = out.entry(node.to_string()).or_default();
+            for vote in votes {
+                entry.push(serde_json::json!({ "tag": tag, "value": vote.clone() }));
+            }
+        }
     }
     out
 }
