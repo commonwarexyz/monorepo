@@ -132,7 +132,10 @@
 use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use commonware_math::algebra::{powers, CryptoGroup, Field, Random, Space};
+use commonware_math::{
+    algebra::{powers, Additive, CryptoGroup, Field, Random, Space},
+    tangle::Tangle,
+};
 use commonware_parallel::Strategy;
 
 /// A setup decides on what group elements we use to commit to vectors and their product.
@@ -232,6 +235,63 @@ impl<G> Setup<G> {
     /// The product generator `Q`.
     pub const fn product_generator(&self) -> &G {
         &self.product_generator
+    }
+}
+
+impl<G: Clone> Setup<G> {
+    #[must_use]
+    pub fn check_tangle<F>(
+        &self,
+        log_len: u8,
+        tangle: Tangle<F, G>,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        F: Additive,
+        G: Space<F>,
+    {
+        let Some(len) = 1usize.checked_shl(u32::from(log_len)) else {
+            return false;
+        };
+        tangle
+            .eval(
+                std::iter::once(((2, 0), self.product_generator().clone()))
+                    .chain(
+                        self.g()
+                            .iter()
+                            .take(len)
+                            .cloned()
+                            .enumerate()
+                            .map(|(i, g_i)| {
+                                (
+                                    (
+                                        0,
+                                        i.try_into().expect("generator index should fit in u32"),
+                                    ),
+                                    g_i,
+                                )
+                            }),
+                    )
+                    .chain(
+                        self.h()
+                            .iter()
+                            .take(len)
+                            .cloned()
+                            .enumerate()
+                            .map(|(i, h_i)| {
+                                (
+                                    (
+                                        1,
+                                        i.try_into().expect("generator index should fit in u32"),
+                                    ),
+                                    h_i,
+                                )
+                            }),
+                    ),
+                strategy,
+            )
+            .map(|res| res == G::zero())
+            .unwrap_or(false)
     }
 }
 
@@ -623,14 +683,17 @@ where
 /// correct, rather than one that the prover is telling them to use. For example,
 /// by using one generated from a deterministic seed that's agreed upon, or
 /// something similar.
+///
+/// The return will be `None` if the proof is incorrect in an obvious way.
+/// Otherwise, we have a [`Tangle`] which should [`Tangle::eval`] to 0 if the
+/// proof is correct, using [`Setup::g`] as row 0, [`Setup::h`] as row 1, and
+/// [`Setup::product_generator`] as row 2.
 #[must_use]
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
-    setup: &Setup<G>,
     claim: &Claim<F, G>,
     proof: Proof<F, G>,
-    strategy: &impl Strategy,
-) -> bool
+) -> Option<Tangle<F, G>>
 where
     Claim<F, G>: Encode,
 {
@@ -709,9 +772,7 @@ where
     // Recall also that the prover starts by turning H_i -> H'_i = y^i H_i. We can
     // accomplish this by multiplying our weights for those values by y^i as well.
     let rounds = usize::from(claim.log_len);
-    let Some(claimed_len) = 1usize.checked_shl(u32::from(claim.log_len)) else {
-        return false;
-    };
+    let claimed_len = 1usize.checked_shl(u32::from(claim.log_len))?;
     let Proof {
         l_r_coms,
         transcript_summary,
@@ -719,25 +780,17 @@ where
         b_final,
     } = proof;
     if l_r_coms.len() != rounds {
-        return false;
-    }
-    if setup.g.len() < claimed_len || setup.h.len() < claimed_len {
-        return false;
+        return None;
     }
     transcript.commit(claim.encode());
 
     let w = F::random(&mut transcript.noise(b"w challenge"));
-    let w_q = setup.product_generator.clone() * &w;
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
-    let capacity = 2 * claimed_len + 2 * rounds + 1;
-    let mut points = Vec::<G>::with_capacity(capacity);
-    let mut weights = Vec::<F>::with_capacity(capacity);
     let mut us = Vec::<(F, F)>::with_capacity(rounds);
-
-    for (l, r) in l_r_coms {
+    let mut out = Tangle::tethered(l_r_coms.into_iter().flat_map(|(l, r)| {
         transcript.commit(l.encode());
         transcript.commit(r.encode());
         let u = F::random(transcript.noise(b"u challenge"));
@@ -753,48 +806,37 @@ where
             out.square();
             out
         };
-        points.push(l);
-        weights.push(u2);
-        points.push(r);
-        weights.push(u_inv2);
-    }
+        [(u2, l), (u_inv2, r)]
+    }));
     if transcript.summarize() != transcript_summary {
-        return false;
+        return None;
     }
-
-    points.extend_from_slice(&setup.g[..claimed_len]);
-    points.extend_from_slice(&setup.h[..claimed_len]);
-    points.push(w_q);
-
-    let g_h_weights_start = weights.len();
-    weights.push(F::one());
-    for (u, u_inv) in us.into_iter().rev() {
-        let end = weights.len();
-        weights.extend_from_within(g_h_weights_start..end);
-        for left_i in &mut weights[g_h_weights_start..end] {
-            *left_i *= &u_inv;
+    out += &Tangle::tethered([(F::one(), claim.commitment.clone())]);
+    out += &Tangle::free_point((2, 0), claim.product.clone() * &w);
+    let g_weights = {
+        let mut weights = Vec::<F>::with_capacity(claimed_len);
+        weights.push(F::one());
+        for (u, u_inv) in us.into_iter().rev() {
+            let end = weights.len();
+            weights.extend_from_within(..);
+            for left_i in &mut weights[..end] {
+                *left_i *= &u_inv;
+            }
+            for right_i in &mut weights[end..] {
+                *right_i *= &u;
+            }
         }
-        for right_i in &mut weights[end..] {
-            *right_i *= &u;
-        }
-    }
-    let g_end = weights.len();
-    weights.extend_from_within(g_h_weights_start..g_end);
-    weights[g_end..].reverse();
-
-    let g_weight_tweak = -a_final.clone();
-    for g_w_i in &mut weights[g_h_weights_start..g_end] {
-        *g_w_i *= &g_weight_tweak;
-    }
-
-    let h_weight_tweak = -b_final.clone();
-    for (h_w_i, y_i) in weights[g_end..].iter_mut().zip(powers(F::one(), &claim.y)) {
-        *h_w_i *= &(y_i * &h_weight_tweak);
-    }
-
-    weights.push(claim.product.clone() - &(a_final * &b_final));
-
-    G::msm(&points, &weights, strategy) == -claim.commitment.clone()
+        weights
+    };
+    let h_weights = g_weights
+        .iter()
+        .rev()
+        .zip(powers(F::one(), &claim.y))
+        .map(|(w_i, y_i)| y_i * w_i);
+    out -= &(Tangle::free_row(1, h_weights) * &b_final);
+    out -= &(Tangle::free_row(0, g_weights) * &a_final);
+    out -= &Tangle::free_point((2, 0), a_final * &b_final * &w);
+    Some(out)
 }
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -975,13 +1017,11 @@ pub mod fuzz {
             } else {
                 NAMESPACE
             };
-            verify(
-                &mut Transcript::new(ns),
-                self.setup,
-                &self.claim,
-                self.proof,
-                &Sequential,
-            )
+            let Some(check) = verify(&mut Transcript::new(ns), &self.claim, self.proof) else {
+                return false;
+            };
+            self.setup
+                .check_tangle(self.claim.log_len, check, &Sequential)
         }
     }
 
