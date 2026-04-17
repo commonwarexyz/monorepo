@@ -589,8 +589,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// Certification may be inferred only when we have explicit evidence that we
     /// proposed this exact payload for the round, either in the current process
-    /// or via replay of our durable local vote. Leader identity alone is not
-    /// sufficient during catch-up and recovery.
+    /// or via replay of our durable local vote. In certain cases for Byzantine nodes,
+    /// it is possible that a certificate is received for a proposal that we did not propose (although
+    /// we are the leader).
     pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
         candidates
@@ -599,8 +600,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 if view <= self.last_finalized {
                     return None;
                 }
-                let round = self.views.get_mut(&view)?;
-                let candidate = round.try_certify()?;
+                let candidate = self.views.get_mut(&view)?.try_certify()?;
                 Some(candidate)
             })
             .collect()
@@ -1839,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn certify_candidates_do_not_short_circuit_leader_owned_recovered_proposals() {
+    fn certify_external_candidates_for_leader_controlled_views() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
