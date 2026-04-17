@@ -664,7 +664,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dkg::ContinueOnUpdate, setup::PeerConfig};
+    use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
     use commonware_cryptography::{
         bls12381::{dkg::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -675,35 +675,26 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{
-        channel::mpsc, ordered::Set, sync::Mutex, N3f1, TryCollect, NZU32,
-    };
-    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use commonware_utils::{channel::mpsc, N3f1, TryCollect, NZU32};
+    use core::marker::PhantomData;
+    use std::collections::BTreeMap;
 
+    // Satisfies the `Manager + Provider` trait bounds without exercising peer tracking; the
+    // recovered-vs-startup-input divergence is observed via the orchestrator mailbox.
     #[derive(Clone, Debug)]
-    struct TestManager<P: PublicKey> {
-        tracked: Arc<Mutex<BTreeMap<u64, TrackedPeers<P>>>>,
-    }
+    struct NoopManager<P: PublicKey>(PhantomData<P>);
 
-    impl<P: PublicKey> Default for TestManager<P> {
+    impl<P: PublicKey> Default for NoopManager<P> {
         fn default() -> Self {
-            Self {
-                tracked: Arc::new(Mutex::new(BTreeMap::new())),
-            }
+            Self(PhantomData)
         }
     }
 
-    impl<P: PublicKey> TestManager<P> {
-        fn tracked(&self, id: u64) -> Option<TrackedPeers<P>> {
-            self.tracked.lock().get(&id).cloned()
-        }
-    }
-
-    impl<P: PublicKey> Provider for TestManager<P> {
+    impl<P: PublicKey> Provider for NoopManager<P> {
         type PublicKey = P;
 
-        async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-            self.tracked(id)
+        async fn peer_set(&mut self, _: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+            None
         }
 
         async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
@@ -712,12 +703,11 @@ mod tests {
         }
     }
 
-    impl<P: PublicKey> Manager for TestManager<P> {
-        async fn track<R>(&mut self, id: u64, peers: R)
+    impl<P: PublicKey> Manager for NoopManager<P> {
+        async fn track<R>(&mut self, _: u64, _: R)
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send,
         {
-            self.tracked.lock().insert(id, peers.into());
         }
     }
 
@@ -745,25 +735,34 @@ mod tests {
     fn recovered_storage_controls_dkg_mode_on_restart() {
         let executor = deterministic::Runner::seeded(8);
         executor.start(|mut context| async move {
+            // Seed a mid-life state well past the bootstrap epoch so the recovered round is
+            // unambiguously not the initial DKG. Per production semantics, the stored output
+            // carries the current round's dealers as its players (produced by the prior
+            // reshare), so deal with `dealers(RECOVERED_ROUND)`.
+            const RECOVERED_EPOCH: u64 = 5;
+            const RECOVERED_ROUND: u64 = 5;
             let (peer_config, participants) = peer_config(6, vec![4]);
             let first_player = peer_config
-                .dealers(0)
+                .dealers(RECOVERED_ROUND)
                 .iter()
                 .next()
                 .cloned()
-                .expect("bootstrap dealer exists");
+                .expect("recovered dealer exists");
             let signer = participants
                 .get(&first_player)
                 .cloned()
                 .expect("signer should exist");
-            let (output, shares) =
-                deal::<MinSig, _, N3f1>(&mut context, Default::default(), peer_config.dealers(0))
-                    .expect("deal should succeed");
+            let (output, shares) = deal::<MinSig, _, N3f1>(
+                &mut context,
+                Default::default(),
+                peer_config.dealers(RECOVERED_ROUND),
+            )
+            .expect("deal should succeed");
             let share = shares.get_value(&first_player).cloned();
             let partition_prefix = format!("recovered_restart_{first_player}");
 
-            // Seed durable state that looks like a completed bootstrap DKG, even though the
-            // restarted actor will be given stale startup inputs below.
+            // Seed durable state that looks like a completed reshare several rounds in, even
+            // though the restarted actor will be given stale bootstrap inputs below.
             let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
                 context.with_label("seed_storage"),
                 &partition_prefix,
@@ -773,9 +772,9 @@ mod tests {
             .await;
             storage
                 .set_epoch(
-                    Epoch::new(1),
+                    Epoch::new(RECOVERED_EPOCH),
                     EpochState {
-                        round: 1,
+                        round: RECOVERED_ROUND,
                         rng_seed: Summary::random(&mut context),
                         output: Some(output),
                         share,
@@ -784,14 +783,12 @@ mod tests {
                 .await;
             drop(storage);
 
-            // Restart with stale bootstrap inputs and capture the tracked peer set that the
-            // actor derives from the recovered epoch.
-            let manager = TestManager::default();
-            let tracked = manager.clone();
+            // Restart the actor with stale bootstrap inputs (output=None, share=None). The
+            // recovered epoch must override these.
             let (actor, _mailbox) = Actor::<_, _, Sha256, _, MinSig>::new(
                 context.with_label("actor"),
                 Config {
-                    manager,
+                    manager: NoopManager::<Ed25519PublicKey>::default(),
                     signer,
                     mailbox_size: 8,
                     partition_prefix,
@@ -800,7 +797,7 @@ mod tests {
                 },
             );
             let (sender, receiver) = inert_channel(&peer_config.participants);
-            let (orchestrator_sender, _orchestrator_receiver) = mpsc::channel(4);
+            let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(4);
             actor.start(
                 None,
                 None,
@@ -809,30 +806,20 @@ mod tests {
                 ContinueOnUpdate::boxed(),
             );
 
-            // The fix should make the actor follow the recovered reshare round instead of
-            // re-entering the initial DKG path with all participants as dealers.
-            let mut tracked_peers = None;
-            for _ in 0..10 {
-                tracked_peers = tracked.tracked(1);
-                if tracked_peers.is_some() {
-                    break;
-                }
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            let tracked_peers =
-                tracked_peers.expect("actor should track peers for recovered epoch");
-            assert_eq!(tracked_peers.primary, peer_config.dealers(1));
-            assert_ne!(tracked_peers.primary, peer_config.participants);
-            assert_eq!(
-                tracked_peers.secondary,
-                Set::from_iter_dedup(
-                    peer_config
-                        .dealers(2)
-                        .iter()
-                        .chain(peer_config.dealers(3).iter())
-                        .cloned(),
-                ),
+            // The first epoch transition the actor emits should describe the recovered reshare
+            // round. Under the bug, `is_dkg` was computed from the `None` startup output and the
+            // actor re-entered the bootstrap DKG path, producing a transition with all
+            // participants as dealers and an empty poly.
+            let Some(Message::Enter(transition)) = orchestrator_receiver.recv().await else {
+                panic!("actor should emit an epoch transition");
+            };
+            assert_eq!(transition.epoch, Epoch::new(RECOVERED_EPOCH));
+            assert!(
+                transition.poly.is_some(),
+                "transition should carry the recovered public polynomial",
             );
+            assert_eq!(transition.dealers, peer_config.dealers(RECOVERED_ROUND));
+            assert_ne!(transition.dealers, peer_config.participants);
         });
     }
 }
