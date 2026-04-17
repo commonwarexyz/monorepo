@@ -1,6 +1,9 @@
 #[cfg(feature = "std")]
 use crate::BatchVerifier;
-use crate::Secret;
+use crate::{
+    ed25519::ed25519_consensus::{self, VerificationKey},
+    Secret,
+};
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
@@ -12,7 +15,6 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
