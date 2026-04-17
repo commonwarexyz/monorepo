@@ -493,7 +493,7 @@ where
         match plan {
             Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
-                    warn!("missing block to broadcast");
+                    warn!(?digest, "missing block to broadcast");
                     return false;
                 };
                 if block.digest() != digest {
