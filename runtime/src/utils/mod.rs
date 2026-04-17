@@ -980,7 +980,10 @@ b_total 2
                     future::pending::<()>().await;
                 });
             let count = count_running_tasks(&context, "attr_worker");
-            assert_eq!(count, 2, "both attribute-distinguished workers should be counted");
+            assert_eq!(
+                count, 2,
+                "both attribute-distinguished workers should be counted"
+            );
 
             // Abort parent task
             handle1.abort();
