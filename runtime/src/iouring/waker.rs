@@ -29,6 +29,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 use tracing::warn;
 
@@ -248,7 +249,11 @@ impl Waker {
     ///
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always clears the current wait state before returning.
-    pub fn park_idle(&self, processed_seq: u32) {
+    ///
+    /// Returns `Some(duration)` with the time spent blocked in `futex_wait`,
+    /// or `None` if the snapshot showed work or a wake was already pending and
+    /// the call returned without sleeping.
+    pub fn park_idle(&self, processed_seq: u32) -> Option<Duration> {
         // Arming only updates the packed wake state machine. It does not
         // publish queue memory or consume any out-of-band wake publication, so
         // `Relaxed` is sufficient on this RMW.
@@ -270,9 +275,14 @@ impl Waker {
         if (snapshot & WAKE_SIGNALLED_BIT) == 0
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
         {
+            let before = Instant::now();
             self.futex_wait(snapshot);
+            self.clear_wait();
+            Some(before.elapsed())
+        } else {
+            self.clear_wait();
+            None
         }
-        self.clear_wait();
     }
 
     /// Arm the blocking wake path used around `submit_and_wait`.
@@ -659,8 +669,9 @@ pub mod tests {
                     }
                 });
 
-                waker.park_idle(before);
+                let duration = waker.park_idle(before);
                 handle.join().expect("idle notifier thread panicked");
+                assert!(duration.is_some(), "{notifier:?}: should have slept");
 
                 let expected = match notifier {
                     Notifier::Wake => before,
@@ -691,8 +702,9 @@ pub mod tests {
         let before = submitted_seq(&waker);
 
         waker.wake();
-        waker.park_idle(before);
+        let duration = waker.park_idle(before);
 
+        assert!(duration.is_none(), "should not have slept");
         assert_eq!(submitted_seq(&waker), before);
         assert_eq!(state_bits(&waker), 0);
     }
