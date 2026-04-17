@@ -148,6 +148,17 @@ pub fn verdict_for(actions: &[Value], response: &ExecuteResponse) -> TlcVerdict 
     }
 }
 
+/// Appends the `{"reset": true}` terminator the controlled TLC server's
+/// `simulate(..., is_reset=true)` loop expects. Without it the server
+/// calls `actionsToRun.remove()` on an empty queue, throws
+/// NoSuchElementException, then NPEs in the catch block on
+/// `e.getMessage()`, leaving the Rust client with only a transport
+/// error ("error sending request"). Every caller that POSTs an action
+/// list to `/execute` must call this (or push the terminator itself).
+pub fn terminate_actions(actions: &mut Vec<Value>) {
+    actions.push(json!({ "reset": true }));
+}
+
 /// Cumulative set of state fingerprints observed across all fuzz inputs in a
 /// single libfuzzer process. Used as the coverage signal: a fuzz input is
 /// `Keep` iff its TLC trace contributes at least one new fingerprint.
@@ -186,12 +197,7 @@ pub fn submit_trace(client: &TlcClient, trace: &Trace) -> Result<CoverageOutcome
         });
     }
 
-    // The TLC server's `simulate(..., is_reset=true)` loop only terminates
-    // on a reset/quit/unknown action. Without this terminator it would
-    // call `actionsToRun.remove()` on an empty queue, throw
-    // NoSuchElementException, NPE on `e.getMessage()` in the catch block,
-    // and return an empty HTTP reply.
-    actions.push(json!({ "reset": true }));
+    terminate_actions(&mut actions);
 
     let keys = client
         .execute(&actions)

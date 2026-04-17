@@ -15,6 +15,7 @@
 use commonware_consensus::simplex::replay::Trace;
 use commonware_consensus_fuzz::{
     tlc::{verdict_for, ExecuteResponse, TlcVerdict, DEFAULT_TLC_URL},
+    tlc::terminate_actions,
     tracing::tlc_encoder::encode_from_trace,
 };
 use std::{env, fs, path::PathBuf, process};
@@ -43,18 +44,20 @@ fn main() {
         }
     };
 
-    let actions = encode_from_trace(&trace);
+    let mut actions = encode_from_trace(&trace);
     println!("trace        : {}", path.display());
     println!("events       : {}", trace.events.len());
     println!("actions      : {}", actions.len());
-    println!("--- action list ---");
-    for (i, a) in actions.iter().enumerate() {
-        println!("  [{i:>3}] {a}");
-    }
 
     if actions.is_empty() {
         println!("(empty action list, nothing to send)");
         return;
+    }
+    terminate_actions(&mut actions);
+
+    println!("--- action list (with terminator) ---");
+    for (i, a) in actions.iter().enumerate() {
+        println!("  [{i:>3}] {a}");
     }
 
     let body = serde_json::to_string(&actions).expect("serialize actions");

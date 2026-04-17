@@ -10,7 +10,7 @@
 
 use crate::{
     quint_model,
-    tlc::{TlcClient, DEFAULT_TLC_URL},
+    tlc::{terminate_actions, TlcClient, DEFAULT_TLC_URL},
     tracing::tlc_encoder,
 };
 use commonware_consensus::{
@@ -977,7 +977,7 @@ pub fn run() {
             traces_map.insert(sha256_hex(json.as_bytes()));
         }
 
-        let actions = tlc_encoder::encode_from_trace(&trace);
+        let mut actions = tlc_encoder::encode_from_trace(&trace);
         if actions.is_empty() {
             empty_actions += 1;
             println!(
@@ -988,6 +988,7 @@ pub fn run() {
             );
             continue;
         }
+        terminate_actions(&mut actions);
 
         let response = match client.execute_full(&actions) {
             Ok(r) => r,
