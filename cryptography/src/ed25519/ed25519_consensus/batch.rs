@@ -65,7 +65,7 @@ fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
-fn compute_k<M: AsRef<[u8]> + ?Sized>(vk_bytes: &[u8; 32], sig: &Signature, msg: &M) -> Scalar {
+fn challenge(vk_bytes: &[u8; 32], sig: &Signature, msg: &[u8]) -> Scalar {
     Scalar::from_hash(
         Sha512::default()
             .chain(&sig.R_bytes[..])
@@ -89,7 +89,7 @@ pub struct Item {
 impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKeyBytes, Signature, &'msg M)> for Item {
     fn from(tup: (VerificationKeyBytes, Signature, &'msg M)) -> Self {
         let (vk_bytes, sig, msg) = tup;
-        let k = compute_k(vk_bytes.as_bytes(), &sig, msg);
+        let k = challenge(vk_bytes.as_bytes(), &sig, msg.as_ref());
         Self { vk_bytes, sig, k }
     }
 }
@@ -149,7 +149,7 @@ impl Verifier {
     ) {
         let item = Item {
             vk_bytes: VerificationKeyBytes::from(key),
-            k: compute_k(key.as_bytes(), &sig, msg),
+            k: challenge(key.as_bytes(), &sig, msg.as_ref()),
             sig,
         };
         self.queue_inner(item, Some(key));
