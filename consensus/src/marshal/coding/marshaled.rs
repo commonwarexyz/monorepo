@@ -971,15 +971,17 @@ where
                     );
                     return false;
                 };
+                let height = block.height();
                 if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?commitment,
+                        %height,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
                     return false;
                 }
-                debug!(?round, ?commitment, "requested broadcast of built block");
+                debug!(?round, ?commitment, %height, "requested broadcast of built block");
                 true
             }
             Plan::Forward { .. } => {

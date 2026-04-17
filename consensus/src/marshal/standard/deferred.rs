@@ -635,15 +635,17 @@ where
                     );
                     return false;
                 };
+                let height = block.height();
                 if !self.marshal.proposed(round, block).await {
                     warn!(
                         ?round,
                         ?digest,
+                        %height,
                         "marshal unavailable during proposed broadcast; block not persisted"
                     );
                     return false;
                 }
-                debug!(?round, ?digest, "requested broadcast of built block");
+                debug!(?round, ?digest, %height, "requested broadcast of built block");
                 true
             }
             Plan::Forward { round, peers } => {
