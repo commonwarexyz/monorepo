@@ -112,7 +112,9 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Add a key-value attribute to this context's identity. Affects
     /// metric label dimensions and tracing span attributes (when
     /// `with_span` is active). Consuming. Does not create a tree edge:
-    /// the returned handle shares `self`'s tree node.
+    /// the returned handle shares `self`'s tree node. Duplicate keys are
+    /// allowed; the first value wins, so inherited parent attributes
+    /// override later child attempts to reuse the same key.
     #[must_use]
     fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
 

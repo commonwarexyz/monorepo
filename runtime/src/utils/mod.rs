@@ -200,7 +200,8 @@ pub fn validate_label(label: &str) {
 
 /// Add an attribute to a sorted attribute list, maintaining sorted order via binary search.
 ///
-/// Returns `true` if the key was new, `false` if it was a duplicate (value overwritten).
+/// Returns `true` if the key was new, `false` if it was a duplicate. Duplicate keys keep the
+/// existing value so earlier layers remain authoritative.
 pub fn add_attribute(
     attributes: &mut Vec<(String, String)>,
     key: &str,
@@ -210,10 +211,7 @@ pub fn add_attribute(
     let value_string = value.to_string();
 
     match attributes.binary_search_by(|(k, _)| k.cmp(&key_string)) {
-        Ok(pos) => {
-            attributes[pos].1 = value_string;
-            false
-        }
+        Ok(_) => false,
         Err(pos) => {
             attributes.insert(pos, (key_string, value_string));
             true

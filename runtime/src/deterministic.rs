@@ -1350,11 +1350,8 @@ impl crate::Supervisor for Context {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
 
-        // Add the attribute to the list of attributes (consuming).
-        assert!(
-            add_attribute(&mut self.attributes, key, value),
-            "duplicate attribute key: {key}"
-        );
+        // Add the attribute to the list of attributes (consuming). Earlier layers win.
+        add_attribute(&mut self.attributes, key, value);
         self
     }
 
@@ -2302,18 +2299,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let _ = context.child(METRICS_PREFIX);
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate attribute key: epoch")]
-    fn test_metrics_duplicate_attribute_panics() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let _ = context
-                .child("test")
-                .with_attribute("epoch", "old")
-                .with_attribute("epoch", "new");
         });
     }
 

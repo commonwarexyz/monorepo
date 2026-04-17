@@ -201,7 +201,9 @@ stability_scope!(BETA {
         /// shares `self`'s tree node.
         ///
         /// Keys are static dimension names. They must start with `[a-zA-Z]` and
-        /// contain only `[a-zA-Z0-9_]`. Values can be any string.
+        /// contain only `[a-zA-Z0-9_]`. Values can be any string. Duplicate keys are
+        /// allowed; the first value wins, so inherited parent attributes override
+        /// later child attempts to reuse the same key.
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self
         where
@@ -2352,6 +2354,42 @@ mod tests {
     fn test_tokio_metrics_with_attribute() {
         let runner = tokio::Runner::default();
         test_metrics_with_attribute(runner);
+    }
+
+    fn test_metrics_duplicate_attribute_keeps_parent_value<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let ctx = context
+                .child("test")
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
+            let counter = ctx.register("votes", "vote count", Counter::<u64>::default());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("test_votes_total{epoch=\"old\"} 1"),
+                "duplicate attribute should keep parent value: {buffer}"
+            );
+            assert!(
+                !buffer.contains("epoch=\"new\""),
+                "duplicate attribute should ignore child override: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_duplicate_attribute_keeps_parent_value() {
+        let executor = deterministic::Runner::default();
+        test_metrics_duplicate_attribute_keeps_parent_value(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_duplicate_attribute_keeps_parent_value() {
+        let runner = tokio::Runner::default();
+        test_metrics_duplicate_attribute_keeps_parent_value(runner);
     }
 
     fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
