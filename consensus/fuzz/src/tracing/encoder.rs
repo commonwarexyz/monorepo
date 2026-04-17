@@ -1,16 +1,12 @@
-//! Encodes a simplex consensus trace into a quint test module.
+//! Encodes a canonical simplex consensus [`Trace`] into a Quint test module.
 //!
-//! Takes structured [`TraceEntry`] items from the sniffer and produces a
+//! Takes the canonical event list produced by the recorder and produces a
 //! complete `.qnt` test module that can be verified with the quint model
 //! checker against `replica.qnt`. The semantic walk in
-//! [`build_action_items`] is shared with the TLA/TLC back-end (see
+//! [`lower_events_to_actions`] is shared with the TLA/TLC back-end (see
 //! `super::tlc_encoder`), so the two encoders always agree on which events
 //! are emitted, in what order, and with what dedup decisions.
 
-use super::{
-    data::{ReporterReplicaStateData, TraceData, TraceProposalData},
-    sniffer::{TraceEntry, TracedCert, TracedVote},
-};
 use commonware_consensus::{
     simplex::{
         replay::{Event, Snapshot, Trace, Wire},
@@ -26,45 +22,16 @@ use std::{
     fmt::Write,
 };
 
-/// Returns true if the block hash is certifiable, matching
-/// `Certifier::Sometimes`: `last_byte % 11 < 9`.
-fn is_certifiable(block_hash: &str) -> bool {
-    if block_hash.len() >= 2 {
-        let last_two = &block_hash[block_hash.len() - 2..];
-        let last_byte = u8::from_str_radix(last_two, 16).unwrap_or(0);
-        (last_byte % 11) < 9
-    } else {
-        true
-    }
-}
+// ---------------------------------------------------------------------------
+// Semantic action items (shared with tlc_encoder)
+// ---------------------------------------------------------------------------
 
-/// Returns true if the node ID (e.g. "n0") is Byzantine (index < faults).
-fn is_byzantine_node(node: &str, faults: usize) -> bool {
-    if let Some(idx_str) = node.strip_prefix('n') {
-        if let Ok(idx) = idx_str.parse::<usize>() {
-            return idx < faults;
-        }
-    }
-    false
-}
-
-fn normalize_vote_sig_for_sender(sender: &str, sig: &str, cfg: &EncoderConfig) -> String {
-    if !is_byzantine_node(sender, cfg.faults) || cfg.n == 0 {
-        return sig.to_string();
-    }
-    if let Some(idx_str) = sig.strip_prefix('n') {
-        if let Ok(idx) = idx_str.parse::<usize>() {
-            return format!("n{}", idx % cfg.n);
-        }
-    }
-    sig.to_string()
-}
-
-/// Semantic action item produced by [`build_action_items`].
+/// Target-language-independent semantic action.
 ///
-/// Each variant describes one logical action in a target-language-independent
-/// form. The Quint and TLA+ renderers consume this list and turn it into the
-/// appropriate concrete syntax (quint action calls or JSON action objects).
+/// Each variant describes one logical action produced by the canonical
+/// lowering. The Quint and TLA+ renderers consume this list and turn it into
+/// the appropriate concrete syntax (quint action calls or JSON action
+/// objects).
 #[derive(Clone, Debug)]
 pub enum ActionItem {
     /// Leader of `parent_view + 1` proposes a new payload.
@@ -122,9 +89,9 @@ pub enum ActionItem {
 /// Semantic certificate value carried by [`ActionItem::SendCertificate`] and
 /// [`ActionItem::OnCertificate`]. The `payload` field stores the `val_bN`
 /// name (already mapped from the raw block hash), so the renderer never
-/// needs the original [`build_block_map`] output. `parent_view` is the parent
-/// view of the proposal embedded in the cert; populated from the encoder's
-/// proposal map so the JSON renderer can emit a complete `Proposal` record.
+/// needs the original block map. `parent_view` is the parent view of the
+/// proposal embedded in the cert; populated from the encoder's proposal map
+/// so the JSON renderer can emit a complete `Proposal` record.
 #[derive(Clone, Debug)]
 pub enum CertItem {
     Notarization {
@@ -206,57 +173,6 @@ impl CertItem {
     }
 }
 
-fn cert_to_item(cert: &TracedCert, block_map: &[(String, String)]) -> CertItem {
-    match cert {
-        TracedCert::Notarization {
-            view,
-            parent,
-            block,
-            signers,
-            ghost_sender,
-        } => {
-            let payload = map_block(block, block_map);
-            CertItem::Notarization {
-                view: *view,
-                parent_view: *parent,
-                payload,
-                signers: signers.clone(),
-                ghost_sender: ghost_sender.clone(),
-            }
-        }
-        TracedCert::Nullification {
-            view,
-            signers,
-            ghost_sender,
-        } => CertItem::Nullification {
-            view: *view,
-            signers: signers.clone(),
-            ghost_sender: ghost_sender.clone(),
-        },
-        TracedCert::Finalization {
-            view,
-            parent,
-            block,
-            signers,
-            ghost_sender,
-        } => {
-            let payload = map_block(block, block_map);
-            CertItem::Finalization {
-                view: *view,
-                parent_view: *parent,
-                payload,
-                signers: signers.clone(),
-                ghost_sender: ghost_sender.clone(),
-            }
-        }
-    }
-}
-
-fn leader_for_view(cfg: &EncoderConfig, view: u64) -> String {
-    let n = cfg.n as u64;
-    format!("n{}", (cfg.epoch + view) % n)
-}
-
 /// Configuration for the quint test encoder.
 pub struct EncoderConfig {
     /// Number of validators.
@@ -278,54 +194,6 @@ pub(crate) struct ProposalKey {
     block_name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum VoteReplayKey {
-    Notarize {
-        view: u64,
-        parent: u64,
-        sig: String,
-        block: String,
-    },
-    Nullify {
-        view: u64,
-        sig: String,
-    },
-    Finalize {
-        view: u64,
-        parent: u64,
-        sig: String,
-        block: String,
-    },
-}
-
-fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
-    match vote {
-        TracedVote::Notarize {
-            view,
-            parent,
-            block,
-            ..
-        } => VoteReplayKey::Notarize {
-            view: *view,
-            parent: *parent,
-            sig,
-            block: block.clone(),
-        },
-        TracedVote::Nullify { view, .. } => VoteReplayKey::Nullify { view: *view, sig },
-        TracedVote::Finalize {
-            view,
-            parent,
-            block,
-            ..
-        } => VoteReplayKey::Finalize {
-            view: *view,
-            parent: *parent,
-            sig,
-            block: block.clone(),
-        },
-    }
-}
-
 fn proposal_key(view: u64, parent: u64, block_name: &str) -> ProposalKey {
     ProposalKey {
         view,
@@ -342,75 +210,474 @@ fn proposal_ref(view: u64, parent: u64, block_name: &str) -> String {
     proposal_var_name(&proposal_key(view, parent, block_name))
 }
 
-fn collect_honest_votes(entries: &[TraceEntry], cfg: &EncoderConfig) -> HashSet<VoteReplayKey> {
-    entries
-        .iter()
-        .filter_map(|entry| match entry {
-            TraceEntry::Vote { sender, vote, .. } if !is_byzantine_node(sender, cfg.faults) => {
-                let sig = match vote {
-                    TracedVote::Notarize { sig, .. }
-                    | TracedVote::Nullify { sig, .. }
-                    | TracedVote::Finalize { sig, .. } => sig.clone(),
-                };
-                Some(vote_replay_key(vote, sig))
-            }
-            _ => None,
-        })
-        .collect()
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true if the block hash is certifiable, matching
+/// `Certifier::Sometimes`: `last_byte % 11 < 9`.
+fn is_certifiable(block_hash: &str) -> bool {
+    if block_hash.len() >= 2 {
+        let last_two = &block_hash[block_hash.len() - 2..];
+        let last_byte = u8::from_str_radix(last_two, 16).unwrap_or(0);
+        (last_byte % 11) < 9
+    } else {
+        true
+    }
 }
 
-fn filter_invalid_byzantine_votes(
-    entries: &[TraceEntry],
-    cfg: &EncoderConfig,
-    honest_votes: &HashSet<VoteReplayKey>,
-) -> Vec<TraceEntry> {
-    entries
-        .iter()
-        .filter(|entry| match entry {
-            TraceEntry::Vote { sender, vote, .. } if is_byzantine_node(sender, cfg.faults) => {
-                let sig = match vote {
-                    TracedVote::Notarize { sig, .. }
-                    | TracedVote::Nullify { sig, .. }
-                    | TracedVote::Finalize { sig, .. } => {
-                        normalize_vote_sig_for_sender(sender, sig, cfg)
+fn node_id(p: commonware_utils::Participant) -> String {
+    format!("n{}", p.get())
+}
+
+fn digest_hex(d: &Sha256Digest) -> String {
+    d.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Converts a block hash to its val_bN name.
+fn map_block(hash: &str, block_map: &[(String, String)]) -> String {
+    for (h, name) in block_map {
+        if h == hash {
+            return name.clone();
+        }
+    }
+    hash.to_string()
+}
+
+/// Builds the leader map: view -> replica ID using round-robin.
+fn build_leader_map_to(cfg: &EncoderConfig, max_view: u64) -> Vec<(u64, String)> {
+    let mut map = Vec::new();
+    for view in 0..=max_view {
+        let leader_idx = (cfg.epoch + view) as usize % cfg.n;
+        map.push((view, format!("n{}", leader_idx)));
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-shaped representation used by the renderer
+// ---------------------------------------------------------------------------
+
+/// Minimal Quint-view of a per-replica snapshot used by the renderer's
+/// `replica_has_*` assertions. Populated from the canonical
+/// [`Snapshot`] via [`snapshot_to_reporter_states`]; not publicly visible
+/// outside this module (the rendering helpers consume it directly).
+#[derive(Clone, Debug)]
+pub(crate) struct ReporterStateData {
+    pub notarizations: BTreeMap<u64, ProposalData>,
+    pub notarization_signature_counts: BTreeMap<u64, Option<usize>>,
+    pub nullifications: BTreeSet<u64>,
+    pub nullification_signature_counts: BTreeMap<u64, Option<usize>>,
+    pub finalizations: BTreeMap<u64, ProposalData>,
+    pub finalization_signature_counts: BTreeMap<u64, Option<usize>>,
+    pub certified: BTreeSet<u64>,
+    pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
+    pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
+    pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
+    pub max_finalized_view: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProposalData {
+    pub payload: String,
+}
+
+// ---------------------------------------------------------------------------
+// Canonical event lowering
+// ---------------------------------------------------------------------------
+
+/// Build the `(hex, "val_bN")` block map by walking canonical events in
+/// order of first appearance.
+pub fn build_block_map_from_events(events: &[Event]) -> Vec<(String, String)> {
+    let mut map: Vec<(String, String)> = Vec::new();
+    let mut seen: HashMap<String, String> = HashMap::new();
+    let mut record = |hash: String| {
+        if hash == "GENESIS_PAYLOAD" || seen.contains_key(&hash) {
+            return;
+        }
+        let name = format!("val_b{}", map.len());
+        seen.insert(hash.clone(), name.clone());
+        map.push((hash, name));
+    };
+    for event in events {
+        if let Some(d) = event_digest(event) {
+            record(digest_hex(&d));
+        }
+    }
+    map
+}
+
+fn event_digest(e: &Event) -> Option<Sha256Digest> {
+    match e {
+        Event::Propose { proposal, .. } => Some(proposal.payload),
+        Event::Construct { vote, .. } => match vote {
+            Vote::Notarize(n) => Some(n.proposal.payload),
+            Vote::Finalize(f) => Some(f.proposal.payload),
+            Vote::Nullify(_) => None,
+        },
+        Event::Deliver { msg, .. } => match msg {
+            Wire::Vote(v) => match v {
+                Vote::Notarize(n) => Some(n.proposal.payload),
+                Vote::Finalize(f) => Some(f.proposal.payload),
+                Vote::Nullify(_) => None,
+            },
+            Wire::Cert(c) => match c {
+                Certificate::Notarization(n) => Some(n.proposal.payload),
+                Certificate::Finalization(f) => Some(f.proposal.payload),
+                Certificate::Nullification(_) => None,
+            },
+        },
+        Event::Timeout { .. } => None,
+    }
+}
+
+/// Extract the view an event touches; used to derive `max_view`.
+pub fn event_view(e: &Event) -> Option<u64> {
+    match e {
+        Event::Propose { proposal, .. } => Some(proposal.view().get()),
+        Event::Construct { vote, .. } => Some(vote.view().get()),
+        Event::Deliver { msg, .. } => Some(match msg {
+            Wire::Vote(v) => v.view().get(),
+            Wire::Cert(c) => c.view().get(),
+        }),
+        Event::Timeout { view, .. } => Some(view.get()),
+    }
+}
+
+/// Walk canonical events into the existing `ProposalKey` set.
+pub(crate) fn build_proposals_from_events(
+    events: &[Event],
+    block_map: &[(String, String)],
+) -> HashSet<ProposalKey> {
+    let mut out = HashSet::new();
+    for event in events {
+        let (view, parent, hash) = match event {
+            Event::Propose { proposal, .. } => (
+                proposal.view().get(),
+                proposal.parent.get(),
+                digest_hex(&proposal.payload),
+            ),
+            Event::Construct { vote, .. } => match vote {
+                Vote::Notarize(n) => (
+                    n.proposal.view().get(),
+                    n.proposal.parent.get(),
+                    digest_hex(&n.proposal.payload),
+                ),
+                Vote::Finalize(f) => (
+                    f.proposal.view().get(),
+                    f.proposal.parent.get(),
+                    digest_hex(&f.proposal.payload),
+                ),
+                Vote::Nullify(_) => continue,
+            },
+            Event::Deliver { msg, .. } => match msg {
+                Wire::Vote(v) => match v {
+                    Vote::Notarize(n) => (
+                        n.proposal.view().get(),
+                        n.proposal.parent.get(),
+                        digest_hex(&n.proposal.payload),
+                    ),
+                    Vote::Finalize(f) => (
+                        f.proposal.view().get(),
+                        f.proposal.parent.get(),
+                        digest_hex(&f.proposal.payload),
+                    ),
+                    Vote::Nullify(_) => continue,
+                },
+                Wire::Cert(c) => match c {
+                    Certificate::Notarization(n) => (
+                        n.proposal.view().get(),
+                        n.proposal.parent.get(),
+                        digest_hex(&n.proposal.payload),
+                    ),
+                    Certificate::Finalization(f) => (
+                        f.proposal.view().get(),
+                        f.proposal.parent.get(),
+                        digest_hex(&f.proposal.payload),
+                    ),
+                    Certificate::Nullification(_) => continue,
+                },
+            },
+            Event::Timeout { .. } => continue,
+        };
+        out.insert(proposal_key(view, parent, &map_block(&hash, block_map)));
+    }
+    out
+}
+
+/// Lower a canonical event list into semantic [`ActionItem`]s. This is a
+/// 1:1 mapping — no causal reconstruction, no dedup, no Byzantine-sig
+/// normalization (canonical events carry real signed payloads).
+///
+/// The only dedup this does is for `send_certificate`: a certificate
+/// may be `Deliver`ed multiple times (once per receiver), but the TLC
+/// / Quint action set expects `send_certificate` to be emitted once per
+/// `(ghost_sender, dedup_key)`. We emit it on the first `Deliver` of
+/// that certificate and skip on subsequent ones.
+pub fn lower_events_to_actions(
+    events: &[Event],
+    block_map: &[(String, String)],
+) -> Vec<ActionItem> {
+    let mut out = Vec::new();
+    let mut cert_sent: HashSet<String> = HashSet::new();
+
+    for event in events {
+        match event {
+            Event::Propose { leader, proposal } => {
+                let payload = map_block(&digest_hex(&proposal.payload), block_map);
+                out.push(ActionItem::Propose {
+                    leader: node_id(*leader),
+                    view: proposal.view().get(),
+                    parent_view: proposal.parent.get(),
+                    payload,
+                });
+            }
+            Event::Construct { node, vote } => {
+                // Source of truth for the signer is the signed vote
+                // itself (cryptographic identity), not the enclosing
+                // `node` field. For honest recorder output the two
+                // agree; for malformed or future-Byzantine canonical
+                // traces they may diverge — preferring the signed
+                // signer keeps Quint lowering consistent with what
+                // Rust replay actually ingests. A `debug_assert!`
+                // catches mismatches during recorder development.
+                match vote {
+                    Vote::Notarize(n) => {
+                        let signer = n.signer();
+                        debug_assert_eq!(
+                            signer, *node,
+                            "Event::Construct(Notarize) signer mismatch: node={} signer={}",
+                            node.get(),
+                            signer.get(),
+                        );
+                        out.push(ActionItem::SendNotarizeVote {
+                            view: n.proposal.view().get(),
+                            parent_view: n.proposal.parent.get(),
+                            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
+                            sig: node_id(signer),
+                        });
                     }
-                };
-                is_byzantine_node(&sig, cfg.faults)
-                    || honest_votes.contains(&vote_replay_key(vote, sig))
+                    Vote::Nullify(n) => {
+                        let signer = n.signer();
+                        debug_assert_eq!(
+                            signer, *node,
+                            "Event::Construct(Nullify) signer mismatch: node={} signer={}",
+                            node.get(),
+                            signer.get(),
+                        );
+                        out.push(ActionItem::SendNullifyVote {
+                            view: n.view().get(),
+                            sig: node_id(signer),
+                        });
+                    }
+                    Vote::Finalize(f) => {
+                        let signer = f.signer();
+                        debug_assert_eq!(
+                            signer, *node,
+                            "Event::Construct(Finalize) signer mismatch: node={} signer={}",
+                            node.get(),
+                            signer.get(),
+                        );
+                        out.push(ActionItem::SendFinalizeVote {
+                            view: f.proposal.view().get(),
+                            parent_view: f.proposal.parent.get(),
+                            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
+                            sig: node_id(signer),
+                        });
+                    }
+                }
             }
-            _ => true,
-        })
-        .cloned()
-        .collect()
+            Event::Deliver { to, from, msg } => {
+                let receiver = node_id(*to);
+                let ghost_sender = node_id(*from);
+                match msg {
+                    Wire::Vote(Vote::Notarize(n)) => {
+                        out.push(ActionItem::OnNotarize {
+                            receiver,
+                            view: n.proposal.view().get(),
+                            parent_view: n.proposal.parent.get(),
+                            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
+                            sig: node_id(n.signer()),
+                        });
+                    }
+                    Wire::Vote(Vote::Nullify(n)) => {
+                        out.push(ActionItem::OnNullify {
+                            receiver,
+                            view: n.view().get(),
+                            sig: node_id(n.signer()),
+                        });
+                    }
+                    Wire::Vote(Vote::Finalize(f)) => {
+                        out.push(ActionItem::OnFinalize {
+                            receiver,
+                            view: f.proposal.view().get(),
+                            parent_view: f.proposal.parent.get(),
+                            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
+                            sig: node_id(f.signer()),
+                        });
+                    }
+                    Wire::Cert(cert) => {
+                        let item = cert_to_item_canonical(cert, &ghost_sender, block_map);
+                        let key = format!("{}:{}", item.ghost_sender(), item.dedup_key());
+                        if cert_sent.insert(key) {
+                            out.push(ActionItem::SendCertificate {
+                                cert: item.clone(),
+                            });
+                        }
+                        out.push(ActionItem::OnCertificate {
+                            receiver,
+                            cert: item,
+                        });
+                    }
+                }
+            }
+            Event::Timeout { .. } => {
+                // No ActionItem variant for Timeout. Timeout-induced
+                // nullify votes are captured separately as
+                // `Event::Construct(Vote::Nullify)`.
+            }
+        }
+    }
+    out
 }
 
-/// Encodes trace entries into a quint test module.
-pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
-    let entries = &trace_data.entries;
-    let honest_votes = collect_honest_votes(entries, cfg);
-    let filtered_entries = filter_invalid_byzantine_votes(entries, cfg, &honest_votes);
-    let block_map = build_block_map(trace_data);
-    let proposals = build_view_proposals(&filtered_entries, &block_map, cfg);
-    let actions = build_actions_internal(&filtered_entries, &block_map, cfg);
-    render_quint_from_actions(
-        cfg,
-        &block_map,
-        &proposals,
-        &actions,
-        &trace_data.reporter_states,
-    )
+fn cert_to_item_canonical(
+    cert: &Certificate<Scheme, Sha256Digest>,
+    ghost_sender: &str,
+    block_map: &[(String, String)],
+) -> CertItem {
+    let signers = |s: &commonware_cryptography::certificate::Signers| -> Vec<String> {
+        s.iter().map(node_id).collect()
+    };
+    match cert {
+        Certificate::Notarization(n) => CertItem::Notarization {
+            view: n.proposal.view().get(),
+            parent_view: n.proposal.parent.get(),
+            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
+            signers: signers(&n.certificate.signers),
+            ghost_sender: ghost_sender.to_string(),
+        },
+        Certificate::Nullification(n) => CertItem::Nullification {
+            view: n.view().get(),
+            signers: signers(&n.certificate.signers),
+            ghost_sender: ghost_sender.to_string(),
+        },
+        Certificate::Finalization(f) => CertItem::Finalization {
+            view: f.proposal.view().get(),
+            parent_view: f.proposal.parent.get(),
+            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
+            signers: signers(&f.certificate.signers),
+            ghost_sender: ghost_sender.to_string(),
+        },
+    }
 }
 
-/// Core rendering: given already-prepared inputs, emit the Quint test
-/// module. Both the legacy `encode(&TraceData, ...)` and the canonical
-/// `encode_from_trace(&Trace, ...)` delegate here so the two encoder
-/// paths cannot drift in their rendering logic.
+/// Build a `reporter_states`-shaped view of a canonical [`Snapshot`] so
+/// the Quint snapshot-assertion helper can consume it.
+pub(crate) fn snapshot_to_reporter_states(
+    snapshot: &Snapshot,
+) -> BTreeMap<String, ReporterStateData> {
+    let mut out = BTreeMap::new();
+    for (participant, node) in &snapshot.nodes {
+        let node_id_s = format!("n{}", participant.get());
+        let notarizations: BTreeMap<u64, ProposalData> = node
+            .notarizations
+            .iter()
+            .map(|(view, cert)| {
+                (
+                    view.get(),
+                    ProposalData {
+                        payload: digest_hex(&cert.payload),
+                    },
+                )
+            })
+            .collect();
+        let notarization_signature_counts: BTreeMap<u64, Option<usize>> = node
+            .notarizations
+            .iter()
+            .map(|(view, cert)| (view.get(), cert.signature_count.map(|c| c as usize)))
+            .collect();
+        let nullifications: BTreeSet<u64> =
+            node.nullifications.keys().map(|v| v.get()).collect();
+        let nullification_signature_counts: BTreeMap<u64, Option<usize>> = node
+            .nullifications
+            .iter()
+            .map(|(view, n)| (view.get(), n.signature_count.map(|c| c as usize)))
+            .collect();
+        let finalizations: BTreeMap<u64, ProposalData> = node
+            .finalizations
+            .iter()
+            .map(|(view, cert)| {
+                (
+                    view.get(),
+                    ProposalData {
+                        payload: digest_hex(&cert.payload),
+                    },
+                )
+            })
+            .collect();
+        let finalization_signature_counts: BTreeMap<u64, Option<usize>> = node
+            .finalizations
+            .iter()
+            .map(|(view, cert)| (view.get(), cert.signature_count.map(|c| c as usize)))
+            .collect();
+        let certified: BTreeSet<u64> = node.certified.iter().map(|v| v.get()).collect();
+        let sig_map = |m: &BTreeMap<View, BTreeSet<commonware_utils::Participant>>|
+                      -> BTreeMap<u64, BTreeSet<String>> {
+            m.iter()
+                .map(|(v, s)| (v.get(), s.iter().map(|p| node_id(*p)).collect()))
+                .collect()
+        };
+        let data = ReporterStateData {
+            notarizations,
+            notarization_signature_counts,
+            nullifications,
+            nullification_signature_counts,
+            finalizations,
+            finalization_signature_counts,
+            certified,
+            notarize_signers: sig_map(&node.notarize_signers),
+            nullify_signers: sig_map(&node.nullify_signers),
+            finalize_signers: sig_map(&node.finalize_signers),
+            max_finalized_view: node.last_finalized.get(),
+        };
+        out.insert(node_id_s, data);
+    }
+    out
+}
+
+/// Public entry point: encode a canonical [`Trace`] as a Quint test module.
+pub fn encode_from_trace(trace: &Trace, required_containers: u64) -> String {
+    let cfg = EncoderConfig {
+        n: trace.topology.n as usize,
+        faults: trace.topology.faults as usize,
+        epoch: trace.topology.epoch,
+        max_view: trace
+            .events
+            .iter()
+            .filter_map(event_view)
+            .max()
+            .unwrap_or(1),
+        required_containers,
+    };
+    let block_map = build_block_map_from_events(&trace.events);
+    let proposals = build_proposals_from_events(&trace.events, &block_map);
+    let actions = lower_events_to_actions(&trace.events, &block_map);
+    let reporter_states = snapshot_to_reporter_states(&trace.expected);
+    render_quint_from_actions(&cfg, &block_map, &proposals, &actions, &reporter_states)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+/// Core rendering: given already-prepared inputs, emit the Quint test module.
 fn render_quint_from_actions(
     cfg: &EncoderConfig,
     block_map: &[(String, String)],
     proposals: &HashSet<ProposalKey>,
     action_items: &[ActionItem],
-    reporter_states: &BTreeMap<String, ReporterReplicaStateData>,
+    reporter_states: &BTreeMap<String, ReporterStateData>,
 ) -> String {
     let leader_map = build_leader_map_to(cfg, cfg.max_view);
     let block_names: Vec<&str> = block_map.iter().map(|(_, n)| n.as_str()).collect();
@@ -547,12 +814,7 @@ fn render_quint_from_actions(
     } else {
         format!("trace_part_{:02}", chunks.len() - 1)
     };
-    let last_action = write_snapshot_expectations(
-        &mut out,
-        &last_part,
-        reporter_states,
-        block_map,
-    );
+    let last_action = write_snapshot_expectations(&mut out, &last_part, reporter_states, block_map);
     writeln!(out, "    run traceTest =").unwrap();
     writeln!(out, "        {}", last_action).unwrap();
     writeln!(out, "            .expect(safe_invariants)").unwrap();
@@ -577,315 +839,11 @@ fn render_quint_from_actions(
     out
 }
 
-/// Public entry point: builds the full semantic action sequence for a trace.
-///
-/// Filters invalid byzantine votes, builds the block map and view-proposal
-/// map, then walks the entries via [`build_actions_internal`] to produce a
-/// list of [`ActionItem`]s. The caller picks a renderer
-/// ([`render_quint_actions`] or [`render_tla_actions`]) to convert the items
-/// into the target language.
-pub fn build_action_items(trace_data: &TraceData, cfg: &EncoderConfig) -> Vec<ActionItem> {
-    let entries = &trace_data.entries;
-    let honest_votes = collect_honest_votes(entries, cfg);
-    let filtered = filter_invalid_byzantine_votes(entries, cfg, &honest_votes);
-    let block_map = build_block_map(trace_data);
-    build_actions_internal(&filtered, &block_map, cfg)
-}
-
-/// Builds the full action list, processing entries in original trace order.
-///
-/// For notarize votes, the trace format does not include explicit proposal
-/// events. We therefore reconstruct the missing causal prefix:
-/// - when a correct leader is first needed, emit `Propose`
-/// - when a byzantine leader is first needed, emit `SendNotarizeVote`
-/// - before replaying an honest non-leader notarize send, ensure that sender
-///   has already processed the leader's notarize vote via `OnNotarize`
-///
-/// This keeps the current trace format while restoring the protocol's causal
-/// order: proposal first, then honest votes that depend on it.
-fn build_actions_internal(
-    entries: &[TraceEntry],
-    block_map: &[(String, String)],
-    cfg: &EncoderConfig,
-) -> Vec<ActionItem> {
-    let mut actions: Vec<ActionItem> = Vec::new();
-    // Keys include block name and parent for notarize/finalize to handle
-    // byzantine equivocation (same signer, same view, different blocks or parents).
-    let mut sent_votes_emitted: HashSet<(String, u64, u64, String, String)> = HashSet::new();
-    let mut self_delivered: HashSet<(String, u64, u64, String)> = HashSet::new();
-    let mut leader_vote_introduced: HashSet<ProposalKey> = HashSet::new();
-    let mut leader_vote_delivered: HashSet<(String, u64, u64, String)> = HashSet::new();
-    // Dedup cert deliveries per receiver. In the Rust execution, each node
-    // broadcasts its assembled cert to all peers, producing up to N^2 total
-    // deliveries (N senders x N receivers). In the quint model, the first
-    // delivery per (receiver, kind, view, block, signers) does all the work;
-    // subsequent ones with a different ghost_sender are no-ops because the
-    // cert is already in store_certificate. Skipping them avoids redundant
-    // state evaluation and dramatically speeds up the quint checker.
-    let mut cert_delivered: HashSet<String> = HashSet::new();
-    let mut cert_sent: HashSet<String> = HashSet::new();
-
-    for entry in entries {
-        match entry {
-            TraceEntry::Vote {
-                sender,
-                receiver,
-                vote,
-            } => {
-                // Byzantine receivers have no state in the quint model, so
-                // skip delivery actions for them. `Send*Vote` barriers
-                // are still emitted so the global sent-vote set is updated
-                // before any certificate that depends on them.
-                let byzantine_receiver = is_byzantine_node(receiver, cfg.faults);
-
-                match vote {
-                    TracedVote::Notarize {
-                        view,
-                        parent,
-                        sig,
-                        block,
-                    } => {
-                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                        let bn = map_block(block, block_map);
-                        let proposal = proposal_key(*view, *parent, &bn);
-                        let parent_view = *parent;
-                        let leader_id = leader_for_view(cfg, *view);
-                        let leader_is_byzantine = is_byzantine_node(&leader_id, cfg.faults);
-                        let sender_is_correct = !is_byzantine_node(sender, cfg.faults);
-                        let is_leader_vote = sig == leader_id;
-
-                        if sender_is_correct {
-                            if leader_vote_introduced.insert(proposal.clone()) {
-                                if leader_is_byzantine {
-                                    if sent_votes_emitted.insert((
-                                        leader_id.clone(),
-                                        *view,
-                                        parent_view,
-                                        "notarize".into(),
-                                        bn.clone(),
-                                    )) {
-                                        actions.push(ActionItem::SendNotarizeVote {
-                                            view: *view,
-                                            parent_view,
-                                            payload: bn.clone(),
-                                            sig: leader_id.clone(),
-                                        });
-                                    }
-                                } else {
-                                    actions.push(ActionItem::Propose {
-                                        leader: leader_id.clone(),
-                                        view: *view,
-                                        payload: bn.clone(),
-                                        parent_view,
-                                    });
-                                }
-                            }
-
-                            if sender != &leader_id
-                                && leader_vote_delivered.insert((
-                                    sender.clone(),
-                                    *view,
-                                    parent_view,
-                                    bn.clone(),
-                                ))
-                            {
-                                actions.push(ActionItem::OnNotarize {
-                                    receiver: sender.clone(),
-                                    view: *view,
-                                    parent_view,
-                                    payload: bn.clone(),
-                                    sig: leader_id.clone(),
-                                });
-                            }
-                        } else if is_byzantine_node(&sig, cfg.faults)
-                            && sent_votes_emitted.insert((
-                                sig.clone(),
-                                *view,
-                                parent_view,
-                                "notarize".into(),
-                                bn.clone(),
-                            ))
-                        {
-                            actions.push(ActionItem::SendNotarizeVote {
-                                view: *view,
-                                parent_view,
-                                payload: bn.clone(),
-                                sig: sig.clone(),
-                            });
-                        }
-
-                        if byzantine_receiver {
-                            continue;
-                        }
-
-                        if is_leader_vote {
-                            if receiver != &leader_id
-                                && leader_vote_delivered.insert((
-                                    receiver.clone(),
-                                    *view,
-                                    parent_view,
-                                    bn.clone(),
-                                ))
-                            {
-                                actions.push(ActionItem::OnNotarize {
-                                    receiver: receiver.clone(),
-                                    view: *view,
-                                    parent_view,
-                                    payload: bn.clone(),
-                                    sig: leader_id.clone(),
-                                });
-                            }
-                        } else {
-                            actions.push(ActionItem::OnNotarize {
-                                receiver: receiver.clone(),
-                                view: *view,
-                                parent_view,
-                                payload: bn.clone(),
-                                sig,
-                            });
-                        }
-                    }
-                    TracedVote::Finalize {
-                        view,
-                        parent,
-                        sig,
-                        block,
-                    } => {
-                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                        let bn = map_block(block, block_map);
-                        let parent_view = *parent;
-
-                        if sent_votes_emitted.insert((
-                            sig.clone(),
-                            *view,
-                            parent_view,
-                            "finalize".into(),
-                            bn.clone(),
-                        )) {
-                            actions.push(ActionItem::SendFinalizeVote {
-                                view: *view,
-                                parent_view,
-                                payload: bn.clone(),
-                                sig: sig.clone(),
-                            });
-                        }
-
-                        if byzantine_receiver {
-                            continue;
-                        }
-
-                        // Correct finalize: self-delivery (node counts its own finalize)
-                        if !is_byzantine_node(&sig, cfg.faults)
-                            && self_delivered.insert((
-                                sig.clone(),
-                                *view,
-                                parent_view,
-                                "finalize".into(),
-                            ))
-                        {
-                            actions.push(ActionItem::OnFinalize {
-                                receiver: sig.clone(),
-                                view: *view,
-                                parent_view,
-                                payload: bn.clone(),
-                                sig: sig.clone(),
-                            });
-                        }
-
-                        // Deliver vote to receiver
-                        actions.push(ActionItem::OnFinalize {
-                            receiver: receiver.clone(),
-                            view: *view,
-                            parent_view,
-                            payload: bn.clone(),
-                            sig,
-                        });
-                    }
-                    TracedVote::Nullify { view, sig } => {
-                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                        if sent_votes_emitted.insert((
-                            sig.clone(),
-                            *view,
-                            0,
-                            "nullify".into(),
-                            String::new(),
-                        )) {
-                            actions.push(ActionItem::SendNullifyVote {
-                                view: *view,
-                                sig: sig.clone(),
-                            });
-                        }
-
-                        if byzantine_receiver {
-                            continue;
-                        }
-
-                        // Correct nullify: self-delivery
-                        if !is_byzantine_node(&sig, cfg.faults)
-                            && self_delivered.insert((sig.clone(), *view, 0, "nullify".into()))
-                        {
-                            actions.push(ActionItem::OnNullify {
-                                receiver: sig.clone(),
-                                view: *view,
-                                sig: sig.clone(),
-                            });
-                        }
-
-                        // Deliver vote to receiver
-                        actions.push(ActionItem::OnNullify {
-                            receiver: receiver.clone(),
-                            view: *view,
-                            sig,
-                        });
-                    }
-                }
-            }
-            TraceEntry::Certificate { receiver, cert, .. } => {
-                let cert_item = cert_to_item(cert, block_map);
-                let cert_key = cert_item.dedup_key();
-
-                // Emit `send_certificate` once per distinct cert, including
-                // `ghost_sender` in the dedup key. The model treats certs
-                // with different `ghost_sender` as distinct values in
-                // `sent_certificates`, so each variant must be sent before
-                // it can be delivered via `on_certificate`.
-                let cert_send_key = format!("{}:{}", cert_item.ghost_sender(), &cert_key);
-                if cert_sent.insert(cert_send_key) {
-                    actions.push(ActionItem::SendCertificate {
-                        cert: cert_item.clone(),
-                    });
-                }
-
-                // Skip delivery to byzantine receivers (no state in quint model).
-                if is_byzantine_node(receiver, cfg.faults) {
-                    continue;
-                }
-
-                // Skip duplicate cert deliveries to the same receiver.
-                // A cert is identified by (kind, view, block, signers);
-                // the ghost_sender varies but doesn't affect model behavior.
-                let cert_dedup_key = format!("{}:{}", receiver, &cert_key);
-                if !cert_delivered.insert(cert_dedup_key) {
-                    continue;
-                }
-
-                // Deliver certificate (barrier: cannot be reordered with votes)
-                actions.push(ActionItem::OnCertificate {
-                    receiver: receiver.clone(),
-                    cert: cert_item,
-                });
-            }
-        }
-    }
-
-    actions
-}
-
-/// Renders semantic action items as quint action call strings.
+/// Lowers [`ActionItem`]s into a Quint action call string for each item.
 ///
 /// Applies a second-pass dedup over `(receiver, vote)` for finalize/nullify
-/// deliveries so identical calls produced by multiple distinct trace entries
-/// collapse to one quint call (the model's state update is idempotent).
+/// deliveries so identical calls produced by multiple distinct events
+/// collapse to one Quint call (the model's state update is idempotent).
 pub fn render_quint_actions(items: &[ActionItem]) -> Vec<String> {
     let mut result = Vec::new();
     let mut delivery_seen: HashSet<(String, String)> = HashSet::new();
@@ -1038,124 +996,9 @@ fn cert_to_quint(cert: &CertItem) -> String {
     }
 }
 
-/// Maps block hashes to val_b0, val_b1, ... in order of first appearance.
-pub fn build_block_map(trace_data: &TraceData) -> Vec<(String, String)> {
-    let mut map = Vec::new();
-    let mut seen = HashMap::new();
-    let mut record_hash = |hash: String| {
-        if hash == "GENESIS_PAYLOAD" || seen.contains_key(&hash) {
-            return;
-        }
-        let name = format!("val_b{}", map.len());
-        seen.insert(hash.clone(), name.clone());
-        map.push((hash, name));
-    };
-
-    for entry in &trace_data.entries {
-        let hash = match entry {
-            TraceEntry::Vote {
-                vote: TracedVote::Notarize { block, .. },
-                ..
-            }
-            | TraceEntry::Vote {
-                vote: TracedVote::Finalize { block, .. },
-                ..
-            }
-            | TraceEntry::Certificate {
-                cert: TracedCert::Notarization { block, .. },
-                ..
-            }
-            | TraceEntry::Certificate {
-                cert: TracedCert::Finalization { block, .. },
-                ..
-            } => Some(block.clone()),
-            _ => None,
-        };
-        if let Some(hash) = hash {
-            record_hash(hash);
-        }
-    }
-
-    for state in trace_data.reporter_states.values() {
-        for proposal in state.notarizations.values() {
-            record_hash(proposal.payload.clone());
-        }
-        for proposal in state.finalizations.values() {
-            record_hash(proposal.payload.clone());
-        }
-    }
-
-    map
-}
-
-/// Builds the leader map: view -> replica ID using round-robin.
-fn build_leader_map_to(cfg: &EncoderConfig, max_view: u64) -> Vec<(u64, String)> {
-    let mut map = Vec::new();
-    for view in 0..=max_view {
-        let leader_idx = (cfg.epoch + view) as usize % cfg.n;
-        map.push((view, format!("n{}", leader_idx)));
-    }
-    map
-}
-
-/// Converts a block hash to its val_bN name.
-fn map_block(hash: &str, block_map: &[(String, String)]) -> String {
-    for (h, name) in block_map {
-        if h == hash {
-            return name.clone();
-        }
-    }
-    hash.to_string()
-}
-
-/// Builds proposals from block-carrying entries in the trace, using the
-/// parent stored directly in each entry rather than inferring it.
-fn build_view_proposals(
-    entries: &[TraceEntry],
-    block_map: &[(String, String)],
-    _cfg: &EncoderConfig,
-) -> HashSet<ProposalKey> {
-    let mut proposals = HashSet::new();
-    for entry in entries {
-        let (view, parent, block) = match entry {
-            TraceEntry::Vote {
-                vote:
-                    TracedVote::Notarize {
-                        view,
-                        parent,
-                        block,
-                        ..
-                    }
-                    | TracedVote::Finalize {
-                        view,
-                        parent,
-                        block,
-                        ..
-                    },
-                ..
-            } => (*view, *parent, block.as_str()),
-            TraceEntry::Certificate {
-                cert:
-                    TracedCert::Notarization {
-                        view,
-                        parent,
-                        block,
-                        ..
-                    }
-                    | TracedCert::Finalization {
-                        view,
-                        parent,
-                        block,
-                        ..
-                    },
-                ..
-            } => (*view, *parent, block.as_str()),
-            _ => continue,
-        };
-        proposals.insert(proposal_key(view, parent, &map_block(block, block_map)));
-    }
-    proposals
-}
+// ---------------------------------------------------------------------------
+// Renderer-local helpers (snapshot assertions, action definitions)
+// ---------------------------------------------------------------------------
 
 fn encode_reporter_payload_expr(payload: &str, block_map: &[(String, String)]) -> String {
     if payload == "GENESIS_PAYLOAD" {
@@ -1174,7 +1017,7 @@ fn encode_reporter_view_expr(view: u64) -> String {
 }
 
 fn encode_reporter_option_payload_expr(
-    proposal: Option<&TraceProposalData>,
+    proposal: Option<&ProposalData>,
     block_map: &[(String, String)],
 ) -> String {
     match proposal {
@@ -1209,7 +1052,7 @@ fn encode_signer_set_expr(signers: Option<&BTreeSet<String>>) -> String {
 fn write_snapshot_expectations(
     out: &mut String,
     base_action: &str,
-    reporter_states: &BTreeMap<String, ReporterReplicaStateData>,
+    reporter_states: &BTreeMap<String, ReporterStateData>,
     block_map: &[(String, String)],
 ) -> String {
     let mut previous = base_action.to_string();
@@ -1409,15 +1252,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_notarization_signature_count
-    //
-    // Returns the MAX signer count over all notarization certs stored
-    // for `view`. With the widened replica.qnt semantics, the store
-    // may hold multiple notarizations for the same view (different
-    // assembly points of the same proposal observed at different
-    // moments). Rust impl always reports a single cert — the largest
-    // it assembled — so max-over-matching keeps strict equality in the
-    // snapshot assertions.
+    // replica_notarization_signature_count — max over matching certs.
     writeln!(out, "    def replica_notarization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
@@ -1448,8 +1283,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_nullification_signature_count — max over matching certs,
-    // see notarization helper above for rationale.
+    // replica_nullification_signature_count — max over matching certs.
     writeln!(out, "    def replica_nullification_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
@@ -1495,8 +1329,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_finalization_signature_count — max over matching certs,
-    // see notarization helper above for rationale.
+    // replica_finalization_signature_count — max over matching certs.
     writeln!(out, "    def replica_finalization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
@@ -1513,7 +1346,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_observed_notarize_signers (unchanged - uses vote stores)
+    // replica_observed_notarize_signers
     writeln!(out, "    def replica_observed_notarize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_notarize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_notarize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
@@ -1521,7 +1354,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_observed_nullify_signers (unchanged - uses vote stores)
+    // replica_observed_nullify_signers
     writeln!(out, "    def replica_observed_nullify_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_nullify_votes.get(id).filter(v => v.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_nullify_votes.filter(v => and {{ v.sig == sig_of(id), v.view == view }}).map(v => v.sig)").unwrap();
@@ -1529,7 +1362,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // replica_observed_finalize_signers (unchanged - uses vote stores)
+    // replica_observed_finalize_signers
     writeln!(out, "    def replica_observed_finalize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_finalize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_finalize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
@@ -1570,6 +1403,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
+
 /// Writes the standard helper actions used by test modules.
 fn write_helpers(out: &mut String) {
     writeln!(out, "    action unchanged_all = all {{").unwrap();
@@ -1780,409 +1614,9 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
 }
 
-// --- Canonical-event path ---------------------------------------------
-//
-// These functions are the new entry path that takes
-// `commonware_consensus::simplex::replay::Trace` (canonical events) as
-// input and lowers them into the same `ActionItem` sequence the legacy
-// `build_action_items` path produces. Canonical events are already
-// semantically ordered at ingress, so the causal reconstruction logic in
-// `build_action_items` is unnecessary here — this lowering is a pure
-// 1-to-1 mapping.
-
-fn node_id(p: commonware_utils::Participant) -> String {
-    format!("n{}", p.get())
-}
-
-fn digest_hex(d: &Sha256Digest) -> String {
-    d.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Build the `(hex, "val_bN")` block map by walking canonical events in
-/// order of first appearance.
-pub fn build_block_map_from_events(events: &[Event]) -> Vec<(String, String)> {
-    let mut map: Vec<(String, String)> = Vec::new();
-    let mut seen: HashMap<String, String> = HashMap::new();
-    let mut record = |hash: String| {
-        if hash == "GENESIS_PAYLOAD" || seen.contains_key(&hash) {
-            return;
-        }
-        let name = format!("val_b{}", map.len());
-        seen.insert(hash.clone(), name.clone());
-        map.push((hash, name));
-    };
-    for event in events {
-        if let Some(d) = event_digest(event) {
-            record(digest_hex(&d));
-        }
-    }
-    map
-}
-
-fn event_digest(e: &Event) -> Option<Sha256Digest> {
-    match e {
-        Event::Propose { proposal, .. } => Some(proposal.payload),
-        Event::Construct { vote, .. } => match vote {
-            Vote::Notarize(n) => Some(n.proposal.payload),
-            Vote::Finalize(f) => Some(f.proposal.payload),
-            Vote::Nullify(_) => None,
-        },
-        Event::Deliver { msg, .. } => match msg {
-            Wire::Vote(v) => match v {
-                Vote::Notarize(n) => Some(n.proposal.payload),
-                Vote::Finalize(f) => Some(f.proposal.payload),
-                Vote::Nullify(_) => None,
-            },
-            Wire::Cert(c) => match c {
-                Certificate::Notarization(n) => Some(n.proposal.payload),
-                Certificate::Finalization(f) => Some(f.proposal.payload),
-                Certificate::Nullification(_) => None,
-            },
-        },
-        Event::Timeout { .. } => None,
-    }
-}
-
-/// Extract the view an event touches; used to derive `max_view`.
-pub fn event_view(e: &Event) -> Option<u64> {
-    match e {
-        Event::Propose { proposal, .. } => Some(proposal.view().get()),
-        Event::Construct { vote, .. } => Some(vote.view().get()),
-        Event::Deliver { msg, .. } => Some(match msg {
-            Wire::Vote(v) => v.view().get(),
-            Wire::Cert(c) => c.view().get(),
-        }),
-        Event::Timeout { view, .. } => Some(view.get()),
-    }
-}
-
-/// Walk canonical events into the existing `ProposalKey` set.
-pub(crate) fn build_proposals_from_events(
-    events: &[Event],
-    block_map: &[(String, String)],
-) -> HashSet<ProposalKey> {
-    let mut out = HashSet::new();
-    for event in events {
-        let (view, parent, hash) = match event {
-            Event::Propose { proposal, .. } => (
-                proposal.view().get(),
-                proposal.parent.get(),
-                digest_hex(&proposal.payload),
-            ),
-            Event::Construct { vote, .. } => match vote {
-                Vote::Notarize(n) => (
-                    n.proposal.view().get(),
-                    n.proposal.parent.get(),
-                    digest_hex(&n.proposal.payload),
-                ),
-                Vote::Finalize(f) => (
-                    f.proposal.view().get(),
-                    f.proposal.parent.get(),
-                    digest_hex(&f.proposal.payload),
-                ),
-                Vote::Nullify(_) => continue,
-            },
-            Event::Deliver { msg, .. } => match msg {
-                Wire::Vote(v) => match v {
-                    Vote::Notarize(n) => (
-                        n.proposal.view().get(),
-                        n.proposal.parent.get(),
-                        digest_hex(&n.proposal.payload),
-                    ),
-                    Vote::Finalize(f) => (
-                        f.proposal.view().get(),
-                        f.proposal.parent.get(),
-                        digest_hex(&f.proposal.payload),
-                    ),
-                    Vote::Nullify(_) => continue,
-                },
-                Wire::Cert(c) => match c {
-                    Certificate::Notarization(n) => (
-                        n.proposal.view().get(),
-                        n.proposal.parent.get(),
-                        digest_hex(&n.proposal.payload),
-                    ),
-                    Certificate::Finalization(f) => (
-                        f.proposal.view().get(),
-                        f.proposal.parent.get(),
-                        digest_hex(&f.proposal.payload),
-                    ),
-                    Certificate::Nullification(_) => continue,
-                },
-            },
-            Event::Timeout { .. } => continue,
-        };
-        out.insert(proposal_key(view, parent, &map_block(&hash, block_map)));
-    }
-    out
-}
-
-/// Lower a canonical event list into semantic `ActionItem`s. This is a
-/// 1:1 mapping — no causal reconstruction, no dedup, no byzantine-sig
-/// normalization (canonical events carry real signed payloads).
-///
-/// The only dedup this does is for `send_certificate`: a certificate
-/// may be `Deliver`ed multiple times (once per receiver), but the TLC
-/// / Quint action set expects `send_certificate` to be emitted once per
-/// `(ghost_sender, dedup_key)`. We emit it on the first `Deliver` of
-/// that certificate and skip on subsequent ones.
-pub fn lower_events_to_actions(
-    events: &[Event],
-    block_map: &[(String, String)],
-) -> Vec<ActionItem> {
-    let mut out = Vec::new();
-    let mut cert_sent: HashSet<String> = HashSet::new();
-
-    for event in events {
-        match event {
-            Event::Propose { leader, proposal } => {
-                let payload = map_block(&digest_hex(&proposal.payload), block_map);
-                out.push(ActionItem::Propose {
-                    leader: node_id(*leader),
-                    view: proposal.view().get(),
-                    parent_view: proposal.parent.get(),
-                    payload,
-                });
-            }
-            Event::Construct { node, vote } => {
-                // Source of truth for the signer is the signed vote
-                // itself (cryptographic identity), not the enclosing
-                // `node` field. For honest recorder output the two
-                // agree; for malformed or future-Byzantine canonical
-                // traces they may diverge — preferring the signed
-                // signer keeps Quint lowering consistent with what
-                // Rust replay actually ingests. A `debug_assert!`
-                // catches mismatches during recorder development.
-                match vote {
-                    Vote::Notarize(n) => {
-                        let signer = n.signer();
-                        debug_assert_eq!(
-                            signer, *node,
-                            "Event::Construct(Notarize) signer mismatch: node={} signer={}",
-                            node.get(),
-                            signer.get(),
-                        );
-                        out.push(ActionItem::SendNotarizeVote {
-                            view: n.proposal.view().get(),
-                            parent_view: n.proposal.parent.get(),
-                            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
-                            sig: node_id(signer),
-                        });
-                    }
-                    Vote::Nullify(n) => {
-                        let signer = n.signer();
-                        debug_assert_eq!(
-                            signer, *node,
-                            "Event::Construct(Nullify) signer mismatch: node={} signer={}",
-                            node.get(),
-                            signer.get(),
-                        );
-                        out.push(ActionItem::SendNullifyVote {
-                            view: n.view().get(),
-                            sig: node_id(signer),
-                        });
-                    }
-                    Vote::Finalize(f) => {
-                        let signer = f.signer();
-                        debug_assert_eq!(
-                            signer, *node,
-                            "Event::Construct(Finalize) signer mismatch: node={} signer={}",
-                            node.get(),
-                            signer.get(),
-                        );
-                        out.push(ActionItem::SendFinalizeVote {
-                            view: f.proposal.view().get(),
-                            parent_view: f.proposal.parent.get(),
-                            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
-                            sig: node_id(signer),
-                        });
-                    }
-                }
-            }
-            Event::Deliver { to, from, msg } => {
-                let receiver = node_id(*to);
-                let ghost_sender = node_id(*from);
-                match msg {
-                    Wire::Vote(Vote::Notarize(n)) => {
-                        out.push(ActionItem::OnNotarize {
-                            receiver,
-                            view: n.proposal.view().get(),
-                            parent_view: n.proposal.parent.get(),
-                            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
-                            sig: node_id(n.signer()),
-                        });
-                    }
-                    Wire::Vote(Vote::Nullify(n)) => {
-                        out.push(ActionItem::OnNullify {
-                            receiver,
-                            view: n.view().get(),
-                            sig: node_id(n.signer()),
-                        });
-                    }
-                    Wire::Vote(Vote::Finalize(f)) => {
-                        out.push(ActionItem::OnFinalize {
-                            receiver,
-                            view: f.proposal.view().get(),
-                            parent_view: f.proposal.parent.get(),
-                            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
-                            sig: node_id(f.signer()),
-                        });
-                    }
-                    Wire::Cert(cert) => {
-                        let item = cert_to_item_canonical(cert, &ghost_sender, block_map);
-                        let key = format!("{}:{}", item.ghost_sender(), item.dedup_key());
-                        if cert_sent.insert(key) {
-                            out.push(ActionItem::SendCertificate {
-                                cert: item.clone(),
-                            });
-                        }
-                        out.push(ActionItem::OnCertificate {
-                            receiver,
-                            cert: item,
-                        });
-                    }
-                }
-            }
-            Event::Timeout { .. } => {
-                // No ActionItem variant for Timeout. Timeout-induced
-                // nullify votes are captured separately as
-                // `Event::Construct(Vote::Nullify)`.
-            }
-        }
-    }
-    out
-}
-
-fn cert_to_item_canonical(
-    cert: &Certificate<Scheme, Sha256Digest>,
-    ghost_sender: &str,
-    block_map: &[(String, String)],
-) -> CertItem {
-    let signers = |s: &commonware_cryptography::certificate::Signers| -> Vec<String> {
-        s.iter().map(node_id).collect()
-    };
-    match cert {
-        Certificate::Notarization(n) => CertItem::Notarization {
-            view: n.proposal.view().get(),
-            parent_view: n.proposal.parent.get(),
-            payload: map_block(&digest_hex(&n.proposal.payload), block_map),
-            signers: signers(&n.certificate.signers),
-            ghost_sender: ghost_sender.to_string(),
-        },
-        Certificate::Nullification(n) => CertItem::Nullification {
-            view: n.view().get(),
-            signers: signers(&n.certificate.signers),
-            ghost_sender: ghost_sender.to_string(),
-        },
-        Certificate::Finalization(f) => CertItem::Finalization {
-            view: f.proposal.view().get(),
-            parent_view: f.proposal.parent.get(),
-            payload: map_block(&digest_hex(&f.proposal.payload), block_map),
-            signers: signers(&f.certificate.signers),
-            ghost_sender: ghost_sender.to_string(),
-        },
-    }
-}
-
-/// Build a `reporter_states`-shaped view of a canonical [`Snapshot`] so
-/// the existing Quint snapshot-assertion helper can consume it.
-pub fn snapshot_to_reporter_states(
-    snapshot: &Snapshot,
-) -> BTreeMap<String, ReporterReplicaStateData> {
-    let mut out = BTreeMap::new();
-    for (participant, node) in &snapshot.nodes {
-        let node_id_s = format!("n{}", participant.get());
-        let notarizations: BTreeMap<u64, TraceProposalData> = node
-            .notarizations
-            .iter()
-            .map(|(view, cert)| {
-                (
-                    view.get(),
-                    TraceProposalData {
-                        view: view.get(),
-                        parent: 0, // unknown from canonical Snapshot; renderer does not use it
-                        payload: digest_hex(&cert.payload),
-                    },
-                )
-            })
-            .collect();
-        let notarization_signature_counts: BTreeMap<u64, Option<usize>> = node
-            .notarizations
-            .iter()
-            .map(|(view, cert)| (view.get(), cert.signature_count.map(|c| c as usize)))
-            .collect();
-        let nullifications: BTreeSet<u64> =
-            node.nullifications.keys().map(|v| v.get()).collect();
-        let nullification_signature_counts: BTreeMap<u64, Option<usize>> = node
-            .nullifications
-            .iter()
-            .map(|(view, n)| (view.get(), n.signature_count.map(|c| c as usize)))
-            .collect();
-        let finalizations: BTreeMap<u64, TraceProposalData> = node
-            .finalizations
-            .iter()
-            .map(|(view, cert)| {
-                (
-                    view.get(),
-                    TraceProposalData {
-                        view: view.get(),
-                        parent: 0,
-                        payload: digest_hex(&cert.payload),
-                    },
-                )
-            })
-            .collect();
-        let finalization_signature_counts: BTreeMap<u64, Option<usize>> = node
-            .finalizations
-            .iter()
-            .map(|(view, cert)| (view.get(), cert.signature_count.map(|c| c as usize)))
-            .collect();
-        let certified: BTreeSet<u64> = node.certified.iter().map(|v| v.get()).collect();
-        let sig_map = |m: &BTreeMap<View, BTreeSet<commonware_utils::Participant>>|
-                        -> BTreeMap<u64, BTreeSet<String>> {
-            m.iter()
-                .map(|(v, s)| (v.get(), s.iter().map(|p| node_id(*p)).collect()))
-                .collect()
-        };
-        let data = ReporterReplicaStateData {
-            notarizations,
-            notarization_signature_counts,
-            nullifications,
-            nullification_signature_counts,
-            finalizations,
-            finalization_signature_counts,
-            certified,
-            successful_certifications: BTreeSet::new(),
-            notarize_signers: sig_map(&node.notarize_signers),
-            nullify_signers: sig_map(&node.nullify_signers),
-            finalize_signers: sig_map(&node.finalize_signers),
-            max_finalized_view: node.last_finalized.get(),
-        };
-        out.insert(node_id_s, data);
-    }
-    out
-}
-
-/// Public entry point: encode a canonical [`Trace`] as a Quint test module.
-pub fn encode_from_trace(trace: &Trace, required_containers: u64) -> String {
-    let cfg = EncoderConfig {
-        n: trace.topology.n as usize,
-        faults: trace.topology.faults as usize,
-        epoch: trace.topology.epoch,
-        max_view: trace
-            .events
-            .iter()
-            .filter_map(event_view)
-            .max()
-            .unwrap_or(1),
-        required_containers,
-    };
-    let block_map = build_block_map_from_events(&trace.events);
-    let proposals = build_proposals_from_events(&trace.events, &block_map);
-    let actions = lower_events_to_actions(&trace.events, &block_map);
-    let reporter_states = snapshot_to_reporter_states(&trace.expected);
-    render_quint_from_actions(&cfg, &block_map, &proposals, &actions, &reporter_states)
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod canonical_tests {
@@ -2217,4 +1651,3 @@ mod canonical_tests {
         assert!(items.is_empty());
     }
 }
-// --- End canonical-event path ------------------------------------------

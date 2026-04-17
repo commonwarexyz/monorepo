@@ -1,7 +1,10 @@
-use crate::{
-    replayer::compare::{ExpectedNodeState, ExpectedState},
-    tracing::{data::TraceData, decoder, encoder},
-};
+//! Canonical [`Trace`] ↔ Quint `replica.qnt` bridge.
+//!
+//! Given a canonical [`Trace`], encode it as a Quint test module
+//! ([`crate::tracing::encoder::encode_from_trace`]), drive `quint test` with
+//! ITF output, then parse the resulting ITF final state into a
+//! [`Snapshot`] keyed by [`Participant`].
+
 use commonware_consensus::{
     simplex::replay::{
         trace::{CertStateSnapshot, NodeSnapshot, NullStateSnapshot, Snapshot},
@@ -11,6 +14,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::Participant;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha1::{Digest, Sha1};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -21,6 +26,12 @@ use std::{
     process::{self, Command},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use crate::tracing::encoder;
+
+// ---------------------------------------------------------------------------
+// Error
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct ModelError {
@@ -40,6 +51,53 @@ impl Display for ModelError {
 }
 
 impl Error for ModelError {}
+
+// ---------------------------------------------------------------------------
+// ExpectedState (decoded ITF view, keyed by Quint node string)
+// ---------------------------------------------------------------------------
+
+/// Observable state from the Quint model for a single correct node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedNodeState {
+    /// Views that have been notarized, mapped to block hex digest.
+    pub notarizations: BTreeMap<u64, String>,
+    /// Views that have been nullified.
+    pub nullifications: BTreeSet<u64>,
+    /// Views that have been finalized, mapped to block hex digest.
+    pub finalizations: BTreeMap<u64, String>,
+    /// Expected visible certificate signer counts per view.
+    #[serde(default)]
+    pub notarization_signature_counts: BTreeMap<u64, Option<usize>>,
+    #[serde(default)]
+    pub nullification_signature_counts: BTreeMap<u64, Option<usize>>,
+    #[serde(default)]
+    pub finalization_signature_counts: BTreeMap<u64, Option<usize>>,
+    /// The last finalized view.
+    pub last_finalized: u64,
+    /// Views for which the replica observed any certificate.
+    #[serde(default)]
+    pub certified: BTreeSet<u64>,
+    /// Per-view set of node IDs that sent notarize votes to this node.
+    #[serde(default)]
+    pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
+    /// Per-view set of node IDs that sent nullify votes to this node.
+    #[serde(default)]
+    pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
+    /// Per-view set of node IDs that sent finalize votes to this node.
+    #[serde(default)]
+    pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
+}
+
+/// Expected observable state from the Quint model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedState {
+    /// Per correct node expected state, keyed by node ID (e.g. "n1", "n2").
+    pub nodes: BTreeMap<String, ExpectedNodeState>,
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -67,25 +125,11 @@ fn unique_stem(label: &str, suffix: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn normalized_model_trace(trace: &TraceData) -> TraceData {
-    let mut model_trace = trace.clone();
-    model_trace.required_containers = 0;
-    model_trace.reporter_states.clear();
-    model_trace.expected_state = None;
-    model_trace
-}
+// ---------------------------------------------------------------------------
+// Quint test driver
+// ---------------------------------------------------------------------------
 
-fn encoder_config(trace: &TraceData) -> encoder::EncoderConfig {
-    encoder::EncoderConfig {
-        n: trace.n,
-        faults: trace.faults,
-        epoch: trace.epoch,
-        max_view: trace.max_view,
-        required_containers: 0,
-    }
-}
-
-fn run_quint_test_module(
+pub fn run_quint_test_module(
     label: &str,
     suffix: &str,
     qnt_source: &str,
@@ -123,8 +167,7 @@ fn run_quint_test_module(
     let output = command.output().map_err(|e| {
         ModelError::new(format!(
             "failed to run quint for {} [{}]: {e}",
-            label,
-            suffix,
+            label, suffix,
         ))
     })?;
 
@@ -157,95 +200,12 @@ fn run_quint_test_module(
     Ok(())
 }
 
-fn validate_replica_trace_with_itf(
-    trace: &TraceData,
-    label: &str,
-    itf_path: &Path,
-) -> Result<(), ModelError> {
-    let cfg = encoder_config(trace);
-    let qnt = encoder::encode(trace, &cfg);
-    run_quint_test_module(label, "replica", &qnt, Some(itf_path))
-}
-
-/// Validates the trace against `replica.qnt` and extracts expected state
-/// from the ITF output.
-pub fn validate_and_extract_expected(
-    trace: &TraceData,
-    label: &str,
-) -> Result<Option<ExpectedState>, ModelError> {
-    let model_trace = normalized_model_trace(trace);
-
-    // Validate against replica.qnt with ITF output
-    let td = temp_dir();
-    fs::create_dir_all(&td)
-        .map_err(|e| ModelError::new(format!("failed to create {}: {e}", td.display())))?;
-    let stem = unique_stem(label, "itf");
-    let itf_path = td.join(format!("{stem}.itf.json"));
-
-    validate_replica_trace_with_itf(&model_trace, label, &itf_path)?;
-
-    // Parse the ITF file and extract expected state
-    let expected = match fs::read_to_string(&itf_path) {
-        Ok(itf_json) => {
-            let _ = fs::remove_file(&itf_path);
-            let _ = fs::remove_dir(&td);
-            parse_itf_expected_state(&itf_json, trace)?
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&itf_path);
-            let _ = fs::remove_dir(&td);
-            return Err(ModelError::new(format!(
-                "failed to read ITF output for {label}: {e}"
-            )));
-        }
-    };
-
-    Ok(Some(expected))
-}
-
-fn parse_itf_expected_state(
-    itf_json: &str,
-    trace: &TraceData,
-) -> Result<ExpectedState, ModelError> {
-    let itf: serde_json::Value = serde_json::from_str(itf_json)
-        .map_err(|e| ModelError::new(format!("failed to parse ITF JSON: {e}")))?;
-
-    let states = itf["states"]
-        .as_array()
-        .ok_or_else(|| ModelError::new("ITF JSON missing 'states' array".to_string()))?;
-
-    let final_state = states
-        .last()
-        .ok_or_else(|| ModelError::new("ITF 'states' array is empty".to_string()))?;
-
-    // Build block map: invert encoder::build_block_map to get name -> hex
-    let block_pairs = encoder::build_block_map(trace);
-    let block_map: HashMap<String, String> = block_pairs
-        .into_iter()
-        .map(|(hash, name)| (name, hash))
-        .collect();
-
-    let correct_nodes = decoder::identify_correct_nodes(final_state);
-    Ok(decoder::extract_expected_state(
-        final_state,
-        &correct_nodes,
-        &block_map,
-    ))
-}
-
 // ---------------------------------------------------------------------------
-// Canonical (Trace-native) validation path
+// Canonical entry point
 // ---------------------------------------------------------------------------
 
 /// Validates a canonical [`Trace`] against `replica.qnt` and extracts
 /// expected state from the ITF output as a [`Snapshot`].
-///
-/// Mirrors [`validate_and_extract_expected`] but takes the canonical
-/// [`Trace`] type throughout: encodes via
-/// [`encoder::encode_from_trace`], parses the ITF via the shared
-/// [`decoder::extract_expected_state`] (which is already TraceData-free),
-/// and converts the resulting [`ExpectedState`] into a
-/// [`Snapshot`] keyed by [`Participant`].
 pub fn validate_and_extract_expected_canonical(
     trace: &Trace,
     label: &str,
@@ -275,7 +235,7 @@ pub fn validate_and_extract_expected_canonical(
         }
     };
 
-    let itf: serde_json::Value = serde_json::from_str(&itf_json)
+    let itf: Value = serde_json::from_str(&itf_json)
         .map_err(|e| ModelError::new(format!("failed to parse ITF JSON: {e}")))?;
 
     let states = itf["states"]
@@ -292,12 +252,16 @@ pub fn validate_and_extract_expected_canonical(
         .map(|(hash, name)| (name, hash))
         .collect();
 
-    let correct_nodes = decoder::identify_correct_nodes(final_state);
-    let expected = decoder::extract_expected_state(final_state, &correct_nodes, &block_map);
+    let correct_nodes = identify_correct_nodes(final_state);
+    let expected = extract_expected_state(final_state, &correct_nodes, &block_map);
 
     let snapshot = expected_state_to_snapshot(&expected)?;
     Ok(Some(snapshot))
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot conversion
+// ---------------------------------------------------------------------------
 
 /// Converts the Quint-level [`ExpectedState`] (keyed by `"nX"` strings
 /// with hex payloads) into a [`Snapshot`] keyed by [`Participant`] with
@@ -422,6 +386,377 @@ fn hex_to_digest(hex: &str) -> Result<Sha256Digest, String> {
     Ok(Sha256Digest::from(bytes))
 }
 
+// ---------------------------------------------------------------------------
+// ITF parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Looks up a state variable by suffix in an ITF state object.
+/// ITF variables may be qualified (e.g. `itf_main::r::store_vote`),
+/// so we match by the trailing `::suffix` or exact name.
+fn get_var<'a>(state: &'a Value, suffix: &str) -> &'a Value {
+    if let Value::Object(obj) = state {
+        if let Some(v) = obj.get(suffix) {
+            return v;
+        }
+        let pattern = format!("::{suffix}");
+        for (key, val) in obj {
+            if key.ends_with(&pattern) || key == suffix {
+                return val;
+            }
+        }
+    }
+    &Value::Null
+}
+
+/// Parses an ITF-encoded integer (JSON number or `{"#bigint": "N"}`).
+fn parse_int(v: &Value) -> u64 {
+    match v {
+        Value::Number(n) => n.as_u64().unwrap_or(0),
+        Value::Object(obj) => {
+            if let Some(s) = obj.get("#bigint").and_then(|v| v.as_str()) {
+                s.parse().unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Parses an ITF-encoded set (`{"#set": [...]}`).
+fn parse_set(v: &Value) -> Vec<&Value> {
+    match v {
+        Value::Object(obj) => obj
+            .get("#set")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parses an ITF-encoded map (`{"#map": [[k, v], ...]}`).
+fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
+    match v {
+        Value::Object(obj) => obj
+            .get("#map")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|pair| {
+                        let a = pair.as_array()?;
+                        if a.len() >= 2 {
+                            Some((&a[0], &a[1]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Identifies the correct node set from the ITF state.
+/// Correct nodes are those with entries in `replica_state`.
+pub fn identify_correct_nodes(state: &Value) -> Vec<String> {
+    let mut nodes: Vec<String> = parse_map(get_var(state, "replica_state"))
+        .iter()
+        .filter_map(|(k, _)| k.as_str().map(String::from))
+        .collect();
+    nodes.sort();
+    nodes
+}
+
+/// Collects the `store_certificate` map from the ITF state, keyed by node ID.
+fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
+    let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    for (k, v) in parse_map(get_var(state, "store_certificate")) {
+        let Some(node) = k.as_str() else {
+            continue;
+        };
+        let certs = parse_set(v);
+        out.insert(node.to_string(), certs.into_iter().cloned().collect());
+    }
+    out
+}
+
+/// Collects the `store_vote` map from the ITF state, keyed by node ID.
+fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
+    let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    for (k, v) in parse_map(get_var(state, "store_vote")) {
+        let Some(node) = k.as_str() else {
+            continue;
+        };
+        let votes = parse_set(v);
+        out.insert(node.to_string(), votes.into_iter().cloned().collect());
+    }
+    out
+}
+
+/// Collects the `sent_vote` (or union of `sent_notarize_votes`,
+/// `sent_nullify_votes`, `sent_finalize_votes`) as a flat vector of
+/// tagged vote values.
+fn collect_sent_vote(state: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    // Legacy monolithic set.
+    let legacy = get_var(state, "sent_vote");
+    if !legacy.is_null() {
+        for v in parse_set(legacy) {
+            out.push(v.clone());
+        }
+    }
+    // New split sets. Tag each with its variant so downstream matches
+    // the `{"tag": "Notarize", ...}` shape the store uses.
+    for (suffix, tag) in [
+        ("sent_notarize_votes", "Notarize"),
+        ("sent_nullify_votes", "Nullify"),
+        ("sent_finalize_votes", "Finalize"),
+    ] {
+        let set_val = get_var(state, suffix);
+        if set_val.is_null() {
+            continue;
+        }
+        for v in parse_set(set_val) {
+            out.push(serde_json::json!({ "tag": tag, "value": v.clone() }));
+        }
+    }
+    out
+}
+
+/// Extracts expected observable state from the final ITF state.
+pub fn extract_expected_state(
+    state: &Value,
+    correct_nodes: &[String],
+    block_map: &HashMap<String, String>,
+) -> ExpectedState {
+    let store_cert_map = collect_store_certificate(state);
+    let store_vote_map = collect_store_vote(state);
+    let sent_votes = collect_sent_vote(state);
+    let replica_state_entries = parse_map(get_var(state, "replica_state"));
+
+    let mut nodes: BTreeMap<String, ExpectedNodeState> = BTreeMap::new();
+    for node in correct_nodes {
+        let mut notarizations: BTreeMap<u64, String> = BTreeMap::new();
+        let mut notarization_signature_counts: BTreeMap<u64, Option<usize>> = BTreeMap::new();
+        let mut nullifications: BTreeSet<u64> = BTreeSet::new();
+        let mut nullification_signature_counts: BTreeMap<u64, Option<usize>> = BTreeMap::new();
+        let mut finalizations: BTreeMap<u64, String> = BTreeMap::new();
+        let mut finalization_signature_counts: BTreeMap<u64, Option<usize>> = BTreeMap::new();
+
+        if let Some(certs) = store_cert_map.get(node) {
+            for cert_val in certs {
+                let Some(tag) = cert_val.get("tag").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                let Some(inner) = cert_val.get("value") else {
+                    continue;
+                };
+                match tag {
+                    "Notarization" => {
+                        let view = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["view"])
+                                .unwrap_or(&inner["view"]),
+                        );
+                        let block_name = inner
+                            .get("proposal")
+                            .and_then(|proposal| proposal["payload"].as_str())
+                            .or_else(|| inner["block"].as_str())
+                            .unwrap_or("");
+                        let hex = block_map.get(block_name).cloned().unwrap_or_default();
+                        let signature_count = parse_set(&inner["signatures"]).len();
+                        notarizations.insert(view, hex);
+                        // Multiple notarization certs for the same
+                        // view can appear in `store_certificates` under
+                        // equivocation or future-Byzantine scenarios.
+                        // Pick the MAX signer count as the canonical
+                        // representative.
+                        let existing = notarization_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        notarization_signature_counts
+                            .insert(view, Some(signature_count.max(existing)));
+                    }
+                    "Nullification" => {
+                        let view = parse_int(&inner["view"]);
+                        let signature_count = parse_set(&inner["signatures"]).len();
+                        nullifications.insert(view);
+                        let existing = nullification_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        nullification_signature_counts
+                            .insert(view, Some(signature_count.max(existing)));
+                    }
+                    "Finalization" => {
+                        let view = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["view"])
+                                .unwrap_or(&inner["view"]),
+                        );
+                        let block_name = inner
+                            .get("proposal")
+                            .and_then(|proposal| proposal["payload"].as_str())
+                            .or_else(|| inner["block"].as_str())
+                            .unwrap_or("");
+                        let hex = block_map.get(block_name).cloned().unwrap_or_default();
+                        let signature_count = parse_set(&inner["signatures"]).len();
+                        finalizations.insert(view, hex);
+                        let existing = finalization_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        finalization_signature_counts
+                            .insert(view, Some(signature_count.max(existing)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let certified: BTreeSet<u64> = notarizations
+            .keys()
+            .copied()
+            .chain(nullifications.iter().copied())
+            .chain(finalizations.keys().copied())
+            .collect();
+
+        let last_finalized = replica_state_entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(node.as_str()))
+            .map(|(_, v)| parse_int(&v["last_finalized"]))
+            .unwrap_or(0);
+
+        // Extract vote signers from store_vote + sent_vote
+        let (notarize_signers, nullify_signers, finalize_signers) =
+            extract_vote_signers(&store_vote_map, &sent_votes, node);
+
+        nodes.insert(
+            node.clone(),
+            ExpectedNodeState {
+                notarizations,
+                notarization_signature_counts,
+                nullifications,
+                nullification_signature_counts,
+                finalizations,
+                finalization_signature_counts,
+                last_finalized,
+                certified,
+                notarize_signers,
+                nullify_signers,
+                finalize_signers,
+            },
+        );
+    }
+
+    ExpectedState { nodes }
+}
+
+/// For a given node `nid`, collects the per-view sender sets of notarize,
+/// nullify, and finalize votes observed in the node's local `store_vote`
+/// plus the global `sent_vote` (votes sent by `nid` itself).
+fn extract_vote_signers(
+    store_vote_map: &HashMap<String, Vec<Value>>,
+    sent_votes: &[Value],
+    nid: &str,
+) -> (
+    BTreeMap<u64, BTreeSet<String>>,
+    BTreeMap<u64, BTreeSet<String>>,
+    BTreeMap<u64, BTreeSet<String>>,
+) {
+    let mut notarize: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut nullify: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut finalize: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+
+    let empty_store: Vec<Value> = Vec::new();
+    let local_store = store_vote_map.get(nid).unwrap_or(&empty_store);
+    for vote in local_store {
+        insert_vote_signer(vote, &mut notarize, &mut nullify, &mut finalize);
+    }
+
+    // The monolithic sent_vote set (if any) contains the sender's own
+    // broadcasts. For views where the sender is `nid`, treat the vote as
+    // coming from `nid` itself.
+    for vote in sent_votes {
+        let Some(sig) = vote
+            .get("value")
+            .and_then(|v| v.get("sig"))
+            .and_then(|s| s.as_str())
+            .or_else(|| {
+                vote.get("value")
+                    .and_then(|v| v.get("signature"))
+                    .and_then(|s| s.as_str())
+            })
+        else {
+            continue;
+        };
+        if sig != nid {
+            continue;
+        }
+        insert_vote_signer(vote, &mut notarize, &mut nullify, &mut finalize);
+    }
+    (notarize, nullify, finalize)
+}
+
+fn insert_vote_signer(
+    vote: &Value,
+    notarize: &mut BTreeMap<u64, BTreeSet<String>>,
+    nullify: &mut BTreeMap<u64, BTreeSet<String>>,
+    finalize: &mut BTreeMap<u64, BTreeSet<String>>,
+) {
+    let Some(tag) = vote.get("tag").and_then(|t| t.as_str()) else {
+        return;
+    };
+    let Some(inner) = vote.get("value") else {
+        return;
+    };
+    let Some(sig) = inner
+        .get("sig")
+        .and_then(|s| s.as_str())
+        .or_else(|| inner.get("signature").and_then(|s| s.as_str()))
+    else {
+        return;
+    };
+    let sig = sig.to_string();
+    match tag {
+        "Notarize" => {
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
+            notarize.entry(view).or_default().insert(sig);
+        }
+        "Nullify" => {
+            let view = parse_int(&inner["view"]);
+            nullify.entry(view).or_default().insert(sig);
+        }
+        "Finalize" => {
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
+            finalize.entry(view).or_default().insert(sig);
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod canonical_validation_tests {
     use super::*;
@@ -442,7 +777,6 @@ mod canonical_validation_tests {
         }
         let dir = fixtures_dir();
         if !dir.exists() {
-            // Fixture dir is optional in non-replay builds.
             return;
         }
         let path = dir.join("honest_n4_f0_c3.json");
@@ -451,11 +785,9 @@ mod canonical_validation_tests {
         }
         let json = fs::read_to_string(&path).expect("read fixture");
         let trace = Trace::from_json(&json).expect("parse canonical trace");
-        let expected =
-            validate_and_extract_expected_canonical(&trace, "canonical_sanity")
-                .expect("validate + extract");
+        let expected = validate_and_extract_expected_canonical(&trace, "canonical_sanity")
+            .expect("validate + extract");
         let snap = expected.expect("non-empty snapshot");
         assert!(!snap.nodes.is_empty(), "snapshot should have nodes");
     }
 }
-

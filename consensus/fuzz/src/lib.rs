@@ -4,7 +4,6 @@ pub mod disrupter;
 pub mod invariants;
 pub mod ist;
 pub mod quint_model;
-pub mod replayer;
 pub mod simplex;
 pub mod strategy;
 pub mod tlc;
@@ -821,22 +820,6 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
             panic::resume_unwind(payload);
         }
     }
-}
-
-pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_twins_tracing(input, corpus_bytes);
-}
-
-pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_disrupter_tracing(input, corpus_bytes);
-}
-
-pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_byzantine_tracing(actor, input, corpus_bytes);
-}
-
-pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_honest_tracing(input, corpus_bytes);
 }
 
 pub fn run_quint_twins_recording(input: FuzzInput, corpus_bytes: &[u8]) {

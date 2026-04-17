@@ -232,149 +232,176 @@ async fn drain_pipeline(context: &deterministic::Context) {
 
 /// Run consensus with all honest nodes and record a canonical Trace.
 pub fn run_quint_honest_recording(input: FuzzInput, corpus_bytes: &[u8]) {
+    let hash = sha1::Sha1::digest(corpus_bytes);
+    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    let Some(trace) = run_honest_pipeline(input) else {
+        return;
+    };
+    persist_trace("simplex_ed25519_quint_honest", &hash_hex, &trace);
+}
+
+/// Runs the deterministic 4-node honest consensus pipeline and returns the
+/// resulting canonical [`Trace`] without persisting it.
+///
+/// Shared between [`run_quint_honest_recording`] (which then writes the trace
+/// to an artifact directory) and the TLC-driven fuzz target (which feeds the
+/// trace into the controlled TLC server for coverage feedback).
+pub fn run_honest_pipeline(input: FuzzInput) -> Option<Trace> {
+    let captured: Arc<std::sync::Mutex<Option<Trace>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = captured.clone();
+
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
-    let hash = sha1::Sha1::digest(corpus_bytes);
-    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-
-    executor.start(|mut context| async move {
-        let tracing_input = FuzzInput {
-            raw_bytes: input.raw_bytes.clone(),
-            required_containers: input.required_containers,
-            degraded_network: false,
-            configuration: N4F0C4,
-            partition: Partition::Connected,
-            strategy: input.strategy,
-            byzantine_actor: input.byzantine_actor,
-        };
-
-        let (oracle, participants, schemes, mut registrations) =
-            crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
-
-        let recorder = Recorder::new(participants.clone());
-        let app_relay = Arc::new(relay::Relay::new());
-        let elector = RoundRobin::<Sha256Hasher>::default();
-        let mut reporters = Vec::new();
-        let config = tracing_input.configuration;
-        let n_usize = config.n as usize;
-
-        for i in 0..n_usize {
-            let validator = participants[i].clone();
-            let (vote_network, cert_network, resolver_network) =
-                registrations.remove(&validator).unwrap();
-            let ctx = context.with_label(&format!("validator_{validator}"));
-            let me = Participant::new(i as u32);
-
-            let (vote_sender, vote_receiver) = vote_network;
-            let (cert_sender, cert_receiver) = cert_network;
-            let (resolver_sender, resolver_receiver) = resolver_network;
-
-            let rec_vote_rx = RecordingReceiver::new(
-                vote_receiver,
-                recorder.clone(),
-                me,
-                ChannelKind::Vote,
-                n_usize,
-            );
-            let rec_cert_rx = RecordingReceiver::new(
-                cert_receiver,
-                recorder.clone(),
-                me,
-                ChannelKind::Certificate,
-                n_usize,
-            );
-            let rec_vote_tx = RecordingSender::new(vote_sender, recorder.clone(), me);
-
-            let reporter_cfg = reporter::Config {
-                participants: participants
-                    .as_slice()
-                    .try_into()
-                    .expect("public keys are unique"),
-                scheme: schemes[i].clone(),
-                elector: elector.clone(),
-            };
-            let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
-            reporters.push(reporter.clone());
-
-            let app_cfg = application::Config {
-                hasher: Sha256Hasher::default(),
-                relay: app_relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                application::Application::new(ctx.with_label("application"), app_cfg);
-            actor.start();
-
-            let rec_app = RecordingApp::new(application.clone(), recorder.clone(), me);
-
-            let blocker = oracle.control(validator.clone());
-            let engine_cfg = config::Config {
-                blocker,
-                scheme: schemes[i].clone(),
-                elector: elector.clone(),
-                automaton: rec_app.clone(),
-                relay: rec_app,
-                reporter: reporter.clone(),
-                partition: validator.to_string(),
-                mailbox_size: 1024,
-                epoch: Epoch::new(EPOCH),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: Delta::new(10),
-                skip_timeout: Delta::new(5),
-                fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
-            };
-            let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
-            engine.start(
-                (rec_vote_tx, rec_vote_rx),
-                (cert_sender, rec_cert_rx),
-                (resolver_sender, resolver_receiver),
-            );
-        }
-
-        let mut finalizers = Vec::new();
-        for reporter in reporters.iter_mut() {
-            let required_containers = tracing_input.required_containers;
-            let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-            finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                while latest.get() < required_containers {
-                    latest = monitor.recv().await.expect("event missing");
-                }
-            }));
-        }
-        join_all(finalizers).await;
-        drain_pipeline(&context).await;
-
-        let replayed = invariants::extract_replayed(&reporters, config.n as usize);
-        let states = invariants::extract(&reporters, config.n as usize);
-        invariants::check::<SimplexEd25519>(config.n, &states);
-        invariants::check_vote_invariants(&replayed, config.faults as usize);
-
-        let snapshot =
-            build_snapshot_from_reporters(&reporters, &participants, config.faults as usize);
-        let topology = Topology {
-            n: config.n,
-            faults: config.faults,
-            epoch: EPOCH,
-            namespace: NAMESPACE.to_vec(),
-            timing: timing_for_fuzz(),
-        };
-        let trace = recorder.freeze(topology, snapshot);
-        persist_trace("simplex_ed25519_quint_honest", &hash_hex, &trace);
+    executor.start(|context| async move {
+        let trace = build_honest_trace(context, input).await;
+        *captured_clone.lock().unwrap() = Some(trace);
     });
+
+    let result = captured.lock().unwrap().take();
+    result
+}
+
+/// Body of the honest recording pipeline. Sets up the deterministic 4-node
+/// network, runs consensus until every reporter has reached the required
+/// container count, drains the pipeline, and returns the canonical
+/// [`Trace`].
+async fn build_honest_trace(mut context: deterministic::Context, input: FuzzInput) -> Trace {
+    let tracing_input = FuzzInput {
+        raw_bytes: input.raw_bytes.clone(),
+        required_containers: input.required_containers,
+        degraded_network: false,
+        configuration: N4F0C4,
+        partition: Partition::Connected,
+        strategy: input.strategy,
+        byzantine_actor: input.byzantine_actor,
+    };
+
+    let (oracle, participants, schemes, mut registrations) =
+        crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+
+    let recorder = Recorder::new(participants.clone());
+    let app_relay = Arc::new(relay::Relay::new());
+    let elector = RoundRobin::<Sha256Hasher>::default();
+    let mut reporters = Vec::new();
+    let config = tracing_input.configuration;
+    let n_usize = config.n as usize;
+
+    for i in 0..n_usize {
+        let validator = participants[i].clone();
+        let (vote_network, cert_network, resolver_network) =
+            registrations.remove(&validator).unwrap();
+        let ctx = context.with_label(&format!("validator_{validator}"));
+        let me = Participant::new(i as u32);
+
+        let (vote_sender, vote_receiver) = vote_network;
+        let (cert_sender, cert_receiver) = cert_network;
+        let (resolver_sender, resolver_receiver) = resolver_network;
+
+        let rec_vote_rx = RecordingReceiver::new(
+            vote_receiver,
+            recorder.clone(),
+            me,
+            ChannelKind::Vote,
+            n_usize,
+        );
+        let rec_cert_rx = RecordingReceiver::new(
+            cert_receiver,
+            recorder.clone(),
+            me,
+            ChannelKind::Certificate,
+            n_usize,
+        );
+        let rec_vote_tx = RecordingSender::new(vote_sender, recorder.clone(), me);
+
+        let reporter_cfg = reporter::Config {
+            participants: participants
+                .as_slice()
+                .try_into()
+                .expect("public keys are unique"),
+            scheme: schemes[i].clone(),
+            elector: elector.clone(),
+        };
+        let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
+        reporters.push(reporter.clone());
+
+        let app_cfg = application::Config {
+            hasher: Sha256Hasher::default(),
+            relay: app_relay.clone(),
+            me: validator.clone(),
+            propose_latency: (10.0, 5.0),
+            verify_latency: (10.0, 5.0),
+            certify_latency: (10.0, 5.0),
+            should_certify: application::Certifier::Sometimes,
+        };
+        let (actor, application) =
+            application::Application::new(ctx.with_label("application"), app_cfg);
+        actor.start();
+
+        let rec_app = RecordingApp::new(application.clone(), recorder.clone(), me);
+
+        let blocker = oracle.control(validator.clone());
+        let engine_cfg = config::Config {
+            blocker,
+            scheme: schemes[i].clone(),
+            elector: elector.clone(),
+            automaton: rec_app.clone(),
+            relay: rec_app,
+            reporter: reporter.clone(),
+            partition: validator.to_string(),
+            mailbox_size: 1024,
+            epoch: Epoch::new(EPOCH),
+            leader_timeout: Duration::from_secs(1),
+            certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
+            fetch_timeout: Duration::from_secs(1),
+            activity_timeout: Delta::new(10),
+            skip_timeout: Delta::new(5),
+            fetch_concurrent: 1,
+            replay_buffer: NZUsize!(1024 * 1024),
+            write_buffer: NZUsize!(1024 * 1024),
+            page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
+            forwarding: ForwardingPolicy::Disabled,
+        };
+        let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
+        engine.start(
+            (rec_vote_tx, rec_vote_rx),
+            (cert_sender, rec_cert_rx),
+            (resolver_sender, resolver_receiver),
+        );
+    }
+
+    let mut finalizers = Vec::new();
+    for reporter in reporters.iter_mut() {
+        let required_containers = tracing_input.required_containers;
+        let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+        finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+            while latest.get() < required_containers {
+                latest = monitor.recv().await.expect("event missing");
+            }
+        }));
+    }
+    join_all(finalizers).await;
+    drain_pipeline(&context).await;
+
+    let replayed = invariants::extract_replayed(&reporters, config.n as usize);
+    let states = invariants::extract(&reporters, config.n as usize);
+    invariants::check::<SimplexEd25519>(config.n, &states);
+    invariants::check_vote_invariants(&replayed, config.faults as usize);
+
+    let snapshot =
+        build_snapshot_from_reporters(&reporters, &participants, config.faults as usize);
+    let topology = Topology {
+        n: config.n,
+        faults: config.faults,
+        epoch: EPOCH,
+        namespace: NAMESPACE.to_vec(),
+        timing: timing_for_fuzz(),
+    };
+    recorder.freeze(topology, snapshot)
 }
 
 /// Thin wrapper: runs the Byzantine pipeline with [`ByzantineActor::Disrupter`].

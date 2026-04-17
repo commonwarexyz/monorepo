@@ -1,13 +1,14 @@
 //! Rust-side driver for the controlled TLC HTTP server.
 //!
-//! Reuses the existing trace-validation pipeline (`tracing/`) to convert a
-//! fuzz run into a [`TraceData`], then maps that [`TraceData`] into the JSON
-//! action sequence accepted by the Java `SimplexActionMapper`, and POSTs it to
-//! the controlled `tlc2.TLCServer` `/execute` endpoint. The server returns a
-//! list of state fingerprints (`keys`); we keep a global cumulative set of
-//! fingerprints across calls and report whether the most recent run added any
-//! new ones, so the libfuzzer target can `Corpus::Reject` uninteresting
-//! inputs.
+//! Reuses the canonical honest recording pipeline
+//! ([`crate::tracing::record::run_honest_pipeline`]) to produce a
+//! [`Trace`], encodes it into the JSON action sequence accepted by the Java
+//! `SimplexActionMapper` via [`tlc_encoder::encode_from_trace`], and POSTs
+//! it to the controlled `tlc2.TLCServer` `/execute` endpoint. The server
+//! returns a list of state fingerprints (`keys`); we keep a global
+//! cumulative set of fingerprints across calls and report whether the most
+//! recent run added any new ones, so the libfuzzer target can
+//! `Corpus::Reject` uninteresting inputs.
 //!
 //! Spec actions exposed by `main_n4f1b0.qnt` (and the compiled `main.tla`):
 //!
@@ -16,16 +17,12 @@
 //!   * `propose(id, payload, parent_view)` — leader of `parent_view + 1`
 //!     proposes `payload` (must be in `VALID_PAYLOADS`)
 //!   * `byzantine_step` — only enabled when `BYZANTINE` is non-empty
-//!
-//! [`TlcMapper::map_trace`] delegates to [`tlc_encoder::encode`], which
-//! reuses the same semantic walk as the quint encoder so the action
-//! sequence sent to TLC is exactly the one quint sees (same dedup, same
-//! causal repair, same self-deliveries, ...).
 
 use crate::{
-    tracing::{data::TraceData, encoder::EncoderConfig, runtime::run_honest_pipeline, tlc_encoder},
+    tracing::{record::run_honest_pipeline, tlc_encoder},
     FuzzInput,
 };
+use commonware_consensus::simplex::replay::Trace;
 use libfuzzer_sys::Corpus;
 use serde_json::{json, Value};
 use std::{
@@ -35,43 +32,6 @@ use std::{
 
 /// Default URL of the controlled TLC server.
 pub const DEFAULT_TLC_URL: &str = "http://localhost:2023/execute";
-
-/// Maps a [`TraceData`] (collected from a fuzz run) into the JSON action
-/// sequence consumed by the Java `SimplexActionMapper`.
-///
-/// All event-level decisions (which entries become which actions, dedup of
-/// `send_*_vote` barriers, leader-vote causal repair, self-deliveries, ...)
-/// live in [`super::tracing::encoder::build_action_items`] so the quint
-/// encoder and the TLC driver always agree on the action sequence. This
-/// mapper just calls [`tlc_encoder::encode`] and appends the reset
-/// terminator.
-pub struct TlcMapper;
-
-impl TlcMapper {
-    /// Translates the trace into a JSON array of `{name, params}` action
-    /// objects ready for `POST /execute`.
-    pub fn map_trace(trace: &TraceData) -> Vec<Value> {
-        let cfg = EncoderConfig {
-            n: trace.n,
-            faults: trace.faults,
-            epoch: trace.epoch,
-            max_view: trace.max_view,
-            required_containers: trace.required_containers,
-        };
-        let mut actions = tlc_encoder::encode(trace, &cfg);
-
-        // The TLC server's `simulate(..., is_reset=true)` loop only terminates
-        // on a reset/quit/unknown action. Without this terminator it would
-        // call `actionsToRun.remove()` on an empty queue, throw
-        // NoSuchElementException, NPE on `e.getMessage()` in the catch block,
-        // and return an empty HTTP reply.
-        if !actions.is_empty() {
-            actions.push(json!({ "reset": true }));
-        }
-
-        actions
-    }
-}
 
 /// Response payload from `tlc2.TLCServer` `/execute`.
 ///
@@ -137,7 +97,7 @@ pub fn non_reset_action_count(actions: &[Value]) -> usize {
     actions
         .iter()
         .filter(|a| {
-            // The terminator we append in TlcMapper is `{"reset": true}`.
+            // The terminator appended in [`submit_trace`] is `{"reset": true}`.
             // Anything else (proposes, correct_replica_step, ...) is a real
             // action.
             !a.get("reset").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -212,11 +172,12 @@ impl CoverageOutcome {
     }
 }
 
-/// Maps a trace, posts it to TLC, and merges the resulting fingerprints into
-/// the global coverage set. Returns the per-input outcome so the fuzz target
-/// can decide whether to keep or reject the input.
-pub fn submit_trace(client: &TlcClient, trace: &TraceData) -> Result<CoverageOutcome, String> {
-    let actions = TlcMapper::map_trace(trace);
+/// Encodes the trace as TLC actions, posts the result to the controlled
+/// TLC server, and merges the returned fingerprints into the global
+/// coverage set. Returns the per-input outcome so the fuzz target can
+/// decide whether to keep or reject the input.
+pub fn submit_trace(client: &TlcClient, trace: &Trace) -> Result<CoverageOutcome, String> {
+    let mut actions = tlc_encoder::encode_from_trace(trace);
     if actions.is_empty() {
         return Ok(CoverageOutcome {
             returned: 0,
@@ -224,6 +185,13 @@ pub fn submit_trace(client: &TlcClient, trace: &TraceData) -> Result<CoverageOut
             total: global_fingerprints().lock().unwrap().len(),
         });
     }
+
+    // The TLC server's `simulate(..., is_reset=true)` loop only terminates
+    // on a reset/quit/unknown action. Without this terminator it would
+    // call `actionsToRun.remove()` on an empty queue, throw
+    // NoSuchElementException, NPE on `e.getMessage()` in the catch block,
+    // and return an empty HTTP reply.
+    actions.push(json!({ "reset": true }));
 
     let keys = client
         .execute(&actions)
@@ -241,26 +209,24 @@ pub fn submit_trace(client: &TlcClient, trace: &TraceData) -> Result<CoverageOut
     })
 }
 
-// TODO: this fuzz-target hook depends on `tracing::runtime::run_honest_pipeline`
-// (which no longer exists) and on `FuzzInput`/`Corpus`. Commented out until the
-// honest pipeline -> TraceData glue is restored under the new tracing API.
-//
-// /// Full honest fuzz workflow with TLC coverage feedback:
-// ///
-// ///   1. Run the deterministic 4-node honest pipeline (same as the existing
-// ///      `simplex_ed25519_quint_honest` target).
-// ///   2. Encode the resulting [`TraceData`] into TLC actions via [`TlcMapper`].
-// ///   3. POST the actions to the controlled `tlc2.TLCServer` `/execute`
-// ///      endpoint and merge the returned state fingerprints into the global
-// ///      cumulative coverage set.
-// ///   4. Return [`Corpus::Reject`] **only** when TLC explicitly reports zero
-// ///      new state fingerprints; every other outcome (pipeline failure,
-// ///      empty trace, server unreachable, JSON error, ...) falls through to
-// ///      [`Corpus::Keep`]. Coverage feedback from TLC is the *only* reason
-// ///      to drop an input from the corpus.
-// ///
-// /// The TLC server URL is read from the `TLC_URL` environment variable,
-// /// defaulting to [`DEFAULT_TLC_URL`].
+/// Full honest fuzz workflow with TLC coverage feedback:
+///
+///   1. Run the deterministic 4-node honest pipeline (same as the
+///      `simplex_ed25519_quint_honest` target) and collect a canonical
+///      [`Trace`].
+///   2. Encode the resulting [`Trace`] into TLC actions via
+///      [`tlc_encoder::encode_from_trace`].
+///   3. POST the actions to the controlled `tlc2.TLCServer` `/execute`
+///      endpoint and merge the returned state fingerprints into the global
+///      cumulative coverage set.
+///   4. Return [`Corpus::Reject`] **only** when TLC explicitly reports zero
+///      new state fingerprints; every other outcome (pipeline failure,
+///      empty trace, server unreachable, JSON error, ...) falls through to
+///      [`Corpus::Keep`]. Coverage feedback from TLC is the *only* reason
+///      to drop an input from the corpus.
+///
+/// The TLC server URL is read from the `TLC_URL` environment variable,
+/// defaulting to [`DEFAULT_TLC_URL`].
 pub fn run_quint_tlc_honest_model(input: FuzzInput, _corpus_bytes: &[u8]) -> Corpus {
     let Some(trace) = run_honest_pipeline(input) else {
         return Corpus::Keep;
@@ -292,7 +258,6 @@ fn tlc_client(url: &str) -> &'static TlcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracing::data::TraceData;
     use std::{
         path::PathBuf,
         process::{Child, Command, Stdio},
@@ -316,10 +281,6 @@ mod tests {
         fuzz_dir().parent().unwrap().join("quint")
     }
 
-    fn honest_fixtures_dir() -> PathBuf {
-        fuzz_dir().join("src/tracing/tests/fixtures/honest")
-    }
-
     /// RAII guard that kills the spawned `tlc-controlled` server on drop so
     /// the test does not leave a stale JVM. We do not call
     /// `./scripts/tlc.sh kill`, which would `pkill` *every* tlc2.TLCServer
@@ -335,22 +296,6 @@ mod tests {
         }
     }
 
-    fn ensure_compiled() {
-        let main_tla = quint_dir().join("tla-build/main.tla");
-        if main_tla.exists() {
-            return;
-        }
-        let status = Command::new("./scripts/tlc.sh")
-            .args(["compile", "main_n4f1b0_tla.qnt"])
-            .current_dir(quint_dir())
-            .status()
-            .expect("failed to run scripts/tlc.sh compile");
-        assert!(
-            status.success(),
-            "scripts/tlc.sh compile main_n4f1b0_tla.qnt failed"
-        );
-    }
-
     fn require_jar() {
         let jar = quint_dir().join("tlc-controlled/dist/tla2tools_server.jar");
         assert!(
@@ -359,128 +304,6 @@ mod tests {
             jar.display(),
             quint_dir().join("tlc-controlled").display(),
         );
-    }
-
-    fn try_start_server(port: u16) -> Option<TlcServerGuard> {
-        // `scripts/tlc.sh run` does `cd $TLC_BUILD_DIR && exec java ...`,
-        // so the spawned bash process is replaced in place by the JVM and
-        // `Child::kill()` later sends SIGKILL straight to the JVM.
-        let child = Command::new("./scripts/tlc.sh")
-            .arg("run")
-            .env("TLC_PORT", port.to_string())
-            .current_dir(quint_dir())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn scripts/tlc.sh run");
-
-        let mut guard = TlcServerGuard { child };
-
-        // Poll /health until the JVM finishes parsing the spec and the HTTP
-        // server is up. The JVM cold-start typically takes ~10s.
-        let url = format!("http://localhost:{port}/health");
-        let client = reqwest::blocking::Client::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if Instant::now() > deadline {
-                // Server did not start in time (port may have been stolen).
-                // Kill the child and signal failure so the caller can retry.
-                let _ = guard.child.kill();
-                let _ = guard.child.wait();
-                std::mem::forget(guard); // prevent double-kill in Drop
-                return None;
-            }
-            let ready = client
-                .get(&url)
-                .timeout(Duration::from_secs(2))
-                .send()
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            if ready {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-
-        Some(guard)
-    }
-
-    /// Starts a TLC server, retrying with fresh ports if the ephemeral port
-    /// is stolen between allocation and JVM bind.
-    fn start_server() -> (u16, TlcServerGuard) {
-        for attempt in 0..3 {
-            let port = find_free_port();
-            eprintln!("TLC server attempt {}: trying port {port}", attempt + 1);
-            if let Some(guard) = try_start_server(port) {
-                return (port, guard);
-            }
-            eprintln!("TLC server did not start on port {port}, retrying...");
-        }
-        panic!("TLC server failed to start after 3 attempts");
-    }
-
-    /// Replays every honest unit fixture against a freshly-spawned
-    /// tlc-controlled server on a dynamically-chosen free port.
-    /// Each fixture is mapped via [`TlcMapper`] and POSTed through
-    /// the same [`TlcClient`] the fuzz target uses, so any divergence between
-    /// the Rust mapper and the Java [`SimplexActionMapper`] surfaces as a
-    /// failed fixture.
-    #[test]
-    fn test_honest_fixtures_replay_on_tlc() {
-        require_jar();
-        ensure_compiled();
-
-        let (port, _server) = start_server();
-        let url = format!("http://localhost:{port}/execute");
-        let client = TlcClient::new(&url);
-
-        let dir = honest_fixtures_dir();
-        let mut fixtures: Vec<_> = std::fs::read_dir(&dir)
-            .expect("failed to read honest fixtures dir")
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        fixtures.sort_by_key(|e| e.file_name());
-        assert!(
-            !fixtures.is_empty(),
-            "no honest fixtures in {}",
-            dir.display()
-        );
-
-        let mut failures: Vec<String> = Vec::new();
-        let mut replayed = 0usize;
-        for entry in &fixtures {
-            let path = entry.path();
-            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-
-            let json = std::fs::read_to_string(&path).expect("read fixture");
-            let trace: TraceData = serde_json::from_str(&json).expect("parse fixture");
-
-            let actions = TlcMapper::map_trace(&trace);
-            if actions.is_empty() {
-                // Empty traces produce no actions; nothing to replay.
-                continue;
-            }
-
-            match client.execute(&actions) {
-                Ok(keys) if !keys.is_empty() => {
-                    replayed += 1;
-                }
-                Ok(_) => failures.push(format!("{name}: server returned empty keys")),
-                Err(e) => failures.push(format!("{name}: {e}")),
-            }
-        }
-
-        assert!(replayed > 0, "no non-empty honest fixtures were replayed");
-
-        if !failures.is_empty() {
-            panic!(
-                "{} of {} honest fixtures failed to replay on tlc-controlled:\n  {}",
-                failures.len(),
-                fixtures.len(),
-                failures.join("\n  "),
-            );
-        }
     }
 
     fn tla_build_dir() -> PathBuf {
@@ -875,7 +698,8 @@ mod tests {
         // the trace exercised, and `new_states` excludes the init state
         // so it reflects how many states the trace *discovered* on top
         // of the starting point.
-        let distinct_states: std::collections::HashSet<_> = response.keys.iter().copied().collect();
+        let distinct_states: std::collections::HashSet<_> =
+            response.keys.iter().copied().collect();
         let new_states = distinct_states.len().saturating_sub(1);
         println!(
             "[finalize_path] sent={} accepted={} keys={} distinct={} new_states={} verdict={:?}",

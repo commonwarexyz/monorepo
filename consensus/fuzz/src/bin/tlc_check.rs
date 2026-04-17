@@ -1,5 +1,5 @@
-//! Posts a single TraceData JSON file to the controlled TLC server and
-//! prints the action list, the raw response, and the verdict (sent vs
+//! Posts a single canonical [`Trace`] JSON file to the controlled TLC server
+//! and prints the action list, the raw response, and the verdict (sent vs
 //! accepted) so we can see whether `tlc2.TLCServer.simulate` silently
 //! skipped any actions.
 //!
@@ -12,9 +12,10 @@
 //!
 //!   * `TLC_URL` - oracle endpoint, default `http://localhost:2023/execute`
 
+use commonware_consensus::simplex::replay::Trace;
 use commonware_consensus_fuzz::{
-    tlc::{verdict_for, ExecuteResponse, TlcMapper, TlcVerdict, DEFAULT_TLC_URL},
-    tracing::data::TraceData,
+    tlc::{verdict_for, ExecuteResponse, TlcVerdict, DEFAULT_TLC_URL},
+    tracing::tlc_encoder::encode_from_trace,
 };
 use std::{env, fs, path::PathBuf, process};
 
@@ -34,7 +35,7 @@ fn main() {
             process::exit(1);
         }
     };
-    let trace: TraceData = match serde_json::from_str(&json) {
+    let trace = match Trace::from_json(&json) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("parse {}: {e}", path.display());
@@ -42,9 +43,9 @@ fn main() {
         }
     };
 
-    let actions = TlcMapper::map_trace(&trace);
+    let actions = encode_from_trace(&trace);
     println!("trace        : {}", path.display());
-    println!("entries      : {}", trace.entries.len());
+    println!("events       : {}", trace.events.len());
     println!("actions      : {}", actions.len());
     println!("--- action list ---");
     for (i, a) in actions.iter().enumerate() {

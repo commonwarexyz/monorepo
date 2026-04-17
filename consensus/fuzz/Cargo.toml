@@ -178,22 +178,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "replay_trace"
-path = "src/bin/replay_trace.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "convert_trace"
-path = "src/bin/convert_trace.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "validate_trace_corpus"
-path = "src/bin/validate_trace_corpus.rs"
+name = "itf_to_trace"
+path = "src/bin/itf_to_trace.rs"
 test = false
 doc = false
 bench = false
@@ -206,8 +192,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "itf_to_trace"
-path = "src/bin/itf_to_trace.rs"
+name = "tlc_check"
+path = "src/bin/tlc_check.rs"
 test = false
 doc = false
 bench = false

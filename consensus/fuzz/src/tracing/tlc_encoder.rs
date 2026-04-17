@@ -1,38 +1,20 @@
-//! Encodes a simplex consensus trace into a JSON action sequence for the
-//! controlled TLC server.
+//! Encodes a canonical simplex consensus [`Trace`] into a JSON action
+//! sequence for the controlled TLC server.
 //!
-//! Takes the same [`TraceEntry`] items consumed by [`super::encoder::encode`]
-//! and produces the JSON action list accepted by the Java
-//! `SimplexActionMapper`. The semantic walk lives in
-//! [`super::encoder::build_action_items`] so the quint and TLC back-ends
-//! always agree on the action sequence; this module only renders the
-//! resulting [`super::encoder::ActionItem`]s as JSON.
+//! Takes the canonical event list and renders the action list accepted by
+//! the Java `SimplexActionMapper`. The semantic walk lives in
+//! [`super::encoder::lower_events_to_actions`] so the Quint and TLC
+//! back-ends always agree on the action sequence; this module only
+//! renders the resulting [`super::encoder::ActionItem`]s as JSON.
 //!
 //! See `tlc-controlled/src/tlc2/controlled/protocol/SimplexActionMapper.java`
 //! for the per-action JSON schema accepted by the server.
-//!
-//! [`TraceEntry`]: super::sniffer::TraceEntry
 
-use super::{
-    data::TraceData,
-    encoder::{
-        build_action_items, build_block_map_from_events, lower_events_to_actions, ActionItem,
-        CertItem, EncoderConfig,
-    },
+use super::encoder::{
+    build_block_map_from_events, lower_events_to_actions, ActionItem, CertItem,
 };
 use commonware_consensus::simplex::replay::Trace;
 use serde_json::{json, Value};
-
-/// Encodes trace entries into a JSON action sequence for the controlled TLC
-/// server.
-pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> Vec<Value> {
-    let items = build_action_items(trace_data, cfg);
-    let mut out = Vec::with_capacity(items.len());
-    for item in &items {
-        out.push(render_item(item));
-    }
-    out
-}
 
 /// Canonical entry point: encode a [`Trace`] as a JSON action sequence
 /// for the controlled TLC server. The lowering from canonical events
