@@ -171,17 +171,17 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_coding_proposed_success_implies_recoverable_after_restart() {
-        harness::proposed_success_implies_recoverable_after_restart::<CodingHarness>();
+        harness::proposed_success_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }
 
     #[test_traced("WARN")]
     fn test_coding_verified_success_implies_recoverable_after_restart() {
-        harness::verified_success_implies_recoverable_after_restart::<CodingHarness>();
+        harness::verified_success_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }
 
     #[test_traced("WARN")]
     fn test_coding_delivery_visibility_implies_recoverable_after_restart() {
-        harness::delivery_visibility_implies_recoverable_after_restart::<CodingHarness>();
+        harness::delivery_visibility_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }
 
     #[test_traced("WARN")]

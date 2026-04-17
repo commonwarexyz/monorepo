@@ -51,12 +51,8 @@ where
 
 /// Result of the shared epoch / re-proposal pre-check step.
 ///
-/// - `Complete(valid)`: verification can terminate immediately with `valid`.
-/// - `Continue(block)`: full parent + application verification should continue.
-///
-/// The function returns `Option<Decision<B>>`: `None` means the marshal actor
-/// shut down during persistence and the caller must exit silently (consistent
-/// with the `Option<bool>` convention used by [`verify_with_parent`]).
+/// `Complete(valid)` indicates verification can terminate immediately with `valid`.
+/// `Continue(block)` indicates full parent + application verification should continue.
 pub(super) enum Decision<B> {
     Complete(bool),
     Continue(B),

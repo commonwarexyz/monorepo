@@ -191,20 +191,20 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_proposed_success_implies_recoverable_after_restart() {
-        harness::proposed_success_implies_recoverable_after_restart::<InlineHarness>();
-        harness::proposed_success_implies_recoverable_after_restart::<DeferredHarness>();
+        harness::proposed_success_implies_recoverable_after_restart::<InlineHarness>(0..16);
+        harness::proposed_success_implies_recoverable_after_restart::<DeferredHarness>(0..16);
     }
 
     #[test_traced("WARN")]
     fn test_standard_verified_success_implies_recoverable_after_restart() {
-        harness::verified_success_implies_recoverable_after_restart::<InlineHarness>();
-        harness::verified_success_implies_recoverable_after_restart::<DeferredHarness>();
+        harness::verified_success_implies_recoverable_after_restart::<InlineHarness>(0..16);
+        harness::verified_success_implies_recoverable_after_restart::<DeferredHarness>(0..16);
     }
 
     #[test_traced("WARN")]
     fn test_standard_delivery_visibility_implies_recoverable_after_restart() {
-        harness::delivery_visibility_implies_recoverable_after_restart::<InlineHarness>();
-        harness::delivery_visibility_implies_recoverable_after_restart::<DeferredHarness>();
+        harness::delivery_visibility_implies_recoverable_after_restart::<InlineHarness>(0..16);
+        harness::delivery_visibility_implies_recoverable_after_restart::<DeferredHarness>(0..16);
     }
 
     #[test_traced("WARN")]

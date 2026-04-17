@@ -755,8 +755,10 @@ pub fn hailstorm<H: TestHarness>(
 
 /// Contract: `marshal.proposed(...)=true` means the block survives an
 /// immediate crash and repeated recoveries.
-pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>() {
-    for seed in 0u64..16 {
+pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
         let Fixture {
             participants,
             schemes,
@@ -841,8 +843,10 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>() {
 
 /// Contract: `marshal.verified(...)=true` means the block survives an
 /// immediate crash and repeated recoveries.
-pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>() {
-    for seed in 0u64..16 {
+pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
         let Fixture {
             participants,
             schemes,
@@ -928,8 +932,10 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>() {
 
 /// Contract: once marshal has delivered a finalized block to the application,
 /// that finalized block and its certificate must already be durable.
-pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>() {
-    for seed in 0u64..16 {
+pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
         let Fixture {
             participants,
             schemes,
