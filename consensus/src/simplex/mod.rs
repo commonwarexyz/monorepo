@@ -777,7 +777,13 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "mocks")))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "replay"))]
+pub mod replay;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(test, feature = "mocks", feature = "replay")
+))]
 pub use actors::voter;
 
 #[cfg(not(target_arch = "wasm32"))]

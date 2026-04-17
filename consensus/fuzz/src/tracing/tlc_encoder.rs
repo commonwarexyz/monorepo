@@ -15,14 +15,31 @@
 
 use super::{
     data::TraceData,
-    encoder::{build_action_items, ActionItem, CertItem, EncoderConfig},
+    encoder::{
+        build_action_items, build_block_map_from_events, lower_events_to_actions, ActionItem,
+        CertItem, EncoderConfig,
+    },
 };
+use commonware_consensus::simplex::replay::Trace;
 use serde_json::{json, Value};
 
 /// Encodes trace entries into a JSON action sequence for the controlled TLC
 /// server.
 pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> Vec<Value> {
     let items = build_action_items(trace_data, cfg);
+    let mut out = Vec::with_capacity(items.len());
+    for item in &items {
+        out.push(render_item(item));
+    }
+    out
+}
+
+/// Canonical entry point: encode a [`Trace`] as a JSON action sequence
+/// for the controlled TLC server. The lowering from canonical events
+/// to [`ActionItem`] is 1:1, so this is just a rendering pass.
+pub fn encode_from_trace(trace: &Trace) -> Vec<Value> {
+    let block_map = build_block_map_from_events(&trace.events);
+    let items = lower_events_to_actions(&trace.events, &block_map);
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         out.push(render_item(item));

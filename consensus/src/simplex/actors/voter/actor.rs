@@ -1037,7 +1037,7 @@ impl<
                         debug!(%target_view, ?reason, "timing out view");
                         self.state.trigger_timeout(target_view, reason);
                     }
-                    #[cfg(any(test, feature = "mocks"))]
+                    #[cfg(any(test, feature = "replay"))]
                     Message::Proposed(proposal) => {
                         view = proposal.view();
                         if !self.state.is_interesting(view, false) {
@@ -1045,7 +1045,7 @@ impl<
                         }
                         self.state.proposed(proposal);
                     }
-                    #[cfg(any(test, feature = "mocks"))]
+                    #[cfg(any(test, feature = "replay"))]
                     Message::Replayed(vote) => {
                         let artifact: Artifact<S, D> = vote.clone().into();
                         view = artifact.view();

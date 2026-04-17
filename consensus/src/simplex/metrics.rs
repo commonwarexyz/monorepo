@@ -15,6 +15,7 @@ impl Peer {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
 pub enum TimeoutReason {
     Inactivity,
     LeaderNullify,

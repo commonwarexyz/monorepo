@@ -164,6 +164,30 @@ pub enum Mismatch {
     },
 }
 
+/// Certificate signer counts are observation-artifact fields: exact
+/// cardinality depends on *when* the Rust batcher fires
+/// `try_construct_notarization` relative to when asynchronous
+/// verification completes each vote, whereas Quint processes votes
+/// synchronously. Both models agree on everything that matters for
+/// safety (which views are notarized/nullified/finalized, which
+/// payloads, which signers sent votes), but may pick a different
+/// signature count in the range `[Q, N]` for a given subject.
+///
+/// This helper accepts any spec/impl pair that are both ≥ quorum as
+/// a match, and otherwise requires strict equality (covers
+/// `None == None`, `None != Some(_)`, and the `< Q` case which would
+/// indicate a real safety regression).
+fn certificate_counts_match(
+    expected: Option<usize>,
+    actual: Option<usize>,
+    quorum: usize,
+) -> bool {
+    match (expected, actual) {
+        (Some(e), Some(a)) if e >= quorum && a >= quorum => true,
+        _ => expected == actual,
+    }
+}
+
 /// Compares expected Quint state with actual Rust reporter state.
 ///
 /// `faults` is the number of Byzantine nodes (correct nodes start at index `faults`).
@@ -174,6 +198,12 @@ pub fn compare(
     faults: usize,
 ) -> Vec<Mismatch> {
     let mut mismatches = Vec::new();
+
+    // Total participant count = correct nodes observed + Byzantine nodes.
+    // `states.len()` always equals `n - faults` because the replayer
+    // only instantiates engines for correct nodes.
+    let n = states.len() + faults;
+    let quorum = crate::bounds::quorum(n as u32) as usize;
 
     for (correct_idx, state) in states.iter().enumerate() {
         let node_idx = correct_idx + faults;
@@ -218,7 +248,7 @@ pub fn compare(
                 .get(view)
                 .copied()
                 .unwrap_or(None);
-            if expected_count != actual_data.signature_count {
+            if !certificate_counts_match(expected_count, actual_data.signature_count, quorum) {
                 mismatches.push(Mismatch::NotarizationSignatureCountMismatch {
                     node: node_id.clone(),
                     view: *view,
@@ -256,7 +286,7 @@ pub fn compare(
                 .get(view)
                 .expect("view present in both maps")
                 .signature_count;
-            if expected_count != actual_count {
+            if !certificate_counts_match(expected_count, actual_count, quorum) {
                 mismatches.push(Mismatch::NullificationSignatureCountMismatch {
                     node: node_id.clone(),
                     view: *view,
@@ -302,7 +332,7 @@ pub fn compare(
                 .get(view)
                 .copied()
                 .unwrap_or(None);
-            if expected_count != actual_data.signature_count {
+            if !certificate_counts_match(expected_count, actual_data.signature_count, quorum) {
                 mismatches.push(Mismatch::FinalizationSignatureCountMismatch {
                     node: node_id.clone(),
                     view: *view,
@@ -515,7 +545,14 @@ mod tests {
     }
 
     #[test]
-    fn compare_reports_payload_count_and_certified_mismatches() {
+    fn compare_reports_payload_and_certified_mismatches() {
+        // Payload and certified-set mismatches stay strict. Signature
+        // counts are compared via quorum-equivalence (see
+        // `certificate_counts_match`) — this test picks spec/impl
+        // signature counts that are both ≥ quorum so the
+        // `certificate_counts_match` helper returns true and does NOT
+        // flag them. A separate test exercises the strict paths of
+        // that helper.
         let expected = ExpectedState {
             nodes: BTreeMap::from([(
                 "n1".to_string(),
@@ -566,16 +603,93 @@ mod tests {
             .any(|m| matches!(m, Mismatch::NotarizationPayloadMismatch { .. })));
         assert!(mismatches
             .iter()
-            .any(|m| matches!(m, Mismatch::NotarizationSignatureCountMismatch { .. })));
-        assert!(mismatches
-            .iter()
             .any(|m| matches!(m, Mismatch::FinalizationPayloadMismatch { .. })));
         assert!(mismatches
             .iter()
+            .any(|m| matches!(m, Mismatch::CertifiedViewsMismatch { .. })));
+        // Signature counts (spec=3, impl=4) are both ≥ quorum=2 — NOT a mismatch.
+        assert!(!mismatches
+            .iter()
+            .any(|m| matches!(m, Mismatch::NotarizationSignatureCountMismatch { .. })));
+        assert!(!mismatches
+            .iter()
             .any(|m| matches!(m, Mismatch::FinalizationSignatureCountMismatch { .. })));
+    }
+
+    #[test]
+    fn certificate_counts_match_accepts_both_above_quorum() {
+        // Quorum-equivalence: both sides ≥ quorum → accepted regardless
+        // of exact value.
+        assert!(certificate_counts_match(Some(3), Some(4), 3));
+        assert!(certificate_counts_match(Some(4), Some(3), 3));
+        assert!(certificate_counts_match(Some(3), Some(3), 3));
+        assert!(certificate_counts_match(Some(7), Some(5), 3));
+    }
+
+    #[test]
+    fn certificate_counts_match_is_strict_below_quorum() {
+        // Below-quorum on either side bypasses equivalence and falls
+        // back to strict equality — a sub-quorum cert is a real
+        // safety regression, not an observation artifact.
+        assert!(!certificate_counts_match(Some(2), Some(3), 3));
+        assert!(!certificate_counts_match(Some(3), Some(2), 3));
+        // Same value below quorum is still equal, so not a mismatch.
+        assert!(certificate_counts_match(Some(2), Some(2), 3));
+    }
+
+    #[test]
+    fn certificate_counts_match_handles_nones() {
+        assert!(certificate_counts_match(None, None, 3));
+        assert!(!certificate_counts_match(None, Some(3), 3));
+        assert!(!certificate_counts_match(Some(3), None, 3));
+    }
+
+    #[test]
+    fn compare_flags_sub_quorum_signature_count() {
+        // Regression: if impl produces a sub-quorum cert count, it
+        // must still be flagged as a signature-count mismatch even
+        // though spec is ≥ quorum.
+        let expected = ExpectedState {
+            nodes: BTreeMap::from([(
+                "n1".to_string(),
+                ExpectedNodeState {
+                    notarizations: BTreeMap::from([(3, "aa".repeat(32))]),
+                    nullifications: BTreeSet::new(),
+                    finalizations: BTreeMap::new(),
+                    notarization_signature_counts: BTreeMap::from([(3, Some(3))]),
+                    nullification_signature_counts: BTreeMap::new(),
+                    finalization_signature_counts: BTreeMap::new(),
+                    last_finalized: 0,
+                    committed_sequence: Vec::new(),
+                    certified: BTreeSet::from([3]),
+                    successful_certifications: BTreeSet::new(),
+                    notarize_signers: BTreeMap::new(),
+                    nullify_signers: BTreeMap::new(),
+                    finalize_signers: BTreeMap::new(),
+                },
+            )]),
+        };
+        let actual = vec![ReplayedReplicaState {
+            notarizations: HashMap::from([(
+                3,
+                Notarization {
+                    payload: digest(0xaa),
+                    // Sub-quorum count — violates the protocol's cert
+                    // validity threshold, NOT an observation artifact.
+                    signature_count: Some(1),
+                },
+            )]),
+            nullifications: HashMap::new(),
+            finalizations: HashMap::new(),
+            certified: HashSet::from([3]),
+            notarize_signers: HashMap::new(),
+            nullify_signers: HashMap::new(),
+            finalize_signers: HashMap::new(),
+        }];
+        let mismatches = compare(&expected, &actual, 1);
         assert!(mismatches
             .iter()
-            .any(|m| matches!(m, Mismatch::CertifiedViewsMismatch { .. })));
+            .any(|m| matches!(m, Mismatch::NotarizationSignatureCountMismatch { .. })));
     }
 
     #[test]

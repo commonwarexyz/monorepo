@@ -146,3 +146,62 @@ fn test_units_twins() {
 fn test_units_honest() {
     run_all_units("honest");
 }
+
+// --- Canonical-event path ---
+//
+// Exercises `encoder::encode_from_trace` end-to-end against the real
+// Quint model checker, using the canonical replay fixtures under
+// `consensus/tests/fixtures/replay/legacy/`. The canonical lowering is
+// 1:1 (no causal reconstruction), so the generated Quint differs in
+// action sequence from the legacy encoder, but both must pass Quint's
+// `traceTest`.
+
+#[test]
+fn canonical_encoder_produces_valid_quint() {
+    use commonware_consensus::simplex::replay::Trace;
+
+    let fixture_dir = fuzz_dir()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/replay/legacy");
+    assert!(
+        fixture_dir.exists(),
+        "canonical fixtures dir missing: {}",
+        fixture_dir.display()
+    );
+
+    // Pick the smallest honest fixture to keep Quint evaluation quick.
+    let mut candidates: Vec<_> = std::fs::read_dir(&fixture_dir)
+        .expect("read canonical fixtures")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|s| s.starts_with("honest_") && s.ends_with(".json"))
+        })
+        .collect();
+    candidates.sort_by_key(|e| {
+        std::fs::metadata(e.path()).map(|m| m.len()).unwrap_or(u64::MAX)
+    });
+    let smallest = candidates
+        .first()
+        .expect("at least one honest canonical fixture")
+        .path();
+
+    let json = std::fs::read_to_string(&smallest).expect("read canonical fixture");
+    let trace = Trace::from_json(&json).expect("parse canonical trace");
+    let qnt = crate::tracing::encoder::encode_from_trace(&trace, 0);
+
+    let hash = smallest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("canonical");
+    let qnt_path = quint_traces_dir().join(format!("trace_{hash}_canonical_test.qnt"));
+    std::fs::write(&qnt_path, &qnt).expect("write canonical .qnt");
+
+    let result = std::panic::catch_unwind(|| run_quint_test(&qnt_path));
+    let _ = std::fs::remove_file(&qnt_path);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

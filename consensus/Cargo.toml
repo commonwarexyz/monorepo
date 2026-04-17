@@ -29,6 +29,8 @@ commonware-utils.workspace = true
 futures.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+serde = { workspace = true, optional = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -45,11 +47,13 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
-commonware-consensus = { path = ".", features = ["mocks"] }
+commonware-consensus = { path = ".", features = ["mocks", "replay"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 rand_chacha.workspace = true
 rstest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 tracing-subscriber.workspace = true
 
 [package.metadata.cargo-udeps.ignore]
@@ -63,6 +67,17 @@ mocks = [
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
+]
+# Record and replay simplex traces as unit tests.
+#
+# Enables `src/simplex/replay/` and the cfg-gated hooks it drives
+# (`voter::Message::{Proposed,Replayed}`, `Mailbox::{proposed,replayed}`,
+# `Engine::voter_mailbox`). Pulls in `mocks` so the mock reporter is
+# available to the replay driver.
+replay = [
+	"mocks",
+	"dep:serde",
+	"dep:serde_json",
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",

@@ -54,6 +54,8 @@
 //!   * `MUTATOR_FAULTS`        - override `faults` in persisted traces, default inherits from seed
 //!   * `MUTATION_SEEDS_FOLDER` - seed corpus directory, default `corpus/tlc_mutator/`
 
+pub mod canonical;
+
 use crate::{
     quint_model,
     tlc::{TlcClient, TlcMapper, DEFAULT_TLC_URL},

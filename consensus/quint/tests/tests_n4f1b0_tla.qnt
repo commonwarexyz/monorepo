@@ -880,9 +880,16 @@ module tests {
         })
     }
 
-    // create_notarization uses all matching votes instead of exactly Q.
-    // Leader vote arrives 3rd (proposal branch — no cert formed). The first
-    // cert is formed on the 4th vote with all 4 signatures instead of Q=3.
+    // Leader is `n2`, receiver is `n2`. After `propose("n2", ...)`,
+    // n2's own notarize is already in `store_notarize_votes[n2]`, so
+    // the first cert forms at the 2nd aggregation delivery (store
+    // reaches Q). Subsequent deliveries do NOT add or extend a cert
+    // thanks to the one-shot `had_notarization` gate in replica_tla.qnt
+    // — matching Rust's `try_construct_notarization` short-circuit.
+    //
+    // See the parallel comment in `tests_n4f1b0.qnt` and
+    // `notarizationFirstCertFourSignersWitnessTest` for the case where
+    // widening genuinely produces a 4-signer first cert.
     run notarizationCertHasQSignaturesLeaderLateTest = {
         val proposal = {
             payload: "val_b0",
@@ -894,24 +901,28 @@ module tests {
             Map(0 -> "n2", 1 -> "n2", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
             CERTIFY_ALL_TRUE
         )
-        // n2 proposes
+        // n2 proposes (self-votes; `store_notarize_votes[n2]` += {n2}).
         .then(propose("n2", proposal.payload, proposal.parent))
-        // n2 receives n1's vote (1st, aggregation, no cert)
         .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+        // Aggregation delivery 1 — store grows to {n2, n1}, still < Q.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
-        // n2 receives n3's vote (2nd, aggregation, no cert)
         .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+        // Aggregation delivery 2 — store reaches Q = {n2, n1, n3}.
+        // FIRST cert formed here with 3 signers.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
-        // n2 receives its own leader vote (3rd, proposal branch — stores vote, no cert formed)
+        // Leader self-vote arrives via aggregation (broadcast_notarize
+        // already set → can_process_as_proposal = false).
+        // `had_notarization` true → no new cert.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
-        // n2 receives n0's vote (4th, aggregation — first cert formed with all 4 votes)
         .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+        // Aggregation delivery 4 — same one-shot gate, no new cert.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
         .then(all {
             assert(store_certificates.get("n2").exists(c =>
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
             )),
-            // BUG: cert has 4 signatures instead of Q=3
+            // The stored cert has exactly Q signers (formed at the
+            // earliest quorum; the one-shot gate prevents extension).
             assert(store_certificates.get("n2").exists(c =>
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
             )),
@@ -919,9 +930,55 @@ module tests {
         })
     }
 
+    // Witness test mirror of `tests_n4f1b0.qnt::
+    // notarizationFirstCertFourSignersWitnessTest`. Ensures the TLA
+    // variant of `replica` also assembles the first (and only) cert
+    // with all four signers when two aggregation votes precede the
+    // leader's vote.
+    run notarizationFirstCertFourSignersWitnessTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_ALL_TRUE
+        )
+        .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
+        .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+        .then(all {
+            assert(not(store_certificates.get("n0").exists(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+            ))),
+            unchanged_all,
+        })
+        .then(propose("n3", proposal.payload, proposal.parent))
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+        .then(all {
+            assert(store_certificates.get("n0").exists(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_signatures(c) == Set("n0", "n1", "n2", "n3")
+            )),
+            assert(store_certificates.get("n0").filter(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+            ).size() == 1),
+            unchanged_all,
+        })
+    }
+
     // Leader (n2) != self (n3). Two aggregation votes arrive before the
     // leader's vote. The proposal branch adds both the leader vote and
-    // own vote, so cert must still have exactly Q signatures.
+    // own vote; with the widened ≥-Q cert assembly this produces a
+    // 4-signer cert (not exactly Q).
     run notarizationCertHasQSignaturesLeaderDifferentTest = {
         val proposal = {
             payload: "val_b0",
@@ -947,7 +1004,7 @@ module tests {
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
             )),
             assert(store_certificates.get("n3").exists(c =>
-                is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
+                is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() >= Q
             )),
             unchanged_all,
         })

@@ -1225,6 +1225,8 @@ dependencies = [
  "rand_distr",
  "rayon",
  "rstest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
@@ -1236,6 +1238,7 @@ version = "2026.3.0"
 dependencies = [
  "arbitrary",
  "base64 0.22.1",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",

@@ -684,13 +684,38 @@ pub fn extract_reporter_states(
                                 payload: hex,
                             },
                         );
-                        notarization_signature_counts.insert(view, Some(signature_count));
+                        // Multiple notarization certs for the same
+                        // view can appear in `store_certificates` under
+                        // equivocation or future-Byzantine scenarios.
+                        // Pick the MAX signer count as the canonical
+                        // representative. With the one-shot
+                        // `had_notarization` gate in replica.qnt this
+                        // is usually a no-op (one cert per subject),
+                        // but the max-pick prevents ITF-set-ordering
+                        // flakiness if that invariant ever relaxes.
+                        let existing = notarization_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        notarization_signature_counts.insert(
+                            view,
+                            Some(signature_count.max(existing)),
+                        );
                     }
                     "Nullification" => {
                         let view = parse_int(&inner["view"]);
                         let signature_count = parse_set(&inner["signatures"]).len();
                         nullifications.insert(view);
-                        nullification_signature_counts.insert(view, Some(signature_count));
+                        let existing = nullification_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        nullification_signature_counts.insert(
+                            view,
+                            Some(signature_count.max(existing)),
+                        );
                     }
                     "Finalization" => {
                         let view = parse_int(
@@ -720,7 +745,15 @@ pub fn extract_reporter_states(
                                 payload: hex,
                             },
                         );
-                        finalization_signature_counts.insert(view, Some(signature_count));
+                        let existing = finalization_signature_counts
+                            .get(&view)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                        finalization_signature_counts.insert(
+                            view,
+                            Some(signature_count.max(existing)),
+                        );
                     }
                     _ => {}
                 }

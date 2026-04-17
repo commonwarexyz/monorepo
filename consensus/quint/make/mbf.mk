@@ -31,8 +31,9 @@ replay_mutated_traces:
 		exit 1; \
 	fi; \
 	failed=0; total=0; \
-	for f in $$(find $(MUTATED_TRACES_DIR) -maxdepth 1 -name "*.json" -not -path "*/.*"); do \
+	for f in $$(find $(MUTATED_TRACES_DIR) -name "*.json" -not -path "*/.*"); do \
 		[ -f "$$f" ] || continue; \
+		[ -s "$$f" ] || continue; \
 		case "$$f" in *_expected.json) continue;; esac; \
 		total=$$((total + 1)); \
 		echo "=== Replaying $$f ==="; \
@@ -88,19 +89,19 @@ mbf_live_watch:
 		seen_dir="$$dir/.seen"; \
 		failed_dir="$$dir/.failed"; \
 		mkdir -p "$$dir" "$$seen_dir" "$$failed_dir"; \
-		echo "watching $$dir for new traces..."; \
+		echo "watching $$dir (recursive) for new traces..."; \
 		while true; do \
-			for f in $$(find "$$dir" -maxdepth 1 -name "*.json" -not -path "*/.*" 2>/dev/null); do \
+			for f in $$(find "$$dir" -name "*.json" -not -path "*/.*" 2>/dev/null); do \
 				[ -f "$$f" ] || continue; \
+				[ -s "$$f" ] || continue; \
 				case "$$f" in *_expected.json) continue;; esac; \
 				mkdir -p "$$seen_dir" "$$failed_dir"; \
 				name=$$(basename "$$f"); \
 				[ -f "$$seen_dir/$$name" ] && continue; \
 				echo "=== Replaying $$f ==="; \
 				if REPLAY_FAULTS=$(MBF_FAULTS) cargo run -p commonware-consensus-fuzz --bin replay_trace -- "$$f"; then \
-					echo "PASS"; \
-					: > "$$seen_dir/$$name"; \
-					rm -f "$$f"; \
+					echo "PASS (archived to $$seen_dir/$$name)"; \
+					mv "$$f" "$$seen_dir/$$name"; \
 				else \
 					mv "$$f" "$$failed_dir/$$name"; \
 					echo "FAIL: stored failed trace at $$failed_dir/$$name"; \

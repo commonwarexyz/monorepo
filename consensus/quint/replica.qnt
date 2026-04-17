@@ -954,13 +954,15 @@ module replica {
                         observe_round_proposal(timer.next_self, proposal, false),
                         proposal
                     )
-            // Prefer an already-sufficient quorum from stored votes before
-            // adding more signers, so the first assembled cert stays at Q.
-            val cert_existing = if (notarize_ok) create_notarization(id, proposal, store_notarize) else None
-            val cert_leader = if (is_some(cert_existing)) cert_existing
-                else if (notarize_ok) create_notarization(id, proposal, store_notarize.union(Set(vote))) else None
-            val maybe_not_cert_p = if (is_some(cert_leader)) cert_leader
-                else if (notarize_ok) create_notarization(id, proposal, new_store_notarize_p) else None
+            // Build the certificate from the fullest available vote set.
+            // This matches the Rust batcher
+            // (src/simplex/actors/batcher/round.rs:417): once quorum is
+            // reached, the certificate includes every verified notarize
+            // vote the batcher has observed, not just the first Q.
+            // The cardinality of `cert_signatures` is therefore ≥ Q, not
+            // exactly Q. Replaces an earlier Q-cap preference that
+            // diverged from impl under MBF mutation.
+            val maybe_not_cert_p = if (notarize_ok) create_notarization(id, proposal, new_store_notarize_p) else None
             val can_cert_p = can_certify(id, proposal.payload)
             val should_broadcast_not_p = not(broadcast_notarization(id, view))
             val effect_p = match maybe_not_cert_p {
@@ -1018,9 +1020,14 @@ module replica {
             })
             val now_notarized = is_proposal_notarized_votes(proposal, new_store_notarize)
 
-            // Prefer an existing quorum before adding the newly delivered vote.
-            val cert_before_vote = create_notarization(id, proposal, store_notarize)
-            val maybe_not_cert = if (is_some(cert_before_vote)) cert_before_vote
+            // Build the certificate from the fullest available vote
+            // set (≥ Q, matching Rust's batcher). One-shot:
+            // `try_construct_notarization` (src/simplex/actors/batcher/
+            // round.rs:422) returns None if a notarization is already
+            // stored for this subject; we mirror that here with the
+            // `had_notarization` gate so the store never holds two
+            // notarizations for the same (view, proposal).
+            val maybe_not_cert = if (had_notarization) None
                 else create_notarization(id, proposal, new_store_notarize)
             val can_cert = can_certify(id, proposal.payload)
             val is_new_cert = not(had_notarization)
@@ -1051,13 +1058,17 @@ module replica {
                     if (can_self_notarize_agg) new_store_notarize.union(Set(self_vote_agg))
                     else new_store_notarize
                 ),
+                // Add the newly-constructed cert. `maybe_not_cert` is
+                // `None` whenever `had_notarization` holds (see the gate
+                // above), so this branch is a no-op in that case — the
+                // store contains at most one notarization per (view,
+                // proposal), matching Rust's one-shot assembly.
                 store_certificates' = match maybe_not_cert {
-                    | Some(cert) => if (is_new_cert)
+                    | Some(cert) =>
                         store_certificates.setBy(id, old => old.union(Set(Notarization(cert))))
-                      else
-                        store_certificates
                     | None => store_certificates
                 },
+                // Re-broadcast is also one-per-view.
                 sent_certificates' = match maybe_not_cert {
                     | Some(cert) => if (should_broadcast_not)
                         sent_certificates.union(Set(Notarization(cert)))
@@ -1098,10 +1109,10 @@ module replica {
             proposal.view <= self.view + 1,
             val conflict = has_leader_proposal_conflict(self, proposal)
             val new_store_finalize = store_finalize.union(Set(vote))
-            // Prefer an existing quorum before adding the newly delivered vote.
-            val cert_before_vote = if (conflict) None else create_finalization(id, proposal, store_finalize)
-            val maybe_fin_cert = if (is_some(cert_before_vote)) cert_before_vote
-                else if (conflict) None else create_finalization(id, proposal, new_store_finalize)
+            // Build the certificate from the fullest available vote
+            // set (≥ Q, matching Rust impl).
+            val maybe_fin_cert = if (conflict) None
+                else create_finalization(id, proposal, new_store_finalize)
             val is_new_cert = not(store_certificates.get(id).exists(c => and {
                 is_finalization_cert(c),
                 cert_proposal(c) == Some(proposal),
@@ -1163,13 +1174,11 @@ module replica {
             }
             val certs = store_certificates.get(id)
             val had_nullification = certs.exists(c => is_nullification_cert(c) and cert_view(c) == vote.view)
-            // Prefer an existing quorum before adding more signers, so the
-            // first assembled cert stays at Q.
-            val cert_existing = create_nullification(id, vote.view, store_nullify)
-            val cert_before_own = if (is_some(cert_existing)) cert_existing
-                else create_nullification(id, vote.view, new_nullify_votes)
-            val maybe_null_cert = if (is_some(cert_before_own)) cert_before_own
-                else create_nullification(id, vote.view, timer.next_stored_nullify)
+            // Build the certificate from the fullest available vote
+            // set (timer.next_stored_nullify includes the node's own
+            // nullify if the leader-nullify trigger fired). Cardinality
+            // is ≥ Q, matching Rust impl.
+            val maybe_null_cert = create_nullification(id, vote.view, timer.next_stored_nullify)
             match maybe_null_cert {
                 | Some(cert) => all {
                     store_notarize_votes' = store_notarize_votes,
