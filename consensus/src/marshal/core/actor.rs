@@ -543,10 +543,6 @@ where
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
-                    Message::Persist { round, block, ack } => {
-                        self.persist_block(round, block.digest(), block).await;
-                        ack.send_lossy(());
-                    }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
                         let commitment = notarization.proposal.payload;
@@ -1349,20 +1345,6 @@ where
     ) {
         self.notify_subscribers(&block);
         self.cache.put_block(round, digest, block.into()).await;
-    }
-
-    /// Ensure a block is durably present in local storage without asserting it
-    /// belongs in the verified cache.
-    async fn persist_block(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        if self.find_block_in_storage(digest).await.is_some() {
-            return;
-        }
-        self.cache_block(round, digest, block).await;
     }
 
     /// Sync both finalization archives to durable storage.

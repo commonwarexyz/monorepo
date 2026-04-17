@@ -465,7 +465,7 @@ where
                 // `certify` resolving true drives the finalize vote, so mere
                 // buffered availability is not sufficient here. Persist the
                 // block through marshal before signaling success.
-                if marshal.persist(round, block).await {
+                if marshal.verified(round, block).await {
                     tx.send_lossy(true);
                 }
             });

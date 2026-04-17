@@ -120,20 +120,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
-    /// A request to make a block durable locally without asserting it was
-    /// locally application-verified.
-    ///
-    /// The `ack` is signaled after the block is durably present in marshal's
-    /// local storage, either because it was already present or because marshal
-    /// persisted it during this request.
-    Persist {
-        /// The round in which the block was notarized.
-        round: Round,
-        /// The block to durably retain.
-        block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: oneshot::Sender<()>,
-    },
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
@@ -335,21 +321,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
-            .await
-            .is_some()
-    }
-
-    /// Requests that marshal durably retain a block locally, without claiming
-    /// that the caller just performed application verification.
-    ///
-    /// Returns `true` once the actor has confirmed the block is durably present
-    /// in local storage. Returns `false` if the marshal actor shut down before
-    /// acknowledging. Callers MUST NOT treat `false` as sufficient to proceed
-    /// with any action that requires local crash recovery of the block.
-    #[must_use = "callers must not proceed on an unpersisted block"]
-    pub async fn persist(&self, round: Round, block: V::Block) -> bool {
-        self.sender
-            .request(|ack| Message::Persist { round, block, ack })
             .await
             .is_some()
     }

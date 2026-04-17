@@ -902,12 +902,12 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // During crash recovery we may call `marshal.persist` twice for
+                    // During crash recovery we may call `marshal.verified` twice for
                     // the same block; the call is idempotent.
-                    if !marshaled.marshal.persist(round, block).await {
+                    if !marshaled.marshal.verified(round, block).await {
                         debug!(
                             ?round,
-                            "marshal unavailable during certify re-proposal persist ack; \
+                            "marshal unavailable during certify re-proposal verified ack; \
                              skipping certify resolution"
                         );
                         return;
