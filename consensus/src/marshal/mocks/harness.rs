@@ -558,7 +558,9 @@ async fn advance_hailstorm_to<H: TestHarness>(
             H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
         }
 
-        state.canonical.push((height, expected_digest, finalization));
+        state
+            .canonical
+            .push((height, expected_digest, finalization));
         *state.parent = expected_digest;
         *state.parent_commitment = H::commitment(&block);
 
