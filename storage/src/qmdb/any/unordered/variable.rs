@@ -492,6 +492,124 @@ pub(crate) mod test {
         });
     }
 
+    /// A grandchild built after its committed ancestor has been dropped must still apply
+    /// successfully. When the oldest alive ancestor's chain start shifts (because a committed
+    /// ancestor's `Arc` was released), the root-based staleness check must match the DB's
+    /// post-committed-ancestor state. The fix: shift `db_root` alongside `db_size` to the
+    /// oldest alive ancestor's `base_root()`.
+    #[test_traced]
+    fn test_apply_after_committed_ancestor_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key_a = Sha256::hash(&[1]);
+            let key_b = Sha256::hash(&[2]);
+            let key_c = Sha256::hash(&[3]);
+
+            // Build A then B while both are alive (B must capture A's total_root in its
+            // ancestor_roots).
+            let a = db
+                .new_batch()
+                .write(key_a, Some(vec![10]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key_b, Some(vec![20]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Apply A, then drop our reference. B's Weak for A now fails to upgrade.
+            db.apply_batch(a).await.unwrap();
+
+            // Build C off B after A was dropped. C's chain walk only sees B; the effective
+            // chain start shifts to A.total_size (B.base_size), and the shifted db_root must
+            // be A.total_root (= B.base_root()).
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key_c, Some(vec![30]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Apply C. The DB is at A.total_root, and C's shifted db_root matches it. The
+            // staleness check must accept C and replay B's diff into the snapshot.
+            db.apply_batch(c).await.unwrap();
+
+            assert_eq!(db.get(&key_a).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&key_b).await.unwrap(), Some(vec![20]));
+            assert_eq!(db.get(&key_c).await.unwrap(), Some(vec![30]));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A child built off a sibling branch with the same operation count as the applied branch
+    /// must be rejected as stale. The root-based staleness check catches this; the old
+    /// size-only check would have silently accepted it (because the child's `base_size` ==
+    /// applied sibling's `total_size`) and corrupted the snapshot by replaying the orphaned
+    /// sibling's diff as if it were a committed ancestor.
+    #[test_traced]
+    fn test_stale_batch_rejected_same_size_sibling_descendant() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+            let key3 = Sha256::hash(&[3]);
+
+            // Two sibling roots with the same op count: each writes one key, so total_size
+            // matches.
+            let b1 = db
+                .new_batch()
+                .write(key1, Some(vec![10]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let b2 = db
+                .new_batch()
+                .write(key2, Some(vec![20]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert_eq!(b1.total_size, b2.total_size);
+
+            // Child of b2 (the branch we will NOT apply).
+            let c = b2
+                .new_batch::<Sha256>()
+                .write(key3, Some(vec![30]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Apply b1, orphaning b2 and its descendants.
+            db.apply_batch(b1).await.unwrap();
+            let expected_root = db.root();
+            let expected_bounds = db.bounds().await;
+
+            // Applying c must fail: c's base_root (= b2.total_root) does not match the DB's
+            // current root (= b1.total_root).
+            let result = db.apply_batch(c).await;
+            assert!(
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch for child of orphaned same-size sibling, got {result:?}"
+            );
+
+            // DB state is untouched.
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.bounds().await, expected_bounds);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&key2).await.unwrap(), None);
+            assert_eq!(db.get(&key3).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Sibling batches with different operation counts are still detected
     /// as stale.
     #[test_traced]

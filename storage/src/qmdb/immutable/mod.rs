@@ -442,7 +442,6 @@ where
         if !valid {
             return Err(Error::StaleBatch {
                 db_size,
-                batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
             });
         }

@@ -105,12 +105,11 @@ pub enum Error<F: Family> {
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
     /// The batch was created from a different database state than the current one.
-    #[error(
-        "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
-    )]
+    #[error("stale batch: db has {db_size} ops, batch expects {batch_base_size}")]
     StaleBatch {
+        /// Current committed DB size.
         db_size: u64,
-        batch_db_size: u64,
+        /// DB size this batch expected after all its ancestors were applied.
         batch_base_size: u64,
     },
 }

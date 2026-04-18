@@ -119,6 +119,9 @@ where
     /// Created from the DB via `db.new_batch()`.
     Db {
         db_size: u64,
+        /// Ops MMR root at `db_size`. Threaded into the resulting [`MerkleizedBatch`] so
+        /// `apply_batch` can distinguish same-size-but-different sibling branches by root.
+        db_root: D,
         inactivity_floor_loc: Location<F>,
         active_keys: usize,
     },
@@ -138,14 +141,11 @@ where
         }
     }
 
-    /// Effective number of committed DB operations at the base of the batch chain.
-    /// For `Db`, this is the DB size when `new_batch()` was called.
-    /// For `Child`, this is inherited from the parent (which may be higher than
-    /// the original DB size if ancestors were dropped before merkleize).
-    fn db_size(&self) -> u64 {
+    /// Ops MMR root at the chain's starting committed state. Inherited down the chain.
+    fn db_root(&self) -> D {
         match self {
-            Self::Db { db_size, .. } => *db_size,
-            Self::Child(parent) => parent.db_size,
+            Self::Db { db_root, .. } => *db_root,
+            Self::Child(parent) => parent.db_root,
         }
     }
 
@@ -247,21 +247,37 @@ where
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Effective DB size at the base of this batch's ancestor chain. Equals `base_size`
-    /// when all ancestors are alive, but shifts up if ancestors were dropped before
-    /// merkleize (to account for the gap left by dead ancestors). Used by `apply_batch`
-    /// to validate that the DB hasn't diverged from this batch's chain.
-    pub(crate) db_size: u64,
+    /// Ops MMR root at the chain's starting committed state (the DB's root when the root
+    /// batch of this chain was created). Used by `apply_batch`'s staleness check to detect
+    /// "DB at chain start — no ancestors committed."
+    pub(crate) db_root: D,
+
+    /// Each ancestor's `total_root` (ops MMR root after that ancestor). 1:1 with
+    /// `ancestor_diffs`. `apply_batch` matches the DB's current root against these to
+    /// identify which ancestors are already committed.
+    pub(crate) ancestor_roots: Vec<D>,
 
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
-    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
+    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs. 1:1 with
+    /// `ancestor_roots`.
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+}
 
-    /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
-    pub(crate) ancestor_diff_ends: Vec<u64>,
+impl<F: Family, D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<F, D, U>
+where
+    Operation<F, U>: Send + Sync,
+{
+    /// Ops MMR root the DB must have for this batch to be directly applicable on top of its
+    /// ancestors. For a root batch, equals `db_root`; for a child, equals the parent's
+    /// `total_root`.
+    pub(crate) fn base_root(&self) -> D {
+        self.ancestor_roots.first().copied().unwrap_or(self.db_root)
+    }
+
+    /// Ops MMR root after this batch's ops. Children inherit this as their `base_root`.
+    pub(crate) fn total_root(&self) -> D {
+        self.journal_batch.root()
+    }
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -280,6 +296,7 @@ where
     ancestors: Vec<Arc<MerkleizedBatch<F, H::Digest, U>>>,
     base_size: u64,
     db_size: u64,
+    db_root: H::Digest,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
 }
@@ -685,7 +702,7 @@ where
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestor_diff_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
+        let ancestor_roots: Vec<_> = self.ancestors.iter().map(|a| a.total_root()).collect();
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
@@ -697,9 +714,9 @@ where
             base_size: self.base_size,
             total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
-            db_size: self.db_size,
+            db_root: self.db_root,
+            ancestor_roots,
             ancestor_diffs,
-            ancestor_diff_ends,
         }))
     }
 }
@@ -728,23 +745,26 @@ where
             v
         });
         // If the Weak parent chain was truncated (an ancestor was committed and freed), the
-        // oldest alive ancestor's items don't start at db_size. Example: chain A -> B -> C,
-        // A committed and dropped. ancestors() yields [B] (A's Weak is dead). B's items start
-        // at A.size(), not db_size. We use the journal (strong Arcs, always intact) to compute
-        // the actual base so reads fall through to disk for locations in the gap.
-        let db_size = self.base.db_size();
-        let effective_db_size = ancestors.last().map_or(db_size, |oldest| {
-            let oldest_base =
-                oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64;
-            db_size.max(oldest_base)
-        });
+        // oldest alive ancestor's items don't start at the chain's original db_size. For a
+        // root batch (no ancestors) db_size/db_root come from `Base::Db`; for a child we derive
+        // them from the oldest alive ancestor's base so the chain start reflects the shifted
+        // position (and `apply_batch`'s root check will match the DB's current state after any
+        // freed ancestors have been applied and dropped).
+        let (db_size, db_root) = match ancestors.last() {
+            Some(oldest) => (
+                oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64,
+                oldest.base_root(),
+            ),
+            None => (self.base.base_size(), self.base.db_root()),
+        };
         (
             self.mutations,
             Merkleizer {
                 journal_batch: self.journal_batch,
                 ancestors,
                 base_size: self.base.base_size(),
-                db_size: effective_db_size,
+                db_size,
+                db_root,
                 base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
                 base_active_keys: self.base.active_keys(),
             },
@@ -1341,6 +1361,7 @@ where
             mutations: BTreeMap::new(),
             base: Base::Db {
                 db_size: journal_size,
+                db_root: self.log.root(),
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
@@ -1372,33 +1393,34 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor_diff_ends[i] (partial commit).
-        let valid = db_size == batch.db_size
-            || db_size == batch.base_size
-            || batch.ancestor_diff_ends.contains(&db_size);
-        if !valid {
+        let current_root = self.log.root();
+
+        // Match current root to one of the batch's recorded checkpoints to determine which
+        // ancestors (if any) are already committed. Root comparison catches same-size sibling
+        // branches that a size-only check would accept.
+        let committed_from = if current_root == batch.db_root {
+            batch.ancestor_roots.len()
+        } else if current_root == batch.base_root() {
+            0
+        } else if let Some(i) = batch.ancestor_roots.iter().position(|r| *r == current_root) {
+            i
+        } else {
             return Err(crate::qmdb::Error::StaleBatch {
                 db_size,
-                batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
             });
-        }
+        };
         let start_loc = Location::new(db_size);
 
         // 1. Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // 2. Build committed_locs: for each key in a committed ancestor batch, record the nearest
-        //    (to child) committed ancestor's final state. Some(loc) = Active at loc, None =
-        //    Deleted. It's safe to use a hashmap here since we don't rely on iteration order.
+        // 2. Build committed_locs from ancestors already in committed state (indices
+        //    `committed_from..`), nearest-to-child wins via .or_insert.
         let mut committed_locs: HashMap<&U::Key, Option<Location<F>>> = HashMap::new();
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
-                for (key, entry) in ancestor_diff.iter() {
-                    // parent-first order: .or_insert keeps the nearest committed.
-                    committed_locs.entry(key).or_insert(entry.loc());
-                }
+        for ancestor_diff in &batch.ancestor_diffs[committed_from..] {
+            for (key, entry) in ancestor_diff.iter() {
+                committed_locs.entry(key).or_insert(entry.loc());
             }
         }
 
@@ -1414,11 +1436,8 @@ where
             apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
         }
 
-        // 4. Apply uncommitted ancestor diffs (skip committed batches, skip seen keys).
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.ancestor_diff_ends[i] <= db_size {
-                continue;
-            }
+        // 4. Apply uncommitted ancestor diffs (indices `0..committed_from`, skip seen keys).
+        for ancestor_diff in &batch.ancestor_diffs[..committed_from] {
             for (key, entry) in ancestor_diff.iter() {
                 if !seen.insert(key) {
                     continue;
@@ -1466,9 +1485,9 @@ where
             base_size: journal_size,
             total_size: journal_size,
             total_active_keys: self.active_keys,
-            db_size: journal_size,
+            db_root: self.log.root(),
+            ancestor_roots: Vec::new(),
             ancestor_diffs: Vec::new(),
-            ancestor_diff_ends: Vec::new(),
         })
     }
 }
