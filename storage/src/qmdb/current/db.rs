@@ -19,7 +19,7 @@ use crate::{
             operation::{update::Update, Operation},
         },
         current::{
-            batch::BitmapBatch,
+            batch::{BitmapBatch, SharedBitmap},
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof},
         },
@@ -65,9 +65,10 @@ pub struct Db<
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     ///
-    /// Stored as a [`BitmapBatch`] so that `apply_batch` can
-    /// push layers in O(batch) instead of deep-cloning.
-    pub(super) status: BitmapBatch<N>,
+    /// Shared behind an `Arc<RwLock<..>>` so that live batches can hold a reference to the
+    /// committed bitmap while [`Db::apply_batch`] mutates it in place under the write lock. See
+    /// [`SharedBitmap`]'s doc for the branch-validity caveat that callers must respect.
+    pub(super) status: Arc<SharedBitmap<N>>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -204,7 +205,7 @@ where
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
             self.grafted_snapshot(),
-            self.status.clone(),
+            BitmapBatch::Base(Arc::clone(&self.status)),
         )
     }
 
@@ -216,7 +217,7 @@ where
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        OperationProof::new(hasher, &self.status, &storage, loc, ops_root).await
+        OperationProof::new(hasher, self.status.as_ref(), &storage, loc, ops_root).await
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -240,7 +241,7 @@ where
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
             hasher,
-            &self.status,
+            self.status.as_ref(),
             &storage,
             &self.any.log,
             start_loc,
@@ -382,18 +383,6 @@ where
         Self::pair_absorption_threshold(self.status.pruned_chunks() as u64)
     }
 
-    /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
-    ///
-    /// Each [`Db::apply_batch`] pushes a new `Layer` on the bitmap. These layers are cheap
-    /// to create but make subsequent reads walk the full chain. Calling `flatten` collapses
-    /// the chain into a single `Base`, bounding lookup cost.
-    ///
-    /// This is called automatically by [`Db::prune`]. Callers that apply many batches without
-    /// pruning should call this periodically.
-    pub fn flatten(&mut self) {
-        self.status.flatten();
-    }
-
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -410,15 +399,10 @@ where
             return Err(Error::PruneBeyondMinRequired(prune_loc, inactivity_floor));
         }
 
-        self.flatten();
-
         // Prune bitmap chunks below the inactivity floor, but for delayed-merge families only
         // advance to a rewind-safe settled boundary.
         let settled_bitmap_floor = self.settled_bitmap_prune_loc()?;
-        let BitmapBatch::<N>::Base(base) = &mut self.status else {
-            unreachable!("flatten() guarantees Base");
-        };
-        Arc::make_mut(base).prune_to_bit(*settled_bitmap_floor);
+        self.status.write().prune_to_bit(*settled_bitmap_floor);
 
         // Prune the grafted tree to match the bitmap's pruned chunks.
         let pruned_chunks = self.status.pruned_chunks() as u64;
@@ -484,8 +468,6 @@ where
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
-        self.flatten();
-
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
         if rewind_size == current_size {
@@ -544,28 +526,22 @@ where
         // handle may be internally diverged and must be dropped by the caller.
         let restored_locs = self.any.rewind(size).await?;
 
-        // Patch bitmap: truncate to rewound size, then mark restored locations as active.
+        // Patch shared bitmap under the write lock: truncate to rewound size, then mark restored
+        // locations as active. Live batches built pre-rewind will silently return wrong data on
+        // any chunk read that falls through to the committed bitmap; callers must drop them.
         {
-            let BitmapBatch::<N>::Base(base) = &mut self.status else {
-                unreachable!("flatten() guarantees Base");
-            };
-            let status: &mut BitMap<N> = Arc::get_mut(base).expect("flatten ensures sole owner");
-            status.truncate(rewind_size);
+            let mut guard = self.status.write();
+            guard.truncate(rewind_size);
             for loc in &restored_locs {
-                status.set_bit(**loc, true);
+                guard.set_bit(**loc, true);
             }
-            status.set_bit(rewind_size - 1, true);
+            guard.set_bit(rewind_size - 1, true);
         }
-        let BitmapBatch::Base(status) = &self.status else {
-            unreachable!("flatten() guarantees Base");
-        };
-        let status = status.as_ref();
 
-        // Rebuild grafted tree and canonical root for the patched bitmap.
         let hasher = StandardHasher::<H>::new();
         let grafted_tree = build_grafted_tree::<F, H, N>(
             &hasher,
-            status,
+            self.status.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
             self.thread_pool.as_ref(),
@@ -577,9 +553,16 @@ where
             &self.any.log.merkle,
             hasher.clone(),
         );
-        let partial_chunk = partial_chunk(status);
+        let partial_chunk = partial_chunk(self.status.as_ref());
         let ops_root = self.any.log.root();
-        let root = compute_db_root(&hasher, status, &storage, partial_chunk, &ops_root).await?;
+        let root = compute_db_root(
+            &hasher,
+            self.status.as_ref(),
+            &storage,
+            partial_chunk,
+            &ops_root,
+        )
+        .await?;
 
         self.grafted_tree = grafted_tree;
         self.root = root;
@@ -592,15 +575,15 @@ where
         let mut metadata = self.metadata.lock().await;
         metadata.clear();
 
+        // Snapshot the pruning boundary under the read lock; the guard drops before any await.
+        let pruned_chunks_u64 = self.status.pruned_chunks() as u64;
+
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(
-            key,
-            (self.status.pruned_chunks() as u64).to_be_bytes().to_vec(),
-        );
+        metadata.put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
         // Write the pinned nodes of the grafted tree.
-        let pruned_chunks = Location::<F>::new(self.status.pruned_chunks() as u64);
+        let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
         for (i, grafted_pos) in F::nodes_to_pin(pruned_chunks).enumerate() {
             let digest = self
                 .grafted_tree
@@ -678,30 +661,43 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap overlay. The batch's bitmap is a Layer whose overlay
-        //    contains all dirty chunks. Walk the layer chain to collect and apply
-        //    all uncommitted ancestor overlays + this batch's overlay.
-        {
-            let mut overlays = Vec::new();
-            let mut current = &batch.bitmap;
-            while let super::batch::BitmapBatch::Layer(layer) = current {
-                if layer.overlay.len <= db_size {
-                    break;
-                }
-                overlays.push(Arc::clone(&layer.overlay));
-                current = &layer.parent;
+        // 2. Collect bitmap overlays from the batch chain. The `Arc<ChunkOverlay>`s we push here
+        //    are independent of the batch's layer chain, so the batch can be dropped before we
+        //    touch the shared bitmap below.
+        let mut overlays = Vec::new();
+        let mut current = &batch.bitmap;
+        while let super::batch::BitmapBatch::Layer(layer) = current {
+            if layer.overlay.len <= db_size {
+                break;
             }
-            // Apply in chronological order (deepest ancestor first).
-            for overlay in overlays.into_iter().rev() {
-                self.status.apply_overlay(overlay);
-            }
+            overlays.push(Arc::clone(&layer.overlay));
+            current = &layer.parent;
         }
 
         // 3. Apply grafted tree (merkle layer handles partial ancestor skipping).
         self.grafted_tree.apply_batch(&batch.grafted)?;
 
-        // 4. Canonical root.
-        self.root = batch.canonical_root;
+        // 4. Snapshot the canonical root before releasing the batch.
+        let canonical_root = batch.canonical_root;
+
+        // 5. Release the batch so its chain's refs drop before we mutate the shared bitmap.
+        drop(batch);
+
+        // 6. Apply overlays in place under the write lock.
+        {
+            let mut guard = self.status.write();
+            for overlay in overlays.into_iter().rev() {
+                guard.extend_to(overlay.len);
+                let pruned = guard.pruned_chunks();
+                for (&idx, chunk) in &overlay.chunks {
+                    if idx >= pruned {
+                        guard.set_chunk_by_index(idx, chunk);
+                    }
+                }
+            }
+        }
+
+        self.root = canonical_root;
 
         Ok(range)
     }
@@ -938,7 +934,7 @@ pub(super) async fn compute_grafted_leaves<F: merkle::Graftable, H: Hasher, cons
 /// (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
-    bitmap: &BitMap<N>,
+    bitmap: &impl BitmapReadable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
@@ -951,7 +947,7 @@ pub(super) async fn build_grafted_tree<F: merkle::Graftable, H: Hasher, const N:
     let leaves = compute_grafted_leaves::<F, H, N>(
         hasher,
         ops_tree,
-        (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, *bitmap.get_chunk(chunk_idx))),
+        (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
         pool,
     )
     .await?;
@@ -1101,38 +1097,35 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let h1 = StandardHasher::<Sha256>::new();
-        let h2 = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&h1, &ops, &grafted, None);
-        let r2 = combine_roots(&h2, &ops, &grafted, None);
+        let r1 = combine_roots(&hasher, &ops, &grafted, None);
+        let r2 = combine_roots(&hasher, &ops, &grafted, None);
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let h1 = StandardHasher::<Sha256>::new();
-        let h2 = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&h1, &ops, &grafted, None);
-        let with = combine_roots(&h2, &ops, &grafted, Some((5, &partial_digest)));
+        let without = combine_roots(&hasher, &ops, &grafted, None);
+        let with = combine_roots(&hasher, &ops, &grafted, Some((5, &partial_digest)));
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let h1 = StandardHasher::<Sha256>::new();
-        let h2 = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&h1, &ops_a, &grafted, None);
-        let r2 = combine_roots(&h2, &ops_b, &grafted, None);
+        let r1 = combine_roots(&hasher, &ops_a, &grafted, None);
+        let r2 = combine_roots(&hasher, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
     }
 

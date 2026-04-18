@@ -6,6 +6,29 @@
 //! See [`crate::qmdb::any`] for batch API examples (forking, sequential
 //! commit, staleness). The Current layer uses the same batch API.
 //!
+//! # Batch validity
+//!
+//! Current batches are branch-scoped views, not immutable snapshots.
+//!
+//! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
+//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid
+//! objects: do not read through them, do not build children from them, and do not attempt to
+//! apply them.
+//!
+//! A short rule of thumb:
+//! - A batch is only usable while it stays on the winning branch.
+//!
+//! Valid:
+//! - Build `A`, apply `A`, then build `B` from `A` and read or merkleize `B`.
+//! - Call [`Db::to_batch`](db::Db::to_batch) and use the returned batch only while no divergent
+//!   branch has been applied.
+//!
+//! Invalid:
+//! - Build siblings `B1` and `B2`, apply `B1`, then call `B2.get()`, `B2.new_batch()`, or
+//!   `apply_batch(B2)`.
+//! - Hold `snapshot = db.to_batch()`, mutate the DB through another branch, then use `snapshot`
+//!   again.
+//!
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some
@@ -357,7 +380,7 @@ where
 
     Ok(db::Db {
         any,
-        status: batch::BitmapBatch::Base(Arc::new(status)),
+        status: Arc::new(batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
@@ -403,7 +426,10 @@ pub mod tests {
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
+    };
     use tracing::warn;
 
     type Error<F> = crate::qmdb::Error<F>;
@@ -2827,120 +2853,118 @@ pub mod tests {
         });
     }
 
-    /// flatten() is a no-op on a freshly initialized DB (no layers to collapse).
+    /// A live batch (built off the committed state) must remain readable and applicable after
+    /// [`Db::prune`] advances the shared bitmap's pruning boundary. Pruning only discards
+    /// chunks for inactive bits (below the inactivity floor); the batch's own chain and
+    /// overlays operate at or above the floor, so no reads should land in the pruned region.
     #[test_traced("INFO")]
-    fn test_flatten_noop_on_fresh_db() {
+    fn test_current_live_batch_safe_across_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-noop", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-live", &ctx),
+            )
+            .await
+            .unwrap();
 
-            let root_before = db.root();
-            db.flatten();
-            assert_eq!(db.root(), root_before);
+            // Seed enough ops to span multiple bitmap chunks.
+            let mut seed = db.new_batch();
+            for i in 0u64..300 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed_m = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
+            let mut p = db.new_batch();
+            for i in 0u64..250 {
+                p = p.write(key(i), Some(val(i + 10_000)));
+            }
+            let p_m = p.merkleize(&db, None).await.unwrap();
+            db.apply_batch(Arc::clone(&p_m)).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build c off p_m; c is live and shares the committed bitmap via its chain.
+            let c = p_m
+                .new_batch::<Sha256>()
+                .write(key(250), Some(val(99_999)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Prune with c still alive. This advances pruned_chunks on the shared bitmap.
+            let floor = db.inactivity_floor_loc();
+            db.prune(floor).await.unwrap();
+
+            // Sanity: c's pending write is still readable via the any-layer diff chain.
+            assert_eq!(c.get(&key(250), &db).await.unwrap(), Some(val(99_999)));
+
+            // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
+            // chunks below the current pruned boundary.
+            db.apply_batch(c).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
 
             db.destroy().await.unwrap();
         });
     }
 
-    /// flatten() preserves the root and data after multiple apply_batch calls.
+    /// Regression: extending a batch after it has been applied (building a child off the
+    /// just-applied parent) must produce correct data.
+    ///
+    /// With the shared-bitmap `RwLock` design, applying `A` mutates the committed bitmap in
+    /// place; reads through `A`'s chain after apply fall through to the committed bitmap (which
+    /// now reflects `A`'s state), and `A`'s own overlays applied on top are consistent with
+    /// committed. So `A.new_batch()` followed by merkleize + apply is the right-by-construction
+    /// case, and this test locks it in.
     #[test_traced("INFO")]
-    fn test_flatten_preserves_root_after_batches() {
+    fn test_current_extend_applied_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-root", &ctx))
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("xtend", &ctx))
                     .await
                     .unwrap();
 
-            // Apply several batches to accumulate layers.
-            for i in 0u64..5 {
-                let m = db
-                    .new_batch()
-                    .write(key(i), Some(val(i)))
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap();
-                db.apply_batch(m).await.unwrap();
-            }
-
-            let root_before = db.root();
-            db.flatten();
-            assert_eq!(db.root(), root_before);
-
-            // Data is still readable.
-            for i in 0u64..5 {
-                assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// flatten() is idempotent: a second call is a no-op.
-    #[test_traced("INFO")]
-    fn test_flatten_idempotent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-idem", &ctx))
-                    .await
-                    .unwrap();
-
-            let m = db
+            // Apply A, retaining our Arc so we can extend it post-apply.
+            let a = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(m).await.unwrap();
+            db.apply_batch(Arc::clone(&a)).await.unwrap();
 
-            db.flatten();
-            let root_after_first = db.root();
-
-            db.flatten();
-            assert_eq!(db.root(), root_after_first);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// New batches built after flatten() produce correct roots and can be applied.
-    #[test_traced("INFO")]
-    fn test_flatten_then_new_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-then", &ctx))
-                    .await
-                    .unwrap();
-
-            // Apply a batch, flatten, then apply another.
-            let m = db
-                .new_batch()
-                .write(key(0), Some(val(0)))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            db.apply_batch(m).await.unwrap();
-            db.flatten();
-
-            let m = db
-                .new_batch()
+            // Build B off A after A was applied. B's chain walks through A's layer and falls
+            // through to the committed bitmap (now post-A). B's merkleize must read consistent
+            // state from both sources.
+            let b = a
+                .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(m).await.unwrap();
+            db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            // Extend once more to lock in multi-generation behavior.
+            let c = db
+                .new_batch()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(c).await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
 
             db.destroy().await.unwrap();
         });
@@ -3183,7 +3207,6 @@ pub mod tests {
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             db.apply_batch(c_m).await.unwrap();
-            db.flatten();
 
             db.destroy().await.unwrap();
         });
