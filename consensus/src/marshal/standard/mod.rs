@@ -1886,7 +1886,7 @@ mod tests {
             let partition_prefix = format!("proposed-waits-buffer-{me}");
 
             let (buffer, send_entered, release) = GatingBuffer::new();
-            let (mailbox, actor_handle) = start_standard_actor_with_buffer(
+            let (mailbox, _actor_handle) = start_standard_actor_with_buffer(
                 context.with_label("validator_0"),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
