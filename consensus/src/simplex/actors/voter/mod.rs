@@ -312,6 +312,109 @@ mod tests {
         propose_broadcast_failure_stops_before_notarize::<_, _>(secp256r1::fixture);
     }
 
+    /// Engine must not panic when the voter exits cleanly after the local
+    /// relay rejects `Plan::Propose`. The voter treats that as a fatal stop;
+    /// the engine must agree and shut down gracefully.
+    #[test_traced]
+    fn test_engine_stops_cleanly_when_voter_exits_after_failed_propose_broadcast() {
+        let namespace =
+            b"engine_stops_cleanly_when_voter_exits_after_failed_propose_broadcast".to_vec();
+        let partition =
+            "engine_stops_cleanly_when_voter_exits_after_failed_propose_broadcast".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut context, &namespace, 5);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter = mocks::reporter::Reporter::new(
+                context.with_label("reporter"),
+                reporter_cfg.clone(),
+            );
+
+            let app_relay = Arc::new(mocks::relay::Relay::new());
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: app_relay,
+                me: me.clone(),
+                propose_latency: (0.0, 0.0),
+                verify_latency: (0.0, 0.0),
+                certify_latency: (0.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let cfg = crate::simplex::config::Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application,
+                relay: FailingRelay::default(),
+                reporter,
+                strategy: Sequential,
+                partition,
+                mailbox_size: 128,
+                epoch: Epoch::new(4),
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                fetch_concurrent: 4,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: crate::simplex::config::ForwardingPolicy::Disabled,
+            };
+            let engine = crate::simplex::Engine::new(context.with_label("engine"), cfg);
+
+            let (vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, cert_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (resolver_sender, resolver_receiver) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let handle = engine.start(
+                (vote_sender, vote_receiver),
+                (cert_sender, cert_receiver),
+                (resolver_sender, resolver_receiver),
+            );
+
+            select! {
+                result = handle => {
+                    result.expect("engine should stop cleanly after voter exit");
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("timed out waiting for engine to stop after voter exit");
+                }
+            }
+        });
+    }
+
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         proposal: &Proposal<Sha256Digest>,

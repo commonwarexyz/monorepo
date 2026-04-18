@@ -224,8 +224,11 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
-    /// Blocks are persisted and broadcast via `marshal.proposed()` before the digest
-    /// is returned to consensus.
+    /// The built block is cached in memory (`last_built`) for the subsequent
+    /// `Relay::broadcast(Plan::Propose)` call, which invokes `marshal.proposed()`
+    /// as the durable persistence boundary before consensus continues. Receiving
+    /// a digest from `propose()` alone does not mean the block is recoverable
+    /// after restart.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,

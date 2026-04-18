@@ -16,7 +16,7 @@ use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use rand_core::CryptoRngCore;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -225,20 +225,25 @@ impl<
             certificate_sender,
         );
 
-        // Wait for the resolver or voter to finish
+        // Any task may complete on shutdown (its internal `select_loop!` exits
+        // when `context.stopped()` fires) or on an unrecoverable local failure
+        // like the voter breaking out after `Relay::broadcast(Plan::Propose)`
+        // returns `false`. In either case the engine has no more work to do
+        // and should stop cleanly rather than panic on whichever branch the
+        // `select!` observes first.
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping engine");
             },
             _ = &mut voter_task => {
-                panic!("voter should not finish");
+                warn!("voter stopped, shutting down engine");
             },
             _ = &mut batcher_task => {
-                panic!("batcher should not finish");
+                warn!("batcher stopped, shutting down engine");
             },
             _ = &mut resolver_task => {
-                panic!("resolver should not finish");
+                warn!("resolver stopped, shutting down engine");
             },
         }
     }

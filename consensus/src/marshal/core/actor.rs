@@ -243,6 +243,11 @@ where
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
     tip: Height,
+    // Commitment of the highest finalized block awaiting buffer cleanup.
+    // Deferred from `store_finalization` so that `try_repair_gaps` can consume
+    // buffer-only ancestors before variant cleanup (e.g. the coding shard
+    // engine's height-based prune) evicts them.
+    pending_buffer_finalize: Option<V::Commitment>,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<BlockSubscriptionKeyFor<V>, BlockSubscription<V>>,
 
@@ -347,6 +352,7 @@ where
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
+                pending_buffer_finalize: None,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -412,6 +418,7 @@ where
         {
             self.sync_finalized().await;
         }
+        self.flush_buffer_finalize(&mut buffer).await;
 
         // Attempt to dispatch the next finalized block to the application, if it is ready.
         self.try_dispatch_blocks(&mut application).await;
@@ -588,13 +595,13 @@ where
                                     block,
                                     Some(finalization),
                                     &mut application,
-                                    &mut buffer,
                                 )
                                 .await
                             {
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                                     .await;
                                 self.sync_finalized().await;
+                                self.flush_buffer_finalize(&mut buffer).await;
                                 self.try_dispatch_blocks(&mut application).await;
                                 debug!(?round, %height, "finalized block stored");
                             }
@@ -758,7 +765,6 @@ where
                                     response,
                                     &mut delivers,
                                     &mut application,
-                                    &mut buffer,
                                 )
                                 .await;
                         }
@@ -767,7 +773,7 @@ where
 
                 // Batch verify and process all delivers.
                 needs_sync |= self
-                    .verify_delivered(delivers, &mut application, &mut buffer)
+                    .verify_delivered(delivers, &mut application)
                     .await;
 
                 // Attempt to fill gaps before handling produce requests (so we
@@ -780,6 +786,7 @@ where
                 // durability).
                 if needs_sync {
                     self.sync_finalized().await;
+                    self.flush_buffer_finalize(&mut buffer).await;
                     self.try_dispatch_blocks(&mut application).await;
                 }
 
@@ -923,14 +930,13 @@ where
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
     /// Returns true if finalization archives were written and need syncing.
-    async fn handle_deliver<Buf: Buffer<V>>(
+    async fn handle_deliver(
         &mut self,
         key: Request<V::Commitment>,
         value: Bytes,
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut Buf,
     ) -> bool {
         match key {
             Request::Block(commitment) => {
@@ -949,7 +955,7 @@ where
                 let digest = block.digest();
                 let finalization = self.cache.get_finalization_for(digest).await;
                 let wrote = self
-                    .store_finalization(height, digest, block, finalization, application, buffer)
+                    .store_finalization(height, digest, block, finalization, application)
                     .await;
                 debug!(?digest, %height, "received block");
                 response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
@@ -1045,11 +1051,10 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
-    async fn verify_delivered<Buf: Buffer<V>>(
+    async fn verify_delivered(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut Buf,
     ) -> bool {
         if delivers.is_empty() {
             return false;
@@ -1138,7 +1143,6 @@ where
                             block,
                             Some(finalization),
                             application,
-                            buffer,
                         )
                         .await;
                 }
@@ -1169,7 +1173,6 @@ where
                                 block.clone(),
                                 Some(finalization),
                                 application,
-                                buffer,
                             )
                             .await;
                     }
@@ -1414,14 +1417,13 @@ where
     /// `select_loop!` so that archive data is durable before the ack handler
     /// advances `last_processed_height`. See [`Self::try_dispatch_blocks`] for the
     /// crash safety invariant.
-    async fn store_finalization<Buf: Buffer<V>>(
+    async fn store_finalization(
         &mut self,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut Buf,
     ) -> bool {
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
@@ -1463,15 +1465,25 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics, buffer, and application
+        // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
+            self.pending_buffer_finalize = Some(commitment);
         }
-        buffer.finalized(commitment).await;
 
         true
+    }
+
+    /// Flush any deferred `buffer.finalized` notification accumulated by
+    /// `store_finalization`. Must be invoked after `try_repair_gaps` and
+    /// `sync_finalized` so that variant cleanup (e.g. coding height-prune)
+    /// only runs once buffer-only ancestors have been archived.
+    async fn flush_buffer_finalize<Buf: Buffer<V>>(&mut self, buffer: &mut Buf) {
+        if let Some(commitment) = self.pending_buffer_finalize.take() {
+            buffer.finalized(commitment).await;
+        }
     }
 
     /// Get the latest finalized block information (height and digest tuple).
@@ -1592,7 +1604,6 @@ where
                             block,
                             Some(finalization),
                             application,
-                            buffer,
                         )
                         .await;
                 } else {
@@ -1638,7 +1649,6 @@ where
                             block.clone(),
                             finalization,
                             application,
-                            buffer,
                         )
                         .await;
                     debug!(height = %block.height(), "repaired block");

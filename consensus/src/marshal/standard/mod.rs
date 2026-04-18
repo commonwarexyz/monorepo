@@ -201,6 +201,7 @@ mod tests {
         harness::verified_success_implies_recoverable_after_restart::<DeferredHarness>(0..16);
     }
 
+
     #[test_traced("WARN")]
     fn test_standard_delivery_visibility_implies_recoverable_after_restart() {
         harness::delivery_visibility_implies_recoverable_after_restart::<InlineHarness>(0..16);

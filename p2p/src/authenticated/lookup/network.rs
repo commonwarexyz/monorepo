@@ -20,7 +20,7 @@ use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::{channel::mpsc, union};
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
@@ -196,24 +196,29 @@ impl<
 
         // Wait for first actor to exit
         info!("network started");
+        // Any child actor may complete on shutdown (each derives its context
+        // from `self.context` and exits its own loop when `context.stopped()`
+        // fires) or on an unrecoverable local failure. In either case the
+        // network has no more work to do, so log and stop rather than panic
+        // on whichever branch the `select!` observes first.
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping network");
             },
             tracker = &mut tracker_task => {
-                panic!("tracker exited unexpectedly: {tracker:?}");
+                warn!(?tracker, "tracker stopped, shutting down network");
             },
             router = &mut router_task => {
-                panic!("router exited unexpectedly: {router:?}");
+                warn!(?router, "router stopped, shutting down network");
             },
             spawner = &mut spawner_task => {
-                panic!("spawner exited unexpectedly: {spawner:?}");
+                warn!(?spawner, "spawner stopped, shutting down network");
             },
             listener = &mut listener_task => {
-                panic!("listener exited unexpectedly: {listener:?}");
+                warn!(?listener, "listener stopped, shutting down network");
             },
             dialer = &mut dialer_task => {
-                panic!("dialer exited unexpectedly: {dialer:?}");
+                warn!(?dialer, "dialer stopped, shutting down network");
             },
         }
     }
