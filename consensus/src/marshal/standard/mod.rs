@@ -201,6 +201,12 @@ mod tests {
         harness::verified_success_implies_recoverable_after_restart::<DeferredHarness>(0..16);
     }
 
+    #[test_traced("WARN")]
+    fn test_standard_certify_persists_equivocated_block() {
+        harness::certify_persists_equivocated_block::<InlineHarness>();
+        harness::certify_persists_equivocated_block::<DeferredHarness>();
+    }
+
 
     #[test_traced("WARN")]
     fn test_standard_delivery_visibility_implies_recoverable_after_restart() {

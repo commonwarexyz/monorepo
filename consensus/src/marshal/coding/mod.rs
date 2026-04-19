@@ -259,6 +259,11 @@ mod tests {
         harness::finalize_same_height_different_views::<CodingHarness>();
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_certify_persists_equivocated_block() {
+        harness::certify_persists_equivocated_block::<CodingHarness>();
+    }
+
     /// Regression test for issue #167: finalizing a descendant must not
     /// height-prune the shard-engine buffer before `try_repair_gaps` has
     /// consumed buffer-only ancestors.

@@ -259,6 +259,13 @@ pub trait TestHarness: 'static + Sized {
         all_handles: &mut [ValidatorHandle<Self>],
     ) -> impl Future<Output = ()> + Send;
 
+    /// Mark a block as certified (notarized) via the mailbox.
+    fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> impl Future<Output = bool> + Send;
+
     /// Create a finalization certificate.
     fn make_finalization(
         proposal: Proposal<Self::Commitment>,
@@ -927,6 +934,81 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
     }
 }
 
+/// Regression: when a leader equivocates, a validator may verify one block
+/// (A) and then certify a different block (B) at the same round. `verified()`
+/// and `certified()` must write to distinct archives so both blocks are
+/// retained and retrievable; otherwise the second write collides on the same
+/// prunable-archive index (`skip_if_index_exists=true`) and is silently
+/// dropped despite the mailbox returning success.
+pub fn certify_persists_equivocated_block<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let parent = Sha256::hash(b"");
+        let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+
+        // Two distinct blocks at the same height/round (leader equivocation):
+        // distinct timestamps yield distinct digests.
+        let block_a = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_a = H::digest(&block_a);
+        let block_b = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            2,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_b = H::digest(&block_b);
+        assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, round, &block_a, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, round, &block_b).await,
+            "certified must ack"
+        );
+
+        let got_a = handle.mailbox.get_block(&digest_a).await;
+        assert!(
+            got_a.is_some(),
+            "verified block A must be persisted in verified_blocks"
+        );
+        assert_eq!(got_a.unwrap().digest(), digest_a);
+        let got_b = handle.mailbox.get_block(&digest_b).await;
+        assert!(
+            got_b.is_some(),
+            "certified block B must be persisted despite a verify at the same round"
+        );
+        assert_eq!(got_b.unwrap().digest(), digest_b);
+    });
+}
+
 /// Contract: once marshal has delivered a finalized block to the application,
 /// that finalized block and its certificate must already be durable.
 pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
@@ -1275,6 +1357,10 @@ impl TestHarness for StandardHarness {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
+    async fn certify(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
+    }
+
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1536,6 +1622,22 @@ impl TestHarness for InlineHarness {
         .await;
     }
 
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        StandardHarness::certify(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
+    }
+
     fn make_finalization(
         proposal: Proposal<Self::Commitment>,
         schemes: &[S],
@@ -1722,6 +1824,22 @@ impl TestHarness for DeferredHarness {
             &mut [],
         )
         .await;
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        InlineHarness::certify(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
     }
 
     fn make_finalization(
@@ -2061,6 +2179,14 @@ impl TestHarness for CodingHarness {
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+    ) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
     }
 
     fn make_finalization(
