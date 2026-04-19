@@ -283,17 +283,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
-            let mut oracle = setup_network_with_participants(
-                context.clone(),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let setup = CodingHarness::setup_validator(
                 context.with_label("validator_0"),
@@ -352,8 +345,7 @@ mod tests {
             };
             let descendant_finalization =
                 CodingHarness::make_finalization(descendant_proposal, &schemes, QUORUM);
-            CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization)
-                .await;
+            CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization).await;
 
             context.sleep(Duration::from_millis(200)).await;
 

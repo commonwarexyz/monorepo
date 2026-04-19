@@ -1141,13 +1141,7 @@ where
                     debug!(?round, %height, "received finalization");
 
                     wrote |= self
-                        .store_finalization(
-                            height,
-                            digest,
-                            block,
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(height, digest, block, Some(finalization), application)
                         .await;
                 }
                 PendingVerification::Notarized {

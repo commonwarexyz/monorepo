@@ -795,8 +795,12 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task =
-            self.deferred_verify(consensus_context, payload, None, CodingPersistMode::Verified);
+        let task = self.deferred_verify(
+            consensus_context,
+            payload,
+            None,
+            CodingPersistMode::Verified,
+        );
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
