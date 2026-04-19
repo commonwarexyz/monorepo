@@ -934,6 +934,108 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
     }
 }
 
+/// Regression: when the same block is verified at an earlier view and later
+/// certified at a much later view (epoch-boundary reproposal), both writes
+/// must land so retention can prune the earlier view without losing the
+/// block. A naive "skip the sibling write if the block's digest is already
+/// present in the other archive" optimization is unsafe because the two
+/// archives prune per-view on the same boundary: if the block lives only in
+/// `verified_blocks[V_early]` and never gets written to
+/// `notarized_blocks[V_late]`, advancing retention past V_early drops the
+/// block even though V_late is still within the window.
+pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let application = setup.application;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // An off-chain block that we will verify at an early view and certify
+        // at a later view. Its height is intentionally well beyond the chain
+        // we'll drive below, so it never enters the finalized archive via
+        // gap repair and lives solely in the prunable caches.
+        let off_chain = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(5_000),
+            9_999,
+            NUM_VALIDATORS as u16,
+        );
+        let off_chain_digest = H::digest(&off_chain);
+
+        // Verify at V=1, then certify at V=25 (reproposal-style gap).
+        let v_early = Round::new(Epoch::zero(), View::new(1));
+        let v_late = Round::new(Epoch::zero(), View::new(25));
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, v_early, &off_chain, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, v_late, &off_chain).await,
+            "certify must ack"
+        );
+
+        // Drive the finalized chain forward to advance `last_processed_round`
+        // past V=1's retention boundary but not past V=25's. With
+        // view_retention_timeout=10 and prunable_items_per_section=10,
+        // processing views 1..=21 leaves `oldest_allowed=10` in both prunable
+        // archives — V=1 is dropped, V=25 is retained.
+        const CHAIN_LEN: u64 = 21;
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        for i in 1..=CHAIN_LEN {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let digest = H::digest(&block);
+            let commitment = H::commitment(&block);
+            let round = Round::new(Epoch::zero(), View::new(i));
+            H::propose(&mut handle, round, &block).await;
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            H::report_finalization(&mut handle.mailbox, finalization).await;
+            parent = digest;
+            parent_commitment = commitment;
+        }
+        while (application.blocks().len() as u64) < CHAIN_LEN {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        context.sleep(Duration::from_millis(100)).await;
+
+        // The off-chain block must still be retrievable: verified_blocks[V=1]
+        // has been pruned, but notarized_blocks[V=25] still holds it.
+        let recovered = handle.mailbox.get_block(&off_chain_digest).await;
+        assert!(
+            recovered.is_some(),
+            "block certified at V=25 must survive retention pruning of V=1"
+        );
+        assert_eq!(recovered.unwrap().digest(), off_chain_digest);
+    });
+}
+
 /// Regression: when a leader equivocates, a validator may verify one block
 /// (A) and then certify a different block (B) at the same round. `verified()`
 /// and `certified()` must write to distinct archives so both blocks are

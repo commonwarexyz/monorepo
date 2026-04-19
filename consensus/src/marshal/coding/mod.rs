@@ -264,6 +264,11 @@ mod tests {
         harness::certify_persists_equivocated_block::<CodingHarness>();
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_certify_at_later_view_survives_earlier_view_pruning() {
+        harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
+    }
+
     /// Regression test for issue #167: finalizing a descendant must not
     /// height-prune the shard-engine buffer before `try_repair_gaps` has
     /// consumed buffer-only ancestors.
