@@ -50,6 +50,7 @@ use crate::{
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
+                PersistMode,
             },
             Standard,
         },
@@ -411,6 +412,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
+                    PersistMode::Verified,
                 )
                 .await
                 {

@@ -58,6 +58,18 @@ pub(super) enum Decision<B> {
     Continue(B),
 }
 
+/// Which marshal cache a verified block should land in.
+///
+/// Selected by the caller based on context: `Verified` for the initial verify
+/// path, `Certified` when the caller has a notarization for the block.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PersistMode {
+    /// Write to `verified_blocks` via `Mailbox::verified`.
+    Verified,
+    /// Write to `notarized_blocks` via `Mailbox::certified`.
+    Certified,
+}
+
 /// Performs shared pre-checks used by both inline and deferred verification paths.
 ///
 /// This enforces:
@@ -125,6 +137,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
+    persist: PersistMode,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -201,9 +214,15 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid && !marshal.verified(context.round, block).await {
-        debug!(round = ?context.round, "marshal unable to accept block");
-        return None;
+    if application_valid {
+        let persisted = match persist {
+            PersistMode::Verified => marshal.verified(context.round, block).await,
+            PersistMode::Certified => marshal.certified(context.round, block).await,
+        };
+        if !persisted {
+            debug!(round = ?context.round, "marshal unable to accept block");
+            return None;
+        }
     }
     Some(application_valid)
 }

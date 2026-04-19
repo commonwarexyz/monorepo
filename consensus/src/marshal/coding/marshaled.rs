@@ -125,6 +125,15 @@ use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
 
+/// Which marshal cache a verified coded block should land in.
+#[derive(Clone, Copy, Debug)]
+enum CodingPersistMode {
+    /// Write to `verified_blocks` via `Mailbox::verified`.
+    Verified,
+    /// Write to `notarized_blocks` via `Mailbox::certified`.
+    Certified,
+}
+
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
 const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
@@ -299,6 +308,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
+        persist: CodingPersistMode,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -424,9 +434,15 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid && !marshal.verified(round, block).await {
-                    debug!(?round, "marshal unable to accept block");
-                    return;
+                if application_valid {
+                    let persisted = match persist {
+                        CodingPersistMode::Verified => marshal.verified(round, block).await,
+                        CodingPersistMode::Certified => marshal.certified(round, block).await,
+                    };
+                    if !persisted {
+                        debug!(?round, "marshal unable to accept block");
+                        return;
+                    }
                 }
                 tx.send_lossy(application_valid);
             });
@@ -779,7 +795,8 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None);
+        let task =
+            self.deferred_verify(consensus_context, payload, None, CodingPersistMode::Verified);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -917,18 +934,13 @@ where
 
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
-                let block_for_certify = block.clone();
-                let verify_rx = marshaled.deferred_verify(embedded_context, payload, Some(block));
+                let verify_rx = marshaled.deferred_verify(
+                    embedded_context,
+                    payload,
+                    Some(block),
+                    CodingPersistMode::Certified,
+                );
                 if let Ok(result) = verify_rx.await {
-                    if result
-                        && !marshaled
-                            .marshal
-                            .certified(round, block_for_certify)
-                            .await
-                    {
-                        debug!(?round, "marshal unable to accept certified block");
-                        return;
-                    }
                     tx.send_lossy(result);
                 }
             });

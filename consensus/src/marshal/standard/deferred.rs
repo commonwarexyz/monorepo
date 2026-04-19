@@ -81,6 +81,7 @@ use crate::{
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
+                PersistMode,
             },
             Standard,
         },
@@ -203,6 +204,7 @@ where
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
+        persist: PersistMode,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -226,6 +228,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
+                    persist,
                 )
                 .await
                 {
@@ -500,7 +503,7 @@ where
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.deferred_verify(context, block);
+                let task = marshaled.deferred_verify(context, block, PersistMode::Verified);
                 marshaled.verification_tasks.insert(round, digest, task);
 
                 tx.send_lossy(true);
@@ -595,18 +598,9 @@ where
                     return;
                 }
 
-                let block_for_certify = block.clone();
-                let verify_rx = marshaled.deferred_verify(embedded_context, block);
+                let verify_rx =
+                    marshaled.deferred_verify(embedded_context, block, PersistMode::Certified);
                 if let Ok(result) = verify_rx.await {
-                    if result
-                        && !marshaled
-                            .marshal
-                            .certified(round, block_for_certify)
-                            .await
-                    {
-                        debug!(?round, "marshal unable to accept certified block");
-                        return;
-                    }
                     tx.send_lossy(result);
                 }
             });
