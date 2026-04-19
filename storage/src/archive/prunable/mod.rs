@@ -720,11 +720,7 @@ mod tests {
             // Before pruning, either entry is a permitted answer per the
             // trait contract. The implementation happens to return the
             // earlier index, but we only assert a value is present.
-            assert!(archive
-                .get(Identifier::Key(&key))
-                .await
-                .unwrap()
-                .is_some());
+            assert!(archive.get(Identifier::Key(&key)).await.unwrap().is_some());
             assert!(archive.has(Identifier::Key(&key)).await.unwrap());
 
             // Prune the earlier index (section 2). The later index must be

@@ -386,6 +386,74 @@ mod tests {
         });
     }
 
+    async fn test_duplicate_key_cross_index_impl(
+        mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        // Store the same key at two different indices; distinct values only so
+        // the test can observe which entry wins a key lookup.
+        let key = test_key("dupe-xindex");
+        archive.put(2, key.clone(), 20).await.expect("put(2)");
+        archive.put(5, key.clone(), 50).await.expect("put(5)");
+
+        // Both indices must resolve individually.
+        assert_eq!(
+            archive.get(Identifier::Index(2)).await.unwrap(),
+            Some(20),
+            "Index(2) must resolve to the value stored at 2"
+        );
+        assert_eq!(
+            archive.get(Identifier::Index(5)).await.unwrap(),
+            Some(50),
+            "Index(5) must resolve to the value stored at 5"
+        );
+
+        // Key lookup may return either value per the contract; just assert it
+        // returns one of them and that `has` reports presence.
+        let got = archive
+            .get(Identifier::Key(&key))
+            .await
+            .unwrap()
+            .expect("key lookup must find at least one entry");
+        assert!(got == 20 || got == 50, "unexpected value: {got}");
+        assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, None).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_cross_index_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
+            test_duplicate_key_cross_index_impl(archive).await;
+        });
+    }
+
     #[test_traced]
     fn test_duplicate_key_immutable_compression() {
         let executor = deterministic::Runner::default();
