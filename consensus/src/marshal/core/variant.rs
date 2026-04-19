@@ -136,9 +136,11 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
 
-    /// Notify the buffer that a block has been finalized.
-    ///
-    /// This allows the buffer to perform variant-specific cleanup operations.
+    /// Notify the buffer that a block has been fully processed by the
+    /// application (archived, synced, delivered, and acked). Variants may
+    /// perform any variant-specific cleanup for this commitment and
+    /// lower-height siblings — by this point marshal's gap repair has
+    /// completed, so buffered ancestors are no longer needed.
     fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
 
     /// Send a block to peers.

@@ -1017,13 +1017,17 @@ where
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
-    /// and subscriptions.
+    /// Prune reconstruction state at or below the given commitment's height,
+    /// alongside the per-proposal state and subscriptions for that round and
+    /// below.
     ///
-    /// This is the only place reconstruction state is pruned by round. We
-    /// intentionally avoid pruning on reconstruction success because a
-    /// Byzantine leader can equivocate, producing multiple valid commitments
-    /// in the same round. Both must remain recoverable until finalization
-    /// determines which one is canonical.
+    /// Called from marshal's application-ack path, which guarantees every
+    /// finalized block at or below `through` has already been archived,
+    /// synced, delivered, and acknowledged. Gap repair for those heights has
+    /// completed, so eviction here cannot race ahead of any repair lookup —
+    /// cascading by height safely sweeps both canonical ancestors (now only
+    /// reached via the finalized archive) and stale or equivocated blocks at
+    /// the same or lower heights.
     fn prune(&mut self, through: Commitment) {
         if let Some(height) = self.reconstructed_blocks.get(&through).map(|b| b.height()) {
             self.reconstructed_blocks
@@ -1050,6 +1054,7 @@ where
             self.drop_subscriptions(pruned);
         }
     }
+
 }
 
 /// Erasure coded block reconstruction state machine.

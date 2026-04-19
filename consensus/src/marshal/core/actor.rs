@@ -243,11 +243,6 @@ where
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
     tip: Height,
-    // Commitment of the highest finalized block awaiting buffer cleanup.
-    // Deferred from `store_finalization` so that `try_repair_gaps` can consume
-    // buffer-only ancestors before variant cleanup (e.g. the coding shard
-    // engine's height-based prune) evicts them.
-    pending_buffer_finalize: Option<V::Commitment>,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<BlockSubscriptionKeyFor<V>, BlockSubscription<V>>,
 
@@ -352,7 +347,6 @@ where
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
-                pending_buffer_finalize: None,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -418,7 +412,6 @@ where
         {
             self.sync_finalized().await;
         }
-        self.flush_buffer_finalize(&mut buffer).await;
 
         // Attempt to dispatch the next finalized block to the application, if it is ready.
         self.try_dispatch_blocks(&mut application).await;
@@ -468,6 +461,14 @@ where
                             // Apply in-memory progress updates for this acknowledged block.
                             self.handle_block_processed(height, commitment, &mut resolver)
                                 .await;
+                            // The application has archived, synced, delivered
+                            // and acknowledged this block: gap repair is done
+                            // for its height, so variant-specific buffer
+                            // cleanup can safely cascade (e.g. the coding
+                            // shard engine evicts this commitment along with
+                            // any stale/equivocated blocks at the same or
+                            // lower heights).
+                            buffer.finalized(commitment).await;
                         }
                         Err(e) => {
                             // Ack failures are fatal for marshal/application coordination.
@@ -605,7 +606,6 @@ where
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                                     .await;
                                 self.sync_finalized().await;
-                                self.flush_buffer_finalize(&mut buffer).await;
                                 self.try_dispatch_blocks(&mut application).await;
                                 debug!(?round, %height, "finalized block stored");
                             }
@@ -790,7 +790,6 @@ where
                 // durability).
                 if needs_sync {
                     self.sync_finalized().await;
-                    self.flush_buffer_finalize(&mut buffer).await;
                     self.try_dispatch_blocks(&mut application).await;
                 }
 
@@ -1141,7 +1140,13 @@ where
                     debug!(?round, %height, "received finalization");
 
                     wrote |= self
-                        .store_finalization(height, digest, block, Some(finalization), application)
+                        .store_finalization(
+                            height,
+                            digest,
+                            block,
+                            Some(finalization),
+                            application,
+                        )
                         .await;
                 }
                 PendingVerification::Notarized {
@@ -1438,7 +1443,6 @@ where
         self.notify_subscribers(&block);
 
         // Convert block to storage format
-        let commitment = V::commitment(&block);
         let stored: V::StoredBlock = block.into();
         let round = finalization.as_ref().map(|f| f.round());
 
@@ -1463,25 +1467,14 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and application
+        // Update metrics and application.
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
-            self.pending_buffer_finalize = Some(commitment);
         }
 
         true
-    }
-
-    /// Flush any deferred `buffer.finalized` notification accumulated by
-    /// `store_finalization`. Must be invoked after `try_repair_gaps` and
-    /// `sync_finalized` so that variant cleanup (e.g. coding height-prune)
-    /// only runs once buffer-only ancestors have been archived.
-    async fn flush_buffer_finalize<Buf: Buffer<V>>(&mut self, buffer: &mut Buf) {
-        if let Some(commitment) = self.pending_buffer_finalize.take() {
-            buffer.finalized(commitment).await;
-        }
     }
 
     /// Get the latest finalized block information (height and digest tuple).
