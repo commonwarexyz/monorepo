@@ -115,14 +115,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        let current_view = Gauge::<i64, AtomicI64>::default();
-        let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let timeouts = Family::<Timeout, Counter>::default();
-        let nullifications = Family::<Leader, Counter>::default();
-        context.register("current_view", "current view", current_view.clone());
-        context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("timeouts", "timed out views", timeouts.clone());
-        context.register("nullifications", "nullifications", nullifications.clone());
+        let current_view = context.register(
+            "current_view",
+            "current view",
+            Gauge::<i64, AtomicI64>::default(),
+        );
+        let tracked_views = context.register(
+            "tracked_views",
+            "tracked views",
+            Gauge::<i64, AtomicI64>::default(),
+        );
+        let timeouts = context.register(
+            "timeouts",
+            "timed out views",
+            Family::<Timeout, Counter>::default(),
+        );
+        let nullifications = context.register(
+            "nullifications",
+            "nullifications",
+            Family::<Leader, Counter>::default(),
+        );
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());

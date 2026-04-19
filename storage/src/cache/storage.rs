@@ -118,18 +118,11 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let items_tracked =
+            context.register("items_tracked", "Number of items tracked", Gauge::default());
+        let gets = context.register("gets", "Number of gets performed", Counter::default());
+        let has = context.register("has", "Number of has performed", Counter::default());
+        let syncs = context.register("syncs", "Number of syncs called", Counter::default());
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated cache

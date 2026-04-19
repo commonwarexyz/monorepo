@@ -23,7 +23,7 @@ use tracing::debug;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Peer {
-    peer: String,
+    remote_peer: String,
 }
 
 /// Unique identifier for a request.
@@ -159,29 +159,25 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = Family::<Peer, Gauge>::default();
-        context.register(
+        let performance = context.register(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
-            performance.clone(),
+            Family::<Peer, Gauge>::default(),
         );
-        let requests_created = status::Counter::default();
-        context.register(
+        let requests_created = context.register(
             "requests_created",
             "Status of request creation attempts",
-            requests_created.clone(),
+            status::Counter::default(),
         );
-        let requests_sent = status::Counter::default();
-        context.register(
+        let requests_sent = context.register(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            requests_sent.clone(),
+            status::Counter::default(),
         );
-        let resolves = Histogram::new(Buckets::NETWORK);
-        context.register(
+        let resolves = context.register(
             "resolves",
             "Number and duration of requests that were resolved",
-            resolves.clone(),
+            Histogram::new(Buckets::NETWORK),
         );
         Self {
             context,
@@ -222,7 +218,7 @@ where
         let next = past.saturating_add(elapsed.as_millis()) / 2;
         self.participants.put(participant.clone(), next);
         let label = Peer {
-            peer: participant.to_string(),
+            remote_peer: participant.to_string(),
         };
         let _ = self.performance.get_or_create(&label).try_set(next);
     }

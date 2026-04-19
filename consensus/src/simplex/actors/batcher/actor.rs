@@ -93,47 +93,43 @@ where
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let participants = cfg.scheme.participants().clone();
         let participant_count = participants.len();
-        let added = Counter::default();
-        let verified = Counter::default();
-        let inbound_messages = Family::<Inbound, Counter>::default();
-        let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
-        context.register(
+        let added = context.register(
             "added",
             "number of messages added to the verifier",
-            added.clone(),
+            Counter::default(),
         );
-        context.register("verified", "number of messages verified", verified.clone());
-        context.register(
+        let verified = context.register(
+            "verified",
+            "number of messages verified",
+            Counter::default(),
+        );
+        let inbound_messages = context.register(
             "inbound_messages",
             "number of inbound messages",
-            inbound_messages.clone(),
+            Family::<Inbound, Counter>::default(),
         );
-        let latest_vote = Family::<Peer, Gauge>::default();
-        context.register(
+        let latest_vote = context.register(
             "latest_vote",
             "view of latest vote received per peer",
-            latest_vote.clone(),
+            Family::<Peer, Gauge>::default(),
         );
         for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
-        context.register(
+        let batch_size = context.register(
             "batch_size",
             "number of messages in a signature verification batch",
-            batch_size.clone(),
+            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let verify_latency = context.register(
             "verify_latency",
             "latency of signature verification",
-            verify_latency.clone(),
+            Histogram::new(Buckets::CRYPTOGRAPHY),
         );
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let recover_latency = context.register(
             "recover_latency",
             "certificate recover latency",
-            recover_latency.clone(),
+            Histogram::new(Buckets::CRYPTOGRAPHY),
         );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
@@ -572,22 +568,28 @@ where
                     continue;
                 };
 
-                // Batch verify votes if ready
+                // Batch verify votes if ready, timing the cryptographic work.
                 let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_notarizes(self.context.as_mut(), &self.strategy);
+                    timer.observe_now(self.context.as_ref());
+                    Some(result)
                 } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_nullifies(self.context.as_mut(), &self.strategy);
+                    timer.observe_now(self.context.as_ref());
+                    Some(result)
                 } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_finalizes(self.context.as_mut(), &self.strategy);
+                    timer.observe_now(self.context.as_ref());
+                    Some(result)
                 } else {
                     None
                 };
 
                 // Process batch verification results
-                let verify_duration = self.verify_latency.start(self.context.as_ref());
                 if let Some((voters, failed)) = verified {
-                    verify_duration.observe_now(self.context.as_ref());
-
                     // Process verified votes
                     let batch = voters.len() + failed.len();
                     trace!(view = %updated_view, batch, "batch verified votes");
@@ -610,7 +612,6 @@ where
                         round.add_verified(valid);
                     }
                 } else {
-                    verify_duration.discard();
                     trace!(
                         current = %current.view,
                         %finalized,

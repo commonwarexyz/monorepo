@@ -52,29 +52,25 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_blocked = Counter::default();
-        context.register(
+        let handshakes_blocked = context.register(
             "handshakes_blocked",
             "number of handshake attempts blocked because the IP was private",
-            handshakes_blocked.clone(),
+            Counter::default(),
         );
-        let handshakes_concurrent_rate_limited = Counter::default();
-        context.register(
+        let handshakes_concurrent_rate_limited = context.register(
             "handshake_concurrent_rate_limited",
             "number of handshake attempts dropped because maximum concurrent handshakes was reached",
-            handshakes_concurrent_rate_limited.clone(),
+            Counter::default(),
         );
-        let handshakes_ip_rate_limited = Counter::default();
-        context.register(
+        let handshakes_ip_rate_limited = context.register(
             "handshake_ip_rate_limited",
             "number of handshake attempts dropped because an IP exceeded its rate limit",
-            handshakes_ip_rate_limited.clone(),
+            Counter::default(),
         );
-        let handshakes_subnet_rate_limited = Counter::default();
-        context.register(
+        let handshakes_subnet_rate_limited = context.register(
             "handshake_subnet_rate_limited",
             "number of handshake attempts dropped because a subnet exceeded its rate limit",
-            handshakes_subnet_rate_limited.clone(),
+            Counter::default(),
         );
 
         Self {

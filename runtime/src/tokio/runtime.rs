@@ -18,7 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricKey, Panicker,
+        RegisteredMetric, Registry, ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, SinkOf, Spawner as _, StreamOf,
     Supervisor as _, METRICS_PREFIX,
@@ -38,6 +39,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
+    collections::HashMap,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -312,6 +314,7 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashMap<MetricKey, RegisteredMetric>>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -454,6 +457,7 @@ impl crate::Runner for Runner {
         // Initialize executor
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashMap::new()),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -695,10 +699,15 @@ impl crate::Observer for Context {
             return self;
         }
 
-        // RAII guard removes the scoped registry when all handles are dropped.
+        // RAII guard removes the scoped registry and any dedup entries owned
+        // by the scope when all handles are dropped.
         let executor = self.executor.clone();
         let scope_id = executor.registry.lock().create_scope();
         let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            executor
+                .registered_metrics
+                .lock()
+                .retain(|_, entry| entry.scope_id != Some(id));
             executor.registry.lock().remove_scope(id);
         }));
         self.scope = Some(guard);
@@ -717,16 +726,39 @@ impl crate::Observer for Context {
             format!("{}_{}", self.name, name)
         };
 
-        // Route to the appropriate registry (root or scoped).
-        //
-        // prometheus_client's Registry::register is not idempotent at the same key
-        // but it does not panic either; double-registration is silently tolerated
-        // with the first winner. For determinism, the deterministic runtime enforces
-        // get-or-register via its own dedup map. Here we just register on first
-        // sight; duplicate calls return a clone of `default` which is safe because
-        // Metric handles share state internally (they are Arc-based).
+        // Get-or-register in the registered_metrics map, which holds an erased
+        // clone for deduplication. On duplicate key at the same type, return
+        // the existing clone; on type mismatch, panic.
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
+        let scope_id = self.scope.as_ref().map(|s| s.scope_id());
+        let mut registered = self.executor.registered_metrics.lock();
+        if let Some(existing) = registered.get(&metric_key) {
+            return existing
+                .metric
+                .downcast_ref::<M>()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "metric type mismatch for {}: previously registered as {:?}",
+                        prefixed_name,
+                        (*existing.metric).type_id(),
+                    )
+                })
+                .clone();
+        }
+
+        // First registration: store a clone in the dedup map and route to the
+        // appropriate registry (root or scoped).
+        registered.insert(
+            metric_key,
+            RegisteredMetric {
+                scope_id,
+                metric: Box::new(default.clone()),
+            },
+        );
+        drop(registered);
+
         let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let scoped = registry.get_scope(scope_id);
         let sub_registry = self
             .attributes
             .iter()
@@ -863,6 +895,46 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{tokio, Observer as _, Runner as _};
+    use prometheus_client::metrics::counter::Counter;
+
+    #[test]
+    fn test_tokio_duplicate_register_returns_existing_handle() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let c1 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+            let c2 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+
+            c1.inc();
+            c2.inc();
+
+            let output = context.encode();
+            assert_eq!(
+                output.matches("# HELP a_test").count(),
+                1,
+                "duplicate registration should not create duplicate HELP lines: {output}"
+            );
+            assert!(
+                output.contains("a_test_total 2"),
+                "duplicate registration should return the existing counter handle: {output}"
+            );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "metric type mismatch for a_test")]
+    fn test_tokio_register_type_mismatch_panics() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let context = context.child("a");
+            let _ = context.register("test", "help", Counter::<u64>::default());
+            let _ = context.register("test", "help", Gauge::<i64>::default());
+        });
+    }
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {

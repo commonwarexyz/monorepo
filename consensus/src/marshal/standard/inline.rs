@@ -186,11 +186,10 @@ where
     /// the shared "last built block" cache used by [`Relay::broadcast`].
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let context = Arc::new(context);
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let build_duration = Timed::new(build_histogram);
 
@@ -325,12 +324,14 @@ where
                 let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
+                        build_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
+                            build_duration.observe_now(&runtime_context);
                             debug!(
                                 ?parent_digest,
                                 reason = "block building failed",

@@ -139,23 +139,20 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
+        let outbound_messages = context.register(
             "outbound_messages",
             "number of outbound messages",
-            outbound_messages.clone(),
+            Family::<Outbound, Counter>::default(),
         );
-        context.register(
+        let notarization_latency = context.register(
             "notarization_latency",
             "notarization latency",
-            notarization_latency.clone(),
+            Histogram::new(LATENCY),
         );
-        context.register(
+        let finalization_latency = context.register(
             "finalization_latency",
             "finalization latency",
-            finalization_latency.clone(),
+            Histogram::new(LATENCY),
         );
 
         // Initialize store

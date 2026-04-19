@@ -464,6 +464,19 @@ impl Drop for ScopeGuard {
     }
 }
 
+/// A (prefixed_name, attributes) pair identifying a unique metric registration.
+pub(crate) type MetricKey = (String, Vec<(String, String)>);
+
+/// Type-erased clone of a previously-registered metric.
+///
+/// Scoped registrations remember the owning scope so they can be removed from
+/// the dedup map when that scope is torn down. This allows a later scope to
+/// register the same `(prefixed_name, attributes)` pair again after cleanup.
+pub(crate) struct RegisteredMetric {
+    pub scope_id: Option<u64>,
+    pub metric: Box<dyn Any + Send + Sync>,
+}
+
 /// Manages multiple prometheus registries with lifecycle-based scoping.
 ///
 /// Holds a permanent root registry for long-lived metrics (runtime internals)

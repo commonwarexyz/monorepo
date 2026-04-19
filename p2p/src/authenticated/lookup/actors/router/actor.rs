@@ -43,11 +43,10 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
         let pool = context.network_buffer_pool().clone();
 
         // Create metrics
-        let messages_dropped = Family::<metrics::Message, Counter>::default();
-        context.register(
+        let messages_dropped = context.register(
             "messages_dropped",
             "messages dropped",
-            messages_dropped.clone(),
+            Family::<metrics::Message, Counter>::default(),
         );
 
         // Create actor

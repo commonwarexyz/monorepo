@@ -175,12 +175,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         .await?;
 
         // Initialize metrics
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let gets = context.register("gets", "Number of gets performed", Counter::default());
+        let has = context.register("has", "Number of has performed", Counter::default());
+        let syncs = context.register("syncs", "Number of syncs called", Counter::default());
 
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),

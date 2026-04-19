@@ -49,65 +49,52 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
-        let sequencer_heights = Family::default();
-        context.register(
-            "sequencer_heights",
-            "Height per sequencer tracked",
-            sequencer_heights.clone(),
-        );
-        let acks = status::Counter::default();
-        context.register("acks", "Number of acks processed by status", acks.clone());
-        let nodes = status::Counter::default();
-        context.register(
-            "nodes",
-            "Number of nodes processed by status",
-            nodes.clone(),
-        );
-        let verify = status::Counter::default();
-        context.register(
-            "verify",
-            "Number of application verifications by status",
-            verify.clone(),
-        );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let propose = status::Counter::default();
-        context.register(
-            "propose",
-            "Number of propose attempts by status",
-            propose.clone(),
-        );
-        let rebroadcast = status::Counter::default();
-        context.register(
-            "rebroadcast",
-            "Number of rebroadcast attempts by status",
-            rebroadcast.clone(),
-        );
-        let verify_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let verify_duration = context.register(
             "verify_duration",
             "Histogram of application verification durations",
-            verify_duration.clone(),
+            Histogram::new(histogram::Buckets::LOCAL),
         );
-        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK);
-        context.register(
+        let e2e_duration = context.register(
             "e2e_duration",
             "Histogram of time from new proposal to certificate generation",
-            e2e_duration.clone(),
+            Histogram::new(histogram::Buckets::NETWORK),
         );
-
         Self {
-            sequencer_heights,
-            acks,
-            nodes,
-            verify,
-            certificates,
-            propose,
-            rebroadcast,
+            sequencer_heights: context.register(
+                "sequencer_heights",
+                "Height per sequencer tracked",
+                Family::default(),
+            ),
+            acks: context.register(
+                "acks",
+                "Number of acks processed by status",
+                status::Counter::default(),
+            ),
+            nodes: context.register(
+                "nodes",
+                "Number of nodes processed by status",
+                status::Counter::default(),
+            ),
+            verify: context.register(
+                "verify",
+                "Number of application verifications by status",
+                status::Counter::default(),
+            ),
+            certificates: context.register(
+                "certificates",
+                "Number of certificates produced",
+                Counter::default(),
+            ),
+            propose: context.register(
+                "propose",
+                "Number of propose attempts by status",
+                status::Counter::default(),
+            ),
+            rebroadcast: context.register(
+                "rebroadcast",
+                "Number of rebroadcast attempts by status",
+                status::Counter::default(),
+            ),
             verify_duration: histogram::Timed::new(verify_duration),
             e2e_duration: histogram::Timed::new(e2e_duration),
         }

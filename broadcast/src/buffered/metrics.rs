@@ -22,7 +22,6 @@ impl SequencerLabel {
 }
 
 /// Metrics for the [super::Engine]
-#[derive(Default)]
 pub struct Metrics {
     /// Number of broadcasts received by peer
     pub peer: Family<SequencerLabel, Counter>,
@@ -40,32 +39,32 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "peer",
-            "Number of broadcasts received by peer",
-            metrics.peer.clone(),
-        );
-        context.register(
-            "receive",
-            "Number of received messages by status",
-            metrics.receive.clone(),
-        );
-        context.register(
-            "subscribe",
-            "Number of `subscribe` requests by status",
-            metrics.subscribe.clone(),
-        );
-        context.register(
-            "get",
-            "Number of `get` requests by status",
-            metrics.get.clone(),
-        );
-        context.register(
-            "waiters",
-            "Number of digests being awaited",
-            metrics.waiters.clone(),
-        );
-        metrics
+        Self {
+            peer: context.register(
+                "peer",
+                "Number of broadcasts received by peer",
+                Family::default(),
+            ),
+            receive: context.register(
+                "receive",
+                "Number of received messages by status",
+                status::Counter::default(),
+            ),
+            subscribe: context.register(
+                "subscribe",
+                "Number of `subscribe` requests by status",
+                status::Counter::default(),
+            ),
+            get: context.register(
+                "get",
+                "Number of `get` requests by status",
+                status::Counter::default(),
+            ),
+            waiters: context.register(
+                "waiters",
+                "Number of digests being awaited",
+                Gauge::default(),
+            ),
+        }
     }
 }

@@ -255,35 +255,31 @@ where
         } = cfg;
 
         let context = Arc::new(context);
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let build_duration = Timed::new(build_histogram);
 
-        let verify_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let verify_histogram = context.register(
             "verify_duration",
             "Histogram of time taken for the application to verify a block, in seconds",
-            verify_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let verify_duration = Timed::new(verify_histogram);
 
-        let parent_fetch_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let parent_fetch_histogram = context.register(
             "parent_fetch_duration",
             "Histogram of time taken to fetch a parent block in proposal, in seconds",
-            parent_fetch_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
 
-        let erasure_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let erasure_histogram = context.register(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",
-            erasure_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
@@ -573,12 +569,14 @@ where
                 let parent_fetch_duration = proposal_parent_fetch_duration.start(&runtime_context);
                 let parent = select! {
                     _ = tx.closed() => {
+                        parent_fetch_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
                     result = parent_request => match result {
                         Ok(parent) => parent,
                         Err(_) => {
+                            parent_fetch_duration.observe_now(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "failed to fetch parent block",
@@ -625,12 +623,14 @@ where
                 let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
+                        build_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
+                            build_duration.observe_now(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "block building failed",

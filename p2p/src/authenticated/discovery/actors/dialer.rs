@@ -71,11 +71,10 @@ impl<
     > Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let attempts = Family::<metrics::Peer, Counter>::default();
-        context.register(
+        let attempts = context.register(
             "attempts",
             "The number of dial attempts made to each peer",
-            attempts.clone(),
+            Family::<metrics::Peer, Counter>::default(),
         );
         Self {
             context: ContextCell::new(context),

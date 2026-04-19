@@ -752,27 +752,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.register("puts", "number of put operations", Counter::default());
+        let gets = context.register("gets", "number of get operations", Counter::default());
+        let unnecessary_reads = context.register(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
+            Counter::default(),
         );
-        context.register(
+        let unnecessary_writes = context.register(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
+            Counter::default(),
         );
-        context.register(
+        let resizes = context.register(
             "resizes",
             "number of table resizing operations",
-            resizes.clone(),
+            Counter::default(),
         );
 
         Ok(Self {

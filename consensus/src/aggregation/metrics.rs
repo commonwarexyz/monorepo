@@ -21,44 +21,37 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
-        let tip = Gauge::default();
-        context.register("tip", "Lowest height without a certificate", tip.clone());
-        let digest = status::Counter::default();
-        context.register(
-            "digest",
-            "Number of digests returned by the automaton by status",
-            digest.clone(),
-        );
-        let acks = status::Counter::default();
-        context.register(
-            "acks",
-            "Number of Ack messages processed by status",
-            acks.clone(),
-        );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let rebroadcast = status::Counter::default();
-        context.register(
+        let _ = context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            rebroadcast,
+            status::Counter::default(),
         );
-        let digest_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let digest_duration = context.register(
             "digest_duration",
             "Histogram of application digest durations",
-            digest_duration.clone(),
+            Histogram::new(histogram::Buckets::LOCAL),
         );
-
         Self {
-            tip,
-            digest,
-            acks,
-            certificates,
+            tip: context.register(
+                "tip",
+                "Lowest height without a certificate",
+                Gauge::default(),
+            ),
+            digest: context.register(
+                "digest",
+                "Number of digests returned by the automaton by status",
+                status::Counter::default(),
+            ),
+            acks: context.register(
+                "acks",
+                "Number of Ack messages processed by status",
+                status::Counter::default(),
+            ),
+            certificates: context.register(
+                "certificates",
+                "Number of certificates produced",
+                Counter::default(),
+            ),
             digest_duration: histogram::Timed::new(digest_duration),
         }
     }

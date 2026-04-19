@@ -19,10 +19,10 @@ impl Metrics {
     ///
     /// Metric names will be prefixed with the context's label.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
-        let metrics = Self::default();
-        context.register("tip", "Total enqueued items", metrics.tip.clone());
-        context.register("floor", "Acknowledged items", metrics.floor.clone());
-        context.register("next", "Next item to dequeue", metrics.next.clone());
-        metrics
+        Self {
+            tip: context.register("tip", "Total enqueued items", Gauge::default()),
+            floor: context.register("floor", "Acknowledged items", Gauge::default()),
+            next: context.register("next", "Next item to dequeue", Gauge::default()),
+        }
     }
 }

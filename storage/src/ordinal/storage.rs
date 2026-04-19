@@ -241,16 +241,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             .collect();
 
         // Initialize metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        let pruned = Counter::default();
-        context.register("puts", "Number of put calls", puts.clone());
-        context.register("gets", "Number of get calls", gets.clone());
-        context.register("has", "Number of has calls", has.clone());
-        context.register("syncs", "Number of sync calls", syncs.clone());
-        context.register("pruned", "Number of pruned blobs", pruned.clone());
+        let puts = context.register("puts", "Number of put calls", Counter::default());
+        let gets = context.register("gets", "Number of get calls", Counter::default());
+        let has = context.register("has", "Number of has calls", Counter::default());
+        let syncs = context.register("syncs", "Number of sync calls", Counter::default());
+        let pruned = context.register("pruned", "Number of pruned blobs", Counter::default());
 
         Ok(Self {
             context,

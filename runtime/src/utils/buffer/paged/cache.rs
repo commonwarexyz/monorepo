@@ -185,13 +185,12 @@ impl CacheRef {
         capacity: NonZeroUsize,
     ) -> Self {
         let page_size_u64 = page_size.get() as u64;
-        let page_faults = Counter::default();
-        context.register("page_faults", "Number of page faults", page_faults.clone());
-        let page_evictions = Counter::default();
-        context.register(
+        let page_faults =
+            context.register("page_faults", "Number of page faults", Counter::default());
+        let page_evictions = context.register(
             "page_evictions",
             "Number of page evictions",
-            page_evictions.clone(),
+            Counter::default(),
         );
 
         Self {

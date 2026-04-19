@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeGuard,
+        MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Name, Panicked, Spawner as _, Supervisor as _, METRICS_PREFIX,
@@ -366,19 +366,6 @@ impl Default for Config {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// A (prefixed_name, attributes) pair identifying a unique metric registration.
-type MetricKey = (String, Vec<(String, String)>);
-
-/// Type-erased clone of a previously-registered metric.
-///
-/// Scoped registrations remember the owning scope so they can be removed from
-/// the dedup map when that scope is torn down. This allows a later scope to
-/// register the same `(prefixed_name, attributes)` pair again after cleanup.
-struct RegisteredMetric {
-    scope_id: Option<u64>,
-    metric: Box<dyn std::any::Any + Send + Sync>,
 }
 
 /// Per-level deterministic-runtime namespace guard. Catches collisions between
