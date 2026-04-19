@@ -292,10 +292,6 @@ where
     /// the receiver's grafted-pin derivation requires chunk-aligned, absorbed state at the start
     /// of the range, and locations above this boundary place that derivation in the
     /// delayed-merge-unstable region (relevant for MMB).
-    ///
-    /// For families without delayed merges this is the inactivity floor rounded down to the
-    /// nearest chunk boundary. For families with delayed merges (MMB) it is held back further,
-    /// until the youngest pruned chunk-pair's height-`gh+1` parent has been born in the ops tree.
     pub fn sync_boundary(&self) -> Result<Location<F>, Error<F>> {
         self.settled_bitmap_prune_loc()
     }
@@ -415,14 +411,15 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// Pruning is clipped to the settled bitmap boundary (see [`Db::sync_boundary`]): the ops
-    /// log's lower bound is never advanced past where the grafting overlay has been pruned. The
-    /// bitmap and grafted tree advance to that same settled boundary regardless of `prune_loc`.
+    /// Pruning is clipped to the settled bitmap boundary (see [`Db::sync_boundary`]): the ops log's
+    /// lower bound is never advanced past where the grafting overlay has been pruned. The bitmap
+    /// and grafted tree advance to that same settled boundary regardless of `prune_loc`.
     ///
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` >
+    ///   [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
         let inactivity_floor = self.inactivity_floor_loc();
         if prune_loc > inactivity_floor {

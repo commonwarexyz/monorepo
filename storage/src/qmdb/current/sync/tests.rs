@@ -1,18 +1,17 @@
 //! Tests for [crate::qmdb::current] state sync.
 //!
-//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests]
-//! by implementing [SyncTestHarness] for current database types. The key difference from
-//! `any` harnesses is that `sync_target_root` returns the **ops root** (via
+//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
+//! implementing [SyncTestHarness] for current database types. The key difference from `any`
+//! harnesses is that `sync_target_root` returns the **ops root** (via
 //! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
 //! returned by `Db::root()`.
 //!
 //! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
-//! unordered) x (fixed, variable) database variant, so the shared suite runs twice per
-//! variant.
+//! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
 //!
 //! In addition to the shared harness-based suite, this module contains focused tests for
-//! `current`-specific sync behavior: overlay-state authentication (canonical-root check),
-//! pruned MMB round-trip, and target-update regression coverage.
+//! `current`-specific sync behavior: overlay-state authentication (canonical-root check), pruned
+//! MMB round-trip, and target-update regression coverage.
 
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},

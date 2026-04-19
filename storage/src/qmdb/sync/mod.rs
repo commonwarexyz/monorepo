@@ -25,7 +25,7 @@ pub use target::Target;
 
 mod requests;
 
-/// A [`Resolver`] whose associated types match a specific [`Database`].
+/// A [`Resolver`] whose associated types match a specific `Database`.
 ///
 /// Blanket-impled for any matching `Resolver`, so callers never implement this directly.
 pub trait DbResolver<DB: Database>:

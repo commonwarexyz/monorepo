@@ -1821,10 +1821,10 @@ pub mod tests {
         });
     }
 
-    /// Verify that on a non-delayed-merge (MMR) family `pruning_boundary()` lags the
-    /// inactivity floor only by chunk alignment (less than one chunk) — never by a
-    /// delayed-merge absorption window. Guards against an accidental regression that
-    /// would introduce a larger lag on families that don't need it.
+    /// Verify that on a non-delayed-merge (MMR) family `pruning_boundary()` lags the inactivity
+    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// window. Guards against an accidental regression that would introduce a larger lag on
+    /// families that don't need it.
     #[test_traced]
     fn test_current_mmr_prune_boundary_lag_is_only_chunk_alignment() {
         let executor = deterministic::Runner::default();
@@ -1868,9 +1868,8 @@ pub mod tests {
         });
     }
 
-    /// Verify that `prune(loc)` with `loc < pruning_boundary()` prunes the ops journal only
-    /// as far as the caller requested. The clip must pick the smaller of the two — it must
-    /// not over-prune when the caller asked for less than the settled boundary.
+    /// Verify that `prune(loc)` with `loc < pruning_boundary()` prunes the ops journal only as far
+    /// as the caller requested.
     #[test_traced]
     fn test_current_prune_below_settled_boundary_is_honored() {
         let executor = deterministic::Runner::default();
