@@ -30,9 +30,12 @@
 //!
 //! # Uniqueness
 //!
-//! [Archive] assumes all stored indexes and keys are unique. If the same key is associated with
-//! multiple `indices`, there is no guarantee which value will be returned. If the key is written to
-//! an existing `index`, [Archive] will return an error.
+//! Indices are unique for [Archive] — writing to an occupied index is a no-op. Duplicate indices
+//! can be stored via [MultiArchive::put_multi]. Keys may be stored at multiple indices with either
+//! put variant: a lookup by [Identifier::Key] may return any of the values at that key, with one
+//! refinement over the base trait contract — entries whose index has been pruned are never
+//! returned or reported as present, so a key that matches both a pruned and a non-pruned entry
+//! resolves to the non-pruned entry.
 //!
 //! ## Conflicts
 //!
@@ -679,6 +682,67 @@ mod tests {
         let state1 = test_archive_keys_and_restart(5_000);
         let state2 = test_archive_keys_and_restart(5_000);
         assert_eq!(state1, state2);
+    }
+
+    /// Regression: when the same key is stored at multiple indices and the
+    /// earlier index is pruned, a subsequent `get`/`has` by key must resolve
+    /// to the surviving, non-pruned entry rather than report the pruned one.
+    /// Callers such as consensus's marshal cache rely on this to retain a
+    /// reproposal of the same block at a later index even after the
+    /// earlier index's retention window closes.
+    #[test_traced]
+    fn test_archive_key_lookup_skips_pruned_duplicates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Same key stored at two different indices. Distinct values only
+            // to make it observable which entry wins; a real caller would
+            // store the same value (e.g. the same block) at both indices.
+            let key = test_key("dupe-key");
+            archive.put(2, key.clone(), 20).await.unwrap();
+            archive.put(5, key.clone(), 50).await.unwrap();
+
+            // Before pruning, either entry is a permitted answer per the
+            // trait contract. The implementation happens to return the
+            // earlier index, but we only assert a value is present.
+            assert!(archive
+                .get(Identifier::Key(&key))
+                .await
+                .unwrap()
+                .is_some());
+            assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // Prune the earlier index (section 2). The later index must be
+            // the sole surviving answer.
+            archive.prune(3).await.unwrap();
+            let got = archive.get(Identifier::Key(&key)).await.unwrap();
+            assert_eq!(
+                got,
+                Some(50),
+                "key lookup must skip the pruned entry and return the surviving one"
+            );
+            assert!(archive.has(Identifier::Key(&key)).await.unwrap());
+
+            // Prune past the later index too — now nothing survives.
+            archive.prune(6).await.unwrap();
+            assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), None);
+            assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
+        });
     }
 
     #[test_traced]

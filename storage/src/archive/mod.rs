@@ -1,7 +1,9 @@
 //! A write-once key-value store for ordered data.
 //!
-//! [Archive] is a key-value store designed for workloads where all data is written only once and is
-//! uniquely associated with both an `index` and a `key`.
+//! [Archive] is a key-value store designed for workloads where data is written only once and each
+//! item is addressed by both an `index` and a `key`. Indices are unique for [Archive]; duplicate
+//! indices can be stored via [MultiArchive]. The same key may be stored at multiple indices in
+//! either case, and a key lookup may return any of the associated values.
 
 use commonware_codec::Codec;
 use commonware_utils::Array;
@@ -39,7 +41,7 @@ pub enum Error {
     RecordTooLarge,
 }
 
-/// A write-once key-value store where each key is associated with a unique index.
+/// A write-once key-value store addressed by both an index and a key.
 pub trait Archive: Send {
     /// The type of the key.
     type Key: Array;
@@ -47,10 +49,12 @@ pub trait Archive: Send {
     /// The type of the value.
     type Value: Codec + Send;
 
-    /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
+    /// Store an item in [Archive].
     ///
-    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
-    /// at different indices (not recommended), any value associated with the key may be returned.
+    /// Indices are unique: if the index already exists, put does nothing and returns. Duplicate
+    /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique — the same key
+    /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
+    /// with an [Identifier::Key] identifier may return any of the values associated with that key.
     fn put(
         &mut self,
         index: u64,
@@ -122,8 +126,7 @@ pub trait Archive: Send {
 ///
 /// Unlike [Archive::put], which is a no-op when the index already exists,
 /// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
-/// at an existing index. As with [Archive::put], keys are assumed to be globally
-/// unique, but duplicate keys are not rejected.
+/// at an existing index.
 pub trait MultiArchive: Archive {
     /// Retrieve all values stored at the given index.
     ///
