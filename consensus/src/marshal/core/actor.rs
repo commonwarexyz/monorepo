@@ -550,6 +550,10 @@ where
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
+                    Message::Certified { round, block, ack } => {
+                        self.cache_block(round, block.digest(), block).await;
+                        ack.send_lossy(());
+                    }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
                         let commitment = notarization.proposal.payload;

@@ -584,9 +584,10 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // It is possible that, during crash recovery, we call `marshal.verified`
-                    // twice for the same block. That function is idempotent, so this is safe.
-                    if !marshaled.marshal.verified(round, block).await {
+                    // Certifier holds a notarization for this block, so route
+                    // the write to the notarized cache. `certified` is
+                    // idempotent, so crash-recovery double-invocation is safe.
+                    if !marshaled.marshal.certified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -594,8 +595,18 @@ where
                     return;
                 }
 
+                let block_for_certify = block.clone();
                 let verify_rx = marshaled.deferred_verify(embedded_context, block);
                 if let Ok(result) = verify_rx.await {
+                    if result
+                        && !marshaled
+                            .marshal
+                            .certified(round, block_for_certify)
+                            .await
+                    {
+                        debug!(?round, "marshal unable to accept certified block");
+                        return;
+                    }
                     tx.send_lossy(result);
                 }
             });

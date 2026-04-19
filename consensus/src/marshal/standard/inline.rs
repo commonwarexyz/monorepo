@@ -464,8 +464,10 @@ where
 
                 // `certify` resolving true drives the finalize vote, so mere
                 // buffered availability is not sufficient here. Persist the
-                // block through marshal before signaling success.
-                if marshal.verified(round, block).await {
+                // block through marshal before signaling success. The caller
+                // holds a notarization for this block, so route it into the
+                // notarized cache directly rather than the verified cache.
+                if marshal.certified(round, block).await {
                     tx.send_lossy(true);
                 }
             });

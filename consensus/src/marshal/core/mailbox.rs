@@ -112,6 +112,18 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
+    /// A notification that a block is notarized and is being certified locally.
+    ///
+    /// Written to the notarized block cache (not the verified cache) because
+    /// the caller has a notarization in hand for this block.
+    Certified {
+        /// The round in which the block was notarized.
+        round: Round,
+        /// The notarized block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
+    },
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
@@ -303,6 +315,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
+            .await
+            .is_some()
+    }
+
+    /// Notifies the actor that a notarized block is being certified locally,
+    /// awaiting the actor's confirmation that the block has been durably
+    /// persisted to the notarized cache before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Certified { round, block, ack })
             .await
             .is_some()
     }
