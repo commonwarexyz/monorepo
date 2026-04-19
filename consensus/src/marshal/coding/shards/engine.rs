@@ -1054,7 +1054,6 @@ where
             self.drop_subscriptions(pruned);
         }
     }
-
 }
 
 /// Erasure coded block reconstruction state machine.
