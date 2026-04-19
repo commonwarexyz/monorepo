@@ -453,7 +453,7 @@ where
             result = self.pending_acks.current() => {
                 // Start with the ack that woke this `select_loop!` arm.
                 let mut pending = Some(self.pending_acks.complete_current(result));
-                loop {
+                let last_acked_commitment = loop {
                     let (height, commitment, result) =
                         pending.take().expect("pending ack must exist");
                     match result {
@@ -461,14 +461,6 @@ where
                             // Apply in-memory progress updates for this acknowledged block.
                             self.handle_block_processed(height, commitment, &mut resolver)
                                 .await;
-                            // The application has archived, synced, delivered
-                            // and acknowledged this block: gap repair is done
-                            // for its height, so variant-specific buffer
-                            // cleanup can safely cascade (e.g. the coding
-                            // shard engine evicts this commitment along with
-                            // any stale/equivocated blocks at the same or
-                            // lower heights).
-                            buffer.finalized(commitment).await;
                         }
                         Err(e) => {
                             // Ack failures are fatal for marshal/application coordination.
@@ -479,17 +471,26 @@ where
 
                     // Opportunistically drain any additional already-ready acks so we
                     // can persist one metadata sync for the whole batch below.
-                    let Some(next) = self.pending_acks.pop_ready() else {
-                        break;
-                    };
-                    pending = Some(next);
-                }
+                    match self.pending_acks.pop_ready() {
+                        Some(next) => pending = Some(next),
+                        None => break commitment,
+                    }
+                };
 
                 // Persist buffered processed-height updates once after draining all ready acks.
                 if let Err(e) = self.application_metadata.sync().await {
                     error!(?e, "failed to sync application progress");
                     return;
                 }
+
+                // Tell the buffer that the last acked block (and, for
+                // variants that cascade by height, every block at or below
+                // its height) is archived, synced, delivered, and acked.
+                // Gap repair is done for those heights, so variant-specific
+                // cleanup can safely cascade. One call is enough for the
+                // whole batch since the cascading prune subsumes any earlier
+                // acked commitments in this drain.
+                buffer.finalized(last_acked_commitment).await;
 
                 // Fill the pipeline
                 self.try_dispatch_blocks(&mut application).await;
