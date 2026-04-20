@@ -314,80 +314,71 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::types::Round;
-#[cfg(not(target_arch = "wasm32"))]
-use commonware_cryptography::PublicKey;
-#[cfg(not(target_arch = "wasm32"))]
-use commonware_p2p::Recipients;
-
 pub mod elector;
 pub mod scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
+        use crate::types::{Round, View, ViewDelta};
+        use commonware_cryptography::PublicKey;
+        use commonware_p2p::Recipients;
+
         mod actors;
         pub mod config;
         pub use config::{Config, ForwardingPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
+
+        /// The minimum view we are tracking both in-memory and on-disk.
+        pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+            last_finalized.saturating_sub(activity_timeout)
+        }
+
+        /// Whether or not a view is interesting to us. This is a function
+        /// of both `min_active` and whether or not the view is too far
+        /// in the future (based on the view we are currently in).
+        pub(crate) fn interesting(
+            activity_timeout: ViewDelta,
+            last_finalized: View,
+            current: View,
+            pending: View,
+            allow_future: bool,
+        ) -> bool {
+            // If the view is genesis, skip it, genesis doesn't have votes
+            if pending.is_zero() {
+                return false;
+            }
+            if pending < min_active(activity_timeout, last_finalized) {
+                return false;
+            }
+            if !allow_future && pending > current.next() {
+                return false;
+            }
+            true
+        }
+
+        /// Describes how a payload should be broadcast to the network.
+        pub enum Plan<P: PublicKey> {
+            /// Initial broadcast of a newly proposed block to all participants.
+            Propose {
+                /// The round in which the block was proposed.
+                round: Round,
+            },
+            /// Forward a block to a specific set of peers.
+            Forward {
+                /// The round in which the forwarded block was proposed.
+                round: Round,
+                /// The recipients to forward the block to.
+                recipients: Recipients<P>,
+            },
+        }
     }
 }
 
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
-
-#[cfg(not(target_arch = "wasm32"))]
-use crate::types::{View, ViewDelta};
-
-/// The minimum view we are tracking both in-memory and on-disk.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-    last_finalized.saturating_sub(activity_timeout)
-}
-
-/// Whether or not a view is interesting to us. This is a function
-/// of both `min_active` and whether or not the view is too far
-/// in the future (based on the view we are currently in).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn interesting(
-    activity_timeout: ViewDelta,
-    last_finalized: View,
-    current: View,
-    pending: View,
-    allow_future: bool,
-) -> bool {
-    // If the view is genesis, skip it, genesis doesn't have votes
-    if pending.is_zero() {
-        return false;
-    }
-    if pending < min_active(activity_timeout, last_finalized) {
-        return false;
-    }
-    if !allow_future && pending > current.next() {
-        return false;
-    }
-    true
-}
-
-/// Describes how a payload should be broadcast to the network.
-#[cfg(not(target_arch = "wasm32"))]
-pub enum Plan<P: PublicKey> {
-    /// Initial broadcast of a newly proposed block to all participants.
-    Propose {
-        /// The round in which the block was proposed.
-        round: Round,
-    },
-    /// Forward a block to a specific set of peers.
-    Forward {
-        /// The round in which the forwarded block was proposed.
-        round: Round,
-        /// The recipients to forward the block to.
-        recipients: Recipients<P>,
-    },
-}
 
 /// Convenience alias for [`N3f1::quorum`].
 #[cfg(test)]
