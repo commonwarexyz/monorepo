@@ -13,6 +13,7 @@ use crate::{
         self,
         any::{
             db::Db,
+            operation::{update::Update, Operation},
             ordered::{
                 fixed::{
                     Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
@@ -34,12 +35,12 @@ use crate::{
             },
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
-        operation::{Committable, Key, Operation},
+        operation::{Committable, Key},
     },
     translator::Translator,
-    Context,
+    Context, Persistable,
 };
-use commonware_codec::{CodecShared, Read as CodecRead};
+use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_utils::{range::NonEmptyRange, Array};
 
@@ -81,7 +82,7 @@ where
 }
 
 /// Shared helper to build a [Db] from sync components.
-async fn build_db<F, E, O, I, H, U, C, T>(
+async fn build_db<F, E, U, I, H, C, T>(
     context: E,
     merkle_config: journaled::Config,
     log: C,
@@ -93,12 +94,12 @@ async fn build_db<F, E, O, I, H, U, C, T>(
 where
     F: merkle::Family,
     E: Context,
-    O: Operation<F> + Committable + CodecShared + Send + Sync + 'static,
+    U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
-    U: Send + Sync + 'static,
     T: Translator,
-    C: Mutable<Item = O>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = crate::journal::Error>,
+    Operation<F, U>: Codec + Committable + CodecShared,
 {
     let hasher = StandardHasher::<H>::new();
 
@@ -122,7 +123,7 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::from_components(range.start(), log, index).await?;
+    let db = Db::init_from_log(index, log, Some(range.start()), |_, _| {}).await?;
 
     Ok(db)
 }
@@ -160,7 +161,7 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
-                build_db::<F, _, Self::Op, _, H, $update<K, V>, _, T>(
+                build_db::<F, _, $update<K, V>, _, H, _, T>(
                     context,
                     merkle_config,
                     log,
