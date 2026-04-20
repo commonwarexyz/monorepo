@@ -349,7 +349,6 @@ struct HailstormState<'a, H: TestHarness> {
     parent_commitment: &'a mut H::Commitment,
     participants: &'a [K],
     schemes: &'a [S],
-    propagation_delay: Duration,
 }
 
 fn active_validator_indices<H: TestHarness>(
@@ -565,8 +564,6 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
         H::verify(&mut verifier.handle, round, &block, &mut []).await;
     }
 
-    context.sleep(state.propagation_delay).await;
-
     PendingHailstormHeight {
         height,
         expected_digest,
@@ -661,7 +658,6 @@ pub fn hailstorm<H: TestHarness>(
         let mut oracle =
             setup_network_with_participants(context.clone(), NZUsize!(3), participants.clone())
                 .await;
-        let propagation_delay = link.latency;
         setup_network_links(&mut oracle, &participants, link.clone()).await;
 
         let mut validators = Vec::new();
@@ -719,7 +715,6 @@ pub fn hailstorm<H: TestHarness>(
                     parent_commitment: &mut parent_commitment,
                     participants: &participants,
                     schemes: &schemes,
-                    propagation_delay,
                 };
                 advance_hailstorm_to(persisted_height, &mut context, &mut state).await;
             }
@@ -737,7 +732,6 @@ pub fn hailstorm<H: TestHarness>(
                     parent_commitment: &mut parent_commitment,
                     participants: &participants,
                     schemes: &schemes,
-                    propagation_delay,
                 };
                 Some(
                     drive_hailstorm_height_up_to_verify(
@@ -767,7 +761,6 @@ pub fn hailstorm<H: TestHarness>(
                     parent_commitment: &mut parent_commitment,
                     participants: &participants,
                     schemes: &schemes,
-                    propagation_delay,
                 };
                 finalize_hailstorm_height(pending, &mut context, &mut state).await;
             }
@@ -792,7 +785,6 @@ pub fn hailstorm<H: TestHarness>(
                 parent_commitment: &mut parent_commitment,
                 participants: &participants,
                 schemes: &schemes,
-                propagation_delay,
             };
             advance_hailstorm_to(target_height, &mut context, &mut state).await;
 
