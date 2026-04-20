@@ -99,12 +99,8 @@ where
         self.prune(commitment).await;
     }
 
-    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, recipients: Recipients<P>) {
-        // Only disseminate on the initial broadcast. Targeted forwarding is
-        // unsupported in the coding variant; peers reconstruct blocks from
-        // erasure-coded shards.
-        if matches!(recipients, Recipients::All) {
-            self.proposed(round, block).await;
-        }
+    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+        // Targeted forwarding is not supported by the coding variant.
+        self.proposed(round, block).await;
     }
 }
