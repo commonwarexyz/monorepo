@@ -5,9 +5,9 @@
 //!
 //! # Uniqueness
 //!
-//! Indices are unique: writing to an occupied index is a no-op. Keys may be stored at multiple
-//! indices, and a lookup by [crate::archive::Identifier::Key] may return any of the associated
-//! values.
+//! [Archive] assumes all stored indices are unique. If the same key is associated with
+//! multiple indices, there is no guarantee which value will be returned. If the key is written to
+//! an existing index, it is a no-op.
 //!
 //! # Compression
 //!

@@ -194,13 +194,8 @@ impl<
 
         let mut shutdown = self.context.stopped();
 
-        // Wait for first actor to exit
+        // If any task completes, the network should stop
         info!("network started");
-        // Any child actor may complete on shutdown (each derives its context
-        // from `self.context` and exits its own loop when `context.stopped()`
-        // fires) or on an unrecoverable local failure. In either case the
-        // network has no more work to do, so log and stop rather than panic
-        // on whichever branch the `select!` observes first.
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping network");

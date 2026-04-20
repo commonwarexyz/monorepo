@@ -1,9 +1,10 @@
 //! A write-once key-value store for ordered data.
 //!
 //! [Archive] is a key-value store designed for workloads where data is written only once and each
-//! item is addressed by both an `index` and a `key`. Indices are unique for [Archive]; duplicate
-//! indices can be stored via [MultiArchive]. The same key may be stored at multiple indices in
-//! either case, and a key lookup may return any of the associated values.
+//! item is addressed by both an `index` and a `key`. Workloads with unique indices should use [Archive]
+//! and workloads with overlapping indices should use [MultiArchive] (allows all items with the same index
+//! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
+//! return any of the associated values.
 
 use commonware_codec::Codec;
 use commonware_utils::Array;

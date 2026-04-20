@@ -225,12 +225,7 @@ impl<
             certificate_sender,
         );
 
-        // Any task may complete on shutdown (its internal `select_loop!` exits
-        // when `context.stopped()` fires) or on an unrecoverable local failure
-        // like the voter breaking out after `Relay::broadcast(Plan::Propose)`
-        // returns `false`. In either case the engine has no more work to do
-        // and should stop cleanly rather than panic on whichever branch the
-        // `select!` observes first.
+        // If any task completes, the engine should stop
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
