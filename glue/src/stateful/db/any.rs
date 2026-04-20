@@ -100,6 +100,14 @@ where
         self.batch.get(key, &*db).await
     }
 
+    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.batch.get_many(keys, &*db).await
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
@@ -170,6 +178,14 @@ where
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
+    }
+
+    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.batch.get_many(keys, &*db).await
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.

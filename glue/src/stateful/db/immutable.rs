@@ -96,6 +96,14 @@ where
         self.batch.get(key, &*db).await
     }
 
+    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.batch.get_many(keys, &*db).await
+    }
+
     /// Set `key` to `value` in the speculative batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
@@ -150,6 +158,14 @@ where
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.inner.get(key, &*db).await
+    }
+
+    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.inner.get_many(keys, &*db).await
     }
 }
 

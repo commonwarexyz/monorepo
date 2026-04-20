@@ -88,6 +88,17 @@ where
         self.batch.get(location, &*db).await
     }
 
+    /// Read values at multiple locations, amortizing lock acquisition.
+    ///
+    /// Locations must be sorted in ascending order.
+    pub async fn get_many(
+        &self,
+        locations: &[Location],
+    ) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.batch.get_many(locations, &*db).await
+    }
+
     /// Append a value to the speculative batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
@@ -136,6 +147,17 @@ where
     pub async fn get(&self, location: Location) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.inner.get(location, &*db).await
+    }
+
+    /// Read values at multiple locations, amortizing lock acquisition.
+    ///
+    /// Locations must be sorted in ascending order.
+    pub async fn get_many(
+        &self,
+        locations: &[Location],
+    ) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+        let db = self.db.read().await;
+        self.inner.get_many(locations, &*db).await
     }
 }
 
