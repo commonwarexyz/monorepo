@@ -767,6 +767,78 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
 
 impl<const N: usize> BitmapBatch<N> {
     const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+
+    /// Walk to the terminal [`SharedBitmap`] at the bottom of the chain.
+    fn shared(&self) -> &Arc<SharedBitmap<N>> {
+        let mut current = self;
+        loop {
+            match current {
+                Self::Base(s) => return s,
+                Self::Layer(layer) => current = &layer.parent,
+            }
+        }
+    }
+
+    /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
+    /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
+    /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
+    fn trim_committed(&self) -> Self {
+        // Fast path: if already Base, nothing to do
+        if let Self::Base(_) = self {
+            return self.clone();
+        }
+
+        let shared = self.shared();
+        let committed = shared.read().len();
+
+        let mut current = self;
+        let mut uncommitted = 0;
+        while let Self::Layer(layer) = current {
+            if layer.overlay.len <= committed {
+                break;
+            }
+            uncommitted += 1;
+            current = &layer.parent;
+        }
+
+        // Top layer is already committed
+        if uncommitted == 0 {
+            return Self::Base(Arc::clone(shared));
+        }
+
+        // No layer is committed; keep the whole chain
+        if let Self::Base(_) = current {
+            return self.clone();
+        }
+
+        // Fast path for exactly 1 uncommitted layer (common in chained growth)
+        if uncommitted == 1 {
+            if let Self::Layer(layer) = self {
+                return Self::Layer(Arc::new(BitmapBatchLayer {
+                    parent: Self::Base(Arc::clone(shared)),
+                    overlay: Arc::clone(&layer.overlay),
+                }));
+            }
+        }
+
+        let mut kept = Vec::with_capacity(uncommitted);
+        current = self;
+        for _ in 0..uncommitted {
+            if let Self::Layer(layer) = current {
+                kept.push(Arc::clone(&layer.overlay));
+                current = &layer.parent;
+            }
+        }
+
+        let mut result = Self::Base(Arc::clone(shared));
+        for overlay in kept.into_iter().rev() {
+            result = Self::Layer(Arc::new(BitmapBatchLayer {
+                parent: result,
+                overlay,
+            }));
+        }
+        result
+    }
 }
 
 impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
@@ -861,7 +933,7 @@ where
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
             Arc::clone(&self.grafted),
-            self.bitmap.clone(),
+            self.bitmap.trim_committed(),
         )
     }
 

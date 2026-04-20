@@ -686,9 +686,11 @@ where
         // 6. Apply overlays in place under the write lock.
         {
             let mut guard = self.status.write();
+            if let Some(newest) = overlays.first() {
+                guard.extend_to(newest.len);
+            }
+            let pruned = guard.pruned_chunks();
             for overlay in overlays.into_iter().rev() {
-                guard.extend_to(overlay.len);
-                let pruned = guard.pruned_chunks();
                 for (&idx, chunk) in &overlay.chunks {
                     if idx >= pruned {
                         guard.set_chunk_by_index(idx, chunk);
