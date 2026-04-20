@@ -170,6 +170,22 @@ hash = "056610b6516dad245e873a12d84c30fdc40282582761126c32d0b3baf1522a52"
 n_cases = 200
 hash = "19bfc48e2de08b7d5f9e7b168e1719496b636306aae12db9c6727e368105d827"
 
+["commonware_storage::qmdb::conformance::CurrentMmbOrderedFixedConf"]
+n_cases = 200
+hash = "f265ca1f2f7f571230ef4e576b949d3699b619f108cb0a4e2e28c352f7b32aee"
+
+["commonware_storage::qmdb::conformance::CurrentMmbOrderedVariableConf"]
+n_cases = 200
+hash = "74d3a4b1721216ed1bdfc564f5ae07759476b0ceae7dbd1e953c35538a1b0755"
+
+["commonware_storage::qmdb::conformance::CurrentMmbUnorderedFixedConf"]
+n_cases = 200
+hash = "92b2d71ff19a0f24f337a934d43ee06e3f81a155cd4adc97c58b27cef5cde435"
+
+["commonware_storage::qmdb::conformance::CurrentMmbUnorderedVariableConf"]
+n_cases = 200
+hash = "bad7ded44c7cedc95d202dc3334e3de88877d3aeb63b5808b18bd12c2f59c0d9"
+
 ["commonware_storage::qmdb::conformance::CurrentMmrOrderedFixedConf"]
 n_cases = 200
 hash = "95dc738adeb88d6546c62828e448213fe723d600f57bb4660ecf982ee76e29ef"

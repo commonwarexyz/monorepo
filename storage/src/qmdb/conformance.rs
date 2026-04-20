@@ -56,6 +56,15 @@ type CurrentMmrOrderedFixed =
 type CurrentMmrOrderedVariable =
     current::ordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
 
+type CurrentMmbUnorderedFixed =
+    current::unordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+type CurrentMmbUnorderedVariable =
+    current::unordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+type CurrentMmbOrderedFixed =
+    current::ordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+type CurrentMmbOrderedVariable =
+    current::ordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+
 type ImmutableMmrFixed = immutable::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
 type ImmutableMmbFixed = immutable::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
 type ImmutableMmrVariable =
@@ -465,6 +474,26 @@ keyed_conformance!(
     CurrentMmrOrderedVariable,
     current_variable_config
 );
+keyed_conformance!(
+    CurrentMmbUnorderedFixedConf,
+    CurrentMmbUnorderedFixed,
+    current_fixed_config
+);
+keyed_conformance!(
+    CurrentMmbUnorderedVariableConf,
+    CurrentMmbUnorderedVariable,
+    current_variable_config
+);
+keyed_conformance!(
+    CurrentMmbOrderedFixedConf,
+    CurrentMmbOrderedFixed,
+    current_fixed_config
+);
+keyed_conformance!(
+    CurrentMmbOrderedVariableConf,
+    CurrentMmbOrderedVariable,
+    current_variable_config
+);
 
 immutable_conformance!(
     ImmutableMmrFixedConf,
@@ -525,6 +554,10 @@ conformance_tests! {
     CurrentMmrUnorderedVariableConf => 200,
     CurrentMmrOrderedFixedConf => 200,
     CurrentMmrOrderedVariableConf => 200,
+    CurrentMmbUnorderedFixedConf => 200,
+    CurrentMmbUnorderedVariableConf => 200,
+    CurrentMmbOrderedFixedConf => 200,
+    CurrentMmbOrderedVariableConf => 200,
     ImmutableMmrFixedConf => 200,
     ImmutableMmbFixedConf => 200,
     ImmutableMmrVariableConf => 200,
@@ -674,26 +707,50 @@ order_test!(
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
-    test_order_cur_unordered_fixed,
+    test_order_cur_mmr_unordered_fixed,
     CurrentMmrUnorderedFixed,
     current_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
-    test_order_cur_unordered_variable,
+    test_order_cur_mmr_unordered_variable,
     CurrentMmrUnorderedVariable,
     current_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
-    test_order_cur_ordered_fixed,
+    test_order_cur_mmr_ordered_fixed,
     CurrentMmrOrderedFixed,
     current_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
-    test_order_cur_ordered_variable,
+    test_order_cur_mmr_ordered_variable,
     CurrentMmrOrderedVariable,
+    current_variable_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_cur_mmb_unordered_fixed,
+    CurrentMmbUnorderedFixed,
+    current_fixed_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_cur_mmb_unordered_variable,
+    CurrentMmbUnorderedVariable,
+    current_variable_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_cur_mmb_ordered_fixed,
+    CurrentMmbOrderedFixed,
+    current_fixed_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_cur_mmb_ordered_variable,
+    CurrentMmbOrderedVariable,
     current_variable_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
