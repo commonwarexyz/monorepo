@@ -82,9 +82,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage,
-            },
+            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             verification_tasks::VerificationTasks,
         },
         coding::{

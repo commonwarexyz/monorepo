@@ -579,9 +579,7 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards
-                .proposed(boundary_round, coded_boundary)
-                .await;
+            shards.proposed(boundary_round, coded_boundary).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1263,9 +1261,7 @@ mod tests {
             let coded_malicious =
                 CodedBlock::new(malicious_block.clone(), coding_config, &Sequential);
             let malicious_commitment = coded_malicious.commitment();
-            shards
-                .proposed(byzantine_round, coded_malicious)
-                .await;
+            shards.proposed(byzantine_round, coded_malicious).await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1310,9 +1306,7 @@ mod tests {
             let coded_malicious2 =
                 CodedBlock::new(malicious_block2.clone(), coding_config, &Sequential);
             let malicious_commitment2 = coded_malicious2.commitment();
-            shards
-                .proposed(byzantine_round2, coded_malicious2)
-                .await;
+            shards.proposed(byzantine_round2, coded_malicious2).await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;

@@ -63,8 +63,8 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize,
-                Nullification, Nullify, Proposal, Vote,
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -118,7 +118,6 @@ mod tests {
         network.start();
         oracle
     }
-
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
