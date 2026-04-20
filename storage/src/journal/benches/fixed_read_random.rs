@@ -53,11 +53,31 @@ async fn bench_run_concurrent(
     try_join_all(futures).await.expect("failed to read data");
 }
 
+/// Batch-read `items_to_read` random items via `read_many`.
+async fn bench_run_read_many(
+    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    items_to_read: usize,
+) {
+    let reader = journal.reader().await;
+    let mut rng = StdRng::seed_from_u64(0);
+    let mut positions: Vec<u64> = (0..items_to_read)
+        .map(|_| rng.gen_range(0..ITEMS_TO_WRITE))
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    black_box(
+        reader
+            .read_many(&positions)
+            .await
+            .expect("failed to read data"),
+    );
+}
+
 fn bench_fixed_read_random(c: &mut Criterion) {
     let cfg = Config::default();
     let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
-    for mode in ["serial", "concurrent"] {
+    for mode in ["serial", "concurrent", "read_many"] {
         for items_to_read in [100, 1_000, 10_000, 100_000] {
             c.bench_function(
                 &format!(
@@ -88,6 +108,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                             match mode {
                                 "serial" => bench_run_serial(&j, items_to_read).await,
                                 "concurrent" => bench_run_concurrent(&j, items_to_read).await,
+                                "read_many" => bench_run_read_many(&j, items_to_read).await,
                                 _ => unreachable!(),
                             }
                             duration += start.elapsed();
