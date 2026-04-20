@@ -689,6 +689,18 @@ order_test!(
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
 order_test!(
+    test_order_any_mmr_unordered_variable,
+    AnyMmrUnorderedVariable,
+    any_variable_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_any_mmr_ordered_fixed,
+    AnyMmrOrderedFixed,
+    any_fixed_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
     test_order_any_mmr_ordered_variable,
     AnyMmrOrderedVariable,
     any_variable_config,
@@ -697,6 +709,18 @@ order_test!(
 order_test!(
     test_order_any_mmb_unordered_fixed,
     AnyMmbUnorderedFixed,
+    any_fixed_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_any_mmb_unordered_variable,
+    AnyMmbUnorderedVariable,
+    any_variable_config,
+    |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
+);
+order_test!(
+    test_order_any_mmb_ordered_fixed,
+    AnyMmbOrderedFixed,
     any_fixed_config,
     |fwd, rev| assert_keyed_order_independent(&mut fwd, &mut rev).await
 );
