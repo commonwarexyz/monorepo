@@ -112,14 +112,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
-    /// A notification that a block is notarized and is being certified locally.
-    ///
-    /// Written to the notarized block cache (not the verified cache) because
-    /// the caller has a notarization in hand for this block.
+    /// A notification that a block has been certified by the application.
     Certified {
-        /// The round in which the block was notarized.
+        /// The round in which the block was certified.
         round: Round,
-        /// The notarized block.
+        /// The certified block.
         block: V::Block,
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
@@ -319,9 +316,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .is_some()
     }
 
-    /// Notifies the actor that a notarized block is being certified locally,
-    /// awaiting the actor's confirmation that the block has been durably
-    /// persisted to the notarized cache before returning.
+    /// Notifies the actor that a block has been certified, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         self.sender
