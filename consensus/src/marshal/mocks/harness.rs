@@ -259,7 +259,7 @@ pub trait TestHarness: 'static + Sized {
         all_handles: &mut [ValidatorHandle<Self>],
     ) -> impl Future<Output = ()> + Send;
 
-    /// Mark a block as certified (notarized) via the mailbox.
+    /// Mark a block as certified.
     fn certify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -967,28 +967,45 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             extra: setup.extra,
         };
 
-        // An off-chain block that we will verify at an early view and certify
+        // A repeated block that we will verify at an early view and certify
         // at a later view. Its height is intentionally well beyond the chain
         // we'll drive below, so it never enters the finalized archive via
         // gap repair and lives solely in the prunable caches.
-        let off_chain = H::make_test_block(
+        let repeated = H::make_test_block(
             Sha256::hash(b""),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(5_000),
             9_999,
             NUM_VALIDATORS as u16,
         );
-        let off_chain_digest = H::digest(&off_chain);
+        let repeated_digest = H::digest(&repeated);
 
-        // Verify at V=1, then certify at V=25 (reproposal-style gap).
+        // Negative control: a verify-only block at the same early view. Because
+        // it is never certified, it lives solely in `verified_blocks[V=1]` and
+        // must disappear once retention pruning advances past V=1. Asserting it
+        // is gone confirms the prune actually fires at the expected floor, so
+        // the `repeated` survivor assertion below is genuinely load-bearing.
+        let orphan = H::make_test_block(
+            Sha256::hash(b"orphan"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(6_000),
+            9_998,
+            NUM_VALIDATORS as u16,
+        );
+        let orphan_digest = H::digest(&orphan);
+
+        // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
         let v_early = Round::new(Epoch::zero(), View::new(1));
         let v_late = Round::new(Epoch::zero(), View::new(25));
         let mut peers: [ValidatorHandle<H>; 0] = [];
-        H::verify(&mut handle, v_early, &off_chain, &mut peers).await;
+        H::verify(&mut handle, v_early, &repeated, &mut peers).await;
         assert!(
-            H::certify(&mut handle, v_late, &off_chain).await,
+            H::certify(&mut handle, v_late, &repeated).await,
             "certify must ack"
         );
+
+        // Verify `orphan` at V=1 only (no certify).
+        H::verify(&mut handle, v_early, &orphan, &mut peers).await;
 
         // Drive the finalized chain forward to advance `last_processed_round`
         // past V=1's retention boundary but not past V=25's. With
@@ -1025,14 +1042,21 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         }
         context.sleep(Duration::from_millis(100)).await;
 
-        // The off-chain block must still be retrievable: verified_blocks[V=1]
+        // Negative control: the verify-only orphan at V=1 must be gone, which
+        // proves retention pruning actually evicted V=1 at the expected floor.
+        assert!(
+            handle.mailbox.get_block(&orphan_digest).await.is_none(),
+            "verify-only block at V=1 must be evicted by retention pruning"
+        );
+
+        // The repeated block must still be retrievable: verified_blocks[V=1]
         // has been pruned, but notarized_blocks[V=25] still holds it.
-        let recovered = handle.mailbox.get_block(&off_chain_digest).await;
+        let recovered = handle.mailbox.get_block(&repeated_digest).await;
         assert!(
             recovered.is_some(),
             "block certified at V=25 must survive retention pruning of V=1"
         );
-        assert_eq!(recovered.unwrap().digest(), off_chain_digest);
+        assert_eq!(recovered.unwrap().digest(), repeated_digest);
     });
 }
 
