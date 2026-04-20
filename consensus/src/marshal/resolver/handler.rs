@@ -343,6 +343,46 @@ mod tests {
     }
 
     #[test]
+    fn test_subject_decode_rejects_invalid_enum_tag() {
+        let bad = [3u8];
+        let mut buf = bad.as_ref();
+        assert!(matches!(
+            Request::<D>::read(&mut buf),
+            Err(CodecError::InvalidEnum(3))
+        ));
+    }
+
+    #[test]
+    fn test_subject_display_and_debug_cover_variants() {
+        let digest = Sha256::hash(b"test");
+        let block = Request::<D>::Block(digest);
+        let finalized = Request::<D>::Finalized {
+            height: Height::new(42),
+        };
+        let notarized = Request::<D>::Notarized {
+            round: Round::new(Epoch::new(7), View::new(9)),
+        };
+
+        assert!(format!("{block}").starts_with("Block("));
+        assert!(format!("{finalized}").contains("Finalized"));
+        assert!(format!("{notarized}").contains("Notarized"));
+
+        assert_eq!(format!("{block}"), format!("{block:?}"));
+        assert_eq!(format!("{finalized}"), format!("{finalized:?}"));
+        assert_eq!(format!("{notarized}"), format!("{notarized:?}"));
+    }
+
+    #[test]
+    #[should_panic(expected = "we should never retain by block")]
+    fn test_subject_predicate_block_panics() {
+        let block = Request::<D>::Block(Sha256::hash(b"x"));
+        let predicate = block.predicate();
+        let _ = predicate(&Request::<D>::Finalized {
+            height: Height::new(1),
+        });
+    }
+
+    #[test]
     fn test_subject_hash() {
         use std::collections::HashSet;
 
