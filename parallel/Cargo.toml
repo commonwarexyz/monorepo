@@ -24,4 +24,9 @@ proptest.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "commonware-utils/std", "dep:commonware-utils", "dep:rayon" ]
+std = [
+	"commonware-macros/std",
+	"commonware-utils/std",
+	"dep:commonware-utils",
+	"dep:rayon",
+]
