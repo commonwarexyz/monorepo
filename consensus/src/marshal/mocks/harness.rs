@@ -259,6 +259,13 @@ pub trait TestHarness: 'static + Sized {
         all_handles: &mut [ValidatorHandle<Self>],
     ) -> impl Future<Output = ()> + Send;
 
+    /// Mark a block as certified.
+    fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> impl Future<Output = bool> + Send;
+
     /// Create a finalization certificate.
     fn make_finalization(
         proposal: Proposal<Self::Commitment>,
@@ -927,6 +934,207 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
     }
 }
 
+/// Regression: when the same block is verified at an earlier view and later
+/// certified at a much later view (epoch-boundary reproposal), both writes
+/// must land so retention can prune the earlier view without losing the
+/// block. A naive "skip the sibling write if the block's digest is already
+/// present in the other archive" optimization is unsafe because the two
+/// archives prune per-view on the same boundary: if the block lives only in
+/// `verified_blocks[V_early]` and never gets written to
+/// `notarized_blocks[V_late]`, advancing retention past V_early drops the
+/// block even though V_late is still within the window.
+pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let application = setup.application;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // A repeated block that we will verify at an early view and certify
+        // at a later view. Its height is intentionally well beyond the chain
+        // we'll drive below, so it never enters the finalized archive via
+        // gap repair and lives solely in the prunable caches.
+        let repeated = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(5_000),
+            9_999,
+            NUM_VALIDATORS as u16,
+        );
+        let repeated_digest = H::digest(&repeated);
+
+        // Negative control: a verify-only block at the same early view. Because
+        // it is never certified, it lives solely in `verified_blocks[V=1]` and
+        // must disappear once retention pruning advances past V=1. Asserting it
+        // is gone confirms the prune actually fires at the expected floor, so
+        // the `repeated` survivor assertion below is genuinely load-bearing.
+        let orphan = H::make_test_block(
+            Sha256::hash(b"orphan"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(6_000),
+            9_998,
+            NUM_VALIDATORS as u16,
+        );
+        let orphan_digest = H::digest(&orphan);
+
+        // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
+        let v_early = Round::new(Epoch::zero(), View::new(1));
+        let v_late = Round::new(Epoch::zero(), View::new(25));
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, v_early, &repeated, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, v_late, &repeated).await,
+            "certify must ack"
+        );
+
+        // Verify `orphan` at V=1 only (no certify).
+        H::verify(&mut handle, v_early, &orphan, &mut peers).await;
+
+        // Drive the finalized chain forward to advance `last_processed_round`
+        // past V=1's retention boundary but not past V=25's. With
+        // view_retention_timeout=10 and prunable_items_per_section=10,
+        // processing views 1..=21 leaves `oldest_allowed=10` in both prunable
+        // archives — V=1 is dropped, V=25 is retained.
+        const CHAIN_LEN: u64 = 21;
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        for i in 1..=CHAIN_LEN {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let digest = H::digest(&block);
+            let commitment = H::commitment(&block);
+            let round = Round::new(Epoch::zero(), View::new(i));
+            H::propose(&mut handle, round, &block).await;
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            H::report_finalization(&mut handle.mailbox, finalization).await;
+            parent = digest;
+            parent_commitment = commitment;
+        }
+        while (application.blocks().len() as u64) < CHAIN_LEN {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        context.sleep(Duration::from_millis(100)).await;
+
+        // Negative control: the verify-only orphan at V=1 must be gone, which
+        // proves retention pruning actually evicted V=1 at the expected floor.
+        assert!(
+            handle.mailbox.get_block(&orphan_digest).await.is_none(),
+            "verify-only block at V=1 must be evicted by retention pruning"
+        );
+
+        // The repeated block must still be retrievable: verified_blocks[V=1]
+        // has been pruned, but notarized_blocks[V=25] still holds it.
+        let recovered = handle.mailbox.get_block(&repeated_digest).await;
+        assert!(
+            recovered.is_some(),
+            "block certified at V=25 must survive retention pruning of V=1"
+        );
+        assert_eq!(recovered.unwrap().digest(), repeated_digest);
+    });
+}
+
+/// Regression: when a leader equivocates, a validator may verify one block
+/// (A) and then certify a different block (B) at the same round. `verified()`
+/// and `certified()` must write to distinct archives so both blocks are
+/// retained and retrievable; otherwise the second write collides on the same
+/// prunable-archive index (`skip_if_index_exists=true`) and is silently
+/// dropped despite the mailbox returning success.
+pub fn certify_persists_equivocated_block<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle =
+            setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                .await;
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle::<H> {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let parent = Sha256::hash(b"");
+        let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+
+        // Two distinct blocks at the same height/round (leader equivocation):
+        // distinct timestamps yield distinct digests.
+        let block_a = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_a = H::digest(&block_a);
+        let block_b = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            2,
+            NUM_VALIDATORS as u16,
+        );
+        let digest_b = H::digest(&block_b);
+        assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+        let mut peers: [ValidatorHandle<H>; 0] = [];
+        H::verify(&mut handle, round, &block_a, &mut peers).await;
+        assert!(
+            H::certify(&mut handle, round, &block_b).await,
+            "certified must ack"
+        );
+
+        let got_a = handle.mailbox.get_block(&digest_a).await;
+        assert!(
+            got_a.is_some(),
+            "verified block A must be persisted in verified_blocks"
+        );
+        assert_eq!(got_a.unwrap().digest(), digest_a);
+        let got_b = handle.mailbox.get_block(&digest_b).await;
+        assert!(
+            got_b.is_some(),
+            "certified block B must be persisted despite a verify at the same round"
+        );
+        assert_eq!(got_b.unwrap().digest(), digest_b);
+    });
+}
+
 /// Contract: once marshal has delivered a finalized block to the application,
 /// that finalized block and its certificate must already be durable.
 pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
@@ -1275,6 +1483,10 @@ impl TestHarness for StandardHarness {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
+    async fn certify(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
+    }
+
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1536,6 +1748,22 @@ impl TestHarness for InlineHarness {
         .await;
     }
 
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        StandardHarness::certify(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
+    }
+
     fn make_finalization(
         proposal: Proposal<Self::Commitment>,
         schemes: &[S],
@@ -1722,6 +1950,22 @@ impl TestHarness for DeferredHarness {
             &mut [],
         )
         .await;
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) -> bool {
+        InlineHarness::certify(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra.clone(),
+            },
+            round,
+            block,
+        )
+        .await
     }
 
     fn make_finalization(
@@ -2061,6 +2305,14 @@ impl TestHarness for CodingHarness {
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
+    }
+
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+    ) -> bool {
+        handle.mailbox.certified(round, block.clone()).await
     }
 
     fn make_finalization(

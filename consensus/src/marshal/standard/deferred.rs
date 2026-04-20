@@ -74,7 +74,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{is_inferred_reproposal_at_certify, LastBuilt},
+            validation::{is_inferred_reproposal_at_certify, LastBuilt, Stage},
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
@@ -203,6 +203,7 @@ where
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
+        stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -226,6 +227,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
+                    stage,
                 )
                 .await
                 {
@@ -500,7 +502,7 @@ where
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.deferred_verify(context, block);
+                let task = marshaled.deferred_verify(context, block, Stage::Verified);
                 marshaled.verification_tasks.insert(round, digest, task);
 
                 tx.send_lossy(true);
@@ -584,9 +586,10 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // It is possible that, during crash recovery, we call `marshal.verified`
-                    // twice for the same block. That function is idempotent, so this is safe.
-                    if !marshaled.marshal.verified(round, block).await {
+                    // Certifier holds a notarization for this block, so route
+                    // the write to the notarized cache. `certified` is
+                    // idempotent, so crash-recovery double-invocation is safe.
+                    if !marshaled.marshal.certified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -594,7 +597,8 @@ where
                     return;
                 }
 
-                let verify_rx = marshaled.deferred_verify(embedded_context, block);
+                let verify_rx =
+                    marshaled.deferred_verify(embedded_context, block, Stage::Certified);
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }

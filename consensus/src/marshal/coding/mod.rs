@@ -260,6 +260,109 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_certify_persists_equivocated_block() {
+        harness::certify_persists_equivocated_block::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_at_later_view_survives_earlier_view_pruning() {
+        harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
+    }
+
+    /// Finalizing a descendant must not height-prune the shard-engine buffer before
+    /// `try_repair_gaps` has consumed buffer-only ancestors.
+    ///
+    /// Places parent (height 1) and descendant (height 2) in the shard engine's
+    /// reconstructed-block cache via `proposed()`, then reports a finalization
+    /// for the descendant only.
+    #[test_traced("WARN")]
+    fn test_coding_store_finalization_does_not_prune_buffer_before_repair() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut handle = harness::ValidatorHandle::<CodingHarness> {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            };
+
+            // Build a 2-block chain: parent at height 1, descendant at height 2.
+            let parent_block = CodingHarness::make_test_block(
+                Sha256::hash(b""),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(1),
+                1,
+                NUM_VALIDATORS as u16,
+            );
+            let parent_digest = CodingHarness::digest(&parent_block);
+            let parent_commitment = CodingHarness::commitment(&parent_block);
+
+            let descendant_block = CodingHarness::make_test_block(
+                parent_digest,
+                parent_commitment,
+                Height::new(2),
+                2,
+                NUM_VALIDATORS as u16,
+            );
+            let descendant_commitment = CodingHarness::commitment(&descendant_block);
+
+            // Seed the shard engine's reconstructed-block cache with both blocks.
+            CodingHarness::propose(
+                &mut handle,
+                Round::new(Epoch::new(0), View::new(1)),
+                &parent_block,
+            )
+            .await;
+            CodingHarness::propose(
+                &mut handle,
+                Round::new(Epoch::new(0), View::new(2)),
+                &descendant_block,
+            )
+            .await;
+
+            // Report finalization for the descendant only. The parent has no
+            // finalization certificate: it must be archived by walking the
+            // parent link from the descendant and sourcing the block from the
+            // shard-engine buffer.
+            let descendant_proposal = Proposal {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                parent: View::new(1),
+                payload: descendant_commitment,
+            };
+            let descendant_finalization =
+                CodingHarness::make_finalization(descendant_proposal, &schemes, QUORUM);
+            CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization).await;
+
+            // Wait until the descendant is archived: that proves finalization processing
+            // has completed, at which point the parent must already have been repaired
+            // from the shard buffer.
+            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let parent = handle.mailbox.get_block(Height::new(1)).await;
+            assert!(
+                parent.is_some(),
+                "parent must be archived from shard buffer before height-prune evicts it"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_init_processed_height() {
         harness::init_processed_height::<CodingHarness>();
     }

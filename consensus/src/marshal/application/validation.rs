@@ -3,13 +3,43 @@
 //! This module centralizes pure invariant checks shared across marshal verification
 //! and certification flows.
 
-use crate::types::{Epoch, Epocher, Height, Round};
+use crate::{
+    marshal::core::{Mailbox, Variant},
+    types::{Epoch, Epocher, Height, Round},
+};
+use commonware_cryptography::certificate::Scheme;
 use commonware_utils::sync::Mutex;
 use std::sync::Arc;
 
 /// Cache for the last block built during proposal, shared between the
 /// proposer task and the broadcast path.
 pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
+
+/// Which stage of verification a block has reached.
+///
+/// This is used to determine which marshal cache a block should be stored in.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Stage {
+    /// The block has been verified (store in `verified_blocks`).
+    Verified,
+    /// The block has been certified (store in `notarized_blocks`).
+    Certified,
+}
+
+impl Stage {
+    /// Store `block` in the marshal cache for the provided stage.
+    pub(crate) async fn store<S: Scheme, V: Variant>(
+        self,
+        marshal: &mut Mailbox<S, V>,
+        round: Round,
+        block: V::Block,
+    ) -> bool {
+        match self {
+            Self::Verified => marshal.verified(round, block).await,
+            Self::Certified => marshal.certified(round, block).await,
+        }
+    }
+}
 
 /// Returns true if the block is at an epoch boundary (last block in its epoch).
 #[inline]

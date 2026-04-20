@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::LastBuilt,
+        application::validation::{LastBuilt, Stage},
         core::Mailbox,
         standard::{
             validation::{
@@ -224,8 +224,11 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
-    /// Blocks are persisted and broadcast via `marshal.proposed()` before the digest
-    /// is returned to consensus.
+    /// The built block is cached in memory (`last_built`) for the subsequent
+    /// `Relay::broadcast(Plan::Propose)` call, which invokes `marshal.proposed()`
+    /// as the durable persistence boundary before consensus continues. Receiving
+    /// a digest from `propose()` alone does not mean the block is recoverable
+    /// after restart.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
@@ -408,6 +411,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
+                    Stage::Verified,
                 )
                 .await
                 {
@@ -461,8 +465,10 @@ where
 
                 // `certify` resolving true drives the finalize vote, so mere
                 // buffered availability is not sufficient here. Persist the
-                // block through marshal before signaling success.
-                if marshal.verified(round, block).await {
+                // block through marshal before signaling success. The caller
+                // holds a notarization for this block, so route it into the
+                // notarized cache directly rather than the verified cache.
+                if marshal.certified(round, block).await {
                     tx.send_lossy(true);
                 }
             });

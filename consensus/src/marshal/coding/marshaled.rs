@@ -83,7 +83,7 @@ use crate::{
         ancestry::AncestorStream,
         application::{
             validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt, Stage,
             },
             verification_tasks::VerificationTasks,
         },
@@ -299,6 +299,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
+        stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -424,7 +425,7 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid && !marshal.verified(round, block).await {
+                if application_valid && !stage.store(&mut marshal, round, block).await {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
@@ -779,7 +780,7 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None);
+        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -895,9 +896,10 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // During crash recovery we may call `marshal.verified` twice for
-                    // the same block; the call is idempotent.
-                    if !marshaled.marshal.verified(round, block).await {
+                    // Certifier holds a notarization for this block, so route
+                    // the write to the notarized cache. `certified` is
+                    // idempotent, so crash-recovery double-invocation is safe.
+                    if !marshaled.marshal.certified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -916,7 +918,12 @@ where
 
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
-                let verify_rx = marshaled.deferred_verify(embedded_context, payload, Some(block));
+                let verify_rx = marshaled.deferred_verify(
+                    embedded_context,
+                    payload,
+                    Some(block),
+                    Stage::Certified,
+                );
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }

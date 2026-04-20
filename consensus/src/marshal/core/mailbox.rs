@@ -112,6 +112,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
+    /// A notification that a block has been certified by the application.
+    Certified {
+        /// The round in which the block was certified.
+        round: Round,
+        /// The certified block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
+    },
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
@@ -303,6 +312,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
+            .await
+            .is_some()
+    }
+
+    /// Notifies the actor that a block has been certified, awaiting the actor's
+    /// confirmation that the block has been durably persisted before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Certified { round, block, ack })
             .await
             .is_some()
     }
