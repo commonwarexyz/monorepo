@@ -500,92 +500,139 @@ async fn assert_active_validators_match_canonical<H: TestHarness>(
     }
 }
 
+/// A height that has been driven through propose + verify but has not yet had
+/// its finalization reported to the validators.
+struct PendingHailstormHeight<H: TestHarness> {
+    height: Height,
+    expected_digest: D,
+    finalization: Finalization<S, H::Commitment>,
+    next_parent: D,
+    next_parent_commitment: H::Commitment,
+}
+
+/// Drives one height through the propose and verify phases without reporting
+/// finalization. The returned pending height must be committed via
+/// [`finalize_hailstorm_height`] to advance the canonical chain.
+async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
+    height_value: u64,
+    context: &mut deterministic::Context,
+    state: &mut HailstormState<'_, H>,
+) -> PendingHailstormHeight<H> {
+    let height = Height::new(height_value);
+    let active = active_validator_indices(state.validators);
+    let proposer_idx = active[context.gen_range(0..active.len())];
+    let verifier_count = usize::min(QUORUM as usize, active.len());
+    let verifier_indices = active
+        .iter()
+        .copied()
+        .filter(|idx| *idx != proposer_idx)
+        .choose_multiple(context, verifier_count.saturating_sub(1));
+    let block = H::make_test_block(
+        *state.parent,
+        *state.parent_commitment,
+        height,
+        height_value,
+        state.participants.len() as u16,
+    );
+    let round = Round::new(Epoch::zero(), View::new(height_value));
+    let proposal = Proposal {
+        round,
+        parent: height
+            .previous()
+            .map(|previous| View::new(previous.get()))
+            .unwrap_or(View::zero()),
+        payload: H::commitment(&block),
+    };
+    let expected_digest = H::digest(&block);
+    let finalization = H::make_finalization(proposal.clone(), state.schemes, QUORUM);
+
+    {
+        let proposer = state.validators[proposer_idx]
+            .as_mut()
+            .expect("proposer should be active");
+        H::propose(&mut proposer.handle, round, &block).await;
+        H::report_notarization(
+            &mut proposer.handle.mailbox,
+            H::make_notarization(proposal, state.schemes, QUORUM),
+        )
+        .await;
+    }
+
+    for verifier_idx in verifier_indices.iter().copied() {
+        let verifier = state.validators[verifier_idx]
+            .as_mut()
+            .expect("verifier should be active");
+        H::verify(&mut verifier.handle, round, &block, &mut []).await;
+    }
+
+    context.sleep(state.propagation_delay).await;
+
+    PendingHailstormHeight {
+        height,
+        expected_digest,
+        finalization,
+        next_parent: expected_digest,
+        next_parent_commitment: H::commitment(&block),
+    }
+}
+
+/// Reports the finalization for a previously-driven pending height to every
+/// currently-active validator, waits for them to reach the height, and updates
+/// the canonical chain.
+async fn finalize_hailstorm_height<H: TestHarness>(
+    pending: PendingHailstormHeight<H>,
+    context: &mut deterministic::Context,
+    state: &mut HailstormState<'_, H>,
+) {
+    let PendingHailstormHeight {
+        height,
+        expected_digest,
+        finalization,
+        next_parent,
+        next_parent_commitment,
+    } = pending;
+
+    for idx in active_validator_indices(state.validators) {
+        let validator = state.validators[idx]
+            .as_mut()
+            .expect("validator should remain active");
+        H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
+    }
+
+    state
+        .canonical
+        .push((height, expected_digest, finalization));
+    *state.parent = next_parent;
+    *state.parent_commitment = next_parent_commitment;
+
+    let (_, _, expected_finalization) = state
+        .canonical
+        .last()
+        .expect("canonical chain should contain the new height");
+    for idx in active_validator_indices(state.validators) {
+        let validator = state.validators[idx]
+            .as_ref()
+            .expect("validator should be active");
+        wait_for_validator_height(
+            context,
+            validator,
+            height,
+            expected_digest,
+            expected_finalization,
+            &format!("validator_{idx}"),
+        )
+        .await;
+    }
+}
+
 async fn advance_hailstorm_to<H: TestHarness>(
     target: u64,
     context: &mut deterministic::Context,
     state: &mut HailstormState<'_, H>,
 ) {
     for height_value in (state.canonical.len() as u64 + 1)..=target {
-        let height = Height::new(height_value);
-        let active = active_validator_indices(state.validators);
-        let proposer_idx = active[context.gen_range(0..active.len())];
-        let verifier_count = usize::min(QUORUM as usize, active.len());
-        let verifier_indices = active
-            .iter()
-            .copied()
-            .filter(|idx| *idx != proposer_idx)
-            .choose_multiple(context, verifier_count.saturating_sub(1));
-        let block = H::make_test_block(
-            *state.parent,
-            *state.parent_commitment,
-            height,
-            height_value,
-            state.participants.len() as u16,
-        );
-        let round = Round::new(Epoch::zero(), View::new(height_value));
-        let proposal = Proposal {
-            round,
-            parent: height
-                .previous()
-                .map(|previous| View::new(previous.get()))
-                .unwrap_or(View::zero()),
-            payload: H::commitment(&block),
-        };
-        let expected_digest = H::digest(&block);
-        let finalization = H::make_finalization(proposal.clone(), state.schemes, QUORUM);
-
-        {
-            let proposer = state.validators[proposer_idx]
-                .as_mut()
-                .expect("proposer should be active");
-            H::propose(&mut proposer.handle, round, &block).await;
-            H::report_notarization(
-                &mut proposer.handle.mailbox,
-                H::make_notarization(proposal, state.schemes, QUORUM),
-            )
-            .await;
-        }
-
-        for verifier_idx in verifier_indices.iter().copied() {
-            let verifier = state.validators[verifier_idx]
-                .as_mut()
-                .expect("verifier should be active");
-            H::verify(&mut verifier.handle, round, &block, &mut []).await;
-        }
-
-        context.sleep(state.propagation_delay).await;
-
-        for idx in active_validator_indices(state.validators) {
-            let validator = state.validators[idx]
-                .as_mut()
-                .expect("validator should remain active");
-            H::report_finalization(&mut validator.handle.mailbox, finalization.clone()).await;
-        }
-
-        state
-            .canonical
-            .push((height, expected_digest, finalization));
-        *state.parent = expected_digest;
-        *state.parent_commitment = H::commitment(&block);
-
-        let (_, _, expected_finalization) = state
-            .canonical
-            .last()
-            .expect("canonical chain should contain the new height");
-        for idx in active_validator_indices(state.validators) {
-            let validator = state.validators[idx]
-                .as_ref()
-                .expect("validator should be active");
-            wait_for_validator_height(
-                context,
-                validator,
-                height,
-                expected_digest,
-                expected_finalization,
-                &format!("validator_{idx}"),
-            )
-            .await;
-        }
+        let pending = drive_hailstorm_height_up_to_verify(height_value, context, state).await;
+        finalize_hailstorm_height(pending, context, state).await;
     }
 
     assert_active_validators_match_canonical(state.validators, state.canonical).await;
@@ -646,27 +693,64 @@ pub fn hailstorm<H: TestHarness>(
         for shutdown_idx in 0..shutdowns {
             let leadup = context.gen_range(1..=max_interval);
             target_height += leadup;
-            let mut state = HailstormState {
-                validators: &mut validators,
-                canonical: &mut canonical,
-                parent: &mut parent,
-                parent_commitment: &mut parent_commitment,
-                participants: &participants,
-                schemes: &schemes,
-                propagation_delay,
-            };
-            advance_hailstorm_to(target_height, &mut context, &mut state).await;
 
-            let active = active_validator_indices(&validators);
-            let down_limit = usize::min(max_down, active.len().saturating_sub(1));
-            let down_count = down_limit.max(1);
-            let down_count = context.gen_range(1..=down_count);
-            let mut selected = active
+            // Pick validators to crash and compute how far the advance should
+            // run before aborting them. `crash_after == leadup` fires the
+            // crash after every new height has fully finalized; any smaller
+            // value lands mid-cycle, after `verified` / `certified` have
+            // returned for the post-crash height but before finalization is
+            // reported for it.
+            let active_pre = active_validator_indices(&validators);
+            let down_limit = usize::min(max_down, active_pre.len().saturating_sub(1));
+            let down_count = context.gen_range(1..=down_limit.max(1));
+            let mut selected = active_pre
                 .iter()
                 .copied()
                 .choose_multiple(&mut context, down_count);
             selected.sort_unstable();
-            let persisted_height = target_height;
+            let crash_after = context.gen_range(0..=leadup);
+            let persisted_height = target_height - leadup + crash_after;
+
+            {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                    propagation_delay,
+                };
+                advance_hailstorm_to(persisted_height, &mut context, &mut state).await;
+            }
+
+            // Crash mid-advance: drive propose + verify for the next height
+            // and abort the selected validators before reporting
+            // finalization. If `crash_after == leadup - 1` the crash still
+            // happens after the last height's finalization because the loop
+            // below is a no-op.
+            let pending = if persisted_height < target_height {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                    propagation_delay,
+                };
+                Some(
+                    drive_hailstorm_height_up_to_verify(
+                        persisted_height + 1,
+                        &mut context,
+                        &mut state,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+
             for idx in selected.iter().copied() {
                 let crashed = validators[idx]
                     .take()
@@ -674,6 +758,20 @@ pub fn hailstorm<H: TestHarness>(
                 crashed.actor_handle.abort();
                 let _ = crashed.actor_handle.await;
             }
+
+            if let Some(pending) = pending {
+                let mut state = HailstormState {
+                    validators: &mut validators,
+                    canonical: &mut canonical,
+                    parent: &mut parent,
+                    parent_commitment: &mut parent_commitment,
+                    participants: &participants,
+                    schemes: &schemes,
+                    propagation_delay,
+                };
+                finalize_hailstorm_height(pending, &mut context, &mut state).await;
+            }
+
             info!(
                 seed,
                 shutdown_idx,
@@ -681,6 +779,7 @@ pub fn hailstorm<H: TestHarness>(
                 down_count,
                 persisted_height,
                 leadup,
+                crash_after,
                 "marshal hailstorm shutdown"
             );
 
@@ -833,11 +932,28 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
+                        let recovered = restarted
+                            .mailbox
+                            .get_verified(round)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "marshal.verified() returning true must imply \
+                                     get_verified(round) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                )
+                            });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_verified(round) must return the proposed block \
+                             (seed={seed}, cycle={cycle})"
+                        );
                         assert!(
-                        restarted.mailbox.get_block(&digest).await.is_some(),
-                        "marshal.verified() returning true must imply the block is recoverable \
-                         after restart (seed={seed}, cycle={cycle})"
-                    );
+                            restarted.mailbox.get_block(&digest).await.is_some(),
+                            "get_block(&digest) must also recover the proposed block \
+                             (seed={seed}, cycle={cycle})"
+                        );
                     }
                 });
             checkpoint = next_checkpoint;
@@ -922,11 +1038,136 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
+                        let recovered = restarted
+                            .mailbox
+                            .get_verified(round)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "marshal.verified() returning true must imply \
+                                     get_verified(round) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                )
+                            });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_verified(round) must return the verified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
                         assert!(
-                        restarted.mailbox.get_block(&digest).await.is_some(),
-                        "marshal.verified() returning true must imply the block is recoverable \
-                         after restart (seed={seed}, cycle={cycle})"
-                    );
+                            restarted.mailbox.get_block(&digest).await.is_some(),
+                            "get_block(&digest) must also recover the verified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
+                    }
+                });
+            checkpoint = next_checkpoint;
+        }
+    }
+}
+
+/// Contract: `marshal.certified(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
+///
+/// Complements [`verified_success_implies_recoverable_after_restart`] by
+/// exercising the `Message::Certified -> cache_block -> put_sync` handshake.
+/// A regression that acked before syncing the notarized cache would surface
+/// here as a missing block after restart.
+pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
+    seeds: impl IntoIterator<Item = u64>,
+) {
+    for seed in seeds {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(
+            &mut test_rng_seeded(seed),
+            NAMESPACE,
+            NUM_VALIDATORS,
+        );
+
+        let me = participants[0].clone();
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            Height::new(1),
+            100,
+            NUM_VALIDATORS as u16,
+        );
+        let digest = H::digest(&block);
+        let recovery_cycles = restart_cycles_for_seed(seed);
+
+        let (_, mut checkpoint) = contract_runner(seed).start_and_recover({
+            let participants = participants.clone();
+            let me = me.clone();
+            let provider = provider.clone();
+            let block = block.clone();
+            move |context| async move {
+                let mut oracle = setup_network_with_participants(
+                    context.clone(),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = H::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    provider.clone(),
+                )
+                .await;
+                let mut handle = ValidatorHandle::<H> {
+                    mailbox: setup.mailbox,
+                    extra: setup.extra,
+                };
+                assert!(
+                    H::certify(&mut handle, round, &block).await,
+                    "certify must ack"
+                );
+            }
+        });
+
+        for cycle in 0..recovery_cycles {
+            let ((), next_checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover({
+                    let participants = participants.clone();
+                    let me = me.clone();
+                    let provider = provider.clone();
+                    move |context| async move {
+                        let mut oracle = setup_network_with_participants(
+                            context.clone(),
+                            NZUsize!(1),
+                            participants.clone(),
+                        )
+                        .await;
+                        let restarted = H::setup_validator(
+                            context.with_label(&format!("validator_0_restart_{cycle}")),
+                            &mut oracle,
+                            me.clone(),
+                            provider.clone(),
+                        )
+                        .await;
+                        let recovered = restarted
+                            .mailbox
+                            .get_block(&digest)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "marshal.certified() returning true must imply \
+                                     get_block(&digest) recovers the block after restart \
+                                     (seed={seed}, cycle={cycle})"
+                                )
+                            });
+                        assert_eq!(
+                            recovered.digest(),
+                            digest,
+                            "get_block(&digest) must return the certified block \
+                             (seed={seed}, cycle={cycle})"
+                        );
                     }
                 });
             checkpoint = next_checkpoint;

@@ -178,6 +178,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_certified_success_implies_recoverable_after_restart() {
+        harness::certified_success_implies_recoverable_after_restart::<CodingHarness>(0..16);
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_delivery_visibility_implies_recoverable_after_restart() {
         harness::delivery_visibility_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }
