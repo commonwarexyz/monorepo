@@ -163,29 +163,23 @@ where
     )
     .await?;
 
-    // Extract grafted pinned nodes from the ops tree.
-    //
-    // With the zero-chunk identity, all-zero bitmap chunks (which all pruned chunks are)
-    // produce grafted leaves equal to the corresponding ops subtree root. The grafted
-    // tree's pinned nodes for the pruned region are therefore the first
-    // `popcount(pruned_chunks)` ops pinned nodes (in decreasing height order).
-    //
-    // `nodes_to_pin(range.start)` returns all ops peaks, but only the first
-    // `popcount(pruned_chunks)` are at or above the grafting height. The remaining
-    // smaller peaks cover the partial trailing chunk and are not grafted pinned nodes.
+    // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
+    // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
+    // identity: when the covered chunks are all zero (which pruned chunks always are), the
+    // ops-family digest at the mapped position equals the grafted digest.
     //
     // Requires `range.start <=` target's [`Db::sync_boundary`](db::Db::sync_boundary): that
-    // bound guarantees every fully-pruned chunk's height-`gh` subtree is absorbed at
-    // `range.end`, so `nodes_to_pin` returns the correct positions for any merkle family.
+    // bound guarantees every required ops-tree node is born at `range.end`.
     let grafted_pinned_nodes = {
-        let ops_pin_positions: Vec<_> = F::nodes_to_pin(range.start()).collect();
-        let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
-        let mut pins = Vec::with_capacity(num_grafted_pins);
-        for pos in ops_pin_positions.into_iter().take(num_grafted_pins) {
+        let grafted_boundary = Location::<F>::new(pruned_chunks as u64);
+        let grafting_height = grafting::height::<N>();
+        let mut pins = Vec::new();
+        for grafted_pos in F::nodes_to_pin(grafted_boundary) {
+            let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
                 .log
                 .merkle
-                .get_node(pos)
+                .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
             pins.push(digest);

@@ -227,7 +227,8 @@ pub(super) fn ops_to_grafted_pos<F: Graftable>(
     F::subtree_root_position(grafted_leaf_loc, grafted_height)
 }
 
-/// Convert a grafted position back to the corresponding ops-family position.
+/// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
+/// range.
 pub(super) fn grafted_to_ops_pos<F: Graftable>(
     grafted_pos: Position<F>,
     grafting_height: u32,
