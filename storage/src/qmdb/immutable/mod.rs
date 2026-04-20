@@ -510,8 +510,10 @@ where
     /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
     /// - [`Error::FloorRegressed`] if the batch's inactivity floor is below the
     ///   database's current floor.
-    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor exceeds its
-    ///   total operation count.
+    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor is at or
+    ///   beyond its total operation count. The maximum valid floor is
+    ///   `total_size - 1` (the commit operation's location); a floor equal to
+    ///   `total_size` would permit pruning the commit itself.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Immutable::commit`] or
@@ -537,7 +539,7 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        if batch.new_inactivity_floor_loc > Location::new(batch.total_size) {
+        if batch.new_inactivity_floor_loc >= Location::new(batch.total_size) {
             return Err(Error::FloorBeyondSize(
                 batch.new_inactivity_floor_loc,
                 Location::new(batch.total_size),
@@ -2313,31 +2315,31 @@ pub(super) mod test {
         let mut db = open_db(context.with_label("test")).await;
 
         // DB starts with 1 op (initial commit).
-        // First batch: 1 set + 1 commit = total_size 3. Use floor=3.
+        // First batch: 1 set + 1 commit = total_size 3. Use floor=2 (the commit loc).
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
         db.apply_batch(
             db.new_batch()
                 .set(k1, v1)
-                .merkleize(&db, None, Location::new(3)),
+                .merkleize(&db, None, Location::new(2)),
         )
         .await
         .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
-        // Same floor is OK. Second batch: 1 set + 1 commit = total_size 5. floor=3 <= 5.
+        // Same floor is OK. Second batch: 1 set + 1 commit = total_size 5. floor=2 < 5.
         let k2 = Sha256::fill(3u8);
         let v2 = Sha256::fill(4u8);
         db.apply_batch(
             db.new_batch()
                 .set(k2, v2)
-                .merkleize(&db, None, Location::new(3)),
+                .merkleize(&db, None, Location::new(2)),
         )
         .await
         .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
-        // Higher floor also succeeds. Third batch: 1 set + 1 commit = total_size 7. floor=5 <= 7.
+        // Higher floor also succeeds. Third batch: 1 set + 1 commit = total_size 7. floor=5 < 7.
         let k3 = Sha256::fill(5u8);
         let v3 = Sha256::fill(6u8);
         db.apply_batch(
@@ -2379,18 +2381,18 @@ pub(super) mod test {
         let first_size = db.bounds().await.end;
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
-        // Apply second batch with floor=5.
+        // Apply second batch with floor=4 (the new commit's location).
         let k2 = Sha256::fill(3u8);
         let v2 = Sha256::fill(4u8);
         db.apply_batch(
             db.new_batch()
                 .set(k2, v2)
-                .merkleize(&db, None, Location::new(5)),
+                .merkleize(&db, None, Location::new(4)),
         )
         .await
         .unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(5));
+        assert_eq!(db.inactivity_floor_loc(), Location::new(4));
 
         // Rewind to the first batch.
         db.rewind(first_size).await.unwrap();
@@ -2413,13 +2415,13 @@ pub(super) mod test {
     {
         let mut db = open_db(context.with_label("test")).await;
 
-        // DB starts with 1 op. First batch: 1 set + 1 commit = total_size 3. floor=3.
+        // DB starts with 1 op. First batch: 1 set + 1 commit = total_size 3. floor=2.
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
         db.apply_batch(
             db.new_batch()
                 .set(k1, v1)
-                .merkleize(&db, None, Location::new(3)),
+                .merkleize(&db, None, Location::new(2)),
         )
         .await
         .unwrap();
@@ -2435,7 +2437,7 @@ pub(super) mod test {
             )
             .await;
         assert!(matches!(result, Err(Error::FloorRegressed(new, current))
-                if new == Location::new(1) && current == Location::new(3)));
+                if new == Location::new(1) && current == Location::new(2)));
 
         db.destroy().await.unwrap();
     }
@@ -2467,6 +2469,30 @@ pub(super) mod test {
             .await;
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, total))
                 if floor == Location::new(100) && total == Location::new(3)));
+
+        // Boundary: floor == total_size must also be rejected. The commit op is
+        // at total_size - 1, so a floor equal to total_size would allow a later
+        // prune to remove the commit and leave the db unrecoverable.
+        let k2 = Sha256::fill(3u8);
+        let v2 = Sha256::fill(4u8);
+        let result = db
+            .apply_batch(
+                db.new_batch()
+                    .set(k2, v2)
+                    .merkleize(&db, None, Location::new(3)),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, total))
+                if floor == Location::new(3) && total == Location::new(3)));
+
+        // Floor == total_size - 1 (the commit location) is the maximum valid.
+        db.apply_batch(
+            db.new_batch()
+                .set(k2, v2)
+                .merkleize(&db, None, Location::new(2)),
+        )
+        .await
+        .unwrap();
 
         db.destroy().await.unwrap();
     }
