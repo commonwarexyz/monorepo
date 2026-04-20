@@ -531,7 +531,7 @@ where
                 // Building a fresh block would land on the same prunable
                 // archive index and be silently dropped, so the stored block
                 // is the only proposal we can broadcast for this round.
-
+                //
                 // The recovered block is safe to reuse only if its embedded
                 // context matches the context simplex just recovered.
                 // Otherwise the cached block was built against a different
