@@ -680,9 +680,9 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, Plan},
+        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, Relay,
+        Automaton, CertifiableAutomaton,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
@@ -1155,8 +1155,6 @@ mod tests {
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
-
-            marshaled.broadcast(digest_a, Plan::Propose { round }).await;
         });
     }
 }

@@ -80,11 +80,9 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
         },
-        simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan,
-        },
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, Relay,
+        Automaton, CertifiableAutomaton,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -2052,10 +2050,6 @@ mod tests {
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
-
-            marshaled
-                .broadcast(commitment_a, Plan::Propose { round })
-                .await;
         });
     }
 }

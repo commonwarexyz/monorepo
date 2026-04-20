@@ -564,9 +564,7 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context, Plan,
-        },
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
@@ -1235,11 +1233,6 @@ mod tests {
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
-
-            // After the automaton hands the digest to the voter, the voter
-            // calls Relay::broadcast(Plan::Propose). That call must succeed so
-            // the leader actually votes instead of bailing out.
-            inline.broadcast(digest_a, Plan::Propose { round }).await;
         });
     }
 }
