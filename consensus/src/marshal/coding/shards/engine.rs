@@ -159,7 +159,7 @@ use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
-use commonware_parallel::{Bridge, Strategy};
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{histogram::HistogramExt, status::GaugeExt},
@@ -577,7 +577,7 @@ where
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
     /// - `Err(_)` if reconstruction was attempted but failed.
     #[allow(clippy::type_complexity)]
-    fn try_reconstruct(
+    async fn try_reconstruct(
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
@@ -591,20 +591,19 @@ where
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
         }
-        // Attempt to reconstruct the encoded blob
+
+        // Spawn only the erasure decode (which uses the strategy for parallel
+        // recovery) so we can yield while it runs.
+        let shards = state.take_checked_shards();
         let start = self.context.current();
-        let blob = C::decode(
-            &commitment.config(),
-            &commitment.root(),
-            state.checked_shards().iter(),
-            &self.strategy,
-        )
-        .map_err(Error::Coding)?;
+        let blob = self.strategy.spawn(move |s| {
+            C::decode(&commitment.config(), &commitment.root(), shards.iter(), &s)
+        }).await.map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
             .observe_between(start, self.context.current());
 
-        // Attempt to decode the block from the encoded blob
+        // Decode the block and validate the reconstruction.
         let (inner, config): (B, CodingConfig) =
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
@@ -872,7 +871,7 @@ where
             }
         }
 
-        match self.try_reconstruct(commitment) {
+        match self.try_reconstruct(commitment).await {
             Ok(Some(block)) => {
                 // Do not prune other reconstruction state here. A Byzantine
                 // leader can equivocate by proposing multiple commitments in
@@ -1220,7 +1219,7 @@ where
         &mut self,
         commitment: Commitment,
         participants_len: u64,
-        strategy: &impl Strategy,
+        strategy: &impl Bridge,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> Option<ReadyState<P, C, H>> {
         let minimum = usize::from(commitment.config().minimum_shards.get());
@@ -1228,10 +1227,11 @@ where
             return None;
         }
 
-        // Batch-validate all pending weak shards in parallel.
+        // Spawn batch-validation of all pending weak shards so we can yield
+        // while the work runs.
         let pending = std::mem::take(&mut self.pending_shards);
-        let (new_checked, to_block) =
-            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
+        let (new_checked, to_block) = strategy.spawn(move |s| {
+            s.map_partition_collect_vec(pending, |(peer, shard)| {
                 let checked = C::check(
                     &commitment.config(),
                     &commitment.root(),
@@ -1239,7 +1239,8 @@ where
                     &shard.data,
                 );
                 (peer, checked.ok())
-            });
+            })
+        }).await;
 
         for peer in to_block {
             commonware_p2p::block!(blocker, peer, "invalid shard received");
@@ -1343,6 +1344,11 @@ where
     /// Returns all verified shards accumulated for reconstruction.
     const fn checked_shards(&self) -> &[C::CheckedShard] {
         self.common().checked_shards.as_slice()
+    }
+
+    /// Takes the verified shards out of the state, leaving it empty.
+    fn take_checked_shards(&mut self) -> Vec<C::CheckedShard> {
+        std::mem::take(&mut self.common_mut().checked_shards)
     }
 
     /// Takes the pending action for this commitment's validated shard.
