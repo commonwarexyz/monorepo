@@ -6,26 +6,39 @@
 //! Timed: do `batches` more merkleize + apply iterations on top of the pre-built chain, with a
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
-use crate::common::{dispatch_arm, make_fixed_value, Digest};
+use crate::common::{make_fixed_value, Digest, WRITE_BUFFER_SIZE};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
+    BufferPooler, ThreadPooler,
 };
 use commonware_storage::{
-    merkle::{self, mmb::Family as Mmb},
+    journal::contiguous::fixed::Config as FConfig,
+    merkle::{self, journaled, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
     },
     translator::EightCap,
 };
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     hint::black_box,
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
+
+// -- Config (mirrors merkleize bench) --
+
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
+const THREADS: NonZeroUsize = NZUsize!(8);
+const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
+const PARTITION: &str = "bench-chained-growth";
 
 const SMALL_CHUNK_SIZE: usize = 32;
 const LARGE_CHUNK_SIZE: usize = 256;
@@ -34,6 +47,42 @@ type CurUFix32Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMAL
 type CurOFix32Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMALL_CHUNK_SIZE>;
 type CurUFix256Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
 type CurOFix256Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
+
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
+    journaled::Config {
+        journal_partition: format!("journal-{PARTITION}"),
+        metadata_partition: format!("metadata-{PARTITION}"),
+        items_per_blob: ITEMS_PER_BLOB,
+        write_buffer: WRITE_BUFFER_SIZE,
+        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
+        page_cache: pc,
+    }
+}
+
+fn fix_log_cfg(pc: CacheRef) -> FConfig {
+    FConfig {
+        partition: format!("log-journal-{PARTITION}"),
+        items_per_blob: ITEMS_PER_BLOB,
+        page_cache: pc,
+        write_buffer: WRITE_BUFFER_SIZE,
+    }
+}
+
+fn pc(ctx: &impl BufferPooler) -> CacheRef {
+    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+}
+
+fn cur_fix_cfg(
+    ctx: &(impl BufferPooler + ThreadPooler),
+) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
+    let pc = pc(ctx);
+    commonware_storage::qmdb::current::FixedConfig {
+        merkle_config: merkle_cfg(ctx, pc.clone()),
+        journal_config: fix_log_cfg(pc),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
+        translator: EightCap,
+    }
+}
 
 /// Number of pre-populated keys in the seeded database.
 const NUM_KEYS: u64 = 1_000_000;
@@ -78,19 +127,20 @@ const CURRENT_VARIANTS: [CurrentVariant; 4] = [
 /// Construct a Current database for `$variant`, bind it as `$db`, and execute `$body`.
 macro_rules! with_current_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+        macro_rules! init_db {
+            ($DbType:ty) => {{
+                #[allow(unused_mut)]
+                let mut $db = <$DbType>::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                    .await
+                    .unwrap();
+                $body
+            }};
+        }
         match $variant {
-            CurrentVariant::UnorderedFixed32 => {
-                dispatch_arm!($ctx, $db, $body, CurUFix32Mmb, cur_fix_cfg)
-            }
-            CurrentVariant::OrderedFixed32 => {
-                dispatch_arm!($ctx, $db, $body, CurOFix32Mmb, cur_fix_cfg)
-            }
-            CurrentVariant::UnorderedFixed256 => {
-                dispatch_arm!($ctx, $db, $body, CurUFix256Mmb, cur_fix_cfg)
-            }
-            CurrentVariant::OrderedFixed256 => {
-                dispatch_arm!($ctx, $db, $body, CurOFix256Mmb, cur_fix_cfg)
-            }
+            CurrentVariant::UnorderedFixed32 => init_db!(CurUFix32Mmb),
+            CurrentVariant::OrderedFixed32 => init_db!(CurOFix32Mmb),
+            CurrentVariant::UnorderedFixed256 => init_db!(CurUFix256Mmb),
+            CurrentVariant::OrderedFixed256 => init_db!(CurOFix256Mmb),
         }
     }};
 }
