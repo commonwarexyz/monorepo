@@ -789,6 +789,72 @@ where
         }
         db.get(key).await
     }
+
+    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U>,
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local mutations.
+            if let Some(value) = self.mutations.get(*key) {
+                results.push(value.clone());
+                continue;
+            }
+
+            // Check parent diff chain.
+            let mut found = false;
+            if let Some(parent) = self.base.parent() {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(entry.value().cloned());
+                    found = true;
+                }
+                if !found {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(entry.value().cloned());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None); // placeholder
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // Unordered-specific methods.
@@ -1358,6 +1424,65 @@ where
             }
         }
         db.get(key).await
+    }
+
+    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I, H>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U>,
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local diff.
+            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+                results.push(entry.value().cloned());
+                continue;
+            }
+
+            // Walk parent chain.
+            let mut found = false;
+            for batch in self.ancestors() {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                    results.push(entry.value().cloned());
+                    found = true;
+                    break;
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None); // placeholder
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
     }
 }
 
