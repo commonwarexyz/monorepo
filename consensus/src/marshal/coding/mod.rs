@@ -2106,8 +2106,7 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::zero(), genesis_parent_commitment),
             };
-            let stale_block =
-                make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
+            let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale_block, coding_config, &Sequential);
             assert!(marshal.verified(round, stale_coded).await);

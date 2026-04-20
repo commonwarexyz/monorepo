@@ -924,17 +924,18 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_verified(round)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.verified() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.verified() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1030,17 +1031,18 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_verified(round)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.verified() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.verified() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1143,17 +1145,18 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_block(&digest)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.certified() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_block(&digest)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.certified() returning true must imply \
                                      get_block(&digest) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
