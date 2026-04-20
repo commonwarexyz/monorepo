@@ -529,6 +529,28 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
+                // On leader recovery, marshal may already hold a verified
+                // block for this round (persisted before voting in consensus). Building
+                // a fresh block would land on the same view index in the
+                // prunable archive and be silently dropped, so reuse the
+                // stored block instead.
+                if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let commitment = block.commitment();
+                    let round = consensus_context.round;
+                    {
+                        let mut lock = last_built.lock();
+                        *lock = Some((round, block));
+                    }
+                    let success = tx.send_lossy(commitment);
+                    debug!(
+                        ?round,
+                        ?commitment,
+                        success,
+                        "reused verified block from marshal on leader recovery"
+                    );
+                    return;
+                }
+
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,

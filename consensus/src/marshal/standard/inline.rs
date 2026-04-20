@@ -244,6 +244,28 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
+                // On leader recovery, marshal may already hold a verified
+                // block for this round (persisted by a pre-crash propose
+                // whose notarize vote never reached the journal). Building
+                // a fresh block would land on the same view index in the
+                // prunable archive and be silently dropped, so reuse the
+                // stored block instead.
+                if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let digest = block.digest();
+                    {
+                        let mut lock = last_built.lock();
+                        *lock = Some((consensus_context.round, block));
+                    }
+                    let success = tx.send_lossy(digest);
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        success,
+                        "reused verified block from marshal on leader recovery"
+                    );
+                    return;
+                }
+
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
@@ -565,7 +587,9 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+        simplex::{
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context, Plan,
+        },
         types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
@@ -1163,6 +1187,84 @@ mod tests {
             assert!(
                 post_restart.is_none(),
                 "failed marshal.verified ack must not leave a durably recoverable block"
+            );
+        });
+    }
+
+    /// Regression: if marshal persisted a verified block for a round before
+    /// a crash (say, via a prior `Relay::broadcast(Plan::Propose)` landing on
+    /// the verified cache) but the simplex notarize artifact never reached
+    /// the journal, a restarted leader must re-use the persisted block.
+    ///
+    /// Otherwise the application is asked to build afresh, returns a new
+    /// block whose digest does not match the one marshal already stored
+    /// (the prunable archive silently drops the second write at the same
+    /// view index), the leader broadcasts a `Notarize` for a digest no peer
+    /// can serve, and the view stalls until timeout.
+    #[test_traced("WARN")]
+    fn test_propose_reuses_verified_block_on_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            // Seed block A for round V=1 in marshal's verified cache as if
+            // the pre-crash leader had built and broadcasted it.
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let digest_a = block_a.digest();
+            assert!(marshal.proposed(round, block_a.clone()).await);
+
+            // After restart, the fresh application would build a different
+            // block for the same round (distinct timestamp -> distinct digest).
+            let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+            let digest_b = block_b.digest();
+            assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+            let mock_app: MockVerifyingApp<B, S> =
+                MockVerifyingApp::new(genesis.clone()).with_propose_result(block_b);
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let digest_rx = inline.propose(ctx).await;
+            let digest = digest_rx.await.expect("propose must return a digest");
+            assert_eq!(
+                digest, digest_a,
+                "propose must reuse the block marshal already persisted for this round"
+            );
+
+            // After the automaton hands the digest to the voter, the voter
+            // calls Relay::broadcast(Plan::Propose). That call must succeed so
+            // the leader actually votes instead of bailing out.
+            assert!(
+                inline.broadcast(digest_a, Plan::Propose).await,
+                "relay broadcast must succeed after re-propose"
             );
         });
     }

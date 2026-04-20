@@ -521,6 +521,14 @@ where
                         };
                         response.send_lossy(info);
                     }
+                    Message::GetVerified { round, response } => {
+                        let block = self
+                            .cache
+                            .get_verified(round)
+                            .await
+                            .map(Into::into);
+                        response.send_lossy(block);
+                    }
                     Message::Proposed { round, block, ack } => {
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;

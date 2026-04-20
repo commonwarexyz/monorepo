@@ -85,6 +85,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
+    /// A request to retrieve the verified block previously persisted for `round`.
+    GetVerified {
+        /// The round to query.
+        round: Round,
+        /// A channel to send the retrieved block, if any.
+        response: oneshot::Sender<Option<V::Block>>,
+    },
     /// A request to broadcast a proposed block to peers.
     Proposed {
         /// The round in which the block was proposed.
@@ -294,6 +301,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .await
             .ok()
             .map(|block| AncestorStream::new(self.clone(), [V::into_inner(block)]))
+    }
+
+    /// Returns the verified block previously persisted for `round`, if any.
+    pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
+        self.sender
+            .request(|response| Message::GetVerified { round, response })
+            .await
+            .flatten()
     }
 
     /// Requests that a proposed block is sent to peers, awaiting the actor's

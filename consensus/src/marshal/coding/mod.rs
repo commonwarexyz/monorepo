@@ -1982,4 +1982,99 @@ mod tests {
             );
         });
     }
+
+    /// Regression: if marshal already holds a verified block for a round
+    /// (say, persisted by a pre-crash propose whose notarize vote never
+    /// reached the journal), a restarted leader's `propose` must return
+    /// that block's commitment instead of rebuilding. Otherwise the
+    /// new block lands on the same view index in the prunable archive,
+    /// gets silently dropped (`skip_if_index_exists=true`), and the
+    /// leader's notarize targets a commitment no peer can serve.
+    #[test_traced("WARN")]
+    fn test_propose_reuses_verified_block_on_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+
+            // Seed block A in marshal's verified cache for `round`.
+            let block_a = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(block_a.clone(), coding_config, &Sequential);
+            let commitment_a = coded_a.commitment();
+            assert!(marshal.proposed(round, coded_a).await);
+
+            // After restart, a fresh application would build a different
+            // block for the same round.
+            let block_b = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
+            let coded_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(block_b.clone(), coding_config, &Sequential);
+            let commitment_b = coded_b.commitment();
+            assert_ne!(
+                commitment_a, commitment_b,
+                "test requires distinct commitments"
+            );
+
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new(genesis).with_propose_result(block_b);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let commitment = marshaled
+                .propose(ctx)
+                .await
+                .await
+                .expect("propose must return a commitment");
+            assert_eq!(
+                commitment, commitment_a,
+                "propose must reuse the block marshal already persisted for this round"
+            );
+
+            assert!(
+                marshaled.broadcast(commitment_a, Plan::Propose).await,
+                "relay broadcast must succeed after re-propose"
+            );
+        });
+    }
 }

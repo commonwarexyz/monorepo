@@ -312,6 +312,28 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
+                // On leader recovery, marshal may already hold a verified
+                // block for this round (persisted by a pre-crash propose
+                // whose notarize vote never reached the journal). Building
+                // a fresh block would land on the same view index in the
+                // prunable archive and be silently dropped, so reuse the
+                // stored block instead.
+                if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let digest = block.digest();
+                    {
+                        let mut lock = last_built.lock();
+                        *lock = Some((consensus_context.round, block));
+                    }
+                    let success = tx.send_lossy(digest);
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        success,
+                        "reused verified block from marshal on leader recovery"
+                    );
+                    return;
+                }
+
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
@@ -683,9 +705,9 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, Plan},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
+        Automaton, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
@@ -1099,6 +1121,71 @@ mod tests {
                     panic!("certify should terminate after marshal abort");
                 },
             }
+        });
+    }
+
+    /// Regression: when marshal holds a verified block for a round from a
+    /// pre-crash propose, a restarted leader's `propose` must return that
+    /// block's digest instead of asking the application to build afresh.
+    /// See `standard::inline::tests::test_propose_reuses_verified_block_on_restart`.
+    #[test_traced("WARN")]
+    fn test_propose_reuses_verified_block_on_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let digest_a = block_a.digest();
+            assert!(marshal.proposed(round, block_a.clone()).await);
+
+            let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+            let digest_b = block_b.digest();
+            assert_ne!(digest_a, digest_b, "test requires distinct digests");
+
+            let mock_app: MockVerifyingApp<B, S> =
+                MockVerifyingApp::new(genesis.clone()).with_propose_result(block_b);
+            let mut marshaled = Deferred::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let digest_rx = marshaled.propose(ctx).await;
+            let digest = digest_rx.await.expect("propose must return a digest");
+            assert_eq!(
+                digest, digest_a,
+                "propose must reuse the block marshal already persisted for this round"
+            );
+
+            assert!(
+                marshaled.broadcast(digest_a, Plan::Propose).await,
+                "relay broadcast must succeed after re-propose"
+            );
         });
     }
 }
