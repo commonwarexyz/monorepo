@@ -334,7 +334,7 @@ impl<
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
                     .await;
                 if success {
-                    duration.observe_now(self.context.as_ref());
+                    duration.record(self.context.as_ref());
                 }
             },
             // Handle network messages
@@ -429,7 +429,7 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             let duration = self.fetch_timers.remove(&key).unwrap(); // must exist in the map
-            duration.observe_now(self.context.as_ref());
+            duration.record(self.context.as_ref());
 
             // Clear all targets for this key
             self.fetcher.clear_targets(&key);

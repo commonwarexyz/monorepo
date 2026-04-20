@@ -337,7 +337,7 @@ impl<
                     result,
                     duration,
                 } = request;
-                duration.observe_now(self.context.as_ref());
+                duration.record(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");

@@ -602,7 +602,7 @@ where
             &self.strategy,
         )
         .map_err(Error::Coding)?;
-        decode_duration.observe_now(self.context.as_ref());
+        decode_duration.record(self.context.as_ref());
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =

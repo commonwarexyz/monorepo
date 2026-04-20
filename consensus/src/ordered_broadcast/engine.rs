@@ -473,7 +473,7 @@ impl<
                     payload,
                     result,
                 } = verify;
-                duration.observe_now(self.context.as_ref());
+                duration.record(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
@@ -606,7 +606,7 @@ impl<
         if let Some(ref signer) = self.sequencer_signer {
             if chunk.sequencer == signer.public_key() {
                 if let Some(start) = self.propose_timer.take() {
-                    start.observe_now(self.context.as_ref());
+                    start.record(self.context.as_ref());
                 }
             }
         }

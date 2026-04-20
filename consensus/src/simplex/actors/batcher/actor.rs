@@ -572,17 +572,17 @@ where
                 let verified = if round.ready_notarizes() {
                     let timer = self.verify_latency.start(self.context.as_ref());
                     let result = round.verify_notarizes(self.context.as_mut(), &self.strategy);
-                    timer.observe_now(self.context.as_ref());
+                    timer.record(self.context.as_ref());
                     Some(result)
                 } else if round.ready_nullifies() {
                     let timer = self.verify_latency.start(self.context.as_ref());
                     let result = round.verify_nullifies(self.context.as_mut(), &self.strategy);
-                    timer.observe_now(self.context.as_ref());
+                    timer.record(self.context.as_ref());
                     Some(result)
                 } else if round.ready_finalizes() {
                     let timer = self.verify_latency.start(self.context.as_ref());
                     let result = round.verify_finalizes(self.context.as_mut(), &self.strategy);
-                    timer.observe_now(self.context.as_ref());
+                    timer.record(self.context.as_ref());
                     Some(result)
                 } else {
                     None
@@ -620,10 +620,10 @@ where
                 }
 
                 // Try to construct and forward certificates
-                let notarization = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || round.try_construct_notarization(&self.scheme, &self.strategy));
+                let started = self.recover_latency.start(self.context.as_ref());
+                let notarization = round.try_construct_notarization(&self.scheme, &self.strategy);
                 if let Some(notarization) = notarization {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Forward notarization to voter
@@ -631,19 +631,19 @@ where
                         .recovered(Certificate::Notarization(notarization))
                         .await;
                 }
-                let nullification = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || round.try_construct_nullification(&self.scheme, &self.strategy));
+                let started = self.recover_latency.start(self.context.as_ref());
+                let nullification = round.try_construct_nullification(&self.scheme, &self.strategy);
                 if let Some(nullification) = nullification {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
                         .recovered(Certificate::Nullification(nullification))
                         .await;
                 }
-                let finalization = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || round.try_construct_finalization(&self.scheme, &self.strategy));
+                let started = self.recover_latency.start(self.context.as_ref());
+                let finalization = round.try_construct_finalization(&self.scheme, &self.strategy);
                 if let Some(finalization) = finalization {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter
                         .recovered(Certificate::Finalization(finalization))

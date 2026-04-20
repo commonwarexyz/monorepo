@@ -330,7 +330,7 @@ where
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
-                            build_duration.observe_now(&runtime_context);
+                            build_duration.record(&runtime_context);
                             debug!(
                                 ?parent_digest,
                                 reason = "block building failed",
@@ -340,7 +340,7 @@ where
                         }
                     },
                 };
-                build_duration.observe_now(&runtime_context);
+                build_duration.record(&runtime_context);
 
                 let digest = built_block.digest();
                 {

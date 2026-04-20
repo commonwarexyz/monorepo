@@ -448,7 +448,7 @@ where
                     },
                     is_valid = validity_request => is_valid,
                 };
-                verify_duration.observe_now(&runtime_context);
+                verify_duration.record(&runtime_context);
                 if application_valid {
                     // The block is only persisted at this point.
                     marshal.verified(round, block).await;
@@ -575,7 +575,7 @@ where
                     result = parent_request => match result {
                         Ok(parent) => parent,
                         Err(_) => {
-                            parent_fetch_duration.observe_now(&runtime_context);
+                            parent_fetch_duration.record(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "failed to fetch parent block",
@@ -585,7 +585,7 @@ where
                         }
                     },
                 };
-                parent_fetch_duration.observe_now(&runtime_context);
+                parent_fetch_duration.record(&runtime_context);
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -628,7 +628,7 @@ where
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
-                            build_duration.observe_now(&runtime_context);
+                            build_duration.record(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "block building failed",
@@ -638,11 +638,11 @@ where
                         }
                     },
                 };
-                build_duration.observe_now(&runtime_context);
+                build_duration.record(&runtime_context);
 
                 let erasure_encode_duration = erasure_encode_duration.start(&runtime_context);
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-                erasure_encode_duration.observe_now(&runtime_context);
+                erasure_encode_duration.record(&runtime_context);
 
                 let commitment = coded_block.commitment();
                 {

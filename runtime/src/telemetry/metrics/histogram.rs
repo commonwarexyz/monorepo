@@ -17,13 +17,7 @@
 //!
 //!     let started = latency.start(&context);
 //!     context.sleep(Duration::from_millis(1)).await;
-//!     started.observe_now(&context);
-//!
-//!     let value = latency.time(&context, || 7);
-//!     assert_eq!(value, 7);
-//!
-//!     let missing: Option<u8> = latency.time_some(&context, || None);
-//!     assert!(missing.is_none());
+//!     started.record(&context);
 //! });
 //! ```
 
@@ -90,9 +84,9 @@ pub struct Timed {
 
 /// A sampled histogram observation.
 ///
-/// This token is explicit: dropping it records nothing. Call [`Started::observe_now`] or
-/// [`Started::observe_at`] to record a duration.
-#[must_use = "call observe_now/observe_at to record the timing, or drop it to skip recording"]
+/// This token is explicit: dropping it records nothing. Call [`Started::record`] to record
+/// a duration.
+#[must_use = "call record to record the timing, or drop it to skip recording"]
 pub struct Started {
     /// The histogram to record durations in.
     histogram: Histogram,
@@ -117,58 +111,16 @@ impl Timed {
 
     /// Sample the current time and return an explicit observation token.
     pub fn start<C: Clock + ?Sized>(&self, clock: &C) -> Started {
-        self.start_at(clock.current())
-    }
-
-    /// Create an observation token from an existing start time.
-    pub fn start_at(&self, start: SystemTime) -> Started {
         Started {
             histogram: self.histogram.clone(),
-            start,
+            start: clock.current(),
         }
-    }
-
-    /// Observe the duration between two points in time directly.
-    pub fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        self.histogram.observe_between(start, end);
-    }
-
-    /// Time an operation, always recording the elapsed duration.
-    pub fn time<C: Clock + ?Sized, T, F: FnOnce() -> T>(&self, clock: &C, f: F) -> T {
-        let started = self.start(clock);
-        let result = f();
-        started.observe_now(clock);
-        result
-    }
-
-    /// Time an operation, recording only if it returns `Some`.
-    pub fn time_some<C: Clock + ?Sized, T, F: FnOnce() -> Option<T>>(
-        &self,
-        clock: &C,
-        f: F,
-    ) -> Option<T> {
-        let started = self.start(clock);
-        let result = f();
-        if result.is_some() {
-            started.observe_now(clock);
-        }
-        result
     }
 }
 
 impl Started {
-    /// Returns the sampled start time.
-    pub const fn start(&self) -> SystemTime {
-        self.start
-    }
-
     /// Record the observation against the current time of `clock`.
-    pub fn observe_now<C: Clock + ?Sized>(self, clock: &C) {
-        self.observe_at(clock.current());
-    }
-
-    /// Record the observation against `end`.
-    pub fn observe_at(self, end: SystemTime) {
-        self.histogram.observe_between(self.start, end);
+    pub fn record<C: Clock + ?Sized>(self, clock: &C) {
+        self.histogram.observe_between(self.start, clock.current());
     }
 }
