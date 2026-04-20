@@ -2620,4 +2620,122 @@ pub(super) mod test {
 
         db.destroy().await.unwrap();
     }
+
+    /// After committing with `floor = commit_loc` and pruning down to it, the live set is
+    /// exactly one operation — the commit itself. This is the minimum non-empty live set
+    /// achievable under the per-commit bound. The DB must remain fully usable:
+    ///
+    /// - `prune(commit_loc + 1)` is rejected (the floor is a hard ceiling).
+    /// - `prune` does not affect the root (documented invariant).
+    /// - Reopen reconstructs `inactivity_floor_loc` from the sole surviving commit op, and the
+    ///   in-memory snapshot is empty (all Sets were below the floor).
+    /// - A follow-on batch applies cleanly on top from the floor-at-max state.
+    pub(crate) async fn test_immutable_single_commit_live_set<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("test")).await;
+
+        // Initial commit is at loc 0. 3 sets + 1 commit → commit lands at loc 4.
+        // Declare floor = 4 (= commit_loc), the tight maximum.
+        let metadata = Sha256::fill(42u8);
+        let commit_loc = Location::<F>::new(4);
+        let k1 = Sha256::fill(1u8);
+        let k2 = Sha256::fill(2u8);
+        let k3 = Sha256::fill(3u8);
+        let v1 = Sha256::fill(11u8);
+        let v2 = Sha256::fill(12u8);
+        let v3 = Sha256::fill(13u8);
+        db.apply_batch(
+            db.new_batch()
+                .set(k1, v1)
+                .set(k2, v2)
+                .set(k3, v3)
+                .merkleize(&db, Some(metadata), commit_loc),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        let root_after_commit = db.root();
+
+        // All three keys are in the in-memory snapshot pre-prune.
+        assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
+
+        // Prune at the floor — the maximum prune allowed.
+        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
+        // to `commit_loc`; what matters semantically is that the floor authorizes pruning
+        // of everything below the commit and that any further prune is rejected.
+        db.prune(commit_loc).await.unwrap();
+        let bounds = db.bounds().await;
+        assert!(
+            bounds.start <= commit_loc,
+            "prune must not advance bounds.start past the floor"
+        );
+        assert_eq!(bounds.end, Location::new(*commit_loc + 1));
+
+        // Pruning one past the floor must be rejected — the floor is the hard ceiling.
+        let err = db.prune(Location::new(*commit_loc + 1)).await.unwrap_err();
+        assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
+                if *p == *commit_loc + 1 && *f == *commit_loc));
+
+        // State preserved across the prune; root unchanged; commit metadata still readable.
+        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.root(), root_after_commit);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
+        // Persist and reopen. `init_from_journal` rebuilds the snapshot by replaying from
+        // the floor (= commit_loc). The only op at/above the floor is the commit, which
+        // contributes no keys — so the rebuilt snapshot is empty.
+        db.sync().await.unwrap();
+        drop(db);
+        let mut db = open_db(context.with_label("reopened")).await;
+        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.root(), root_after_commit);
+        // The commit op at `commit_loc` is the anchor that survived pruning — its metadata
+        // must come back through `get_metadata` after the snapshot rebuild.
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
+        // Keys set below the floor are excluded from the rebuilt snapshot.
+        assert!(db.get(&k1).await.unwrap().is_none());
+        assert!(db.get(&k2).await.unwrap().is_none());
+        assert!(db.get(&k3).await.unwrap().is_none());
+
+        // A follow-on batch applies on top. Monotonicity requires the new floor to be at
+        // least `commit_loc` (= 4); advancing to the new tight max (= 6) exercises the
+        // floor-at-max → new-batch transition.
+        let k4 = Sha256::fill(4u8);
+        let v4 = Sha256::fill(14u8);
+        let next_commit_loc = Location::<F>::new(6);
+        db.apply_batch(
+            db.new_batch()
+                .set(k4, v4)
+                .merkleize(&db, None, next_commit_loc),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.last_commit_loc, next_commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
+
+        // New key readable; keys from the pre-prune batch remain excluded.
+        assert_eq!(db.get(&k4).await.unwrap(), Some(v4));
+        assert!(db.get(&k1).await.unwrap().is_none());
+        // Follow-on commit replaced the anchor: its metadata was `None`, so `get_metadata`
+        // should no longer return the original metadata.
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
 }

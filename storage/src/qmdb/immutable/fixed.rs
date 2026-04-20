@@ -754,6 +754,22 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_fixed_single_commit_live_set() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_single_commit_live_set(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_single_commit_live_set_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_single_commit_live_set(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_fixed_rewind_after_reopen_with_floor_change() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
