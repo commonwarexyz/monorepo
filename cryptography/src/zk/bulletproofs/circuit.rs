@@ -162,6 +162,11 @@ pub struct Setup<G> {
 }
 
 impl<G> Setup<G> {
+    /// Check if this setup supports claims of a given length.
+    pub const fn supports(&self, lg_len: u8) -> bool {
+        self.ipa.supports(lg_len)
+    }
+
     pub fn tangle_points<F>(
         &self,
         log_len: u8,
@@ -219,6 +224,7 @@ impl<G: EncodeSize> EncodeSize for Claim<G> {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct Proof<F, G> {
     m_big: G,
     o_big: G,
@@ -819,6 +825,9 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         .ilog2()
         .try_into()
         .expect("should be less than 2^256 rows");
+    if !setup.supports(log_len) {
+        return false;
+    }
     pre_verify(rng, transcript, circuit, claim, proof, strategy)
         .map(|check| {
             check
@@ -827,6 +836,77 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
                 == G::zero()
         })
         .unwrap_or(false)
+}
+
+pub fn batch_verify<
+    'p,
+    F: Field + Random + Encode + 'p,
+    G: CryptoGroup<Scalar = F> + Encode + 'p,
+>(
+    rng: &mut impl CryptoRngCore,
+    setup: &Setup<G>,
+    work: impl IntoIterator<Item = (Transcript, &'p Circuit<F>, &'p Claim<G>, Proof<F, G>)>,
+    strategy: &impl Strategy,
+) -> Result<(), Vec<usize>> {
+    let mut invalid = Vec::new();
+    // At this point, invalid contains everything where we can't even get a Tangle.
+    let (indices, log_lens, checks) = work
+        .into_iter()
+        .map(|(mut transcript, circuit, claim, proof)| {
+            let log_len: u8 = circuit
+                .internal_vars
+                .next_power_of_two()
+                .ilog2()
+                .try_into()
+                .ok()?;
+            if !setup.supports(log_len) {
+                return None;
+            }
+            let check = pre_verify(rng, &mut transcript, circuit, claim, proof, strategy)?;
+            Some((log_len, check))
+        })
+        .enumerate()
+        .filter_map(|(i, x)| {
+            if x.is_none() {
+                invalid.push(i);
+            }
+            x.map(|(lg_len_i, check_i)| (i, lg_len_i, check_i))
+        })
+        .collect::<(Vec<_>, Vec<_>, Vec<_>)>();
+    let Some(max_log_len) = log_lens.iter().max().cloned() else {
+        return if invalid.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid)
+        };
+    };
+    let weights = checks
+        .iter()
+        .map(|_| F::random(&mut *rng))
+        .collect::<Vec<_>>();
+    let global_check = Tangle::msm(&checks, &weights, strategy);
+    let all_ok = global_check
+        .eval(setup.tangle_points(max_log_len), strategy)
+        .expect("should be enough points in setup")
+        == G::zero();
+    if !all_ok {
+        // Figure out which ones are invalid.
+        for ((i, lg_len_i), check_i) in indices.into_iter().zip(log_lens).zip(checks) {
+            if G::zero()
+                != check_i
+                    .eval(setup.tangle_points(lg_len_i), strategy)
+                    .expect("should be enough points in setup")
+            {
+                invalid.push(i);
+            }
+        }
+    }
+
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
 }
 
 #[commonware_macros::stability(ALPHA)]
@@ -846,9 +926,9 @@ pub mod fuzz {
     const MAX_INTERNAL_VARS: usize = 24;
     const MAX_PADDED_INTERNAL_VARS: usize = MAX_INTERNAL_VARS.next_power_of_two();
     const NUM_GENERATORS: usize = 2 * MAX_PADDED_INTERNAL_VARS + 3;
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
+    pub(super) const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
 
-    fn test_setup() -> &'static Setup<G> {
+    pub(super) fn test_setup() -> &'static Setup<G> {
         static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
         TEST_SETUP.get_or_init(|| {
             let generators = (1..=NUM_GENERATORS)
@@ -875,6 +955,27 @@ pub mod fuzz {
     }
 
     impl Instance {
+        pub(super) fn prove(self) -> (Circuit<F>, Claim<G>, Proof<F, G>) {
+            let Self {
+                circuit,
+                claim,
+                witness,
+            } = self;
+            let mut rng = test_rng();
+            let mut transcript = Transcript::new(NAMESPACE);
+            let proof = super::prove(
+                &mut rng,
+                &mut transcript,
+                test_setup(),
+                &circuit,
+                &claim,
+                &witness,
+                &Sequential,
+            )
+            .expect("honest circuit prover should create a proof");
+            (circuit, claim, proof)
+        }
+
         fn generate(
             setup: &Setup<G>,
             committed_values: Vec<F>,
@@ -975,27 +1076,15 @@ pub mod fuzz {
 
         pub fn run(self) {
             let setup = test_setup();
-            let mut rng = test_rng();
-            let mut prover_transcript = Transcript::new(NAMESPACE);
-            let proof = prove(
-                &mut rng,
-                &mut prover_transcript,
-                setup,
-                &self.circuit,
-                &self.claim,
-                &self.witness,
-                &Sequential,
-            )
-            .expect("honest circuit prover should create a proof");
-
+            let (circuit, claim, proof) = self.prove();
             let mut verifier_rng = test_rng();
             let mut verifier_transcript = Transcript::new(NAMESPACE);
             assert!(verify(
                 &mut verifier_rng,
                 &mut verifier_transcript,
                 setup,
-                &self.circuit,
-                &self.claim,
+                &circuit,
+                &claim,
                 proof,
                 &Sequential,
             ));
@@ -1016,12 +1105,30 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, Circuit, SparseMatrix};
+    use super::{batch_verify, fuzz, verify, Circuit, Claim, Proof, SparseMatrix};
+    use crate::transcript::Transcript;
     use commonware_invariants::minifuzz;
     use commonware_math::{
         algebra::{Additive, Ring},
-        test::F,
+        test::{F, G},
     };
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Tamper {
+        Honest,
+        Commitment,
+        Tx,
+        MBig,
+    }
+
+    struct BatchCase {
+        circuit: Circuit<F>,
+        claim: Claim<G>,
+        proof: Proof<F, G>,
+        tamper: Tamper,
+    }
 
     #[test]
     fn test_random_r1cs_minifuzz() {
@@ -1077,6 +1184,91 @@ mod test {
                 Circuit::new(N, weights)
                     .expect("should be able to make circuit")
                     .is_satisfied(&z, &left, &right)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_matches_individual_minifuzz() {
+        minifuzz::test(|u| {
+            let setup = fuzz::test_setup();
+            let num_proofs = u.int_in_range(0..=4)?;
+            let mut cases = (0..num_proofs)
+                .map(|_| {
+                    let (circuit, claim, proof) = u.arbitrary::<fuzz::Instance>()?.prove();
+                    Ok(BatchCase {
+                        circuit,
+                        claim,
+                        proof,
+                        tamper: Tamper::Honest,
+                    })
+                })
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+
+            for case in &mut cases {
+                match u.int_in_range(0..=3)? {
+                    0 => case.tamper = Tamper::Honest,
+                    1 => {
+                        case.claim.commitments[0] += &setup.pedersen_value;
+                        case.tamper = Tamper::Commitment;
+                    }
+                    2 => {
+                        case.proof.t_x += &F::one();
+                        case.tamper = Tamper::Tx;
+                    }
+                    3 => {
+                        case.proof.m_big += &setup.pedersen_value;
+                        case.tamper = Tamper::MBig;
+                    }
+                    _ => unreachable!("tamper variant out of range"),
+                }
+            }
+
+            let expected_invalid = cases
+                .iter()
+                .enumerate()
+                .filter_map(|(i, case)| {
+                    let mut rng = test_rng();
+                    let mut transcript = Transcript::new(fuzz::NAMESPACE);
+                    (!verify(
+                        &mut rng,
+                        &mut transcript,
+                        setup,
+                        &case.circuit,
+                        &case.claim,
+                        case.proof.clone(),
+                        &Sequential,
+                    ))
+                    .then_some(i)
+                })
+                .collect::<Vec<_>>();
+
+            let mut batch_rng = test_rng();
+            let actual_invalid = batch_verify(
+                &mut batch_rng,
+                setup,
+                cases.iter().map(|case| {
+                    (
+                        Transcript::new(fuzz::NAMESPACE),
+                        &case.circuit,
+                        &case.claim,
+                        case.proof.clone(),
+                    )
+                }),
+                &Sequential,
+            )
+            .err()
+            .unwrap_or_default();
+
+            assert_eq!(
+                actual_invalid,
+                expected_invalid,
+                "cases={:?}",
+                cases
+                    .iter()
+                    .map(|case| (case.circuit.internal_vars, case.tamper))
+                    .collect::<Vec<_>>()
             );
             Ok(())
         });
