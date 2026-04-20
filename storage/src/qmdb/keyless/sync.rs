@@ -275,6 +275,7 @@ mod tests {
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
+            let target_floor = target_db.inactivity_floor_loc();
 
             let db_config =
                 create_sync_config(&format!("sync_client_{}", context.next_u64()), &context);
@@ -303,6 +304,8 @@ mod tests {
             assert_eq!(bounds.end, target_op_count);
             assert_eq!(bounds.start, target_oldest_retained_loc);
             assert_eq!(got_db.root(), target_root);
+            // Explicit: sync must reproduce the inactivity floor, not just the root.
+            assert_eq!(got_db.inactivity_floor_loc(), target_floor);
 
             // Verify values match
             for (i, op) in target_ops.iter().enumerate() {
@@ -595,6 +598,7 @@ mod tests {
             let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
+            let target_floor = target_db.inactivity_floor_loc();
 
             let target_db = Arc::new(target_db);
             let config = Config {
@@ -617,6 +621,7 @@ mod tests {
 
             assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
+            assert_eq!(sync_db.inactivity_floor_loc(), target_floor);
 
             sync_db.destroy().await.unwrap();
             let target_db =
@@ -649,6 +654,7 @@ mod tests {
             let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
+            let target_floor = target_db.inactivity_floor_loc();
 
             let resolver = Arc::new(target_db);
             let config = Config {
@@ -671,6 +677,7 @@ mod tests {
 
             assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
+            assert_eq!(sync_db.inactivity_floor_loc(), target_floor);
 
             sync_db.destroy().await.unwrap();
             let target_db =

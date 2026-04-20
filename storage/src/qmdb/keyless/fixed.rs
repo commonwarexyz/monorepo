@@ -354,10 +354,10 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_keyless_fixed_floor_beyond_size_rejected() {
+    fn test_keyless_fixed_floor_beyond_commit_loc_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_db_floor_beyond_size_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
         });
     }
 
@@ -379,10 +379,10 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_keyless_fixed_floor_at_total_size_accepted() {
+    fn test_keyless_fixed_floor_at_commit_loc_accepted() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_db_floor_at_total_size_accepted(db).await;
+            tests::test_keyless_db_floor_at_commit_loc_accepted(db).await;
         });
     }
 
@@ -392,6 +392,30 @@ mod test {
             let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
             tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmr::Family>())
                 .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_regression_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_chained_apply_with_valid_floors_succeeds() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_chained_apply_with_valid_floors_succeeds(db).await;
         });
     }
 
@@ -655,10 +679,10 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_keyless_fixed_floor_beyond_size_rejected_mmb() {
+    fn test_keyless_fixed_floor_beyond_commit_loc_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_db_floor_beyond_size_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
         });
     }
 
@@ -680,10 +704,10 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_keyless_fixed_floor_at_total_size_accepted_mmb() {
+    fn test_keyless_fixed_floor_at_commit_loc_accepted_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_db_floor_at_total_size_accepted(db).await;
+            tests::test_keyless_db_floor_at_commit_loc_accepted(db).await;
         });
     }
 
@@ -693,6 +717,30 @@ mod test {
             let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
             tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmb::Family>())
                 .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_regression_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_chained_apply_with_valid_floors_succeeds_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_chained_apply_with_valid_floors_succeeds(db).await;
         });
     }
 }

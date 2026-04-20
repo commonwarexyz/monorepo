@@ -118,8 +118,10 @@ pub enum Error<F: Family> {
     #[error("floor regressed: batch floor {0} < current floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
-    /// The batch's inactivity floor exceeds its total operation count.
-    #[error("floor beyond size: floor {0} > total size {1}")]
+    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
+    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
+    /// last readable commit from the journal.
+    #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 }
 

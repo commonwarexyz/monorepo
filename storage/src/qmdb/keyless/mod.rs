@@ -357,6 +357,7 @@ where
             total_size: journal_size,
             db_size: journal_size,
             ancestor_batch_ends: Vec::new(),
+            ancestor_new_inactivity_floor_locs: Vec::new(),
             new_inactivity_floor_loc: self.inactivity_floor_loc,
         })
     }
@@ -367,10 +368,19 @@ where
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`Error::StaleBatch`].
     ///
-    /// The batch's declared inactivity floor must be monotonically non-decreasing with respect
-    /// to the current floor and must not exceed the batch's total operation count. Violations
-    /// return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`]. Floor validation happens
-    /// before any journal mutation, so the database is untouched on floor errors.
+    /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the
+    /// tip's) must satisfy two per-commit invariants:
+    ///
+    /// 1. The floor is monotonically non-decreasing across the chain, starting from the
+    ///    database's current inactivity floor.
+    /// 2. The floor is at most the commit operation's own location (`total_size - 1` at that
+    ///    point). A floor past the commit would let a later `prune(floor)` remove the last
+    ///    readable commit from the journal.
+    ///
+    /// Violations return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`] identifying
+    /// the offending floor and the bound it crossed (the prior validated floor, or the commit
+    /// location, respectively). Floor validation happens before any journal mutation, so the
+    /// database is untouched on floor errors.
     ///
     /// Returns the range of locations written.
     ///
@@ -392,18 +402,40 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        // Enforce floor monotonicity and bounds before mutating the journal.
-        if batch.new_inactivity_floor_loc < self.inactivity_floor_loc {
+        // Validate every unapplied commit's floor (each ancestor in the chain, then the tip)
+        // before mutating the journal. The invariant is per-commit:
+        //   - floors are monotonically non-decreasing across the chain, and
+        //   - each floor is at most its own commit location (= total_size - 1 at that point).
+        // Ancestors are stored newest-first, so walk in reverse to get oldest-first.
+        let mut prev_floor = self.inactivity_floor_loc;
+        for i in (0..batch.ancestor_batch_ends.len()).rev() {
+            let ancestor_end = batch.ancestor_batch_ends[i];
+            if ancestor_end <= db_size {
+                // Already on disk — its floor was validated when it was first applied.
+                continue;
+            }
+            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
+            let ancestor_commit_loc = Location::new(ancestor_end - 1);
+            if ancestor_floor < prev_floor {
+                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
+            }
+            if ancestor_floor > ancestor_commit_loc {
+                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
+            }
+            prev_floor = ancestor_floor;
+        }
+        // Tip checks chain off the last validated ancestor floor.
+        if batch.new_inactivity_floor_loc < prev_floor {
             return Err(Error::FloorRegressed(
                 batch.new_inactivity_floor_loc,
-                self.inactivity_floor_loc,
+                prev_floor,
             ));
         }
-        let batch_end = Location::new(batch.total_size);
-        if batch.new_inactivity_floor_loc > batch_end {
+        let tip_commit_loc = Location::new(batch.total_size - 1);
+        if batch.new_inactivity_floor_loc > tip_commit_loc {
             return Err(Error::FloorBeyondSize(
                 batch.new_inactivity_floor_loc,
-                batch_end,
+                tip_commit_loc,
             ));
         }
         let start_loc = self.last_commit_loc + 1;
@@ -2012,7 +2044,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_beyond_size_rejected<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2021,7 +2053,8 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Batch of 2 appends + 1 commit lands at locations [1..4); commit at 3, total_size = 4.
-        // A floor > 4 is invalid.
+        // A floor > 3 (the commit location) is invalid — even floor == 4 (one past the commit)
+        // is rejected so a subsequent prune cannot remove the last readable commit.
         let merkleized = db
             .new_batch()
             .append(V::Value::make(1))
@@ -2029,7 +2062,19 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(999));
         let err = db.apply_batch(merkleized).await.unwrap_err();
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, size) if *floor == 999 && *size == 4),
+            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 999 && *commit == 3),
+            "unexpected error: {err:?}"
+        );
+
+        // Boundary: floor == total_size (= commit_loc + 1) is also rejected.
+        let merkleized = db
+            .new_batch()
+            .append(V::Value::make(3))
+            .append(V::Value::make(4))
+            .merkleize(&db, None, Location::new(4));
+        let err = db.apply_batch(merkleized).await.unwrap_err();
+        assert!(
+            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 4 && *commit == 3),
             "unexpected error: {err:?}"
         );
 
@@ -2118,8 +2163,8 @@ pub(crate) mod tests {
         db_b.destroy().await.unwrap();
     }
 
-    /// A floor equal to the batch's total operation count is on the boundary of acceptance.
-    pub(crate) async fn test_keyless_db_floor_at_total_size_accepted<F: Family, V, C, H>(
+    /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
+    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2127,18 +2172,18 @@ pub(crate) mod tests {
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
-        // 2 appends + 1 commit on top of the initial commit: total_size = 4.
-        // Setting floor = 4 is on the boundary (inclusive).
-        let total_size = Location::<F>::new(4);
+        // 2 appends + 1 commit on top of the initial commit: commit lands at location 3.
+        // floor == 3 (= commit_loc) is the maximum accepted value under the per-commit bound.
+        let commit_loc = Location::<F>::new(3);
         db.apply_batch(
             db.new_batch()
                 .append(V::Value::make(1))
                 .append(V::Value::make(2))
-                .merkleize(&db, None, total_size),
+                .merkleize(&db, None, commit_loc),
         )
         .await
         .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), total_size);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
 
         db.destroy().await.unwrap();
     }
@@ -2194,6 +2239,119 @@ pub(crate) mod tests {
         drop(db);
         let db = reopen(context.with_label("reopen2")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A chained batch that applies a tip with a floor *lower than* its parent's floor must
+    /// be rejected — the parent's `Commit` is written to the journal by the same
+    /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
+    /// invariant.
+    pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<F, V, C, H>(
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        F: Family,
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // parent: 1 append + commit at loc 2 with floor=2 (the parent's commit_loc).
+        let parent =
+            db.new_batch()
+                .append(V::Value::make(1))
+                .merkleize(&db, None, Location::new(2));
+        // child: 1 append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
+        let child = parent.new_batch::<H>().append(V::Value::make(2)).merkleize(
+            &db,
+            None,
+            Location::new(1),
+        );
+
+        let root_before = db.root();
+        let last_commit_before = db.last_commit_loc();
+        let floor_before = db.inactivity_floor_loc();
+
+        let err = db.apply_batch(child).await.unwrap_err();
+        assert!(
+            matches!(err, Error::FloorRegressed(new, prev) if *new == 1 && *prev == 2),
+            "unexpected error: {err:?}"
+        );
+
+        // DB state untouched by the rejected chain.
+        assert_eq!(db.root(), root_before);
+        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.inactivity_floor_loc(), floor_before);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
+    /// rejected — identifying the ancestor's bound, not the tip's.
+    pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H>(
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        F: Family,
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // parent: 1 append + commit at loc 2. Declare floor = 3 (one past the commit).
+        let parent =
+            db.new_batch()
+                .append(V::Value::make(1))
+                .merkleize(&db, None, Location::new(3));
+        // child: valid on its own (floor = 0 ≤ child's commit_loc), but parent's floor is bad.
+        let child = parent.new_batch::<H>().append(V::Value::make(2)).merkleize(
+            &db,
+            None,
+            Location::new(0),
+        );
+
+        let err = db.apply_batch(child).await.unwrap_err();
+        // Error should identify the ancestor's commit_loc (2), not the tip's.
+        assert!(
+            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 3 && *commit == 2),
+            "unexpected error: {err:?}"
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
+    pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<F, V, C, H>(
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        F: Family,
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // parent:     1 append, commit at loc 2, floor = 2.
+        // child:      1 append, commit at loc 4, floor = 3.
+        // grandchild: 1 append, commit at loc 6, floor = 5.
+        let parent =
+            db.new_batch()
+                .append(V::Value::make(1))
+                .merkleize(&db, None, Location::new(2));
+        let child = parent.new_batch::<H>().append(V::Value::make(2)).merkleize(
+            &db,
+            None,
+            Location::new(3),
+        );
+        let grandchild =
+            child
+                .new_batch::<H>()
+                .append(V::Value::make(3))
+                .merkleize(&db, None, Location::new(5));
+
+        db.apply_batch(grandchild).await.unwrap();
+
+        // Grandchild's commit is the last op; tip's floor is the live floor.
+        assert_eq!(db.last_commit_loc(), Location::new(6));
+        assert_eq!(db.inactivity_floor_loc(), Location::new(5));
 
         db.destroy().await.unwrap();
     }

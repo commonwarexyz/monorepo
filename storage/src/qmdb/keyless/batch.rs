@@ -66,6 +66,11 @@ where
     /// Used by `apply_batch` to validate partial ancestor commits.
     pub(super) ancestor_batch_ends: Vec<u64>,
 
+    /// Each ancestor's `new_inactivity_floor_loc`, stored in parallel with
+    /// `ancestor_batch_ends` (same order, newest-first: parent, grandparent, ...).
+    /// Used by `apply_batch` to enforce per-commit floor monotonicity across the chain.
+    pub(super) ancestor_new_inactivity_floor_locs: Vec<Location<F>>,
+
     /// The inactivity floor declared by this batch's commit operation.
     pub(super) new_inactivity_floor_loc: Location<F>,
 }
@@ -189,8 +194,9 @@ where
     /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// `inactivity_floor` is the application-declared floor embedded in the commit. It must
-    /// be monotonically non-decreasing (enforced on `apply_batch`) and must not exceed the
-    /// batch's total operation count.
+    /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
+    /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
+    /// would let a later `prune(floor)` remove the last readable commit.
     pub fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H>,
@@ -220,10 +226,13 @@ where
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         let mut ancestor_batch_ends = Vec::new();
+        let mut ancestor_new_inactivity_floor_locs = Vec::new();
         if let Some(parent) = &self.parent {
             ancestor_batch_ends.push(parent.total_size);
+            ancestor_new_inactivity_floor_locs.push(parent.new_inactivity_floor_loc);
             for batch in parent.ancestors() {
                 ancestor_batch_ends.push(batch.total_size);
+                ancestor_new_inactivity_floor_locs.push(batch.new_inactivity_floor_loc);
             }
         }
 
@@ -234,6 +243,7 @@ where
             total_size,
             db_size: self.db_size,
             ancestor_batch_ends,
+            ancestor_new_inactivity_floor_locs,
             new_inactivity_floor_loc: inactivity_floor,
         })
     }

@@ -8,7 +8,7 @@ use commonware_storage::{
     merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
-        verify_proof,
+        verify_proof, Error,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -18,6 +18,49 @@ use std::num::NonZeroU16;
 const MAX_OPERATIONS: usize = 50;
 const MAX_PROOF_OPS: u64 = 100;
 
+/// Which error variant a bad-floor commit should produce.
+#[derive(Debug, Clone, Copy)]
+enum BadFloorExpect {
+    Regression,
+    BeyondSize,
+}
+
+fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
+    match (err, kind) {
+        (Error::FloorRegressed(_, _), BadFloorExpect::Regression) => {}
+        (Error::FloorBeyondSize(_, _), BadFloorExpect::BeyondSize) => {}
+        _ => panic!("unexpected error for {kind:?}: {err:?}"),
+    }
+}
+
+/// What floor value a fuzz-generated commit should carry. The `Bad*` variants intentionally
+/// produce floors that must be rejected; the handler asserts the expected error variant and
+/// that the DB state is untouched.
+#[derive(Debug, Clone, Copy)]
+enum FloorKind {
+    /// Keep the current floor (monotonicity trivially preserved).
+    Current,
+    /// Advance to the commit location (the tight upper bound).
+    AdvanceToCommit,
+    /// Floor one below the current floor — must be rejected as `FloorRegressed`.
+    BadRegression,
+    /// Floor one past the commit location — must be rejected as `FloorBeyondSize`.
+    BadBeyondCommit,
+}
+
+impl<'a> Arbitrary<'a> for FloorKind {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        Ok(match choice % 4 {
+            0 => FloorKind::Current,
+            1 => FloorKind::AdvanceToCommit,
+            2 => FloorKind::BadRegression,
+            3 => FloorKind::BadBeyondCommit,
+            _ => unreachable!(),
+        })
+    }
+}
+
 #[derive(Debug)]
 enum Operation {
     Append {
@@ -25,7 +68,13 @@ enum Operation {
     },
     Commit {
         metadata_bytes: Option<Vec<u8>>,
-        advance_floor: bool,
+        floor_kind: FloorKind,
+    },
+    /// Build a two-level batch chain (parent → child) and apply the child directly. The
+    /// parent's floor is intentionally invalid (regressed or beyond its own commit location);
+    /// this exercises the per-ancestor validation path in `apply_batch`.
+    BadChainedCommit {
+        ancestor_kind: FloorKind,
     },
     Get {
         loc_offset: u32,
@@ -52,7 +101,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 13 {
+        match choice % 14 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
@@ -68,10 +117,10 @@ impl<'a> Arbitrary<'a> for Operation {
                 } else {
                     None
                 };
-                let advance_floor: bool = u.arbitrary()?;
+                let floor_kind = FloorKind::arbitrary(u)?;
                 Ok(Operation::Commit {
                     metadata_bytes,
-                    advance_floor,
+                    floor_kind,
                 })
             }
             2 => {
@@ -104,6 +153,14 @@ impl<'a> Arbitrary<'a> for Operation {
                 })
             }
             12 => Ok(Operation::SimulateFailure {}),
+            13 => {
+                // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
+                let ancestor_kind = match u.arbitrary::<bool>()? {
+                    false => FloorKind::BadRegression,
+                    true => FloorKind::BadBeyondCommit,
+                };
+                Ok(Operation::BadChainedCommit { ancestor_kind })
+            }
             _ => unreachable!(),
         }
     }
@@ -173,23 +230,108 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     pending_appends.push(value_bytes.clone());
                 }
 
-                Operation::Commit { metadata_bytes, advance_floor } => {
+                Operation::Commit { metadata_bytes, floor_kind } => {
                     let pending_count = pending_appends.len() as u64;
+                    let end = db.bounds().await.end;
+                    let commit_loc = end.as_u64() + pending_count;
+                    let current_floor = db.inactivity_floor_loc();
+
+                    // Pick the floor for this commit. `Bad*` kinds are guaranteed to trigger
+                    // the expected error; Valid kinds (Current/AdvanceToCommit) apply cleanly.
+                    let (floor, expect_err) = match floor_kind {
+                        FloorKind::Current => (current_floor, None),
+                        FloorKind::AdvanceToCommit => (Location::<F>::new(commit_loc), None),
+                        FloorKind::BadRegression => {
+                            // Only meaningful when current floor > 0; otherwise fall back to Current.
+                            if current_floor.as_u64() == 0 {
+                                (current_floor, None)
+                            } else {
+                                let bad = Location::<F>::new(current_floor.as_u64() - 1);
+                                (bad, Some(BadFloorExpect::Regression))
+                            }
+                        }
+                        FloorKind::BadBeyondCommit => {
+                            let bad = Location::<F>::new(commit_loc + 1);
+                            (bad, Some(BadFloorExpect::BeyondSize))
+                        }
+                    };
+
                     let mut batch = db.new_batch();
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    // If the fuzzer opts in, advance the floor to the commit location (the max
-                    // valid value). Otherwise, keep the current floor to preserve monotonicity.
-                    let floor = if *advance_floor {
-                        let end = db.bounds().await.end;
-                        Location::<F>::new(end.as_u64() + pending_count)
-                    } else {
-                        db.inactivity_floor_loc()
-                    };
                     let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor);
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+
+                    match expect_err {
+                        None => {
+                            db.apply_batch(merkleized).await.expect("Commit should not fail");
+                            db.commit().await.expect("Commit should not fail");
+                        }
+                        Some(kind) => {
+                            // Snapshot state; the reject must not mutate.
+                            let before_last_commit = db.last_commit_loc();
+                            let before_floor = db.inactivity_floor_loc();
+                            let before_root = db.root();
+                            let err = db
+                                .apply_batch(merkleized)
+                                .await
+                                .expect_err("bad floor must be rejected");
+                            assert_bad_floor_error(&err, kind);
+                            assert_eq!(db.last_commit_loc(), before_last_commit);
+                            assert_eq!(db.inactivity_floor_loc(), before_floor);
+                            assert_eq!(db.root(), before_root);
+                        }
+                    }
+                }
+
+                Operation::BadChainedCommit { ancestor_kind } => {
+                    let end = db.bounds().await.end;
+                    let current_floor = db.inactivity_floor_loc();
+
+                    // Parent batch: base = end, 1 append lands at `end`, commit lands at `end + 1`.
+                    // So parent's total_size = end + 2 and parent_commit_loc = end + 1.
+                    let parent_commit_loc = end.as_u64() + 1;
+                    let (parent_floor, kind) = match ancestor_kind {
+                        FloorKind::BadRegression => {
+                            if current_floor.as_u64() == 0 {
+                                // No regression possible; skip this op (no-op).
+                                continue;
+                            }
+                            (
+                                Location::<F>::new(current_floor.as_u64() - 1),
+                                BadFloorExpect::Regression,
+                            )
+                        }
+                        FloorKind::BadBeyondCommit => (
+                            Location::<F>::new(parent_commit_loc + 1),
+                            BadFloorExpect::BeyondSize,
+                        ),
+                        _ => continue, // only bad kinds are meaningful here
+                    };
+
+                    // Don't drain pending_appends — keep them for future ops. Build from scratch.
+                    let parent = db
+                        .new_batch()
+                        .append(vec![0u8; 1])
+                        .merkleize(&db, None, parent_floor);
+                    // child: valid on its own; only the ancestor should trip the check.
+                    let child_floor = parent_floor; // stay ≥ parent_floor even if parent is bad
+                    let child = parent
+                        .new_batch::<Sha256>()
+                        .append(vec![1u8; 1])
+                        .merkleize(&db, None, child_floor);
+
+                    let before_last_commit = db.last_commit_loc();
+                    let before_floor = db.inactivity_floor_loc();
+                    let before_root = db.root();
+                    let err = db
+                        .apply_batch(child)
+                        .await
+                        .expect_err("bad ancestor floor must be rejected");
+                    assert_bad_floor_error(&err, kind);
+                    assert_eq!(db.last_commit_loc(), before_last_commit);
+                    assert_eq!(db.inactivity_floor_loc(), before_floor);
+                    assert_eq!(db.root(), before_root);
                 }
 
                 Operation::Get { loc_offset } => {
