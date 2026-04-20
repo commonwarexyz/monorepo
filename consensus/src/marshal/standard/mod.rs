@@ -1592,82 +1592,10 @@ mod tests {
         }
     }
 
-    /// A no-op resolver used by tests that drive the marshal actor's
-    /// resolver_rx channel directly. Outbound fetches/cancellations are dropped.
-    #[derive(Clone, Default)]
-    struct NoopResolver {
-        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
-    }
-
-    impl NoopResolver {
-        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
-            Self {
-                _keepalive: Some(sender),
-            }
-        }
-    }
-
-    impl Resolver for NoopResolver {
-        type Key = handler::Request<D>;
-        type PublicKey = PublicKey;
-
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(
-            &mut self,
-            _key: Self::Key,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) {
-        }
-        async fn fetch_all_targeted(
-            &mut self,
-            _requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
-        }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
-    }
-
-    /// A no-op buffer used by tests that do not need marshal's dissemination path.
-    #[derive(Clone, Default)]
-    struct NoopBuffer;
-
-    impl crate::marshal::core::Buffer<Standard<B>> for NoopBuffer {
-        type PublicKey = PublicKey;
-        type CachedBlock = B;
-
-        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn subscribe_by_commitment(
-            &self,
-            _commitment: D,
-        ) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn finalized(&self, _commitment: D) {}
-
-        async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {}
-    }
-
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, B, Recipients<PublicKey>);
 
-    /// A recording buffer that captures each `send` call. Tests use it to
-    /// assert whether marshal dispatched a block to peers.
+    /// A buffer that records each `send` invocation; other methods are no-ops.
     #[derive(Clone, Default)]
     struct RecordingBuffer {
         sends: Arc<Mutex<Vec<BufferSend>>>,
@@ -1714,11 +1642,13 @@ mod tests {
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
     type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
 
-    /// A resolver that captures each call so tests can assert whether marshal
-    /// initiated a fetch (or elided it). Mirrors [`NoopResolver::holding`].
+    /// A resolver that records each `fetch_targeted` invocation; other
+    /// methods are no-ops.
+    ///
+    /// `_keepalive` optionally retains a resolver-message sender so the
+    /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        fetches: Arc<Mutex<Vec<handler::Request<D>>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
     }
@@ -1726,18 +1656,17 @@ mod tests {
     impl RecordingResolver {
         fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
             Self {
-                fetches: Arc::new(Mutex::new(Vec::new())),
                 targeted: Arc::new(Mutex::new(Vec::new())),
                 _keepalive: Some(sender),
             }
         }
 
-        fn fetches(&self) -> Vec<handler::Request<D>> {
-            self.fetches.lock().clone()
-        }
-
         fn targeted(&self) -> Vec<TargetedFetch> {
             self.targeted.lock().clone()
+        }
+
+        fn targeted_is_empty(&self) -> bool {
+            self.targeted.lock().is_empty()
         }
     }
 
@@ -1745,12 +1674,8 @@ mod tests {
         type Key = handler::Request<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, key: Self::Key) {
-            self.fetches.lock().push(key);
-        }
-        async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
-            self.fetches.lock().extend(keys);
-        }
+        async fn fetch(&mut self, _key: Self::Key) {}
+        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
         async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
             self.targeted.lock().push((key, targets));
         }
@@ -1765,107 +1690,20 @@ mod tests {
         async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
     }
 
-    /// Start the standard marshal actor wired to a [`RecordingBuffer`] and
-    /// [`RecordingResolver`] so tests can observe buffer sends and resolver
-    /// fetches.
-    async fn start_recording_standard_actor<R: Reporter<Activity = Update<B>>>(
-        context: deterministic::Context,
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        application: R,
-    ) -> (
-        Mailbox<S, Standard<B>>,
-        RecordingBuffer,
-        RecordingResolver,
-        commonware_runtime::Handle<()>,
+    /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.
+    async fn wait_until<F: FnMut() -> bool>(
+        context: &deterministic::Context,
+        deadline: Duration,
+        label: &str,
+        mut cond: F,
     ) {
-        let config = Config {
-            provider,
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
-            block_codec_config: (),
-            partition_prefix: partition_prefix.to_string(),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
-        };
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
-                freezer_table_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-table"
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-key"
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-value"
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
-                items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
-                freezer_table_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-table"
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-value"
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!("{partition_prefix}-finalized_blocks-ordinal"),
-                items_per_section: NZU64!(10),
-                codec_config: config.block_codec_config,
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        let (actor, mailbox, _) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        let (resolver_tx, resolver_rx) = mpsc::channel(100);
-        let buffer = RecordingBuffer::default();
-        let resolver = RecordingResolver::holding(resolver_tx);
-        let actor_handle =
-            actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
-        (mailbox, buffer, resolver, actor_handle)
+        let start = context.current();
+        while !cond() {
+            if context.current().duration_since(start).unwrap_or_default() > deadline {
+                panic!("{label} did not hold within {deadline:?}");
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// A buffer whose `send` blocks until released, and signals when entered.
@@ -1977,12 +1815,34 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
         application: R,
     ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>) {
+        let (mailbox, _buffer, _resolver, handle) = start_standard_actor_with_buffer(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            RecordingBuffer::default(),
+        )
+        .await;
+        (mailbox, handle)
+    }
+
+    async fn start_recording_standard_actor<R: Reporter<Activity = Update<B>>>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        application: R,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        RecordingBuffer,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    ) {
         start_standard_actor_with_buffer(
             context,
             partition_prefix,
             provider,
             application,
-            NoopBuffer,
+            RecordingBuffer::default(),
         )
         .await
     }
@@ -1993,10 +1853,16 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
         application: R,
         buffer: Buf,
-    ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>)
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        Buf,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
     where
         R: Reporter<Activity = Update<B>>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey, CachedBlock = B>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey, CachedBlock = B>
+            + Clone,
     {
         let config = Config {
             provider,
@@ -2080,12 +1946,10 @@ mod tests {
         )
         .await;
         let (resolver_tx, resolver_rx) = mpsc::channel(100);
-        let actor_handle = actor.start(
-            application,
-            buffer,
-            (resolver_rx, NoopResolver::holding(resolver_tx)),
-        );
-        (mailbox, actor_handle)
+        let resolver = RecordingResolver::holding(resolver_tx);
+        let actor_handle =
+            actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
+        (mailbox, buffer, resolver, actor_handle)
     }
 
     /// Regression: `marshal.proposed` must not ack until the block has been
@@ -2103,7 +1967,7 @@ mod tests {
             let partition_prefix = format!("proposed-waits-buffer-{me}");
 
             let (buffer, send_entered, release) = GatingBuffer::new();
-            let (mailbox, _actor_handle) = start_standard_actor_with_buffer(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor_with_buffer(
                 context.with_label("validator_0"),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
@@ -2254,7 +2118,7 @@ mod tests {
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (resolver_rx, NoopResolver::default()),
+                (resolver_rx, RecordingResolver::default()),
             );
 
             // Inject a Finalized delivery with garbage payload. The
@@ -2522,33 +2386,28 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("forward-empty-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("forward-empty-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
             .await;
 
-            assert!(
-                mailbox.verified(round, block.clone()).await,
-                "verified must persist the block into the marshal cache"
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
 
             mailbox.forward(round, digest, Vec::new()).await;
-
             // Allow the actor to drain the mailbox; `forward` with no peers
             // must take the `continue` branch.
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
                 buffer.sends().is_empty(),
-                "buffer.send must not be invoked for empty peer set"
+                "forward with empty peers must not dispatch"
             );
         });
     }
@@ -2565,13 +2424,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("forward-unknown-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
             let unknown = Sha256::hash(b"unknown-block");
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2580,12 +2438,11 @@ mod tests {
             mailbox
                 .forward(round, unknown, vec![participants[1].clone()])
                 .await;
-
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
                 buffer.sends().is_empty(),
-                "buffer.send must not be invoked when the block is unknown"
+                "forward for an unknown block must not dispatch"
             );
         });
     }
@@ -2602,14 +2459,13 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("forward-cached-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2620,20 +2476,13 @@ mod tests {
             let targets = vec![participants[1].clone(), participants[2].clone()];
             mailbox.forward(round, digest, targets.clone()).await;
 
-            let deadline = Duration::from_secs(5);
-            let start = context.current();
-            loop {
-                if !buffer.sends().is_empty() {
-                    break;
-                }
-                if context.current().duration_since(start).unwrap_or_default() > deadline {
-                    panic!("buffer.send was not called within {deadline:?}");
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            wait_until(&context, Duration::from_secs(5), "buffer.send", || {
+                !buffer.sends.lock().is_empty()
+            })
+            .await;
 
             let sends = buffer.sends();
-            assert_eq!(sends.len(), 1, "expected exactly one send");
+            assert_eq!(sends.len(), 1);
             let (sent_round, sent_block, sent_recipients) = &sends[0];
             assert_eq!(*sent_round, round);
             assert_eq!(sent_block.digest(), digest);
@@ -2656,11 +2505,10 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("hint-below-floor-{me}");
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2668,7 +2516,6 @@ mod tests {
 
             // Raise the floor above the hint we are about to send.
             mailbox.set_floor(Height::new(10)).await;
-
             // Drain the set_floor message before issuing the hint so they are
             // sequenced deterministically.
             context.sleep(Duration::from_millis(50)).await;
@@ -2676,16 +2523,11 @@ mod tests {
             mailbox
                 .hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()))
                 .await;
-
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
-                resolver.targeted().is_empty(),
-                "fetch_targeted must not run for hints at or below the floor"
-            );
-            assert!(
-                resolver.fetches().is_empty(),
-                "fetch must not run for hints at or below the floor"
+                resolver.targeted_is_empty(),
+                "hint at or below floor must not fetch"
             );
         });
     }
@@ -2703,7 +2545,6 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("hint-already-final-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
@@ -2714,7 +2555,7 @@ mod tests {
 
             let (mut mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2724,32 +2565,18 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
-            let deadline = Duration::from_secs(5);
-            let start = context.current();
-            loop {
-                if mailbox.get_finalization(Height::new(1)).await.is_some() {
-                    break;
-                }
-                if context.current().duration_since(start).unwrap_or_default() > deadline {
-                    panic!("finalization was not persisted within {deadline:?}");
-                }
+            while mailbox.get_finalization(Height::new(1)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            // Sanity: set_floor raised `last_processed_height` internally through
-            // dispatch; to isolate the "already finalized" branch, hint at a
-            // height above the floor that already has a finalization.
-            let hint_targeted_before = resolver.targeted().len();
             mailbox
                 .hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()))
                 .await;
-
             context.sleep(Duration::from_millis(50)).await;
 
-            assert_eq!(
-                resolver.targeted().len(),
-                hint_targeted_before,
-                "fetch_targeted must not run when the finalization is already local"
+            assert!(
+                resolver.targeted_is_empty(),
+                "hint for a locally-finalized height must not fetch"
             );
         });
     }
@@ -2766,11 +2593,10 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("hint-targets-{me}");
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2781,20 +2607,13 @@ mod tests {
                 .hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()))
                 .await;
 
-            let deadline = Duration::from_secs(5);
-            let start = context.current();
-            loop {
-                if !resolver.targeted().is_empty() {
-                    break;
-                }
-                if context.current().duration_since(start).unwrap_or_default() > deadline {
-                    panic!("fetch_targeted was not invoked within {deadline:?}");
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
+                !resolver.targeted.lock().is_empty()
+            })
+            .await;
 
             let targeted = resolver.targeted();
-            assert_eq!(targeted.len(), 1, "expected exactly one targeted fetch");
+            assert_eq!(targeted.len(), 1);
             let (request, targets) = &targeted[0];
             assert_eq!(
                 request,
@@ -2802,7 +2621,7 @@ mod tests {
                     height: Height::new(7)
                 }
             );
-            assert_eq!(AsRef::<[PublicKey]>::as_ref(targets), &[target]);
+            assert_eq!(&targets[..], &[target]);
         });
     }
 
@@ -2818,7 +2637,6 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
-            let partition_prefix = format!("prune-above-floor-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
@@ -2829,7 +2647,7 @@ mod tests {
 
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_recording_standard_actor(
                 context.with_label("validator_0"),
-                &partition_prefix,
+                &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
             )
@@ -2838,32 +2656,17 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let deadline = Duration::from_secs(5);
-            let start = context.current();
-            loop {
-                if mailbox.get_finalization(Height::new(1)).await.is_some() {
-                    break;
-                }
-                if context.current().duration_since(start).unwrap_or_default() > deadline {
-                    panic!("finalization was not persisted within {deadline:?}");
-                }
+            while mailbox.get_finalization(Height::new(1)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
             // Prune above the floor must be a no-op, not an error.
             mailbox.prune(Height::new(100)).await;
-
             context.sleep(Duration::from_millis(50)).await;
 
             // The finalized block and its finalization must still be retrievable.
-            assert!(
-                mailbox.get_block(Height::new(1)).await.is_some(),
-                "block must survive a prune above the floor"
-            );
-            assert!(
-                mailbox.get_finalization(Height::new(1)).await.is_some(),
-                "finalization must survive a prune above the floor"
-            );
+            assert!(mailbox.get_block(Height::new(1)).await.is_some());
+            assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
         });
     }
 }
