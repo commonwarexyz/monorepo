@@ -5,11 +5,14 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::mmr::{journaled::Config as MmrConfig, Family},
+    merkle::{
+        self,
+        mmr::{journaled::Config as MmrConfig, Family},
+    },
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            traits::{DbAny, UnmerkleizedBatch as _},
+            traits::{DbAny, UnmerkleizedBatch},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
@@ -541,6 +544,43 @@ pub async fn gen_random_kv<M>(
 /// Generate a fixed-size digest value.
 pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
+}
+
+/// Pre-populate the database with `num_keys` unique keys, then commit and sync so that
+/// seed-phase buffered writes are flushed before the caller starts timing.
+pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    db: &mut C,
+    num_keys: u64,
+) {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut batch = db.new_batch();
+    for i in 0u64..num_keys {
+        let k = Sha256::hash(&i.to_be_bytes());
+        batch = batch.write(k, Some(make_fixed_value(&mut rng)));
+    }
+    let merkleized = batch.merkleize(db, None).await.unwrap();
+    db.apply_batch(merkleized).await.unwrap();
+    db.commit().await.unwrap();
+    db.sync().await.unwrap();
+}
+
+/// Write `num_updates` random key updates into a batch.
+pub fn write_random_updates<B, Db>(
+    mut batch: B,
+    num_updates: u64,
+    num_keys: u64,
+    rng: &mut StdRng,
+) -> B
+where
+    B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
+    Db: ?Sized,
+{
+    for _ in 0..num_updates {
+        let idx = rng.next_u64() % num_keys;
+        let k = Sha256::hash(&idx.to_be_bytes());
+        batch = batch.write(k, Some(make_fixed_value(rng)));
+    }
+    batch
 }
 
 /// Generate a variable-size `Vec<u8>` value (1-256 bytes).
