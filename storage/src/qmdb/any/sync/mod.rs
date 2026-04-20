@@ -50,16 +50,10 @@ pub(crate) mod tests;
 ///
 /// Shared across [crate::qmdb::any] and [crate::qmdb::current] sync because both
 /// build on the same operations-MMR layout and share the same merkle partition.
-///
-/// # Caller contract
-///
-/// `target.range.start()` **must** equal the committed inactivity floor of the
-/// target state (i.e. the floor carried by the last `CommitFloor` op). Only the
-/// persisted tree size and root are checked; the merkle pruning boundary is not.
-/// Callers that set `target.range.start()` below the committed floor (or that
-/// prune their own database past the committed floor) can cause a later
-/// [`qmdb::sync::Database::from_sync_result`] rebuild to fail with `MissingNode`
-/// even though this function returned `true`.
+/// Verifies only that the persisted tree size and root match; the merkle pruning
+/// boundary is not re-checked. Callers must keep their local pruning point at or
+/// below `target.range.start()` or a later
+/// [`qmdb::sync::Database::from_sync_result`] rebuild may fail.
 pub async fn has_local_target_state<F, E, H>(
     context: E,
     merkle_config: journaled::Config,
@@ -78,7 +72,8 @@ where
     )
     .await;
     // Size + root match implies the last CommitFloor op (and therefore the
-    // committed inactivity floor) matches, per the caller contract above.
+    // size + root identify a unique state, so if they match the target's we can reuse
+    // the persisted DB without fetching boundary pins.
     matches!(
         peek,
         Ok(Some((_, journal_leaves, root)))

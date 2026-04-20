@@ -174,9 +174,9 @@ where
     // `popcount(pruned_chunks)` are at or above the grafting height. The remaining
     // smaller peaks cover the partial trailing chunk and are not grafted pinned nodes.
     //
-    // This relies on the pruning-boundary invariant: at `range.end`, every pruned chunk's
-    // height-`gh` subtree is absorbed, so `nodes_to_pin` at a chunk-aligned `range.start`
-    // returns the correct positions for both MMR and MMB.
+    // Requires `range.start <=` target's [`Db::sync_boundary`](db::Db::sync_boundary): that
+    // bound guarantees every fully-pruned chunk's height-`gh` subtree is absorbed at
+    // `range.end`, so `nodes_to_pin` returns the correct positions for both MMR and MMB.
     let grafted_pinned_nodes = {
         let ops_pin_positions: Vec<_> = F::nodes_to_pin(range.start()).collect();
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;

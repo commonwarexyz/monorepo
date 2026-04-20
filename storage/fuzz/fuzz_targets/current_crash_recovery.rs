@@ -265,10 +265,7 @@ fn fuzz(input: FuzzInput) {
                         {
                             break;
                         }
-                        let Ok(boundary) = db.sync_boundary() else {
-                            break;
-                        };
-                        if db.prune(boundary).await.is_err() {
+                        if db.prune(db.sync_boundary()).await.is_err() {
                             break;
                         }
                     }
@@ -327,9 +324,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Verify range proofs over the recovered DB.
-            let floor = *db
-                .sync_boundary()
-                .expect("sync_boundary should not overflow");
+            let floor = *db.sync_boundary();
             let size = *db.bounds().await.end;
             for i in floor..size {
                 let loc = Location::new(i);

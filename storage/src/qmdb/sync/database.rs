@@ -59,20 +59,12 @@ pub trait Database: Sized + Send {
 
     /// Returns whether persisted local state already matches the requested sync target.
     ///
-    /// Databases can override this to allow the sync engine to complete immediately
-    /// when an on-disk database already matches the target and can be rebuilt without
-    /// fetching fresh boundary pins.
-    ///
-    /// # Caller contract
-    ///
-    /// `target.range.start()` **must** equal the committed inactivity floor of
-    /// the target state (i.e. the floor carried by the last `CommitFloor` op).
-    /// Implementations are free to verify only that the persisted tree size and
-    /// root match and to skip checking the persisted merkle pruning boundary
-    /// directly. Callers that set `target.range.start()` below the committed
-    /// floor (or that prune their own database past the committed floor) can cause
-    /// a later [`Self::from_sync_result`] rebuild to fail with `MissingNode` even
-    /// though this function returned `true`.
+    /// Databases can override this to let the sync engine finish immediately when an
+    /// on-disk database already reflects the target. Implementations may verify only
+    /// that persisted tree size and root match; the merkle pruning boundary is not
+    /// re-checked. Callers are responsible for keeping their local pruning point at or
+    /// below `target.range.start()`; pruning past it can cause a later
+    /// [`Self::from_sync_result`] rebuild to fail.
     fn has_local_target_state(
         _context: Self::Context,
         _config: &Self::Config,

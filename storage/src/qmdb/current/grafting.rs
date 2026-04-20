@@ -436,8 +436,7 @@ impl<
     ///
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
-    /// [`super::db::Db::settled_bitmap_prune_loc`] ensures this case is unreachable for
-    /// pruned chunks.
+    /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
     fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<D> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);

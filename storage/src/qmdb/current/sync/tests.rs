@@ -265,11 +265,11 @@ mod harnesses {
         db
     }
 
-    pub struct UnorderedFixedMmrHarness;
+    pub struct UnorderedFixedHarness<F>(std::marker::PhantomData<F>);
 
-    impl SyncTestHarness for UnorderedFixedMmrHarness {
-        type Family = mmr::Family;
-        type Db = UnorderedFixedDb<mmr::Family>;
+    impl<F: merkle::Graftable> SyncTestHarness for UnorderedFixedHarness<F> {
+        type Family = F;
+        type Db = UnorderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
             SyncDatabase::root(db)
@@ -281,17 +281,15 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_unordered_fixed_ops::<mmr::Family>(n, 0)
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
+            create_unordered_fixed_ops::<F>(n, 0)
         }
 
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_unordered_fixed_ops::<mmr::Family>(n, seed)
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
+            create_unordered_fixed_ops::<F>(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
@@ -305,63 +303,20 @@ mod harnesses {
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
         ) -> Self::Db {
             apply_unordered_fixed_ops(db, ops).await
         }
     }
 
-    pub struct UnorderedFixedMmbHarness;
+    pub type UnorderedFixedMmrHarness = UnorderedFixedHarness<mmr::Family>;
+    pub type UnorderedFixedMmbHarness = UnorderedFixedHarness<mmb::Family>;
 
-    impl SyncTestHarness for UnorderedFixedMmbHarness {
-        type Family = mmb::Family;
-        type Db = UnorderedFixedDb<mmb::Family>;
+    pub struct UnorderedVariableHarness<F>(std::marker::PhantomData<F>);
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
-        }
-
-        fn create_ops(
-            n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_unordered_fixed_ops::<mmb::Family>(n, 0)
-        }
-
-        fn create_ops_seeded(
-            n: usize,
-            seed: u64,
-        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_unordered_fixed_ops::<mmb::Family>(n, seed)
-        }
-
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
-        }
-
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
-        }
-
-        async fn apply_ops(
-            db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
-        ) -> Self::Db {
-            apply_unordered_fixed_ops(db, ops).await
-        }
-    }
-
-    pub struct UnorderedVariableMmrHarness;
-
-    impl SyncTestHarness for UnorderedVariableMmrHarness {
-        type Family = mmr::Family;
-        type Db = UnorderedVariableDb<mmr::Family>;
+    impl<F: merkle::Graftable> SyncTestHarness for UnorderedVariableHarness<F> {
+        type Family = F;
+        type Db = UnorderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
             SyncDatabase::root(db)
@@ -373,17 +328,15 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_unordered_variable_ops::<mmr::Family>(n, 0)
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
+            create_unordered_variable_ops::<F>(n, 0)
         }
 
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_unordered_variable_ops::<mmr::Family>(n, seed)
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
+            create_unordered_variable_ops::<F>(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
@@ -397,63 +350,20 @@ mod harnesses {
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>,
+            ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
         ) -> Self::Db {
             apply_unordered_variable_ops(db, ops).await
         }
     }
 
-    pub struct UnorderedVariableMmbHarness;
+    pub type UnorderedVariableMmrHarness = UnorderedVariableHarness<mmr::Family>;
+    pub type UnorderedVariableMmbHarness = UnorderedVariableHarness<mmb::Family>;
 
-    impl SyncTestHarness for UnorderedVariableMmbHarness {
-        type Family = mmb::Family;
-        type Db = UnorderedVariableDb<mmb::Family>;
+    pub struct OrderedFixedHarness<F>(std::marker::PhantomData<F>);
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
-        }
-
-        fn create_ops(
-            n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_unordered_variable_ops::<mmb::Family>(n, 0)
-        }
-
-        fn create_ops_seeded(
-            n: usize,
-            seed: u64,
-        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_unordered_variable_ops::<mmb::Family>(n, seed)
-        }
-
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
-        }
-
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
-        }
-
-        async fn apply_ops(
-            db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>,
-        ) -> Self::Db {
-            apply_unordered_variable_ops(db, ops).await
-        }
-    }
-
-    pub struct OrderedFixedMmrHarness;
-
-    impl SyncTestHarness for OrderedFixedMmrHarness {
-        type Family = mmr::Family;
-        type Db = OrderedFixedDb<mmr::Family>;
+    impl<F: merkle::Graftable> SyncTestHarness for OrderedFixedHarness<F> {
+        type Family = F;
+        type Db = OrderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
             SyncDatabase::root(db)
@@ -465,15 +375,15 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
-            create_ordered_fixed_ops::<mmr::Family>(n, 0)
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
+            create_ordered_fixed_ops::<F>(n, 0)
         }
 
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
-            create_ordered_fixed_ops::<mmr::Family>(n, seed)
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
+            create_ordered_fixed_ops::<F>(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
@@ -487,61 +397,20 @@ mod harnesses {
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>>,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
         ) -> Self::Db {
             apply_ordered_fixed_ops(db, ops).await
         }
     }
 
-    pub struct OrderedFixedMmbHarness;
+    pub type OrderedFixedMmrHarness = OrderedFixedHarness<mmr::Family>;
+    pub type OrderedFixedMmbHarness = OrderedFixedHarness<mmb::Family>;
 
-    impl SyncTestHarness for OrderedFixedMmbHarness {
-        type Family = mmb::Family;
-        type Db = OrderedFixedDb<mmb::Family>;
+    pub struct OrderedVariableHarness<F>(std::marker::PhantomData<F>);
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
-        }
-
-        fn create_ops(
-            n: usize,
-        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
-            create_ordered_fixed_ops::<mmb::Family>(n, 0)
-        }
-
-        fn create_ops_seeded(
-            n: usize,
-            seed: u64,
-        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
-            create_ordered_fixed_ops::<mmb::Family>(n, seed)
-        }
-
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
-        }
-
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
-        }
-
-        async fn apply_ops(
-            db: Self::Db,
-            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
-        ) -> Self::Db {
-            apply_ordered_fixed_ops(db, ops).await
-        }
-    }
-
-    pub struct OrderedVariableMmrHarness;
-
-    impl SyncTestHarness for OrderedVariableMmrHarness {
-        type Family = mmr::Family;
-        type Db = OrderedVariableDb<mmr::Family>;
+    impl<F: merkle::Graftable> SyncTestHarness for OrderedVariableHarness<F> {
+        type Family = F;
+        type Db = OrderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
             SyncDatabase::root(db)
@@ -553,17 +422,15 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_ordered_variable_ops::<mmr::Family>(n, 0)
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
+            create_ordered_variable_ops::<F>(n, 0)
         }
 
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>
-        {
-            create_ordered_variable_ops::<mmr::Family>(n, seed)
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
+            create_ordered_variable_ops::<F>(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
@@ -577,57 +444,14 @@ mod harnesses {
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
         ) -> Self::Db {
             apply_ordered_variable_ops(db, ops).await
         }
     }
 
-    pub struct OrderedVariableMmbHarness;
-
-    impl SyncTestHarness for OrderedVariableMmbHarness {
-        type Family = mmb::Family;
-        type Db = OrderedVariableDb<mmb::Family>;
-
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
-        }
-
-        fn create_ops(
-            n: usize,
-        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_ordered_variable_ops::<mmb::Family>(n, 0)
-        }
-
-        fn create_ops_seeded(
-            n: usize,
-            seed: u64,
-        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>
-        {
-            create_ordered_variable_ops::<mmb::Family>(n, seed)
-        }
-
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
-        }
-
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
-        }
-
-        async fn apply_ops(
-            db: Self::Db,
-            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>,
-        ) -> Self::Db {
-            apply_ordered_variable_ops(db, ops).await
-        }
-    }
+    pub type OrderedVariableMmrHarness = OrderedVariableHarness<mmr::Family>;
+    pub type OrderedVariableMmbHarness = OrderedVariableHarness<mmb::Family>;
 }
 
 /// Regression test: sync a pruned MMB-backed current DB and verify the synced DB has the
@@ -681,14 +505,11 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             "expected inactivity floor past chunk 0"
         );
 
-        target_db
-            .prune(target_db.inactivity_floor_loc())
-            .await
-            .unwrap();
+        target_db.prune(target_db.sync_boundary()).await.unwrap();
 
         let sync_root = SyncDatabase::root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.inactivity_floor_loc();
+        let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().await.end;
 
         let client_suffix = context.next_u64().to_string();
@@ -718,7 +539,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         assert_eq!(SyncDatabase::root(&synced_db), sync_root);
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.inactivity_floor_loc(), lower_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
 
         drop(synced_db);
@@ -728,7 +549,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             .unwrap();
         assert_eq!(SyncDatabase::root(&reopened), sync_root);
         assert_eq!(reopened.root(), verification_root);
-        assert_eq!(reopened.inactivity_floor_loc(), lower_bound);
+        assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
 
         reopened.destroy().await.unwrap();

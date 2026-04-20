@@ -141,7 +141,6 @@ where
 
     async fn sync_boundary(&self) -> Location {
         self.sync_boundary()
-            .expect("sync_boundary should not overflow")
     }
 
     fn historical_proof(

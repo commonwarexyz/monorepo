@@ -100,19 +100,13 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    ///
-    /// This is an implementation detail of the activity tracking; external callers should
-    /// prefer [`Self::sync_boundary`] when constructing a sync target.
+    #[cfg(any(test, feature = "test-traits"))]
     pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
-    /// Return the most recent location from which this database can safely be synced.
-    ///
-    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this value, or
-    /// any earlier retained location, as `range.start`. For `any` databases this equals the
-    /// inactivity floor; the receiver's reconstruction does not require chunk alignment, so any
-    /// retained earlier location is also valid.
+    /// Return the most recent location from which this database can safely be synced, and the
+    /// upper bound on [`Self::prune`]'s `loc`. For `any`, this equals the inactivity floor.
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
