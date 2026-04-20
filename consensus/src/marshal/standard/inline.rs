@@ -914,7 +914,7 @@ mod tests {
                 .expect("verify result missing");
             assert!(verify_result, "inline verify should pass");
 
-            // CRITICAL: abort the marshal actor synchronously, with no
+            // Abort the marshal actor synchronously, with no
             // intervening await. If verify returned true but the actor had
             // only enqueued (not processed) the `Verified` message, this
             // abort kills the actor before persistence completes.
