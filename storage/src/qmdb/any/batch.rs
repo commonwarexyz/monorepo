@@ -1813,7 +1813,7 @@ mod tests {
                 },
             ),
         ];
-        base_diff.sort_by(|a, b| a.0.cmp(&b.0));
+        base_diff.sort_by_key(|a| a.0);
 
         let creates = extract_parent_deleted_creates(&mut mutations, &base_diff);
 

@@ -227,7 +227,7 @@ where
         let oldest = reader.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(*key) {
+            for &loc in self.snapshot.get(key) {
                 if loc < oldest {
                     continue;
                 }
@@ -1309,12 +1309,12 @@ pub(super) mod test {
         let mut kvs_first: Vec<(Digest, Digest)> = (0u64..5)
             .map(|i| (Sha256::hash(&i.to_be_bytes()), Sha256::fill(i as u8)))
             .collect();
-        kvs_first.sort_by(|a, b| a.0.cmp(&b.0));
+        kvs_first.sort_by_key(|a| a.0);
 
         let mut kvs_second: Vec<(Digest, Digest)> = (5u64..10)
             .map(|i| (Sha256::hash(&i.to_be_bytes()), Sha256::fill(i as u8)))
             .collect();
-        kvs_second.sort_by(|a, b| a.0.cmp(&b.0));
+        kvs_second.sort_by_key(|a| a.0);
 
         // Parent batch: set keys 0..5.
         let mut parent = db.new_batch();
