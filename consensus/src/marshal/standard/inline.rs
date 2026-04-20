@@ -241,13 +241,19 @@ where
             .spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal). The parent context
-                // recovered by simplex may differ from the one the cached block
-                // was built against, so the stored block is not safe to reuse
+                // notarize vote never reached the journal).
+                //
+                // The parent context recovered by simplex may differ from the one
+                // the cached block was built against, so the stored block is not safe to reuse
                 // and building a fresh block would land on the same prunable
-                // archive index and be silently dropped. Skip this view and let
-                // the voter nullify it via timeout.
-                if marshal.get_verified(consensus_context.round).await.is_some() {
+                // archive index and be silently dropped.
+                //
+                // Skip this view and let the voter nullify it via timeout.
+                if marshal
+                    .get_verified(consensus_context.round)
+                    .await
+                    .is_some()
+                {
                     debug!(
                         round = ?consensus_context.round,
                         "skipping proposal: verified block already exists for round on restart"
@@ -1203,12 +1209,10 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::zero(), genesis.digest()),
             };
-            let stale_block =
-                B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
             assert!(marshal.verified(round, stale_block).await);
 
-            let fresh_block =
-                B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
+            let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
 
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
