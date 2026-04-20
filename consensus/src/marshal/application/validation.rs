@@ -16,9 +16,6 @@ use std::sync::Arc;
 pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// Which marshal cache a verified block should land in.
-///
-/// Selected by the caller based on context: `Verified` for the initial verify
-/// path, `Certified` when the caller has a notarization for the block.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cache {
     /// Write to `verified_blocks` via [`Mailbox::verified`].
