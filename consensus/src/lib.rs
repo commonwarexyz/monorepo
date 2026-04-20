@@ -134,23 +134,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
     ///
-    /// This trait is required by consensus implementations (like Simplex) that support a certification
-    /// phase between notarization and finalization. Applications that do not need custom certification
-    /// logic can use the default implementation which always certifies.
+    /// Applications that do not need custom certification logic can use the default
+    /// implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
         /// Determine whether a verified payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
-        /// applications to associate certification with the correct verification context.
-        ///
-        /// Note: In applications where payloads incorporate the round number (recommended),
-        /// each round will have a unique payload digest. However, the same payload may appear
-        /// in multiple rounds when re-proposing notarized blocks at epoch boundaries or in
-        /// integrations where payloads are round-agnostic.
-        ///
-        /// This is particularly useful for applications that employ erasure coding, which
-        /// can override this method to delay or prevent finalization until they have
-        /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        /// applications to associate certification with the correct verification context. The
+        /// same payload may appear in multiple rounds, so implementations must key any state
+        /// on `(round, payload)` rather than `payload` alone.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given

@@ -53,7 +53,7 @@ pub trait Archive: Send {
     /// Store an item in [Archive].
     ///
     /// Indices are unique: if the index already exists, put does nothing and returns. Duplicate
-    /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique — the same key
+    /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
     /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
     /// with an [Identifier::Key] identifier may return any of the values associated with that key.
     fn put(

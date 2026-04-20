@@ -81,7 +81,10 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        let _peers = Broadcaster::broadcast(self, recipients, block).await;
+    async fn send(&self, _round: Round, block: B, recipients: Recipients<K>) -> bool {
+        Broadcaster::broadcast(self, recipients, block)
+            .await
+            .await
+            .is_ok()
     }
 }

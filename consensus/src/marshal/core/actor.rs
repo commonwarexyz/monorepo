@@ -52,7 +52,7 @@ use std::{
     pin::Pin,
     sync::Arc,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
@@ -491,7 +491,7 @@ where
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
-                debug!("mailbox closed, shutting down");
+                info!("mailbox closed, shutting down");
                 break;
             } => {
                 match message {
@@ -524,8 +524,16 @@ where
                     Message::Proposed { round, block, ack } => {
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;
-                        buffer.send(round, block, Recipients::All).await;
-                        ack.send_lossy(());
+                        // Only signal success once the dissemination layer
+                        // accepts the block. Leaving `ack` unresolved when the
+                        // broadcaster is gone causes the waiting relay to see
+                        // a closed channel and abort the proposal, rather than
+                        // letting consensus vote on a block no peer received.
+                        if buffer.send(round, block, Recipients::All).await {
+                            ack.send_lossy(());
+                        } else {
+                            warn!(?round, "buffer refused proposal");
+                        }
                     }
                     Message::Forward {
                         round,
@@ -542,6 +550,15 @@ where
                         };
                         buffer.send(round, block, Recipients::Some(peers)).await;
                     }
+                    // Both handlers ack unconditionally even when the round
+                    // has already been pruned by tip advancement. In that case
+                    // `cache_verified`/`cache_block` is a no-op because the
+                    // round is below the retention floor, but pruning past a
+                    // round implies consensus has already advanced past it, so
+                    // any downstream notarize/finalize vote a caller casts on
+                    // the strength of this ack is stale and will be ignored by
+                    // peers. Returning false here would stall a background
+                    // task waiting on an outcome that no longer matters.
                     Message::Verified { round, block, ack } => {
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
@@ -736,7 +753,7 @@ where
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
             Some(message) = resolver_rx.recv() else {
-                debug!("handler closed, shutting down");
+                info!("handler closed, shutting down");
                 return;
             } => {
                 // Drain up to max_repair messages: blocks handled immediately,

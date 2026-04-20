@@ -142,12 +142,18 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
 
     /// Send a block to peers.
+    ///
+    /// Returns `true` when the dissemination layer accepted the block for
+    /// broadcast. Returns `false` when the handoff failed, for example because
+    /// the broadcaster actor has shut down. Callers that rely on `proposed`
+    /// durability guarantees must treat `false` as a failure to disseminate
+    /// and stop driving consensus for the round.
     fn send(
         &self,
         round: Round,
         block: V::Block,
         recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = bool> + Send;
 }
 
 /// A trait for cached block types that can be converted to the underlying block.

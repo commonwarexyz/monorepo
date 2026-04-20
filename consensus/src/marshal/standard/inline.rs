@@ -442,7 +442,17 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // If block was already seen, return immediately.
+        // Fast path: verify has already run for this (round, digest) and its
+        // success was recorded in `available_blocks`. `verify` does not mark a
+        // round available until `marshal.verified(round, block)` has returned,
+        // and that call blocks on `put_sync` of the block into the round's
+        // verified cache. Because the verified and notarized caches share the
+        // same pruning schedule (both advance together to `min_view`), the
+        // block is already durable for this round and re-persisting it into
+        // the notarized cache would be a redundant `put_sync`. The slow path
+        // below persists through the notarized cache because in that case
+        // verify has not run locally and the block may be held only in the
+        // broadcast buffer, which is not durable.
         if self.available_blocks.lock().contains(&(round, digest)) {
             let (tx, rx) = oneshot::channel();
             tx.send_lossy(true);
@@ -938,7 +948,7 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "verify resolved true ⟹ block must be durably persisted (seed={seed})"
+                "verify resolved true so block must be durably persisted (seed={seed})"
             );
         });
     }
@@ -1040,7 +1050,7 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted (seed={seed})"
+                "certify resolved true so block must be durably persisted (seed={seed})"
             );
         });
     }
