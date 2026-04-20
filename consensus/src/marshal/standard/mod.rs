@@ -1809,45 +1809,7 @@ mod tests {
         }
     }
 
-    async fn start_standard_actor<R: Reporter<Activity = Update<B>>>(
-        context: deterministic::Context,
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        application: R,
-    ) -> (Mailbox<S, Standard<B>>, commonware_runtime::Handle<()>) {
-        let (mailbox, _buffer, _resolver, handle) = start_standard_actor_with_buffer(
-            context,
-            partition_prefix,
-            provider,
-            application,
-            RecordingBuffer::default(),
-        )
-        .await;
-        (mailbox, handle)
-    }
-
-    async fn start_recording_standard_actor<R: Reporter<Activity = Update<B>>>(
-        context: deterministic::Context,
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        application: R,
-    ) -> (
-        Mailbox<S, Standard<B>>,
-        RecordingBuffer,
-        RecordingResolver,
-        commonware_runtime::Handle<()>,
-    ) {
-        start_standard_actor_with_buffer(
-            context,
-            partition_prefix,
-            provider,
-            application,
-            RecordingBuffer::default(),
-        )
-        .await
-    }
-
-    async fn start_standard_actor_with_buffer<R, Buf>(
+    async fn start_standard_actor<R, Buf>(
         context: deterministic::Context,
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
@@ -1967,7 +1929,7 @@ mod tests {
             let partition_prefix = format!("proposed-waits-buffer-{me}");
 
             let (buffer, send_entered, release) = GatingBuffer::new();
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor_with_buffer(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
@@ -2177,11 +2139,12 @@ mod tests {
             );
 
             let (application, started, release) = GatedBlockReporter::new();
-            let (mut mailbox, actor_handle) = start_standard_actor(
+            let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2211,11 +2174,12 @@ mod tests {
             // Yield once so the aborted actor drops its storage handles before restart.
             context.sleep(Duration::from_millis(1)).await;
 
-            let (mailbox, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0_restart"),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2388,11 +2352,12 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let unknown = Sha256::hash(b"unknown-block");
 
-            let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2424,11 +2389,12 @@ mod tests {
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let digest = block.digest();
 
-            let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2467,11 +2433,12 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
-            let (mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2514,11 +2481,12 @@ mod tests {
                 QUORUM,
             );
 
-            let (mut mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
+            let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2555,11 +2523,12 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
-            let (mailbox, _buffer, resolver, _actor_handle) = start_recording_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
@@ -2606,11 +2575,12 @@ mod tests {
                 QUORUM,
             );
 
-            let (mut mailbox, _buffer, _resolver, _actor_handle) = start_recording_standard_actor(
+            let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.with_label("validator_0"),
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
             )
             .await;
 
