@@ -186,8 +186,8 @@ where
     ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         let grafted_root =
-            compute_grafted_root::<F, H, _, _, N>(hasher, &self.status, &storage).await?;
-        let partial_chunk = partial_chunk::<_, N>(&self.status)
+            compute_grafted_root::<F, H, _, _, N>(hasher, self.status.as_ref(), &storage).await?;
+        let partial_chunk = partial_chunk::<_, N>(self.status.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
         Ok(OpsRootWitness {
             grafted_root,
@@ -1179,7 +1179,7 @@ mod tests {
             let mut next_idx = 0;
             populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 256).await;
             next_idx += 256;
-            while partial_chunk::<_, 32>(&db.status).is_some() {
+            while partial_chunk::<_, 32>(db.status.as_ref()).is_some() {
                 populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 1).await;
                 next_idx += 1;
             }
