@@ -83,13 +83,13 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// A handle to a computation dispatched via [`Strategy::spawn`].
+    /// A handle to a computation dispatched via [`Bridge::spawn`].
     ///
     /// `SpawnHandle` implements [`Future`] and resolves with the value returned by the
-    /// spawned closure. Strategies that complete their work inline (for example,
+    /// spawned closure. Implementations that complete their work inline (for example,
     /// [`Sequential`]) return an already-resolved handle via [`SpawnHandle::ready`];
-    /// strategies that defer work to another thread (for example, [`Rayon`]) return a
-    /// handle backed by a oneshot channel.
+    /// implementations that defer work to another thread (for example, [`Rayon`]) return
+    /// a handle backed by a oneshot channel.
     ///
     /// # Panics
     ///
@@ -110,7 +110,7 @@ commonware_macros::stability_scope!(BETA {
     impl<R> SpawnHandle<R> {
         /// Construct an already-resolved [`SpawnHandle`] from a value.
         ///
-        /// Intended for [`Strategy`] implementations that compute `f` inline and have the
+        /// Intended for [`Bridge`] implementations that compute `f` inline and have the
         /// result available before returning the handle (like [`Sequential`]). Available in
         /// `no_std` builds.
         pub const fn ready(value: R) -> Self {
@@ -139,7 +139,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Construct a pending [`SpawnHandle`] from a oneshot receiver.
     ///
-    /// Intended for implementors of [`Strategy::spawn`] that dispatch `f` to another
+    /// Intended for implementors of [`Bridge::spawn`] that dispatch `f` to another
     /// thread and deliver the result through a oneshot channel. Only available when the
     /// `std` feature is enabled, because the underlying channel requires `std`.
     #[cfg(feature = "std")]
@@ -481,30 +481,33 @@ commonware_macros::stability_scope!(BETA {
 
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
+    }
 
-        /// Dispatch `f` to the underlying executor and return a [`SpawnHandle`] that
-        /// resolves to its result.
+    /// A bridge between async runtimes and a [`Strategy`].
+    ///
+    /// Code that uses a [`Strategy`] directly is fully synchronous - it never
+    /// needs to `.await` anything. When callers in an async context want to
+    /// offload a [`Strategy`] computation without blocking the executor, they
+    /// can require `Bridge` instead and `.await` the returned [`SpawnHandle`].
+    pub trait Bridge: Strategy {
+        /// Dispatch `f` to the underlying executor and return a [`SpawnHandle`]
+        /// that resolves to its result.
         ///
-        /// The closure receives an owned clone of the strategy, which lets it invoke other
-        /// [`Strategy`] methods without the caller having to pre-clone `self`. The handle
-        /// is a [`Future`], so callers can `.await` it from async contexts without blocking
-        /// the calling thread.
-        ///
-        /// For [`Rayon`], `f` runs on a thread-pool worker (via [`rayon::ThreadPool::spawn`]),
-        /// so the caller's thread is free to make progress on other work while `f` executes.
-        /// For [`Sequential`], `f` runs inline on the calling thread before the handle is
-        /// returned; the handle is already resolved when the caller first polls it.
+        /// The closure receives an owned clone of the strategy, which lets it
+        /// invoke [`Strategy`] methods without the caller having to pre-clone
+        /// `self`.
         ///
         /// # Panics
         ///
-        /// If `f` panics, the spawned task's oneshot sender is dropped without sending a
-        /// value. The returned [`SpawnHandle`] will panic when polled in that case, matching
-        /// the behavior the caller would observe if they had invoked `f` inline.
+        /// If `f` panics, the spawned task's oneshot sender is dropped without
+        /// sending a value. The returned [`SpawnHandle`] will panic when polled
+        /// in that case, matching the behavior the caller would observe if they
+        /// had invoked `f` inline.
         ///
         /// # Examples
         ///
         /// ```
-        /// use commonware_parallel::{Strategy, Sequential};
+        /// use commonware_parallel::{Bridge, Sequential};
         /// use futures::executor::block_on;
         ///
         /// let strategy = Sequential;
@@ -580,7 +583,9 @@ commonware_macros::stability_scope!(BETA {
         fn parallelism_hint(&self) -> usize {
             1
         }
+    }
 
+    impl Bridge for Sequential {
         fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
         where
             F: FnOnce(Self) -> R + Send + 'static,
@@ -707,7 +712,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         fn parallelism_hint(&self) -> usize {
             self.thread_pool.current_num_threads()
         }
+    }
 
+    impl Bridge for Rayon {
         fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
         where
             F: FnOnce(Self) -> R + Send + 'static,
@@ -725,7 +732,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
 #[cfg(test)]
 mod test {
-    use crate::{Rayon, Sequential, Strategy};
+    use crate::{Bridge, Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use futures::executor::block_on;
     use proptest::prelude::*;

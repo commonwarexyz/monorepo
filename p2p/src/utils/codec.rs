@@ -361,14 +361,6 @@ mod tests {
         fn parallelism_hint(&self) -> usize {
             self.0
         }
-
-        fn spawn<F, R>(&self, f: F) -> commonware_parallel::SpawnHandle<R>
-        where
-            F: FnOnce(Self) -> R + Send + 'static,
-            R: Send + 'static,
-        {
-            commonware_parallel::SpawnHandle::ready(f(*self))
-        }
     }
 
     #[derive(Debug)]
