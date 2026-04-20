@@ -403,6 +403,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views.get(&view).and_then(|round| round.notarization())
     }
 
+    /// Return all views that have a notarization, in descending order.
+    pub fn notarized_views_descending(&self) -> Vec<View> {
+        self.views
+            .iter()
+            .rev()
+            .filter_map(|(view, round)| round.notarization().map(|_| *view))
+            .collect()
+    }
+
     /// Return a nullification certificate, if one exists.
     pub fn nullification(&self, view: View) -> Option<&Nullification<S>> {
         self.views
@@ -596,6 +605,42 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 self.views.get_mut(&view)?.try_certify()
             })
             .collect()
+    }
+
+    /// Walks the ancestor chain of `view` and certifies any ancestors that are eligible
+    /// for inference (have a notarization and are in `CertifyState::Ready`).
+    ///
+    /// Returns a list of `(view, notarization)` pairs ordered from nearest to farthest
+    /// ancestor. The caller is responsible for journaling and signaling each entry.
+    pub fn infer_ancestors(&mut self, view: View) -> Vec<(View, Notarization<S, D>)> {
+        let mut result = Vec::new();
+        let Some(start) = self.notarization(view) else {
+            return result;
+        };
+        let mut current = start.proposal.parent;
+        loop {
+            // Stop at or below the finalized frontier (covers GENESIS_VIEW since
+            // last_finalized initializes to GENESIS_VIEW = View::zero()).
+            if current <= self.last_finalized {
+                break;
+            }
+            let Some(round) = self.views.get(&current) else {
+                break;
+            };
+            if !round.is_certify_ready() {
+                break;
+            }
+            let Some(notarization) = round.notarization().cloned() else {
+                break;
+            };
+            let next = notarization.proposal.parent;
+            // enter_view(current.next()) is a no-op for views below self.view.
+            self.certified(current, true);
+            self.certification_candidates.remove(&current);
+            result.push((current, notarization));
+            current = next;
+        }
+        result
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -2353,6 +2398,395 @@ mod tests {
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
+        });
+    }
+
+    // Helper: build a notarization for `view` with the given `parent` and add it to state.
+    fn add_notarization_for_view<E, S, L>(
+        state: &mut State<E, S, L, Sha256Digest>,
+        schemes: &[S],
+        verifier: &S,
+        epoch: Epoch,
+        view: View,
+        parent: View,
+    ) -> Notarization<S, Sha256Digest>
+    where
+        E: Clock + CryptoRngCore + Metrics,
+        S: crate::simplex::scheme::Scheme<Sha256Digest>,
+        L: ElectorConfig<S>,
+    {
+        let round = Rnd::new(epoch, view);
+        let proposal = Proposal::new(round, parent, Sha256Digest::from([view.get() as u8; 32]));
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
+            .collect();
+        let notarization = Notarization::from_notarizes(verifier, votes.iter(), &Sequential)
+            .expect("notarization");
+        state.add_notarization(notarization.clone());
+        notarization
+    }
+
+    #[test]
+    fn infer_ancestors_empty_when_view_has_no_notarization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_no_notarization".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            // view 1 has no notarization — infer_ancestors returns empty
+            assert!(state.infer_ancestors(View::new(1)).is_empty());
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_empty_when_parent_is_already_certified() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_parent_certified".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            // Parent is GENESIS_VIEW which is already certified via genesis
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            // Certify view 1 so it's not Ready
+            state.certified(View::new(1), true);
+            // View 2's parent (view 1) is already Certified — no inference
+            assert!(state.infer_ancestors(View::new(2)).is_empty());
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_empty_when_parent_is_outstanding() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_parent_outstanding".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            // Put view 1 into Outstanding state
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(1), handle);
+            // View 2's parent (view 1) is Outstanding — no inference
+            assert!(state.infer_ancestors(View::new(2)).is_empty());
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_empty_when_parent_has_no_notarization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_parent_no_nota".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            // Add notarization for view 2 but NOT view 1 (parent)
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            // View 1 has no notarization — inference stops, returns empty
+            assert!(state.infer_ancestors(View::new(2)).is_empty());
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_single_ancestor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_single".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            // View 1: parent=GENESIS, Ready, has notarization
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            // View 2: parent=view1, has notarization (the trigger)
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            let inferred = state.infer_ancestors(View::new(2));
+            assert_eq!(inferred.len(), 1);
+            assert_eq!(inferred[0].0, View::new(1));
+            // View 1 should now be Certified
+            assert!(state.notarization(View::new(1)).is_some());
+            let v1_round = state.views.get(&View::new(1)).unwrap();
+            assert!(v1_round.is_certified(), "inferred view must be certified");
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_chain() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_chain".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(3),
+                View::new(2),
+            );
+            // Trigger inference from view 3 — should certify views 2 and 1
+            let inferred = state.infer_ancestors(View::new(3));
+            assert_eq!(inferred.len(), 2);
+            assert_eq!(inferred[0].0, View::new(2));
+            assert_eq!(inferred[1].0, View::new(1));
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_stops_at_outstanding() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_stop_outstanding".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(3),
+                View::new(2),
+            );
+            // Put view 1 into Outstanding — inference stops at view 2 (whose parent is 1)
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(1), handle);
+            // Trigger from view 3: view 2 is Ready → inferred; view 1 is Outstanding → stop
+            let inferred = state.infer_ancestors(View::new(3));
+            assert_eq!(inferred.len(), 1);
+            assert_eq!(inferred[0].0, View::new(2));
+        });
+    }
+
+    #[test]
+    fn infer_ancestors_removes_from_certification_candidates() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns_infer_candidates".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(1),
+                GENESIS_VIEW,
+            );
+            add_notarization_for_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                epoch,
+                View::new(2),
+                View::new(1),
+            );
+            // Verify view 1 is in certification_candidates
+            assert!(state.certification_candidates.contains(&View::new(1)));
+            state.infer_ancestors(View::new(2));
+            // After inference, view 1 removed from candidates (won't re-dispatch to automaton)
+            assert!(!state.certification_candidates.contains(&View::new(1)));
+            // certify_candidates drains the set — view 1 should not appear
+            let candidates = state.certify_candidates();
+            assert!(candidates.iter().all(|p| p.round.view() != View::new(1)));
         });
     }
 
