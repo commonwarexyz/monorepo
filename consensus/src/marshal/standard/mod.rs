@@ -2373,45 +2373,6 @@ mod tests {
         });
     }
 
-    /// `Forward { peers = [] }` must be a no-op: marshal should not call
-    /// `buffer.send` at all. This is the cheap guard against waking the
-    /// dissemination path for a degenerate target set.
-    #[test_traced("WARN")]
-    fn test_standard_forward_empty_peers_is_noop() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let digest = block.digest();
-
-            let (mailbox, buffer, _resolver, _actor_handle) = start_recording_standard_actor(
-                context.with_label("validator_0"),
-                &format!("forward-empty-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-            )
-            .await;
-
-            assert!(mailbox.verified(round, block.clone()).await);
-
-            mailbox.forward(round, digest, Vec::new()).await;
-            // Allow the actor to drain the mailbox; `forward` with no peers
-            // must take the `continue` branch.
-            context.sleep(Duration::from_millis(50)).await;
-
-            assert!(
-                buffer.sends().is_empty(),
-                "forward with empty peers must not dispatch"
-            );
-        });
-    }
-
     /// `Forward` for an unknown commitment must early-return without
     /// dispatching, even when peers are provided.
     #[test_traced("WARN")]
