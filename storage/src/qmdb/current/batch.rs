@@ -783,53 +783,17 @@ impl<const N: usize> BitmapBatch<N> {
     /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
     fn trim_committed(&self) -> Self {
-        // Fast path: if already Base, nothing to do
-        if let Self::Base(_) = self {
-            return self.clone();
-        }
-
         let shared = self.shared();
         let committed = shared.read().len();
-
+        let mut kept = Vec::new();
         let mut current = self;
-        let mut uncommitted = 0;
         while let Self::Layer(layer) = current {
             if layer.overlay.len <= committed {
                 break;
             }
-            uncommitted += 1;
+            kept.push(Arc::clone(&layer.overlay));
             current = &layer.parent;
         }
-
-        // Top layer is already committed
-        if uncommitted == 0 {
-            return Self::Base(Arc::clone(shared));
-        }
-
-        // No layer is committed; keep the whole chain
-        if let Self::Base(_) = current {
-            return self.clone();
-        }
-
-        // Fast path for exactly 1 uncommitted layer (common in chained growth)
-        if uncommitted == 1 {
-            if let Self::Layer(layer) = self {
-                return Self::Layer(Arc::new(BitmapBatchLayer {
-                    parent: Self::Base(Arc::clone(shared)),
-                    overlay: Arc::clone(&layer.overlay),
-                }));
-            }
-        }
-
-        let mut kept = Vec::with_capacity(uncommitted);
-        current = self;
-        for _ in 0..uncommitted {
-            if let Self::Layer(layer) = current {
-                kept.push(Arc::clone(&layer.overlay));
-                current = &layer.parent;
-            }
-        }
-
         let mut result = Self::Base(Arc::clone(shared));
         for overlay in kept.into_iter().rev() {
             result = Self::Layer(Arc::new(BitmapBatchLayer {
