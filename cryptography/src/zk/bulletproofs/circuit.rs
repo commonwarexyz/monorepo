@@ -4,7 +4,7 @@ use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, Write};
 use commonware_math::{
     algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space},
-    tangle::Tangle,
+    tangle::{Tangle, TangleIdx},
 };
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
@@ -159,6 +159,22 @@ pub struct Setup<G> {
     ipa: ipa::Setup<G>,
     pedersen_value: G,
     pedersen_blinding: G,
+}
+
+impl<G> Setup<G> {
+    pub fn tangle_points<F>(
+        &self,
+        log_len: u8,
+    ) -> impl Iterator<Item = (TangleIdx, G)> + use<'_, F, G>
+    where
+        F: Additive,
+        G: Space<F>,
+    {
+        self.ipa.tangle_points(log_len).chain([
+            ((3, 0), self.pedersen_value.clone()),
+            ((3, 1), self.pedersen_blinding.clone()),
+        ])
+    }
 }
 
 impl<G: Write> Write for Setup<G> {
@@ -647,16 +663,15 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     })
 }
 
-#[must_use]
-pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
+/// Construct the verification equation for a circuit proof.
+pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRngCore,
     transcript: &mut Transcript,
-    setup: &Setup<G>,
     circuit: &Circuit<F>,
     claim: &Claim<G>,
     proof: Proof<F, G>,
     strategy: &impl Strategy,
-) -> bool {
+) -> Option<Tangle<F, G>> {
     let Proof {
         m_big,
         o_big,
@@ -780,59 +795,38 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
             .expect("should be less than 2^256 rows"),
     };
 
-    let Some(ipa_check) = ipa::verify(transcript, &ipa_claim, ipa_proof) else {
-        return false;
-    };
+    let ipa_check = ipa::pre_verify(transcript, &ipa_claim, ipa_proof)?;
 
     let final_check =
         ipa_check + &(p_check * &F::random(&mut *rng)) + &(t_check * &F::random(&mut *rng));
-    final_check
-        .eval(
-            std::iter::once(((2, 0), setup.ipa.product_generator().clone()))
-                .chain(
-                    setup
-                        .ipa
-                        .g()
-                        .iter()
-                        .take(padded_vars)
-                        .cloned()
-                        .enumerate()
-                        .map(|(i, g_i)| {
-                            (
-                                (
-                                    0,
-                                    i.try_into().expect("generator index should fit in u32"),
-                                ),
-                                g_i,
-                            )
-                        }),
-                )
-                .chain(
-                    setup
-                        .ipa
-                        .h()
-                        .iter()
-                        .take(padded_vars)
-                        .cloned()
-                        .enumerate()
-                        .map(|(i, h_i)| {
-                            (
-                                (
-                                    1,
-                                    i.try_into().expect("generator index should fit in u32"),
-                                ),
-                                h_i,
-                            )
-                        }),
-                )
-                .chain([
-                    ((3, 0), setup.pedersen_value.clone()),
-                    ((3, 1), setup.pedersen_blinding.clone()),
-                ]),
-            strategy,
-        )
-        .expect("should be enough setup points for bulletproof verification")
-        == G::zero()
+    Some(final_check)
+}
+
+/// Check a circuit proof against the provided setup.
+#[must_use]
+pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
+    rng: &mut impl CryptoRngCore,
+    transcript: &mut Transcript,
+    setup: &Setup<G>,
+    circuit: &Circuit<F>,
+    claim: &Claim<G>,
+    proof: Proof<F, G>,
+    strategy: &impl Strategy,
+) -> bool {
+    let log_len = circuit
+        .internal_vars
+        .next_power_of_two()
+        .ilog2()
+        .try_into()
+        .expect("should be less than 2^256 rows");
+    pre_verify(rng, transcript, circuit, claim, proof, strategy)
+        .map(|check| {
+            check
+                .eval(setup.tangle_points(log_len), strategy)
+                .expect("should be enough setup points for bulletproof verification")
+                == G::zero()
+        })
+        .unwrap_or(false)
 }
 
 #[commonware_macros::stability(ALPHA)]
