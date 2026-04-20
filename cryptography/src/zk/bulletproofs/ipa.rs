@@ -238,9 +238,12 @@ impl<G> Setup<G> {
     pub const fn product_generator(&self) -> &G {
         &self.product_generator
     }
-}
 
-impl<G: Clone> Setup<G> {
+    /// Check if this setup supports claims of a given length.
+    pub const fn supports(&self, lg_len: u8) -> bool {
+        self.g.len() >> lg_len > 0
+    }
+
     pub fn tangle_points<F>(
         &self,
         log_len: u8,
@@ -419,7 +422,7 @@ impl<F: Field> Witness<F> {
 }
 
 /// A proof for the inner product argument.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
     /// Summary of the transcript after the public statement and all proof messages.
