@@ -2,10 +2,14 @@
 
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
-use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
+use prometheus_client::{
+    encoding::text::encode,
+    registry::{Metric, Registry as PrometheusRegistry},
+};
 use std::{
     any::Any,
-    collections::BTreeMap,
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -475,6 +479,55 @@ pub(crate) type MetricKey = (String, Vec<(String, String)>);
 pub(crate) struct RegisteredMetric {
     pub scope_id: Option<u64>,
     pub metric: Box<dyn Any + Send + Sync>,
+}
+
+/// Implements `Observer::register()` get-or-register semantics. First call at a
+/// `(prefixed_name, attributes)` key inserts `default` into both the dedup map
+/// and the prometheus registry; later calls return a clone of the first-registered
+/// handle. Panics on type mismatch (e.g. a `Counter` registered where a `Gauge`
+/// already exists).
+pub(crate) fn get_or_register<M: Metric + Clone>(
+    registered_metrics: &Mutex<HashMap<MetricKey, RegisteredMetric>>,
+    registry: &Mutex<Registry>,
+    attributes: &[(String, String)],
+    scope_id: Option<u64>,
+    prefixed_name: String,
+    help: &str,
+    default: M,
+) -> M {
+    let metric_key = (prefixed_name.clone(), attributes.to_vec());
+    let mut registered = registered_metrics.lock();
+    if let Some(existing) = registered.get(&metric_key) {
+        return existing
+            .metric
+            .downcast_ref::<M>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "metric type mismatch for {}: previously registered as {:?}",
+                    prefixed_name,
+                    (*existing.metric).type_id(),
+                )
+            })
+            .clone();
+    }
+    registered.insert(
+        metric_key,
+        RegisteredMetric {
+            scope_id,
+            metric: Box::new(default.clone()),
+        },
+    );
+    drop(registered);
+
+    let mut registry = registry.lock();
+    let scoped = registry.get_scope(scope_id);
+    let sub_registry = attributes
+        .iter()
+        .fold(scoped, |reg, (k, v): &(String, String)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+    sub_registry.register(prefixed_name, help, default.clone());
+    default
 }
 
 /// Manages multiple prometheus registries with lifecycle-based scoping.

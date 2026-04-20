@@ -18,8 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, MetricKey, Panicker,
-        RegisteredMetric, Registry, ScopeGuard,
+        self, add_attribute, get_or_register, signal::Stopper, supervision::Tree, MetricKey,
+        Panicker, RegisteredMetric, Registry, ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, SinkOf, Spawner as _, StreamOf,
     Supervisor as _, METRICS_PREFIX,
@@ -38,7 +38,6 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     env,
     future::Future,
@@ -694,13 +693,9 @@ impl crate::Supervisor for Context {
 
 impl crate::Observer for Context {
     fn with_scope(mut self) -> Self {
-        // If already scoped, inherit the existing scope.
         if self.scope.is_some() {
             return self;
         }
-
-        // RAII guard removes the scoped registry and any dedup entries owned
-        // by the scope when all handles are dropped.
         let executor = self.executor.clone();
         let scope_id = executor.registry.lock().create_scope();
         let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
@@ -725,48 +720,16 @@ impl crate::Observer for Context {
         } else {
             format!("{}_{}", self.name, name)
         };
-
-        // Get-or-register in the registered_metrics map, which holds an erased
-        // clone for deduplication. On duplicate key at the same type, return
-        // the existing clone; on type mismatch, panic.
-        let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let scope_id = self.scope.as_ref().map(|s| s.scope_id());
-        let mut registered = self.executor.registered_metrics.lock();
-        if let Some(existing) = registered.get(&metric_key) {
-            return existing
-                .metric
-                .downcast_ref::<M>()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "metric type mismatch for {}: previously registered as {:?}",
-                        prefixed_name,
-                        (*existing.metric).type_id(),
-                    )
-                })
-                .clone();
-        }
-
-        // First registration: store a clone in the dedup map and route to the
-        // appropriate registry (root or scoped).
-        registered.insert(
-            metric_key,
-            RegisteredMetric {
-                scope_id,
-                metric: Box::new(default.clone()),
-            },
-        );
-        drop(registered);
-
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(scope_id);
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, default.clone());
-        default
+        get_or_register(
+            &self.executor.registered_metrics,
+            &self.executor.registry,
+            &self.attributes,
+            scope_id,
+            prefixed_name,
+            help,
+            default,
+        )
     }
 
     fn encode(&self) -> String {

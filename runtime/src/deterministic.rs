@@ -54,7 +54,7 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        add_attribute,
+        add_attribute, get_or_register,
         signal::{Signal, Stopper},
         supervision::Tree,
         MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
@@ -92,7 +92,6 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
@@ -1405,47 +1404,16 @@ impl crate::Observer for Context {
         // Cross-check with any previously-created child namespaces at this level.
         self.guard.cross_check_register(&prefixed_name);
 
-        // Get-or-register in the registered_metrics map, which holds an erased
-        // clone for deduplication. On duplicate key at the same type, return
-        // the existing clone; on type mismatch, panic.
-        let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let scope_id = self.scope.as_ref().map(|s| s.scope_id());
-        let mut registered = executor.registered_metrics.lock();
-        if let Some(existing) = registered.get(&metric_key) {
-            return existing
-                .metric
-                .downcast_ref::<M>()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "metric type mismatch for {}: previously registered as {:?}",
-                        prefixed_name,
-                        (*existing.metric).type_id(),
-                    )
-                })
-                .clone();
-        }
-
-        // First registration: store a clone in the dedup map and route to the
-        // appropriate registry (root or scoped).
-        registered.insert(
-            metric_key,
-            RegisteredMetric {
-                scope_id,
-                metric: Box::new(default.clone()),
-            },
-        );
-        drop(registered);
-
-        let mut registry = executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, default.clone());
-        default
+        get_or_register(
+            &executor.registered_metrics,
+            &executor.registry,
+            &self.attributes,
+            scope_id,
+            prefixed_name,
+            help,
+            default,
+        )
     }
 
     fn encode(&self) -> String {
