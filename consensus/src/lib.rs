@@ -194,11 +194,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// treat every broadcast identically can set this to `()`.
         type Plan: Send;
 
-        /// Broadcast a payload to the given recipients.
-        ///
-        /// Broadcast is best-effort dissemination and does not signal
-        /// durability; callers that need durability must rely on
-        /// [`Automaton::propose`] or [`Automaton::verify`].
+        /// Broadcast a payload according to the given plan.
         fn broadcast(
             &mut self,
             payload: Self::Digest,
