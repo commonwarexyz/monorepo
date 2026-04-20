@@ -419,6 +419,14 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_single_commit_live_set() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmr::Family>()).await;
+        });
+    }
+
     // mmb::Family variants
 
     #[test_traced("INFO")]
@@ -741,6 +749,14 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
             tests::test_keyless_db_chained_apply_with_valid_floors_succeeds(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_single_commit_live_set_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 }

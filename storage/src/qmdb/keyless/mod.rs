@@ -2319,6 +2319,104 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// After committing with `floor = commit_loc` and pruning down to it, the live set is
+    /// exactly one operation — the commit itself. This is the minimum non-empty live set
+    /// achievable under the per-commit bound. The DB must remain fully usable: the commit is
+    /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
+    /// remaining op, and a follow-on batch applies cleanly on top.
+    pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H>(
+        context: deterministic::Context,
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+    ) where
+        F: Family,
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // Initial commit is at loc 0. 3 appends + commit → commit lands at loc 4.
+        // Declare floor = 4 (= commit_loc), the tight maximum.
+        let metadata = V::Value::make(42);
+        let commit_loc = Location::<F>::new(4);
+        db.apply_batch(
+            db.new_batch()
+                .append(V::Value::make(1))
+                .append(V::Value::make(2))
+                .append(V::Value::make(3))
+                .merkleize(&db, Some(metadata.clone()), commit_loc),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        let root_after_commit = db.root();
+
+        // Prune at the floor — the maximum prune allowed under the invariant.
+        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
+        // to `commit_loc`; what matters semantically is that the floor has authorized pruning
+        // of everything below the commit and that any further prune is rejected.
+        db.prune(commit_loc).await.unwrap();
+        let bounds = db.bounds().await;
+        assert!(
+            bounds.start <= commit_loc,
+            "prune must not advance bounds.start past the floor"
+        );
+        assert_eq!(bounds.end, Location::new(*commit_loc + 1));
+
+        // Pruning one past the floor must be rejected — the floor is the hard ceiling.
+        let err = db.prune(Location::new(*commit_loc + 1)).await.unwrap_err();
+        assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
+                if *p == *commit_loc + 1 && *f == *commit_loc));
+
+        // The commit op remains readable; its metadata is intact.
+        assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata.clone()));
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
+        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        // Prune does not affect the root (documented invariant on `prune`).
+        assert_eq!(db.root(), root_after_commit);
+
+        // Persist the prune, then reopen: `init_from_journal` must recover the floor from
+        // the last commit op.
+        db.sync().await.unwrap();
+        drop(db);
+        let mut db = reopen(context.with_label("reopened")).await;
+        let reopened_bounds = db.bounds().await;
+        assert_eq!(reopened_bounds.end, Location::new(*commit_loc + 1));
+        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.root(), root_after_commit);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
+
+        // A follow-on batch applies on top. Monotonicity requires the new floor to be at
+        // least `commit_loc` (= 4); advancing to the new tight max (= 7) exercises the
+        // ancestor-to-tip floor transition from a minimum-live-set starting point.
+        let next_commit_loc = Location::<F>::new(7);
+        let v5 = V::Value::make(5);
+        let v6 = V::Value::make(6);
+        db.apply_batch(
+            db.new_batch()
+                .append(v5.clone())
+                .append(v6.clone())
+                .merkleize(&db, None, next_commit_loc),
+        )
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.last_commit_loc(), next_commit_loc);
+        assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
+
+        // New appends readable; the original commit op is also still in the live set (not
+        // re-pruned), so reading it still returns its metadata.
+        assert_eq!(db.get(Location::new(5)).await.unwrap(), Some(v5));
+        assert_eq!(db.get(Location::new(6)).await.unwrap(), Some(v6));
+        assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata));
+
+        db.destroy().await.unwrap();
+    }
+
     /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
     pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<F, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
