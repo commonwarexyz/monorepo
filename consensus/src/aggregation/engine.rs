@@ -681,7 +681,7 @@ impl<
         // Validate signature
         let ack_clone = ack.clone();
         let scheme = scheme.clone();
-        let mut context = self.context.as_present().clone();
+        let mut context = self.context.with_label("verify");
         if !self.strategy.spawn(move |s| {
             ack_clone.verify(&mut context, &*scheme, &s)
         }).await {

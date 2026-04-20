@@ -181,7 +181,7 @@ impl<
                 }
                 let n = notarization.clone();
                 let scheme = self.scheme.clone();
-                let mut context = self.context.as_present().clone();
+                let mut context = self.context.with_label("verify");
                 if !self.strategy.spawn(move |s| {
                     n.verify(&mut context, &scheme, &s)
                 }).await {
@@ -206,7 +206,7 @@ impl<
                 }
                 let f = finalization.clone();
                 let scheme = self.scheme.clone();
-                let mut context = self.context.as_present().clone();
+                let mut context = self.context.with_label("verify");
                 if !self.strategy.spawn(move |s| {
                     f.verify(&mut context, &scheme, &s)
                 }).await {
@@ -231,7 +231,7 @@ impl<
                 }
                 let n = nullification.clone();
                 let scheme = self.scheme.clone();
-                let mut context = self.context.as_present().clone();
+                let mut context = self.context.with_label("verify");
                 if !self.strategy.spawn(move |s| {
                     n.verify::<_, D>(&mut context, &scheme, &s)
                 }).await {

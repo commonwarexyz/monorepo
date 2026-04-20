@@ -904,7 +904,7 @@ impl<
         let node = node.clone();
         let chunk_verifier = self.chunk_verifier.clone();
         let validators_provider = self.validators_provider.clone();
-        let mut context = self.context.as_present().clone();
+        let mut context = self.context.with_label("verify");
         self.strategy.spawn(move |s| {
             node.verify(&mut context, &chunk_verifier, &validators_provider, &s)
         }).await
@@ -966,7 +966,7 @@ impl<
         // Validate the vote signature
         let ack_clone = ack.clone();
         let scheme = scheme.clone();
-        let mut context = self.context.as_present().clone();
+        let mut context = self.context.with_label("verify");
         if !self.strategy.spawn(move |s| {
             ack_clone.verify(&mut context, &*scheme, &s)
         }).await {
