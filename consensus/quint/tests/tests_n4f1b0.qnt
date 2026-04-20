@@ -989,9 +989,21 @@ module tests {
         })
     }
 
-    // create_notarization uses all matching votes instead of exactly Q.
-    // Leader vote arrives 3rd (proposal branch — no cert formed). The first
-    // cert is formed on the 4th vote with all 4 signatures instead of Q=3.
+    // Leader is `n2`, receiver is `n2`. After `propose("n2", ...)`,
+    // n2's own notarize is already in `store_notarize_votes[n2]`, so
+    // the first cert forms at the 2nd aggregation delivery (store
+    // reaches {n2, n1, n3} = Q). Subsequent deliveries do NOT add or
+    // extend a cert thanks to the one-shot `had_notarization` gate in
+    // replica.qnt's aggregation branch — matching Rust's
+    // `try_construct_notarization` short-circuit. The stored cert
+    // stays at exactly Q=3 signers.
+    //
+    // (Previously, with the Q-cap preference removed but before the
+    // one-shot gate was added, this scenario produced a second 4-sig
+    // cert alongside the first. That divergence from Rust has now
+    // been closed; see `notarizationFirstCertFourSignersWitnessTest`
+    // for the case where widening genuinely produces a 4-signer first
+    // cert without an intervening 3-signer one.)
     run notarizationCertHasQSignaturesLeaderLateTest = {
         val proposal = {
             payload: "val_b0",
@@ -1003,24 +1015,28 @@ module tests {
             Map(0 -> "n2", 1 -> "n2", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
             CERTIFY_ALL_TRUE
         )
-        // n2 proposes
+        // n2 proposes (self-votes; `store_notarize_votes[n2]` += {n2}).
         .then(propose("n2", proposal.payload, proposal.parent))
         .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
         .then(send_notarize_vote({ proposal: proposal, sig: "n3" }))
         .then(send_notarize_vote({ proposal: proposal, sig: "n0" }))
-        // n2 receives n1's vote (1st, aggregation, no cert)
+        // Aggregation delivery 1 — store grows to {n2, n1}, still < Q.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
-        // n2 receives n3's vote (2nd, aggregation, no cert)
+        // Aggregation delivery 2 — store reaches Q = {n2, n1, n3}.
+        // FIRST cert formed here with 3 signers.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
-        // n2 receives its own leader vote (3rd, proposal branch — stores vote, no cert formed)
+        // Leader self-vote arrives. `broadcast_notarize` already set,
+        // so can_process_as_proposal = false → aggregation branch.
+        // `had_notarization` is true → no new cert formed.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
-        // n2 receives n0's vote (4th, aggregation — first cert formed with all 4 votes)
+        // Aggregation delivery 4. Same one-shot gate — no new cert.
         .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
         .then(all {
             assert(store_certificates.get("n2").exists(c =>
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
             )),
-            // BUG: cert has 4 signatures instead of Q=3
+            // The stored cert has exactly Q signers (formed at the
+            // earliest quorum; the one-shot gate prevents extension).
             assert(store_certificates.get("n2").exists(c =>
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
             )),
@@ -1028,9 +1044,82 @@ module tests {
         })
     }
 
+    // Witness test for spec/impl divergence on
+    // notarization signer cardinality. The first (and only) cert
+    // assembly fires *after* all four notarize votes are in the
+    // receiver's store, so the cert carries all four signers.
+    //
+    // Setup: leader(1) = n3 (per the map below), receiver = n0.
+    // Two peer votes (n1, n2) are staged and delivered to n0 via
+    // aggregation — neither reaches quorum. Then n3 (leader) proposes,
+    // and n0 processes the leader vote via the proposal branch, which
+    // atomically adds both n3's and n0's self-vote. The first cert
+    // forms with 4 signers in one step.
+    //
+    // Before `replica.qnt` is widened: FAILS — the Q-cap preference
+    // chain selects `store ∪ {vote}` (3 signers) over
+    // `new_store_notarize_p` (4 signers), capping the cert at Q=3.
+    //
+    // After widening + one-shot gate: PASSES — the cert uses the
+    // fullest available vote set, and no second cert is later added.
+    run notarizationFirstCertFourSignersWitnessTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            // leader(1) = n3 — receiver n0 is NOT the leader.
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_ALL_TRUE
+        )
+        // Stage two peer votes. `propose` is deliberately NOT called
+        // yet, so n0's own self-vote is NOT pre-populated by any
+        // earlier action — the proposal branch's self-vote injection
+        // is the first time n0's signature enters the store.
+        .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
+        .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
+        // Deliver the two peer votes to n0. Both go through the
+        // aggregation branch (sig != leader), neither reaches quorum.
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+        .then(all {
+            // Sanity: no cert yet — only 2 < Q votes in n0's store.
+            assert(not(store_certificates.get("n0").exists(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+            ))),
+            unchanged_all,
+        })
+        // The leader now proposes and self-votes.
+        .then(propose("n3", proposal.payload, proposal.parent))
+        // n0 processes the leader's vote via the proposal branch.
+        // new_store_notarize_p = {n1, n2} ∪ {n3, n0_self} = 4 votes.
+        // First cert forms with 4 signers in a single step.
+        .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+        .then(all {
+            // Exactly one cert, with all four signers.
+            assert(store_certificates.get("n0").exists(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_signatures(c) == Set("n0", "n1", "n2", "n3")
+            )),
+            // And it is the ONLY notarization for this (view, proposal).
+            assert(store_certificates.get("n0").filter(c =>
+                is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+            ).size() == 1),
+            unchanged_all,
+        })
+    }
+
     // Leader (n2) != self (n3). Two aggregation votes arrive before the
     // leader's vote. The proposal branch adds both the leader vote and
-    // own vote, so cert must still have exactly Q signatures.
+    // own vote; with the widened ≥-Q cert assembly this produces a
+    // 4-signer cert (not exactly Q).
     run notarizationCertHasQSignaturesLeaderDifferentTest = {
         val proposal = {
             payload: "val_b0",
@@ -1056,7 +1145,7 @@ module tests {
                 is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
             )),
             assert(store_certificates.get("n3").exists(c =>
-                is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
+                is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() >= Q
             )),
             unchanged_all,
         })

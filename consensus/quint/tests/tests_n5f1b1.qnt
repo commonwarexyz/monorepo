@@ -403,9 +403,13 @@ module tests {
             .expect(test_invariants)
     }
 
-    // A late 4th notarize vote must not change the first notarization formed
-    // at quorum; the stored cert keeps the original {n0, n1, n3} signer set.
-    run lateNotarizeVoteKeepsFirstNotarizationQuorumTest = {
+    // A late 4th notarize vote must NOT add a second certificate for
+    // the same (view, proposal). Mirrors Rust's
+    // `try_construct_notarization` short-circuit at
+    // `src/simplex/actors/batcher/round.rs:422`, which returns early
+    // once `has_notarization()` is true. The store keeps the original
+    // first cert (3 signers) unchanged.
+    run lateNotarizeVoteDoesNotAddSecondCertTest = {
         val proposal = {
             payload: "val_b1",
             view: FIRST_VIEW,
@@ -421,6 +425,7 @@ module tests {
             .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n1"))
             .then(all {
+                // First cert formed at quorum with {n0, n1, n3}.
                 assert(store_certificates.get("n0").exists(c =>
                     is_notarization_cert(c)
                         and cert_view(c) == FIRST_VIEW
@@ -437,11 +442,86 @@ module tests {
             .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
             .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
+                // The original 3-signer cert is still in the store.
                 assert(store_certificates.get("n0").exists(c =>
                     is_notarization_cert(c)
                         and cert_view(c) == FIRST_VIEW
                         and cert_proposal(c) == Some(proposal)
                         and cert_signatures(c) == Set("n0", "n1", "n3")
+                )),
+                // NO second certificate was created for this proposal.
+                // The `had_notarization` gate in replica.qnt prevents
+                // a late 4th vote from constructing a larger cert
+                // alongside the first one (matching Rust).
+                assert(store_certificates.get("n0").filter(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_proposal(c) == Some(proposal)
+                ).size() == 1),
+                assert(not(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_proposal(c) == Some(proposal)
+                        and cert_signatures(c).size() == 4
+                ))),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    // Complementary to `lateNotarizeVoteDoesNotAddSecondCertTest`: when
+    // the first certificate construction happens *after* all four
+    // notarize votes are already in the store, the resulting cert
+    // carries all four signers. This exercises the ≥-Q widening
+    // (replica.qnt drops the former Q-cap preference) without the
+    // multi-cert artifact: only one notarization exists in the store
+    // for the given (view, proposal). Matches Rust's single-shot
+    // `try_construct_notarization` firing after batch verification of
+    // 4 votes.
+    run notarizationFirstCertFourSignersTest = {
+        val proposal = {
+            payload: "val_b1",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            // leader(1) = n3
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            CERTIFY_ALL_TRUE
+        )
+            // Stage two peer votes into sent_notarize_votes.
+            .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
+            .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
+            // Deliver both to n0 via aggregation — each is below Q.
+            .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(all {
+                // No cert yet — only 2 < Q votes in store.
+                assert(not(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_proposal(c) == Some(proposal)
+                ))),
+                unchanged_all,
+            })
+            // Now the leader (n3) sends its notarize (stages it into
+            // sent_notarize_votes via propose).
+            .then(propose("n3", proposal.payload, proposal.parent))
+            // n0 processes n3's leader vote. This goes through the
+            // proposal branch of on_notarize, which adds BOTH the
+            // leader's signature AND n0's own self-vote at once.
+            // new_store_notarize_p = {n1, n2} ∪ {n3_vote, n0_self_vote}
+            //                      = {n0, n1, n2, n3} = 4 signers.
+            // The first (and only) certificate forms here with all 4.
+            .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(all {
+                // Exactly one cert, with all four signers.
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_proposal(c) == Some(proposal)
+                        and cert_signatures(c) == Set("n0", "n1", "n2", "n3")
                 )),
                 assert(store_certificates.get("n0").filter(c =>
                     is_notarization_cert(c)
