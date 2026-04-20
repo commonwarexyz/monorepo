@@ -20,16 +20,16 @@ pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 /// Selected by the caller based on context: `Verified` for the initial verify
 /// path, `Certified` when the caller has a notarization for the block.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum PersistMode {
+pub(crate) enum Cache {
     /// Write to `verified_blocks` via [`Mailbox::verified`].
     Verified,
     /// Write to `notarized_blocks` via [`Mailbox::certified`].
     Certified,
 }
 
-impl PersistMode {
-    /// Dispatch to the appropriate marshal cache for this mode.
-    pub(crate) async fn persist<S: Scheme, V: Variant>(
+impl Cache {
+    /// Store `block` in the corresponding marshal cache.
+    pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
         marshal: &mut Mailbox<S, V>,
         round: Round,

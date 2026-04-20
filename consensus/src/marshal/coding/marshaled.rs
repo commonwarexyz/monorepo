@@ -83,8 +83,7 @@ use crate::{
         ancestry::AncestorStream,
         application::{
             validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
-                PersistMode,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Cache, LastBuilt,
             },
             verification_tasks::VerificationTasks,
         },
@@ -300,7 +299,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
-        persist: PersistMode,
+        cache: Cache,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -426,7 +425,7 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid && !persist.persist(&mut marshal, round, block).await {
+                if application_valid && !cache.store(&mut marshal, round, block).await {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
@@ -781,7 +780,7 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None, PersistMode::Verified);
+        let task = self.deferred_verify(consensus_context, payload, None, Cache::Verified);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -923,7 +922,7 @@ where
                     embedded_context,
                     payload,
                     Some(block),
-                    PersistMode::Certified,
+                    Cache::Certified,
                 );
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
