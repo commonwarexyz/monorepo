@@ -166,7 +166,7 @@ where
     /// The vectors in the map are non-empty.
     fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
 
-    /// Pinned MMR nodes extracted from proofs, used for database construction
+    /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
     /// Whether persisted local state already matches the current target and can be
@@ -175,9 +175,9 @@ where
 
     /// Historical roots from previous sync targets, keyed by tree size
     /// (target.range.end()). Each tree size maps to a unique root because
-    /// the MMR is append-only and validate_update rejects unchanged roots.
-    /// When a retained request completes, proof.leaves identifies which
-    /// historical root to verify against.
+    /// the merkle tree is append-only and validate_update rejects unchanged
+    /// roots. When a retained request completes, proof.leaves identifies
+    /// which historical root to verify against.
     retained_roots: HashMap<Location<DB::Family>, DB::Digest>,
 
     /// Tree sizes of retained roots in insertion order (oldest first),

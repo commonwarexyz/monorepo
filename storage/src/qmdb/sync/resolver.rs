@@ -38,7 +38,7 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub operations: Vec<Op>,
     /// Channel to report success/failure back to resolver
     pub success_tx: oneshot::Sender<bool>,
-    /// Pinned MMR nodes at the start location, if requested
+    /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
 }
 
@@ -70,7 +70,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
     /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
-    /// pinned MMR nodes at `start_loc`.
+    /// pinned merkle nodes at `start_loc`.
     ///
     /// The corresponding `cancel_tx` is dropped when the engine no longer needs this
     /// request (e.g. due to a target update), causing `cancel_rx.await` to return

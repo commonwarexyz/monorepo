@@ -3,27 +3,27 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
 //! variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database combines the ops root, grafted MMR root, and
+//! The canonical root of a `current` database combines the ops root, grafted tree root, and
 //! optional partial chunk into a single hash (see the [Root structure](super) section in the
 //! module documentation). The sync engine operates on the **ops root**, not the canonical root:
-//! it downloads operations and verifies each batch against the ops root using standard MMR
+//! it downloads operations and verifies each batch against the ops root using standard merkle
 //! range proofs (identical to `any` sync). [crate::qmdb::current::proof::OpsRootWitness] can be
 //! used by callers that need to authenticate the synced ops root against a trusted canonical root;
 //! the sync engine does not perform this check itself.
 //!
-//! After all operations are synced, the bitmap and grafted MMR are reconstructed
+//! After all operations are synced, the bitmap and grafted tree are reconstructed
 //! deterministically from the operations. The canonical root is then computed from the
-//! ops root, the reconstructed grafted MMR root, and any partial chunk.
+//! ops root, the reconstructed grafted tree root, and any partial chunk.
 //!
 //! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
 //! implementation returns the **ops root** (not the canonical root) because that is what the
 //! sync engine verifies against.
 //!
-//! For pruned databases (`range.start > 0`), grafted MMR pinned nodes for the pruned region
-//! are read directly from the ops MMR after it is built. This works because of the zero-chunk
+//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are
+//! read directly from the ops tree after it is built. This works because of the zero-chunk
 //! identity: for all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals
-//! the ops subtree root, making the grafted MMR structurally identical to the ops MMR at and
-//! above the grafting height.
+//! the ops subtree root, making the grafted tree structurally identical to the ops tree at
+//! and above the grafting height.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -89,8 +89,8 @@ impl<T: Translator, J: Clone> Config for super::Config<T, J> {
 ///
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
-/// * Extracts grafted pinned nodes from the ops MMR (zero-chunk identity).
-/// * Builds the grafted MMR from the bitmap and ops MMR.
+/// * Extracts grafted pinned nodes from the ops tree (zero-chunk identity).
+/// * Builds the grafted tree from the bitmap and ops tree.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, T, const N: usize>(
@@ -163,11 +163,11 @@ where
     )
     .await?;
 
-    // Extract grafted pinned nodes from the ops MMR.
+    // Extract grafted pinned nodes from the ops tree.
     //
     // With the zero-chunk identity, all-zero bitmap chunks (which all pruned chunks are)
     // produce grafted leaves equal to the corresponding ops subtree root. The grafted
-    // MMR's pinned nodes for the pruned region are therefore the first
+    // tree's pinned nodes for the pruned region are therefore the first
     // `popcount(pruned_chunks)` ops pinned nodes (in decreasing height order).
     //
     // `nodes_to_pin(range.start)` returns all ops peaks, but only the first
@@ -176,7 +176,7 @@ where
     //
     // Requires `range.start <=` target's [`Db::sync_boundary`](db::Db::sync_boundary): that
     // bound guarantees every fully-pruned chunk's height-`gh` subtree is absorbed at
-    // `range.end`, so `nodes_to_pin` returns the correct positions for both MMR and MMB.
+    // `range.end`, so `nodes_to_pin` returns the correct positions for any merkle family.
     let grafted_pinned_nodes = {
         let ops_pin_positions: Vec<_> = F::nodes_to_pin(range.start()).collect();
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
@@ -193,7 +193,7 @@ where
         pins
     };
 
-    // Build grafted MMR.
+    // Build grafted tree.
     let hasher = StandardHasher::<H>::new();
     let grafted_tree = db::build_grafted_tree::<F, H, N>(
         &hasher,
@@ -312,7 +312,7 @@ macro_rules! impl_current_sync_database {
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies
-            /// batches against the ops MMR.
+            /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
                 self.any.log.root()
             }

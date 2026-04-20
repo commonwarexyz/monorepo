@@ -427,7 +427,7 @@ pub(crate) mod test {
 
             // Test that apply_batch + sync w/ pruning will raise the activity floor.
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             assert_eq!(db.snapshot.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -494,7 +494,7 @@ pub(crate) mod test {
                 db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
             }
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
             let inactivity_floor_loc = db.inactivity_floor_loc();

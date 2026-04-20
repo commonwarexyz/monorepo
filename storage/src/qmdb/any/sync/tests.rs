@@ -53,9 +53,6 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 /// Type alias for the journal type of a harness.
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
-/// Type alias for the merkle family used by a harness.
-pub(crate) type FamilyOf<H> = <DbOf<H> as qmdb::sync::Database>::Family;
-
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
     type Family: merkle::Family;
@@ -136,7 +133,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -181,14 +178,14 @@ where
 /// Test that resolver failure is handled correctly
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
 where
-    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
-        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
+        Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -217,7 +214,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -300,8 +297,8 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -366,8 +363,8 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -460,9 +457,9 @@ where
 /// Uses FailResolver to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    resolver::tests::FailResolver<FamilyOf<H>, OpOf<H>, Digest>:
-        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<FamilyOf<H>, Key = Digest>,
+    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
+        Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -501,7 +498,7 @@ where
         // sync_db should never ask the resolver for operations
         // because it is already complete. Use a resolver that always fails
         // to ensure that it's not being used.
-        let resolver = resolver::tests::FailResolver::<FamilyOf<H>, OpOf<H>, Digest>::new();
+        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
@@ -546,7 +543,7 @@ where
 /// Test that the client fails to sync if the lower bound is decreased via target update.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -621,7 +618,7 @@ where
 /// Test that the client fails to sync if the upper bound is decreased via target update.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -690,7 +687,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -775,7 +772,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -844,7 +841,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -947,7 +944,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1010,7 +1007,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1059,7 +1056,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1113,8 +1110,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>:
-        Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1225,7 +1221,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1299,7 +1295,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1639,7 +1635,7 @@ where
 /// succeeds on retry when the resolver returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1776,7 +1772,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = FamilyOf<H>, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -2349,6 +2345,8 @@ mod harnesses {
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -2429,6 +2427,12 @@ mod harnesses {
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Vec<u8>>)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db
         }
     }
@@ -2505,6 +2509,8 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -2588,6 +2594,12 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Vec<u8>>)
+                .await
+                .unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -2720,6 +2732,11 @@ macro_rules! sync_tests_for_harness {
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
+
+            #[test_traced]
+            fn test_sync_waits_for_boundary_retry_after_target_update() {
+                super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
+            }
         }
     };
 }
@@ -2731,11 +2748,6 @@ macro_rules! from_sync_result_tests_for_harness {
         mod $mod_name {
             use super::harnesses;
             use commonware_macros::test_traced;
-
-            #[test_traced]
-            fn test_sync_waits_for_boundary_retry_after_target_update() {
-                super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
-            }
 
             #[test_traced("WARN")]
             fn test_from_sync_result_empty_to_empty() {

@@ -49,7 +49,7 @@ pub(crate) mod tests;
 /// Returns whether persisted local state already matches the requested sync target.
 ///
 /// Shared across [crate::qmdb::any] and [crate::qmdb::current] sync because both
-/// build on the same operations-MMR layout and share the same merkle partition.
+/// build on the same operations-tree layout and share the same merkle partition.
 /// Verifies only that the persisted tree size and root match; the merkle pruning
 /// boundary is not re-checked. Callers must keep their local pruning point at or
 /// below `target.range.start()` or a later
@@ -71,8 +71,7 @@ where
         &hasher,
     )
     .await;
-    // Size + root match implies the last CommitFloor op (and therefore the
-    // size + root identify a unique state, so if they match the target's we can reuse
+    // Size + root identify a unique state, so if they match the target's we can reuse
     // the persisted DB without fetching boundary pins.
     matches!(
         peek,
