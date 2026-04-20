@@ -141,16 +141,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Determine whether a verified payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
-        /// applications to associate certification with the correct verification context.
-        ///
-        /// Note: In applications where payloads incorporate the round number (recommended),
-        /// each round will have a unique payload digest. However, the same payload may appear
-        /// in multiple rounds when re-proposing notarized blocks at epoch boundaries or in
-        /// integrations where payloads are round-agnostic.
-        ///
-        /// This is particularly useful for applications that employ erasure coding, which
-        /// can override this method to delay or prevent finalization until they have
-        /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        /// applications to associate certification with the correct verification context. The
+        /// same payload may appear in multiple rounds, so implementations must key any state
+        /// on `(round, payload)` rather than `payload` alone.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given

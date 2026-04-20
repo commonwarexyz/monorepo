@@ -1011,7 +1011,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // past V=1's retention boundary but not past V=25's. With
         // view_retention_timeout=10 and prunable_items_per_section=10,
         // processing views 1..=21 leaves `oldest_allowed=10` in both prunable
-        // archives — V=1 is dropped, V=25 is retained.
+        // archives. V=1 is dropped, V=25 is retained.
         const CHAIN_LEN: u64 = 21;
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);

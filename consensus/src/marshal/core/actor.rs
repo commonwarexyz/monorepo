@@ -543,10 +543,18 @@ where
                         buffer.send(round, block, Recipients::Some(peers)).await;
                     }
                     Message::Verified { round, block, ack } => {
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_verified` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_block` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
                         self.cache_block(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
