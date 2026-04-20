@@ -919,9 +919,6 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal.
-                //
-                // Broadcast is best-effort dissemination; durability was already
-                // established when propose returned the digest.
                 self.relay
                     .broadcast(
                         proposed,
