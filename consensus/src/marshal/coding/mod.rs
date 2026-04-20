@@ -178,6 +178,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_certified_success_implies_recoverable_after_restart() {
+        harness::certified_success_implies_recoverable_after_restart::<CodingHarness>(0..16);
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_delivery_visibility_implies_recoverable_after_restart() {
         harness::delivery_visibility_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }
@@ -2049,6 +2054,92 @@ mod tests {
             assert_eq!(
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
+            );
+        });
+    }
+
+    /// Regression: if a pre-crash leader persisted a verified block for a
+    /// round but the simplex `Notarize` never reached the journal, replay
+    /// can recover a `consensus_context` whose parent differs from the one
+    /// the cached block was built against. The restarted leader must then
+    /// drop the receiver so the voter nullifies the view via
+    /// `MissingProposal`, rather than broadcasting the stale cached block
+    /// under a header that peers will reject.
+    #[test_traced("WARN")]
+    fn test_propose_skips_when_verified_block_context_changed() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            // Stash a stale block built against genesis as its parent at round V=2.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let stale_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
+            let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(stale_block, coding_config, &Sequential);
+            assert!(marshal.verified(round, stale_coded).await);
+
+            // Simulate a replay where parent selection now points to a
+            // different parent commitment than the cached block was built for.
+            let new_parent_commitment = Commitment::from((
+                Sha256::hash(b"different-parent-block"),
+                Sha256::hash(b"different-parent-inner"),
+                Sha256::hash(b"different-parent-ctx"),
+                coding_config,
+            ));
+            let new_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), new_parent_commitment),
+            };
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let commitment_rx = marshaled.propose(new_ctx).await;
+            assert!(
+                commitment_rx.await.is_err(),
+                "propose must drop the receiver when the cached block's context no longer matches"
             );
         });
     }

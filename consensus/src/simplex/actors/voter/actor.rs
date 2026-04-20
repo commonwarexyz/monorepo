@@ -795,6 +795,14 @@ impl<
                             .await;
                     }
                 }
+
+                // We deliberately avoid re-seeding the batcher with our
+                // own votes (or the votes of other peers) on replay. We assume that
+                // whatever view we were in during shutdown is no longer the latest
+                // and we'll quickly jump ahead to a new view.
+                //
+                // If this is not the case (cluster-wide shutdown), we will recover
+                // when timing out.
             }
         }
         self.journal = Some(journal);

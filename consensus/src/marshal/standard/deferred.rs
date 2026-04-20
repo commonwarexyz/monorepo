@@ -308,13 +308,30 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                // On leader recovery, marshal may already hold a verified
-                // block for this round (persisted by a pre-crash propose
-                // whose notarize vote never reached the journal). Building
-                // a fresh block would land on the same view index in the
-                // prunable archive and be silently dropped, so reuse the
-                // stored block instead.
+                // On leader recovery, marshal may already hold a verified block
+                // for this round (persisted by a pre-crash propose whose
+                // notarize vote never reached the journal).
+                //
+                // Building a fresh block would land on the same prunable archive
+                // index and be silently dropped, so the stored block is the only proposal
+                // we can broadcast for this round.
+                //
+                // The recovered block is safe to reuse only if its embedded
+                // context matches the context simplex just recovered. Otherwise the
+                // cached block was built against a different parent and cannot be
+                // broadcast under the current header, so drop the receiver
+                // and let the voter nullify the view via timeout.
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let block_context = block.context();
+                    if block_context != consensus_context {
+                        debug!(
+                            round = ?consensus_context.round,
+                            ?consensus_context,
+                            ?block_context,
+                            "skipping proposal: cached verified block context no longer matches"
+                        );
+                        return;
+                    }
                     let digest = block.digest();
                     let success = tx.send_lossy(digest);
                     debug!(
@@ -1154,6 +1171,74 @@ mod tests {
             assert_eq!(
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
+            );
+        });
+    }
+
+    /// Regression: if a pre-crash leader persisted a verified block for a
+    /// round but the simplex `Notarize` never reached the journal, replay
+    /// can recover a `consensus_context` whose parent differs from the one
+    /// the cached block was built against (e.g. a late certification of an
+    /// older view changes the parent selected by `State::find_parent`).
+    /// In that case the restarted leader must not broadcast the stale
+    /// cached block; it must drop the receiver so the voter nullifies the
+    /// view via `MissingProposal`.
+    #[test_traced("WARN")]
+    fn test_propose_skips_when_verified_block_context_changed() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+
+            // Stash a stale block built against genesis as its parent at round V=2.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let stale_ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let stale_block = B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
+            assert!(marshal.verified(round, stale_block).await);
+
+            // Simulate a replay where parent selection now points to a
+            // different parent view than the cached block was built for.
+            let new_parent_digest = Sha256::hash(b"late-certified-parent");
+            let new_ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), new_parent_digest),
+            };
+
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut marshaled = Deferred::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let digest_rx = marshaled.propose(new_ctx).await;
+            assert!(
+                digest_rx.await.is_err(),
+                "propose must drop the receiver when the cached block's context no longer matches"
             );
         });
     }

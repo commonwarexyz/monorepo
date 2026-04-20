@@ -208,6 +208,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_certified_success_implies_recoverable_after_restart() {
+        harness::certified_success_implies_recoverable_after_restart::<InlineHarness>(0..16);
+        harness::certified_success_implies_recoverable_after_restart::<DeferredHarness>(0..16);
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_certify_at_later_view_survives_earlier_view_pruning() {
         harness::certify_at_later_view_survives_earlier_view_pruning::<InlineHarness>();
         harness::certify_at_later_view_survives_earlier_view_pruning::<DeferredHarness>();
