@@ -542,20 +542,19 @@ where
                         };
                         buffer.send(round, block, Recipients::Some(peers)).await;
                     }
-                    // Both handlers ack unconditionally even when the round
-                    // has already been pruned by tip advancement. In that case
-                    // `cache_verified`/`cache_block` is a no-op because the
-                    // round is below the retention floor, but pruning past a
-                    // round implies consensus has already advanced past it, so
-                    // any downstream notarize/finalize vote a caller casts on
-                    // the strength of this ack is stale and will be ignored by
-                    // peers. Returning false here would stall a background
-                    // task waiting on an outcome that no longer matters.
                     Message::Verified { round, block, ack } => {
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_verified` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_block` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
                         self.cache_block(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
