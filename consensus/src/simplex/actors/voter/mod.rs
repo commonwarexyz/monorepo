@@ -4318,13 +4318,13 @@ mod tests {
             // progress to their next await points without consuming batcher
             // messages we still need for later assertions.
             for _ in 0..100 {
-                if pre_propose_calls.lock().iter().any(|v| *v == target_view) {
+                if pre_propose_calls.lock().contains(&target_view) {
                     break;
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert!(
-                pre_propose_calls.lock().iter().any(|v| *v == target_view),
+                pre_propose_calls.lock().contains(&target_view),
                 "pre-crash voter must reach the propose window for the leader-owned view"
             );
 
