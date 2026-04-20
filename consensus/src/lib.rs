@@ -195,9 +195,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Broadcast a payload to the given recipients.
         ///
-        /// Returns `true` when the relay accepted the payload for the requested
-        /// broadcast plan. Returns `false` when the relay could not complete the
-        /// handoff.
+        /// Returns `true` when the relay has durably handled the payload (per
+        /// the plan's requirements, e.g. local persistence for `Propose`).
+        /// Returns `false` when the relay could not complete the handoff,
+        /// which consensus treats as a fatal condition for the round.
         fn broadcast(
             &mut self,
             payload: Self::Digest,

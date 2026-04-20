@@ -26,10 +26,6 @@ where
         block: CodedBlock<B, C, H>,
         /// The round in which the block was proposed.
         round: Round,
-        /// A channel signaled once the engine has accepted the proposal for
-        /// dissemination. Callers rely on this ack to know that the shards
-        /// have been enqueued onto the network.
-        ack: oneshot::Sender<()>,
     },
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
@@ -120,15 +116,9 @@ where
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
-    ///
-    /// Resolves to `true` once the engine has accepted the proposal. Returns
-    /// `false` when the engine has shut down or dropped the ack before
-    /// accepting.
-    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) -> bool {
-        self.sender
-            .request(|ack| Message::Proposed { block, round, ack })
-            .await
-            .is_some()
+    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
+        let msg = Message::Proposed { block, round };
+        self.sender.send_lossy(msg).await;
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

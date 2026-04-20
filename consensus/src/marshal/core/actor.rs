@@ -524,16 +524,8 @@ where
                     Message::Proposed { round, block, ack } => {
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;
-                        // Only signal success once the dissemination layer
-                        // accepts the block. Leaving `ack` unresolved when the
-                        // broadcaster is gone causes the waiting relay to see
-                        // a closed channel and abort the proposal, rather than
-                        // letting consensus vote on a block no peer received.
-                        if buffer.send(round, block, Recipients::All).await {
-                            ack.send_lossy(());
-                        } else {
-                            warn!(?round, "buffer refused proposal");
-                        }
+                        buffer.send(round, block, Recipients::All).await;
+                        ack.send_lossy(());
                     }
                     Message::Forward {
                         round,

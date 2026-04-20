@@ -99,12 +99,7 @@ where
         self.prune(commitment).await;
     }
 
-    async fn send(
-        &self,
-        round: Round,
-        block: CodedBlock<B, C, H>,
-        _recipients: Recipients<P>,
-    ) -> bool {
-        self.proposed(round, block).await
+    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+        self.proposed(round, block).await;
     }
 }

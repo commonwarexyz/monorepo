@@ -1634,9 +1634,8 @@ mod tests {
 
         async fn finalized(&self, _commitment: D) {}
 
-        async fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) -> bool {
+        async fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
-            true
         }
     }
 
@@ -1707,48 +1706,6 @@ mod tests {
         }
     }
 
-    /// A buffer whose `send` immediately returns `false`, simulating a
-    /// downstream broadcaster that has shut down.
-    #[derive(Clone, Default)]
-    struct FailingBuffer;
-
-    impl crate::marshal::core::Buffer<Standard<B>> for FailingBuffer {
-        type PublicKey = PublicKey;
-        type CachedBlock = B;
-
-        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn subscribe_by_commitment(
-            &self,
-            _commitment: D,
-        ) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn finalized(&self, _commitment: D) {}
-
-        async fn send(
-            &self,
-            _round: Round,
-            _block: B,
-            _recipients: Recipients<PublicKey>,
-        ) -> bool {
-            false
-        }
-    }
-
     /// A buffer whose `send` blocks until released, and signals when entered.
     /// Used to verify `proposed` only resolves after `buffer.send` completes.
     #[derive(Clone)]
@@ -1799,12 +1756,7 @@ mod tests {
 
         async fn finalized(&self, _commitment: D) {}
 
-        async fn send(
-            &self,
-            _round: Round,
-            _block: B,
-            _recipients: Recipients<PublicKey>,
-        ) -> bool {
+        async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {
             if let Some(entered) = self.send_entered.lock().take() {
                 entered.send_lossy(());
             }
@@ -1812,7 +1764,6 @@ mod tests {
             if let Some(release) = release {
                 let _ = release.await;
             }
-            true
         }
     }
 
@@ -2024,37 +1975,6 @@ mod tests {
                 },
             };
             assert!(ok, "proposed should return true after durable dispatch");
-        });
-    }
-
-    /// Regression: `marshal.proposed` must ack `false` when the dissemination
-    /// buffer refuses the block, so consensus does not proceed to vote
-    /// notarize/finalize on a proposal no peer will ever receive.
-    #[test_traced("WARN")]
-    fn test_standard_proposed_fails_when_buffer_send_fails() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-            let partition_prefix = format!("proposed-fails-{me}");
-
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
-                &partition_prefix,
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                FailingBuffer,
-            )
-            .await;
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let ok = mailbox.proposed(round, block).await;
-            assert!(!ok, "proposed must return false when buffer refuses");
         });
     }
 

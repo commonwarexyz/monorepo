@@ -466,9 +466,8 @@ where
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
             } => match message {
-                Message::Proposed { block, round, ack } => {
+                Message::Proposed { block, round } => {
                     self.broadcast_shards(&mut sender, round, block).await;
-                    ack.send_lossy(());
                 }
                 Message::Discovered {
                     commitment,
