@@ -442,7 +442,7 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // Fast path: verify has already run for this (round, digest) and its
+        // Verify has already run for this (round, digest) and its
         // success was recorded in `available_blocks`. `verify` does not mark a
         // round available until `marshal.verified(round, block)` has returned,
         // and that call blocks on `put_sync` of the block into the round's
