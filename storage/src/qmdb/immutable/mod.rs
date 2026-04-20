@@ -278,7 +278,7 @@ where
         let oldest = reader.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(*key) {
+            for &loc in self.snapshot.get(key) {
                 if loc < oldest {
                     continue;
                 }
