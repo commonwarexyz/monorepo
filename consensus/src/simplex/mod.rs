@@ -314,8 +314,11 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::types::Round;
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_cryptography::PublicKey;
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_p2p::Recipients;
 
 pub mod elector;
@@ -370,6 +373,7 @@ pub(crate) fn interesting(
 }
 
 /// Describes how a payload should be broadcast to the network.
+#[cfg(not(target_arch = "wasm32"))]
 pub enum Plan<P: PublicKey> {
     /// Initial broadcast of a newly proposed block to all participants.
     Propose {
