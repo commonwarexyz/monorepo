@@ -91,9 +91,8 @@ pub struct Timed {
 /// A sampled histogram observation.
 ///
 /// This token is explicit: dropping it records nothing. Call [`Started::observe_now`] or
-/// [`Started::observe_at`] to record a duration, or [`Started::discard`] when the timing should
-/// be ignored (for example on a fast-path cancellation).
-#[must_use = "call observe_now/observe_at to record the timing, or discard it explicitly"]
+/// [`Started::observe_at`] to record a duration.
+#[must_use = "call observe_now/observe_at to record the timing, or drop it to skip recording"]
 pub struct Started {
     /// The histogram to record durations in.
     histogram: Histogram,
@@ -152,8 +151,6 @@ impl Timed {
         let result = f();
         if result.is_some() {
             started.observe_now(clock);
-        } else {
-            started.discard();
         }
         result
     }
@@ -174,7 +171,4 @@ impl Started {
     pub fn observe_at(self, end: SystemTime) {
         self.histogram.observe_between(self.start, end);
     }
-
-    /// Discard the observation without recording it.
-    pub fn discard(self) {}
 }

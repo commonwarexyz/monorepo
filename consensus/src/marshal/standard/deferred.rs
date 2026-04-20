@@ -395,7 +395,6 @@ where
                 let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
-                        build_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },

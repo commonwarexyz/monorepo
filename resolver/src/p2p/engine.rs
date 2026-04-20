@@ -259,7 +259,7 @@ impl<
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
                         if self.fetcher.cancel(&key) {
                             guard.set(Status::Success);
-                            self.fetch_timers.remove(&key).unwrap().discard(); // must exist
+                            let _ = self.fetch_timers.remove(&key).expect("must exist");
                             self.consumer.failed(key.clone(), ()).await;
                         }
                     }

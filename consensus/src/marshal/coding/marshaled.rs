@@ -569,7 +569,6 @@ where
                 let parent_fetch_duration = proposal_parent_fetch_duration.start(&runtime_context);
                 let parent = select! {
                     _ = tx.closed() => {
-                        parent_fetch_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
@@ -623,7 +622,6 @@ where
                 let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
-                        build_duration.discard();
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
