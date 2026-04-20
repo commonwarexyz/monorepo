@@ -2444,8 +2444,6 @@ mod tests {
 
             // Raise the floor above the hint we are about to send.
             mailbox.set_floor(Height::new(10)).await;
-            // Drain the set_floor message before issuing the hint so they are
-            // sequenced deterministically.
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox
