@@ -559,6 +559,7 @@ mod tests {
         types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
+    use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme},
         sha256::Sha256,
@@ -840,7 +841,6 @@ mod tests {
     }
 
     fn inline_verify_persists_block_before_resolving_at(seed: u64) {
-        use commonware_broadcast::Broadcaster;
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -954,7 +954,6 @@ mod tests {
     }
 
     fn inline_certify_persists_block_before_resolving_at(seed: u64) {
-        use commonware_broadcast::Broadcaster;
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -1050,8 +1049,6 @@ mod tests {
     fn test_inline_certify_does_not_bypass_failed_verify_persistence() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            use commonware_broadcast::Broadcaster;
-
             let Fixture {
                 participants,
                 schemes,
