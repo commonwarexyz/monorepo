@@ -8,7 +8,6 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -41,7 +40,7 @@ impl ForwardingPolicy {
 }
 
 /// Configuration for the consensus engine.
-pub struct Config<S, L, B, D, A, R, F, T>
+pub struct Config<S, L, B, D, A, R, F>
 where
     S: Scheme,
     L: Elector<S>,
@@ -50,7 +49,6 @@ where
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
-    T: Strategy,
 {
     /// Signing scheme for the consensus engine.
     ///
@@ -88,9 +86,6 @@ where
     /// consider wrapping with [`crate::simplex::scheme::reporter::AttributableReporter`] to
     /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
-
-    /// Strategy for parallel operations.
-    pub strategy: T,
 
     /// Partition for the consensus engine.
     pub partition: String,
@@ -153,8 +148,7 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+    > Config<S, L, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager as _};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, StrategyConfig,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -150,7 +150,9 @@ fn main() {
         .expect("Other identity not well-formed");
 
     // Initialize context
-    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
+    let runtime_cfg = tokio::Config::new()
+        .with_storage_directory(storage_directory)
+        .with_strategy(StrategyConfig::Rayon(NZUsize!(2)));
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
@@ -221,7 +223,6 @@ fn main() {
         );
 
         // Initialize application
-        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
@@ -261,7 +262,6 @@ fn main() {
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
-                strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );

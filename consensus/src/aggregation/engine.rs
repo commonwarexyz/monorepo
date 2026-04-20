@@ -20,7 +20,6 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
@@ -28,7 +27,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -71,14 +70,13 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-    T: Strategy,
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
@@ -87,7 +85,6 @@ pub struct Engine<
     provider: P,
     reporter: Z,
     blocker: B,
-    strategy: T,
 
     // Pruning
     /// A tuple representing the epochs to keep in memory.
@@ -154,18 +151,17 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-        T: Strategy,
-    > Engine<E, P, D, A, Z, M, B, T>
+    > Engine<E, P, D, A, Z, M, B>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<P, D, A, Z, M, B, T>) -> Self {
+    pub fn new(context: E, cfg: Config<P, D, A, Z, M, B>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -176,7 +172,6 @@ impl<
             monitor: cfg.monitor,
             provider: cfg.provider,
             blocker: cfg.blocker,
-            strategy: cfg.strategy,
             epoch_bounds: cfg.epoch_bounds,
             window: HeightDelta::new(cfg.window.into()),
             activity_timeout: cfg.activity_timeout,
@@ -385,7 +380,7 @@ impl<
                 }
 
                 // Validate that we need to process the ack
-                if let Err(err) = self.validate_ack(&ack, &sender) {
+                if let Err(err) = self.validate_ack(&ack, &sender).await {
                     if err.blockable() {
                         commonware_p2p::block!(
                             self.blocker,
@@ -530,9 +525,16 @@ impl<
         let filtered = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
+            .cloned()
             .collect::<Vec<_>>();
         if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
+            let certificate = self
+                .context
+                .with_strategy(move |strategy| {
+                    Certificate::from_acks(&*scheme, filtered.iter(), strategy)
+                })
+                .await;
+            if let Some(certificate) = certificate {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
             }
@@ -613,7 +615,7 @@ impl<
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
+    async fn validate_ack(
         &mut self,
         ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
@@ -679,7 +681,13 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme, &self.strategy) {
+        let ack = ack.clone();
+        let mut rng = self.context.clone();
+        let valid = self
+            .context
+            .with_strategy(move |strategy| ack.verify(&mut rng, &*scheme, strategy))
+            .await;
+        if !valid {
             return Err(Error::InvalidAckSignature);
         }
 

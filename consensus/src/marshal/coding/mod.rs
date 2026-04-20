@@ -420,7 +420,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -541,7 +540,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -757,7 +755,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -847,7 +844,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -924,7 +920,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1116,7 +1111,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: limited_epocher,
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1218,7 +1212,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1384,7 +1377,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1506,7 +1498,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1705,7 +1696,6 @@ mod tests {
                 shards: setup.extra,
                 scheme_provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1810,7 +1800,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -1928,7 +1917,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -2042,7 +2030,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
@@ -2132,7 +2119,6 @@ mod tests {
                 shards: shards.clone(),
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 

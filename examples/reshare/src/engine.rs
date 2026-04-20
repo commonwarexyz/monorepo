@@ -27,10 +27,9 @@ use commonware_cryptography::{
     BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
-use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage,
+    Network, Spawner, Storage, Strategist,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
@@ -60,13 +59,12 @@ const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
-pub struct Config<C, P, B, V, T>
+pub struct Config<C, P, B, V>
 where
     P: Manager<PublicKey = C::PublicKey>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    T: Strategy,
 {
     pub signer: C,
     pub manager: P,
@@ -77,12 +75,11 @@ where
     pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
-    pub strategy: T,
 }
 
-pub struct Engine<E, C, P, B, H, V, S, L, T>
+pub struct Engine<E, C, P, B, H, V, S, L>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + Strategist,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -90,11 +87,10 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    config: Config<C, P, B, V, T>,
+    config: Config<C, P, B, V>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>, P>,
@@ -107,7 +103,6 @@ where
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
         FixedEpocher,
-        T,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -119,14 +114,13 @@ where
         Deferred<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
-        T,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
-impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
+impl<E, C, P, B, H, V, S, L> Engine<E, C, P, B, H, V, S, L>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + Strategist,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -134,11 +128,10 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    T: Strategy,
     Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
@@ -282,7 +275,6 @@ where
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
                 max_pending_acks: MAX_PENDING_ACKS,
-                strategy: config.strategy.clone(),
             },
         )
         .await;
@@ -301,7 +293,6 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                strategy: config.strategy.clone(),
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

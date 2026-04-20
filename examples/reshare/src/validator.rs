@@ -14,8 +14,8 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota, ThreadPooler};
-use commonware_utils::{union, union_unique, NZUsize, NZU32};
+use commonware_runtime::{tokio, Metrics, Quota};
+use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -116,8 +116,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -129,7 +128,6 @@ pub async fn run<S, L>(
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
-            strategy,
         },
     )
     .await;
@@ -176,14 +174,13 @@ mod test {
         utils::mux,
         Message, Receiver,
     };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Handle, Metrics, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
-        test_rng_seeded, union, N3f1, TryCollect,
+        test_rng_seeded, union, N3f1, NZUsize, TryCollect,
     };
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
@@ -384,7 +381,7 @@ mod test {
             };
             let marshal =
                 marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
                 validator_ctx.with_label("consensus"),
                 engine::Config {
                     signer: sk.clone(),
@@ -396,7 +393,6 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
-                    strategy: Sequential,
                 },
             )
             .await;

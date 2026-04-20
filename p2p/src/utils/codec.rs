@@ -4,7 +4,6 @@ use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_parallel::Strategy;
 use commonware_runtime::{iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Spawner};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
@@ -127,10 +126,9 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// backpressure on the event loop, such as signature verification, decryption, or intensive
 /// validity checks.
 ///
-/// Concurrency is bounded by the provided [`Strategy`]'s
-/// [`parallelism_hint`](Strategy::parallelism_hint): when the number of in-flight decode
-/// tasks reaches this limit, the receiver stops accepting new messages until an in-flight
-/// task completes, providing natural backpressure.
+/// Concurrency is bounded by the configured `max_concurrency`: when the number of in-flight
+/// decode tasks reaches this limit, the receiver stops accepting new messages until an
+/// in-flight task completes, providing natural backpressure.
 pub struct WrappedBackgroundReceiver<E, P, B, R, V>
 where
     E: Spawner,
@@ -158,15 +156,14 @@ where
     /// Create a new [`WrappedBackgroundReceiver`].
     ///
     /// `channel_capacity` controls the size of the internal channel to the consumer.
-    /// The `strategy`'s [`parallelism_hint`](Strategy::parallelism_hint) bounds the
-    /// number of in-flight decode tasks.
+    /// `max_concurrency` bounds the number of in-flight decode tasks.
     pub fn new(
         context: E,
         receiver: R,
         codec_config: V::Cfg,
         blocker: B,
         channel_capacity: usize,
-        strategy: &impl Strategy,
+        max_concurrency: usize,
     ) -> (Self, mpsc::Receiver<(P, V)>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
         (
@@ -176,7 +173,7 @@ where
                 codec_config,
                 blocker,
                 sender: tx,
-                max_concurrency: strategy.parallelism_hint().max(1),
+                max_concurrency: max_concurrency.max(1),
             },
             rx,
         )
@@ -411,7 +408,7 @@ mod tests {
                 (),
                 control2.clone(),
                 16,
-                &Sequential,
+                Sequential.parallelism_hint(),
             );
             let _handle = bg.start();
 
@@ -448,7 +445,7 @@ mod tests {
                 (),
                 control2.clone(),
                 16,
-                &Sequential,
+                Sequential.parallelism_hint(),
             );
             let _handle = bg.start();
 
@@ -507,7 +504,7 @@ mod tests {
                 (),
                 control2.clone(),
                 16,
-                &Sequential,
+                Sequential.parallelism_hint(),
             );
             let _handle = bg.start();
 
@@ -555,7 +552,7 @@ mod tests {
                 (),
                 control2.clone(),
                 16,
-                &Sequential,
+                Sequential.parallelism_hint(),
             );
             let _handle = bg.start();
 
@@ -603,7 +600,7 @@ mod tests {
                 (),
                 control2.clone(),
                 16,
-                &Sequential,
+                Sequential.parallelism_hint(),
             );
             let _handle = bg.start();
 
@@ -659,7 +656,7 @@ mod tests {
                 (),
                 NoopBlocker,
                 count as usize,
-                &HintStrategy(8),
+                HintStrategy(8).parallelism_hint(),
             );
             let _handle = bg.start();
 

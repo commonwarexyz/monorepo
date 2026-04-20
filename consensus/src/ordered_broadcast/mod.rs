@@ -92,7 +92,6 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -265,7 +264,6 @@ mod tests {
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    strategy: Sequential,
                 },
             );
 
@@ -801,7 +799,6 @@ mod tests {
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
-                        strategy: Sequential,
                     },
                 );
 
@@ -965,7 +962,6 @@ mod tests {
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
-                        strategy: Sequential,
                     },
                 );
 
@@ -1023,7 +1019,6 @@ mod tests {
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
-                        strategy: Sequential,
                     },
                 );
 

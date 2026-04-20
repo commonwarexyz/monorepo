@@ -24,11 +24,10 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
-use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    Metrics, Spawner, Storage, Strategist,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -69,6 +68,38 @@ enum PendingVerification<S: CertificateScheme, V: Variant> {
         block: V::Block,
         response: oneshot::Sender<bool>,
     },
+}
+
+#[derive(Clone)]
+enum OwnedVerification<S: CertificateScheme, D: commonware_cryptography::Digest> {
+    Notarized(Notarization<S, D>),
+    Finalized(Finalization<S, D>),
+}
+
+impl<S: CertificateScheme, D: commonware_cryptography::Digest> OwnedVerification<S, D> {
+    fn epoch(&self) -> Epoch {
+        match self {
+            Self::Notarized(notarization) => notarization.epoch(),
+            Self::Finalized(finalization) => finalization.epoch(),
+        }
+    }
+
+    const fn as_subject_and_certificate(&self) -> (Subject<'_, D>, &S::Certificate) {
+        match self {
+            Self::Finalized(finalization) => (
+                Subject::Finalize {
+                    proposal: &finalization.proposal,
+                },
+                &finalization.certificate,
+            ),
+            Self::Notarized(notarization) => (
+                Subject::Notarize {
+                    proposal: &notarization.proposal,
+                },
+                &notarization.certificate,
+            ),
+        }
+    }
 }
 
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
@@ -198,9 +229,9 @@ type BlockSubscriptionKeyFor<V> =
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
+pub struct Actor<E, V, P, FC, FB, ES, A = Exact>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -210,7 +241,6 @@ where
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
-    T: Strategy,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -231,9 +261,6 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::Block as Read>::Cfg,
-    // Strategy for parallel operations
-    strategy: T,
-
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
@@ -265,9 +292,9 @@ where
     processed_height: Gauge,
 }
 
-impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
+impl<E, V, P, FC, FB, ES, A> Actor<E, V, P, FC, FB, ES, A>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -277,7 +304,6 @@ where
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
-    T: Strategy,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -285,7 +311,7 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<V::Block, P, ES, T>,
+        config: Config<V::Block, P, ES>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -344,7 +370,6 @@ where
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                strategy: config.strategy,
                 last_proposed_block: None,
                 last_processed_round: Round::zero(),
                 last_processed_height,
@@ -1091,36 +1116,36 @@ where
         let certs: Vec<_> = delivers
             .iter()
             .map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.proposal,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ),
+                PendingVerification::Finalized { finalization, .. } => {
+                    OwnedVerification::Finalized(finalization.clone())
+                }
+                PendingVerification::Notarized { notarization, .. } => {
+                    OwnedVerification::Notarized(notarization.clone())
+                }
             })
             .collect();
 
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(&mut self.context, scheme.as_ref(), &certs, &self.strategy)
+            let certs = certs.clone();
+            let mut rng = self.context.clone();
+            self.context
+                .with_strategy(move |strategy| {
+                    let cert_refs: Vec<_> = certs
+                        .iter()
+                        .map(OwnedVerification::as_subject_and_certificate)
+                        .collect();
+                    verify_certificates(&mut rng, scheme.as_ref(), &cert_refs, strategy)
+                })
+                .await
         } else {
             let mut verified = vec![false; delivers.len()];
 
             // Group indices by epoch.
             let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
+            for (i, cert) in certs.iter().enumerate() {
+                by_epoch.entry(cert.epoch()).or_default().push(i);
             }
 
             // Batch verify each epoch group.
@@ -1128,9 +1153,18 @@ where
                 let Some(scheme) = self.provider.scoped(*epoch) else {
                     continue;
                 };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results =
-                    verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
+                let group: Vec<_> = indices.iter().map(|&i| certs[i].clone()).collect();
+                let mut rng = self.context.clone();
+                let results = self
+                    .context
+                    .with_strategy(move |strategy| {
+                        let group_refs: Vec<_> = group
+                            .iter()
+                            .map(OwnedVerification::as_subject_and_certificate)
+                            .collect();
+                        verify_certificates(&mut rng, scheme.as_ref(), &group_refs, strategy)
+                    })
+                    .await;
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];
                 }

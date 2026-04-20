@@ -11,9 +11,9 @@ use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
-    Metrics, Runner,
+    Metrics, Runner, StrategyConfig,
 };
-use commonware_utils::{hex, NZU64};
+use commonware_utils::{hex, NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
 use tracing::Level;
 
@@ -153,7 +153,8 @@ fn main() {
 
     let config = tokio::Config::new()
         .with_worker_threads(app.worker_threads)
-        .with_catch_panics(false);
+        .with_catch_panics(false)
+        .with_strategy(StrategyConfig::Rayon(NZUsize!(2)));
     let runner = tokio::Runner::new(config);
     runner.start(|context| async move {
         // Initialize telemetry.

@@ -60,7 +60,8 @@ use crate::{
         Panicker, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
+    Metrics as _, Panicked, RuntimeStrategy, Spawner as _, StrategyConfig, ThreadPooler as _,
+    METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -228,6 +229,9 @@ pub struct Config {
 
     /// Buffer pool configuration for storage I/O.
     storage_buffer_pool_cfg: BufferPoolConfig,
+
+    /// Strategy used by [`crate::Strategist`].
+    strategy_cfg: StrategyConfig,
 }
 
 impl Config {
@@ -259,6 +263,7 @@ impl Config {
             storage_fault_cfg: FaultConfig::default(),
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
+            strategy_cfg: StrategyConfig::default(),
         }
     }
 
@@ -308,6 +313,11 @@ impl Config {
         self.storage_buffer_pool_cfg = cfg;
         self
     }
+    /// See [Config]
+    pub const fn with_strategy(mut self, cfg: StrategyConfig) -> Self {
+        self.strategy_cfg = cfg;
+        self
+    }
 
     /// Configure storage fault injection.
     ///
@@ -343,6 +353,10 @@ impl Config {
     /// See [Config]
     pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
         &self.storage_buffer_pool_cfg
+    }
+    /// See [Config]
+    pub const fn strategy(&self) -> &StrategyConfig {
+        &self.strategy_cfg
     }
 
     /// Assert that the configuration is valid.
@@ -386,6 +400,7 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
+    strategy_cfg: StrategyConfig,
 }
 
 impl Executor {
@@ -473,6 +488,7 @@ pub struct Checkpoint {
     catch_panics: bool,
     network_buffer_pool_cfg: BufferPoolConfig,
     storage_buffer_pool_cfg: BufferPoolConfig,
+    strategy_cfg: StrategyConfig,
 }
 
 impl Checkpoint {
@@ -713,6 +729,7 @@ impl Runner {
             catch_panics: executor.panicker.catch(),
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
+            strategy_cfg: executor.strategy_cfg,
         };
 
         (output, checkpoint)
@@ -924,6 +941,8 @@ impl Clone for Context {
 
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+        let strategy_cfg = cfg.strategy_cfg.clone();
+
         // Create a new registry
         let mut registry = Registry::new();
         let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
@@ -984,25 +1003,22 @@ impl Context {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             dns: Mutex::new(HashMap::new()),
+            strategy_cfg,
         });
-
-        (
-            Self {
-                name: String::new(),
-                attributes: Vec::new(),
-                scope: None,
-                executor: Arc::downgrade(&executor),
-                network: Arc::new(network),
-                storage: Arc::new(storage),
-                network_buffer_pool,
-                storage_buffer_pool,
-                tree: Tree::root(),
-                execution: Execution::default(),
-                traced: false,
-            },
-            executor,
-            panicked,
-        )
+        let context = Self {
+            name: String::new(),
+            attributes: Vec::new(),
+            scope: None,
+            executor: Arc::downgrade(&executor),
+            network: Arc::new(network),
+            storage: Arc::new(storage),
+            network_buffer_pool,
+            storage_buffer_pool,
+            tree: Tree::root(),
+            execution: Execution::default(),
+            traced: false,
+        };
+        (context, executor, panicked)
     }
 
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
@@ -1057,24 +1073,22 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            strategy_cfg: checkpoint.strategy_cfg.clone(),
         });
-        (
-            Self {
-                name: String::new(),
-                attributes: Vec::new(),
-                scope: None,
-                executor: Arc::downgrade(&executor),
-                network: Arc::new(network),
-                storage: checkpoint.storage,
-                network_buffer_pool,
-                storage_buffer_pool,
-                tree: Tree::root(),
-                execution: Execution::default(),
-                traced: false,
-            },
-            executor,
-            panicked,
-        )
+        let context = Self {
+            name: String::new(),
+            attributes: Vec::new(),
+            scope: None,
+            executor: Arc::downgrade(&executor),
+            network: Arc::new(network),
+            storage: checkpoint.storage,
+            network_buffer_pool,
+            storage_buffer_pool,
+            tree: Tree::root(),
+            execution: Execution::default(),
+            traced: false,
+        };
+        (context, executor, panicked)
     }
 
     /// Upgrade Weak reference to [Executor].
@@ -1242,6 +1256,30 @@ impl crate::ThreadPooler for Context {
             })
             .build()
             .map(Arc::new)
+    }
+}
+
+impl crate::Strategist for Context {
+    type Strategy = RuntimeStrategy;
+
+    fn with_strategy<F, T>(&self, f: F) -> impl Future<Output = T> + Send
+    where
+        F: FnOnce(&Self::Strategy) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let handle = self.clone().shared(true).spawn(move |context| async move {
+            let strategy = match context.executor().strategy_cfg.clone() {
+                StrategyConfig::Sequential => RuntimeStrategy::default(),
+                StrategyConfig::Rayon(concurrency) => RuntimeStrategy::Rayon(
+                    context
+                        .with_label("strategy")
+                        .create_strategy(concurrency)
+                        .expect("failed to create runtime strategy"),
+                ),
+            };
+            f(&strategy)
+        });
+        async move { handle.await.expect("strategy task failed") }
     }
 }
 

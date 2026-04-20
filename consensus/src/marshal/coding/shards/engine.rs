@@ -163,7 +163,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{histogram::HistogramExt, status::GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Strategist,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -210,7 +210,7 @@ enum BlockSubscriptionKey<D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, S, X, D, C, H, B, T>
+pub struct Config<P, S, X, D, C, H, B>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
@@ -219,7 +219,6 @@ where
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
-    T: Strategy,
 {
     /// The scheme provider.
     pub scheme_provider: S,
@@ -232,9 +231,6 @@ where
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
-
-    /// The strategy used for parallel computation.
-    pub strategy: T,
 
     /// The size of the mailbox buffer.
     pub mailbox_size: usize,
@@ -269,9 +265,9 @@ where
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
-pub struct Engine<E, S, X, D, C, H, B, P, T>
+pub struct Engine<E, S, X, D, C, H, B, P>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock + Strategist,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
@@ -280,7 +276,6 @@ where
     H: Hasher,
     B: CertifiableBlock,
     P: PublicKey,
-    T: Strategy,
 {
     /// Context held by the actor.
     context: ContextCell<E>,
@@ -299,9 +294,6 @@ where
 
     /// [`Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
-
-    /// The strategy used for parallel shard verification.
-    strategy: T,
 
     /// A map of [`Commitment`]s to [`ReconstructionState`]s.
     state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
@@ -356,9 +348,9 @@ where
     metrics: ShardMetrics,
 }
 
-impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
+impl<E, S, X, D, C, H, B, P> Engine<E, S, X, D, C, H, B, P>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock + Strategist,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
@@ -367,10 +359,9 @@ where
     H: Hasher,
     B: CertifiableBlock,
     P: PublicKey,
-    T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+    pub fn new(context: E, config: Config<P, S, X, D, C, H, B>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -381,7 +372,6 @@ where
                 blocker: config.blocker,
                 shard_codec_cfg: config.shard_codec_cfg,
                 block_codec_cfg: config.block_codec_cfg,
-                strategy: config.strategy,
                 state: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
@@ -415,6 +405,10 @@ where
             self.context.network_buffer_pool().clone(),
             sender,
         );
+        let max_concurrency = self
+            .context
+            .with_strategy(|strategy| strategy.parallelism_hint())
+            .await;
         let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
             WrappedBackgroundReceiver::new(
                 self.context.with_label("shard_ingress"),
@@ -422,7 +416,7 @@ where
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
-                &self.strategy,
+                max_concurrency,
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
@@ -529,19 +523,13 @@ where
                     continue;
                 }
 
-                if let Some(state) = self.state.get_mut(&commitment) {
-                    let round = state.round();
+                if let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) {
                     let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
                         warn!(%commitment, "no scheme for epoch, ignoring shard");
                         continue;
                     };
-                    let progressed = state
-                        .on_network_shard(
-                            peer,
-                            shard,
-                            InsertCtx::new(scheme.as_ref(), &self.strategy),
-                            &mut self.blocker,
-                        )
+                    let progressed = self
+                        .handle_network_shard(commitment, peer, shard, scheme)
                         .await;
                     if progressed {
                         self.try_advance(&mut sender, commitment).await;
@@ -569,6 +557,36 @@ where
         true
     }
 
+    async fn handle_network_shard(
+        &mut self,
+        commitment: Commitment,
+        peer: P,
+        shard: Shard<C, H>,
+        scheme: Arc<S::Scheme>,
+    ) -> bool {
+        let Some(mut state) = self.state.remove(&commitment) else {
+            return false;
+        };
+        let mut blocker = self.blocker.clone();
+        let participants_len = u64::try_from(scheme.participants().len())
+            .expect("participant count impossibly out of bounds");
+        let progressed = state
+            .on_network_shard(peer, shard, scheme.as_ref(), &mut blocker)
+            .await;
+        if progressed {
+            state = Self::try_transition_state(
+                self.context.clone(),
+                commitment,
+                participants_len,
+                state,
+                &mut blocker,
+            )
+            .await;
+        }
+        self.state.insert(commitment, state);
+        progressed
+    }
+
     /// Attempts to reconstruct a [`CodedBlock`] from the checked [`Shard`]s present in the
     /// [`ReconstructionState`].
     ///
@@ -577,29 +595,37 @@ where
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
     /// - `Err(_)` if reconstruction was attempted but failed.
     #[allow(clippy::type_complexity)]
-    fn try_reconstruct(
+    async fn try_reconstruct(
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
         }
-        let Some(state) = self.state.get_mut(&commitment) else {
+        let Some(state) = self.state.remove(&commitment) else {
             return Ok(None);
         };
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
+            self.state.insert(commitment, state);
             return Ok(None);
         }
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
-        let blob = C::decode(
-            &commitment.config(),
-            &commitment.root(),
-            state.checked_shards().iter(),
-            &self.strategy,
-        )
-        .map_err(Error::Coding)?;
+        let (state, blob) = self
+            .context
+            .with_strategy(move |strategy| {
+                let blob = C::decode(
+                    &commitment.config(),
+                    &commitment.root(),
+                    state.checked_shards().iter(),
+                    strategy,
+                );
+                (state, blob)
+            })
+            .await;
+        self.state.insert(commitment, state);
+        let blob = blob.map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
             .observe_between(start, self.context.current());
@@ -722,25 +748,61 @@ where
             }
         }
 
-        let Some(state) = self.state.get_mut(&commitment) else {
+        let Some(mut state) = self.state.remove(&commitment) else {
             return false;
         };
         let round = state.round();
         let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, dropping buffered shards");
+            self.state.insert(commitment, state);
             return false;
         };
+        let participants_len = u64::try_from(scheme.participants().len())
+            .expect("participant count impossibly out of bounds");
 
         // Ingest buffered shards into the active reconstruction state. Batch verification
         // will be triggered if there are enough shards to meet the quorum threshold.
+        let mut blocker = self.blocker.clone();
         let mut progressed = false;
-        let ctx = InsertCtx::new(scheme.as_ref(), &self.strategy);
         for (peer, shard) in buffered {
-            progressed |= state
-                .on_network_shard(peer, shard, ctx, &mut self.blocker)
+            let shard_progressed = state
+                .on_network_shard(peer, shard, scheme.as_ref(), &mut blocker)
                 .await;
+            if !shard_progressed {
+                continue;
+            }
+            progressed = true;
+            state = Self::try_transition_state(
+                self.context.clone(),
+                commitment,
+                participants_len,
+                state,
+                &mut blocker,
+            )
+            .await;
         }
+        self.state.insert(commitment, state);
         progressed
+    }
+
+    async fn try_transition_state(
+        context: ContextCell<E>,
+        commitment: Commitment,
+        participants_len: u64,
+        state: ReconstructionState<P, C, H>,
+        blocker: &mut X,
+    ) -> ReconstructionState<P, C, H> {
+        let (state, to_block) = context
+            .with_strategy(move |strategy| {
+                let mut state = state;
+                let to_block = state.try_transition(commitment, participants_len, strategy);
+                (state, to_block)
+            })
+            .await;
+        for peer in to_block {
+            commonware_p2p::block!(blocker, peer, "invalid shard received");
+        }
+        state
     }
 
     /// Cache a block and notify all subscribers waiting on it.
@@ -776,7 +838,13 @@ where
             return;
         };
 
-        let shard_count = block.shards(&self.strategy).len();
+        let (block, shard_count) = self
+            .context
+            .with_strategy(move |strategy| {
+                let shard_count = block.shards(strategy).len();
+                (block, shard_count)
+            })
+            .await;
         if shard_count != participants.len() {
             warn!(
                 %commitment,
@@ -872,7 +940,7 @@ where
             }
         }
 
-        match self.try_reconstruct(commitment) {
+        match self.try_reconstruct(commitment).await {
             Ok(Some(block)) => {
                 // Do not prune other reconstruction state here. A Byzantine
                 // leader can equivocate by proposing multiple commitments in
@@ -1215,17 +1283,16 @@ where
     H: Hasher,
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
-    /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
-    async fn try_transition(
+    /// shards in parallel. Returns blocking actions and a ready-state transition when successful.
+    fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
         strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, C, H>> {
+    ) -> TransitionAttempt<P, C, H> {
         let minimum = usize::from(commitment.config().minimum_shards.get());
         if self.common.checked_shards.len() + self.pending_shards.len() < minimum {
-            return None;
+            return TransitionAttempt::default();
         }
 
         // Batch-validate all pending weak shards in parallel.
@@ -1241,16 +1308,16 @@ where
                 (peer, checked.ok())
             });
 
-        for peer in to_block {
-            commonware_p2p::block!(blocker, peer, "invalid shard received");
-        }
         for checked in new_checked {
             self.common.checked_shards.push(checked);
         }
 
         // After validation, some may have failed; recheck threshold.
         if self.common.checked_shards.len() < minimum {
-            return None;
+            return TransitionAttempt {
+                ready: None,
+                to_block,
+            };
         }
 
         // Transition to Ready.
@@ -1260,37 +1327,33 @@ where
             &mut self.common,
             CommonState::new(leader, round, participants_len),
         );
-        Some(ReadyState { common })
+        TransitionAttempt {
+            ready: Some(ReadyState { common }),
+            to_block,
+        }
     }
 }
 
-/// Context required for processing incoming network shards.
-struct InsertCtx<'a, Sch, S>
+struct TransitionAttempt<P, C, H>
 where
-    Sch: CertificateScheme,
-    S: Strategy,
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
 {
-    scheme: &'a Sch,
-    strategy: &'a S,
-    participants_len: u64,
+    ready: Option<ReadyState<P, C, H>>,
+    to_block: Vec<P>,
 }
 
-impl<Sch: CertificateScheme, S: Strategy> Clone for InsertCtx<'_, Sch, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<Sch: CertificateScheme, S: Strategy> Copy for InsertCtx<'_, Sch, S> {}
-
-impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
-    fn new(scheme: &'a Sch, strategy: &'a S) -> Self {
-        let participants_len = u64::try_from(scheme.participants().len())
-            .expect("participant count impossibly out of bounds");
+impl<P, C, H> Default for TransitionAttempt<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
+    fn default() -> Self {
         Self {
-            scheme,
-            strategy,
-            participants_len,
+            ready: None,
+            to_block: Vec::new(),
         }
     }
 }
@@ -1398,19 +1461,18 @@ where
     ///   engine level in bounded per-peer queues until
     ///   [`Discovered`](super::Message::Discovered) creates a
     ///   reconstruction state for this commitment.
-    async fn on_network_shard<Sch, S, X>(
+    async fn on_network_shard<Sch, X>(
         &mut self,
         sender: P,
         shard: Shard<C, H>,
-        ctx: InsertCtx<'_, Sch, S>,
+        scheme: &Sch,
         blocker: &mut X,
     ) -> bool
     where
         Sch: CertificateScheme<PublicKey = P>,
-        S: Strategy,
         X: Blocker<PublicKey = P>,
     {
-        let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
+        let Some(sender_index) = scheme.participants().index(&sender) else {
             commonware_p2p::block!(blocker, sender, "shard sent by non-participant");
             return false;
         };
@@ -1423,7 +1485,7 @@ where
         // Determine expected index based on sender role.
         let is_from_leader = sender == self.common().leader;
         let expected_participant = if is_from_leader {
-            ctx.scheme.me().unwrap_or(sender_index)
+            scheme.me().unwrap_or(sender_index)
         } else {
             sender_index
         };
@@ -1461,25 +1523,8 @@ where
         if is_from_leader && !self.common().assigned_shard_verified {
             let progressed = self
                 .common_mut()
-                .verify_assigned_shard(
-                    sender,
-                    commitment,
-                    indexed,
-                    ctx.scheme.me().is_some(),
-                    blocker,
-                )
+                .verify_assigned_shard(sender, commitment, indexed, scheme.me().is_some(), blocker)
                 .await;
-
-            if progressed {
-                if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state
-                        .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-                        .await
-                    {
-                        *self = Self::Ready(ready);
-                    }
-                }
-            }
             return progressed;
         }
 
@@ -1495,14 +1540,24 @@ where
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
-        if let Some(ready) = state
-            .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-            .await
-        {
+        true
+    }
+
+    fn try_transition(
+        &mut self,
+        commitment: Commitment,
+        participants_len: u64,
+        strategy: &impl Strategy,
+    ) -> Vec<P> {
+        let Self::AwaitingQuorum(state) = self else {
+            return Vec::new();
+        };
+        let TransitionAttempt { ready, to_block } =
+            state.try_transition(commitment, participants_len, strategy);
+        if let Some(ready) = ready {
             *self = Self::Ready(ready);
         }
-
-        true
+        to_block
     }
 }
 
@@ -1656,9 +1711,9 @@ mod tests {
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type D = simulated::Manager<P, deterministic::Context>;
-    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
+    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P>;
     type ChurningShardEngine<S> =
-        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
+        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P>;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -1806,7 +1861,6 @@ mod tests {
                             maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
-                        strategy: STRATEGY,
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
@@ -1843,7 +1897,6 @@ mod tests {
                             maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
-                        strategy: STRATEGY,
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
@@ -3746,14 +3799,13 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
@@ -3880,14 +3932,13 @@ mod tests {
             // and `ingest_buffered_shards`). Leader-shard validation is the third.
             // Any additional lookup for epoch 0 churns to `None`.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
-            let broadcaster_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let broadcaster_config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
@@ -3903,14 +3954,13 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme should be created");
-            let receiver_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let receiver_config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
@@ -4741,14 +4791,13 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
@@ -4852,14 +4901,13 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 16,
                 peer_buffer_size: NZUsize!(4),
                 background_channel_capacity: 16,
@@ -4984,7 +5032,7 @@ mod tests {
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
                     .expect("epoch 1 signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
@@ -4992,7 +5040,6 @@ mod tests {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
@@ -5145,14 +5192,13 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
                     maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
-                strategy: STRATEGY,
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,

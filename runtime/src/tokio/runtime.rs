@@ -20,13 +20,13 @@ use crate::{
     utils::{
         self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, RuntimeStrategy,
+    SinkOf, Spawner as _, StrategyConfig, StreamOf, ThreadPooler as _, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -43,7 +43,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -177,6 +177,9 @@ pub struct Config {
 
     /// Explicit buffer pool configuration for storage I/O, if provided.
     storage_buffer_pool_cfg: Option<BufferPoolConfig>,
+
+    /// Strategy used by [`crate::Strategist`].
+    strategy_cfg: StrategyConfig,
 }
 
 impl Config {
@@ -195,6 +198,7 @@ impl Config {
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
+            strategy_cfg: StrategyConfig::default(),
         }
     }
 
@@ -259,6 +263,11 @@ impl Config {
         self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
+    /// See [Config]
+    pub const fn with_strategy(mut self, cfg: StrategyConfig) -> Self {
+        self.strategy_cfg = cfg;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -301,6 +310,10 @@ impl Config {
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
+    /// See [Config]
+    pub const fn strategy(&self) -> &StrategyConfig {
+        &self.strategy_cfg
+    }
 
     /// Returns the network buffer pool config, deriving thread-cache
     /// parallelism from `worker_threads` if not explicitly configured.
@@ -335,6 +348,7 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+    strategy: OnceLock<RuntimeStrategy>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -480,6 +494,7 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
+            strategy: OnceLock::new(),
         });
 
         // Get metrics
@@ -501,6 +516,20 @@ impl crate::Runner for Runner {
             execution: Execution::default(),
             traced: false,
         };
+        let strategy = match self.cfg.strategy_cfg {
+            StrategyConfig::Sequential => RuntimeStrategy::default(),
+            StrategyConfig::Rayon(concurrency) => RuntimeStrategy::Rayon(
+                context
+                    .with_label("strategy")
+                    .create_strategy(concurrency)
+                    .expect("failed to create runtime strategy"),
+            ),
+        };
+        executor
+            .strategy
+            .set(strategy)
+            .expect("runtime strategy already initialized");
+
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
 
@@ -564,6 +593,13 @@ impl Context {
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
+    }
+
+    fn strategy(&self) -> &RuntimeStrategy {
+        self.executor
+            .strategy
+            .get()
+            .expect("runtime strategy not initialized")
     }
 }
 
@@ -688,6 +724,38 @@ impl crate::ThreadPooler for Context {
             })
             .build()
             .map(Arc::new)
+    }
+}
+
+#[stability(BETA)]
+impl crate::Strategist for Context {
+    type Strategy = RuntimeStrategy;
+
+    fn with_strategy<F, T>(&self, f: F) -> impl Future<Output = T> + Send
+    where
+        F: FnOnce(&Self::Strategy) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let strategy = self.strategy().clone();
+        match strategy {
+            RuntimeStrategy::Sequential(strategy) => {
+                let strategy = RuntimeStrategy::Sequential(strategy);
+                let handle = self
+                    .clone()
+                    .shared(true)
+                    .spawn(move |_| async move { f(&strategy) });
+                Either::Left(async move { handle.await.expect("strategy task failed") })
+            }
+            RuntimeStrategy::Rayon(strategy) => {
+                let (sender, receiver) = oneshot::channel();
+                let pool = strategy.thread_pool().clone();
+                let strategy = RuntimeStrategy::Rayon(strategy);
+                pool.spawn(move || {
+                    let _ = sender.send(f(&strategy));
+                });
+                Either::Right(async move { receiver.await.expect("strategy task failed") })
+            }
+        }
     }
 }
 

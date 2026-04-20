@@ -79,7 +79,6 @@ mod tests {
         simulated::{self, Network},
         Recipients,
     };
-    use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
@@ -1785,7 +1784,6 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
         };
         let finalizations_by_height = immutable::Archive::init(
             context.with_label("finalizations_by_height"),
@@ -1900,7 +1898,6 @@ mod tests {
                 key_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 page_cache: page_cache.clone(),
-                strategy: Sequential,
             };
             let finalizations_by_height = prunable::Archive::init(
                 context.with_label("finalizations_by_height"),
