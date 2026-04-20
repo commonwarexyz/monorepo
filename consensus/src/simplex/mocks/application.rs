@@ -116,8 +116,8 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type PublicKey = P;
     type Plan = Plan<P>;
 
-    async fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) -> bool {
-        self.sender.send_lossy(Message::Broadcast { payload }).await
+    async fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) {
+        self.sender.send_lossy(Message::Broadcast { payload }).await;
     }
 }
 

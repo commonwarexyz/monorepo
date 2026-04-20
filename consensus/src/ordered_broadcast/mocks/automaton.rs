@@ -68,8 +68,7 @@ impl<P: PublicKey> R for Automaton<P> {
     type Plan = ();
     type PublicKey = P;
 
-    async fn broadcast(&mut self, payload: Self::Digest, _plan: ()) -> bool {
+    async fn broadcast(&mut self, payload: Self::Digest, _plan: ()) {
         trace!(?payload, "broadcast");
-        true
     }
 }

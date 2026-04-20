@@ -918,14 +918,18 @@ impl<
                 }
                 view = self.state.current_view();
 
-                // Notify application of proposal
-                if !self.relay.broadcast(proposed, Plan::Propose).await {
-                    warn!(
-                        round = ?context.round,
-                        "failed to broadcast proposed payload, stopping voter"
-                    );
-                    break;
-                }
+                // Notify application of proposal.
+                //
+                // Broadcast is best-effort dissemination; durability was already
+                // established when propose returned the digest.
+                self.relay
+                    .broadcast(
+                        proposed,
+                        Plan::Propose {
+                            round: context.round,
+                        },
+                    )
+                    .await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter

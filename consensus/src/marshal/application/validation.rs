@@ -8,12 +8,6 @@ use crate::{
     types::{Epoch, Epocher, Height, Round},
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_utils::sync::Mutex;
-use std::sync::Arc;
-
-/// Cache for the last block built during proposal, shared between the
-/// proposer task and the broadcast path.
-pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
 /// Which stage of verification a block has reached.
 ///

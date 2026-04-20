@@ -316,6 +316,7 @@
 
 use crate::types::Round;
 use commonware_cryptography::PublicKey;
+use commonware_p2p::Recipients;
 
 pub mod elector;
 pub mod scheme;
@@ -371,13 +372,16 @@ pub(crate) fn interesting(
 /// Describes how a payload should be broadcast to the network.
 pub enum Plan<P: PublicKey> {
     /// Initial broadcast of a newly proposed block to all participants.
-    Propose,
+    Propose {
+        /// The round in which the block was proposed.
+        round: Round,
+    },
     /// Forward a block to a specific set of peers.
     Forward {
         /// The round in which the forwarded block was proposed.
         round: Round,
-        /// The peers to forward the block to.
-        peers: Vec<P>,
+        /// The recipients to forward the block to.
+        recipients: Recipients<P>,
     },
 }
 

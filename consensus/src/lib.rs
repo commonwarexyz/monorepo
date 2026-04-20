@@ -196,14 +196,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Broadcast a payload to the given recipients.
         ///
-        /// Returns `true` when the relay accepted the payload for the requested
-        /// broadcast plan. Returns `false` when the relay could not complete the
-        /// handoff.
+        /// Broadcast is best-effort dissemination and does not signal
+        /// durability; callers that need durability must rely on
+        /// [`Automaton::propose`] or [`Automaton::verify`].
         fn broadcast(
             &mut self,
             payload: Self::Digest,
             plan: Self::Plan,
-        ) -> impl Future<Output = bool> + Send;
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.
