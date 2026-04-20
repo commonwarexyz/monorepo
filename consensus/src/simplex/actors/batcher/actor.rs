@@ -219,22 +219,41 @@ where
             .await
     }
 
-    async fn construct_certificates(
+    async fn construct_notarization(
         context: ContextCell<E>,
         scheme: S,
         mut round: Round<S, B, D, Re>,
-    ) -> (
-        Round<S, B, D, Re>,
-        Option<Notarization<S, D>>,
-        Option<Nullification<S>>,
-        Option<Finalization<S, D>>,
-    ) {
+    ) -> (Round<S, B, D, Re>, Option<Notarization<S, D>>) {
         context
             .with_strategy(move |strategy| {
                 let notarization = round.try_construct_notarization(&scheme, strategy);
+                (round, notarization)
+            })
+            .await
+    }
+
+    async fn construct_nullification(
+        context: ContextCell<E>,
+        scheme: S,
+        mut round: Round<S, B, D, Re>,
+    ) -> (Round<S, B, D, Re>, Option<Nullification<S>>) {
+        context
+            .with_strategy(move |strategy| {
                 let nullification = round.try_construct_nullification(&scheme, strategy);
+                (round, nullification)
+            })
+            .await
+    }
+
+    async fn construct_finalization(
+        context: ContextCell<E>,
+        scheme: S,
+        mut round: Round<S, B, D, Re>,
+    ) -> (Round<S, B, D, Re>, Option<Finalization<S, D>>) {
+        context
+            .with_strategy(move |strategy| {
                 let finalization = round.try_construct_finalization(&scheme, strategy);
-                (round, notarization, nullification, finalization)
+                (round, finalization)
             })
             .await
     }
@@ -690,16 +709,54 @@ where
                     );
                 }
 
-                let (round, notarization, nullification, finalization) =
-                    Self::construct_certificates(
+                let (round, notarization) = {
+                    let mut timer = self.recover_latency.timer();
+                    let result = Self::construct_notarization(
                         self.context.clone(),
                         self.scheme.clone(),
                         round,
                     )
                     .await;
+                    if result.1.is_some() {
+                        timer.observe();
+                    } else {
+                        timer.cancel();
+                    }
+                    result
+                };
+                let (round, nullification) = {
+                    let mut timer = self.recover_latency.timer();
+                    let result = Self::construct_nullification(
+                        self.context.clone(),
+                        self.scheme.clone(),
+                        round,
+                    )
+                    .await;
+                    if result.1.is_some() {
+                        timer.observe();
+                    } else {
+                        timer.cancel();
+                    }
+                    result
+                };
+                let (round, finalization) = {
+                    let mut timer = self.recover_latency.timer();
+                    let result = Self::construct_finalization(
+                        self.context.clone(),
+                        self.scheme.clone(),
+                        round,
+                    )
+                    .await;
+                    if result.1.is_some() {
+                        timer.observe();
+                    } else {
+                        timer.cancel();
+                    }
+                    result
+                };
 
                 // Try to construct and forward certificates
-                if let Some(notarization) = self.recover_latency.time_some(|| notarization) {
+                if let Some(notarization) = notarization {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Forward notarization to voter
@@ -707,13 +764,13 @@ where
                         .recovered(Certificate::Notarization(notarization))
                         .await;
                 }
-                if let Some(nullification) = self.recover_latency.time_some(|| nullification) {
+                if let Some(nullification) = nullification {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
                         .recovered(Certificate::Nullification(nullification))
                         .await;
                 }
-                if let Some(finalization) = self.recover_latency.time_some(|| finalization) {
+                if let Some(finalization) = finalization {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter
                         .recovered(Certificate::Finalization(finalization))
