@@ -25,11 +25,13 @@ use crate::{
     },
     Context,
 };
+use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeSet, HashMap},
+    hash::BuildHasherDefault,
     sync::Arc,
 };
 
@@ -41,7 +43,10 @@ use std::{
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
-    pub(crate) chunks: BTreeMap<usize, [u8; N]>,
+    ///
+    /// `ahash` (fast on integer keys) with `BuildHasherDefault` (no per-construction RNG
+    /// sampling). Iteration order is not observed by any consumer.
+    pub(crate) chunks: HashMap<usize, [u8; N], BuildHasherDefault<AHasher>>,
     /// Total number of bits (parent + new operations).
     pub(crate) len: u64,
 }
@@ -49,9 +54,9 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 impl<const N: usize> ChunkOverlay<N> {
     const CHUNK_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
-    const fn new(len: u64) -> Self {
+    fn new(len: u64) -> Self {
         Self {
-            chunks: BTreeMap::new(),
+            chunks: HashMap::default(),
             len,
         }
     }
@@ -590,6 +595,7 @@ where
     // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        pruned_chunks: bitmap_parent.pruned_chunks(),
         parent: bitmap_parent.clone(),
         overlay: Arc::new(overlay),
     }));
@@ -648,6 +654,10 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     pub(crate) parent: BitmapBatch<N>,
     /// Chunk-level overlay: materialized bytes for every chunk that differs from parent.
     pub(crate) overlay: Arc<ChunkOverlay<N>>,
+    /// Pruned-chunk count, copied from `parent` at construction. Invariant across the whole
+    /// layer chain (pruning only happens on the committed base), so caching here lets
+    /// `BitmapBatch::pruned_chunks` return in O(1) instead of walking to the Base.
+    pub(crate) pruned_chunks: usize,
 }
 
 impl<const N: usize> BitmapBatch<N> {
@@ -660,14 +670,17 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     }
 
     fn get_chunk(&self, idx: usize) -> [u8; N] {
-        match self {
-            Self::Base(bm) => *bm.get_chunk(idx),
-            Self::Layer(layer) => {
-                // Check overlay first; fall through to parent if unmodified.
-                if let Some(&chunk) = layer.overlay.get(idx) {
-                    chunk
-                } else {
-                    layer.parent.get_chunk(idx)
+        // Walk the layer chain. Each layer's overlay either holds the chunk (return it) or
+        // doesn't (descend).
+        let mut current = self;
+        loop {
+            match current {
+                Self::Base(bm) => return *bm.get_chunk(idx),
+                Self::Layer(layer) => {
+                    if let Some(&chunk) = layer.overlay.get(idx) {
+                        return chunk;
+                    }
+                    current = &layer.parent;
                 }
             }
         }
@@ -691,7 +704,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     fn pruned_chunks(&self) -> usize {
         match self {
             Self::Base(bm) => bm.pruned_chunks(),
-            Self::Layer(layer) => layer.parent.pruned_chunks(),
+            Self::Layer(layer) => layer.pruned_chunks,
         }
     }
 
@@ -723,8 +736,13 @@ impl<const N: usize> BitmapBatch<N> {
         }
 
         // Slow path: create a new layer.
+        let pruned_chunks = self.pruned_chunks();
         let parent = self.clone();
-        *self = Self::Layer(Arc::new(BitmapBatchLayer { parent, overlay }));
+        *self = Self::Layer(Arc::new(BitmapBatchLayer {
+            parent,
+            overlay,
+            pruned_chunks,
+        }));
     }
 
     /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
