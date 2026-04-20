@@ -367,9 +367,7 @@ mod tests {
             F: FnOnce(Self) -> R + Send + 'static,
             R: Send + 'static,
         {
-            let (tx, rx) = commonware_utils::channel::oneshot::channel();
-            let _ = tx.send(f(*self));
-            rx.into()
+            commonware_parallel::SpawnHandle::ready(f(*self))
         }
     }
 

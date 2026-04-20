@@ -62,7 +62,12 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::fmt;
+    use core::{
+        fmt,
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
 
     cfg_if! {
         if #[cfg(feature = "std")] {
@@ -71,55 +76,107 @@ commonware_macros::stability_scope!(BETA {
                 iter::{IntoParallelIterator, ParallelIterator},
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
-            use std::{
-                num::NonZeroUsize,
-                sync::Arc,
-                future::Future,
-                pin::Pin,
-                task::{Context, Poll},
-            };
-
-            /// A handle to computation dispatched via [`Strategy::spawn`].
-            ///
-            /// `SpawnHandle` implements [`Future`] and resolves with the value returned by
-            /// the spawned closure. A panic in the closure is treated as fatal: under
-            /// rayon's default behavior the worker aborts the process, so polling the
-            /// handle after such a panic is not observable in practice. If a custom
-            /// executor does let the sender drop without sending (e.g. a user-supplied
-            /// pool that installs its own panic handler), polling the handle panics.
-            #[derive(Debug)]
-            pub struct SpawnHandle<R> {
-                inner: oneshot::Receiver<R>,
-            }
-
-            /// Construct a [`SpawnHandle`] from a oneshot receiver.
-            ///
-            /// Intended for implementors of [`Strategy::spawn`] in other crates.
-            impl<R> From<oneshot::Receiver<R>> for SpawnHandle<R> {
-                fn from(receiver: oneshot::Receiver<R>) -> Self {
-                    Self { inner: receiver }
-                }
-            }
-
-            impl<R> Future for SpawnHandle<R> {
-                type Output = R;
-
-                fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
-                    let this = Pin::into_inner(self);
-                    match Pin::new(&mut this.inner).poll(cx) {
-                        Poll::Ready(Ok(value)) => Poll::Ready(value),
-                        Poll::Ready(Err(_)) => {
-                            panic!("commonware-parallel: worker panicked before sending result")
-                        }
-                        Poll::Pending => Poll::Pending,
-                    }
-                }
-            }
+            use std::{num::NonZeroUsize, sync::Arc};
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
         }
     }
+
+    /// A handle to a computation dispatched via [`Strategy::spawn`].
+    ///
+    /// `SpawnHandle` implements [`Future`] and resolves with the value returned by the
+    /// spawned closure. Strategies that complete their work inline (for example,
+    /// [`Sequential`]) return an already-resolved handle via [`SpawnHandle::ready`];
+    /// strategies that defer work to another thread (for example, [`Rayon`]) return a
+    /// handle backed by a oneshot channel.
+    ///
+    /// # Panics
+    ///
+    /// When the handle is backed by a channel, polling it panics if the sender is
+    /// dropped without sending a value. Under rayon's default behavior a worker panic
+    /// aborts the process before the sender can drop, so this branch is primarily a
+    /// safety net for custom executors that install their own panic handlers.
+    pub struct SpawnHandle<R> {
+        inner: SpawnHandleInner<R>,
+    }
+
+    enum SpawnHandleInner<R> {
+        Ready(Option<R>),
+        #[cfg(feature = "std")]
+        Pending(oneshot::Receiver<R>),
+    }
+
+    impl<R> SpawnHandle<R> {
+        /// Construct an already-resolved [`SpawnHandle`] from a value.
+        ///
+        /// Intended for [`Strategy`] implementations that compute `f` inline and have the
+        /// result available before returning the handle (like [`Sequential`]). Available in
+        /// `no_std` builds.
+        pub const fn ready(value: R) -> Self {
+            Self {
+                inner: SpawnHandleInner::Ready(Some(value)),
+            }
+        }
+    }
+
+    // `SpawnHandle` never structurally pins its inner variants: the `Ready` slot hands
+    // its value out by move, and `oneshot::Receiver` is itself `Unpin`. Opting into
+    // `Unpin` unconditionally frees callers from requiring `R: Unpin`.
+    impl<R> Unpin for SpawnHandle<R> {}
+
+    impl<R: fmt::Debug> fmt::Debug for SpawnHandle<R> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.inner {
+                SpawnHandleInner::Ready(value) => {
+                    f.debug_tuple("SpawnHandle::Ready").field(value).finish()
+                }
+                #[cfg(feature = "std")]
+                SpawnHandleInner::Pending(_) => f.debug_struct("SpawnHandle::Pending").finish(),
+            }
+        }
+    }
+
+    /// Construct a pending [`SpawnHandle`] from a oneshot receiver.
+    ///
+    /// Intended for implementors of [`Strategy::spawn`] that dispatch `f` to another
+    /// thread and deliver the result through a oneshot channel. Only available when the
+    /// `std` feature is enabled, because the underlying channel requires `std`.
+    #[cfg(feature = "std")]
+    impl<R> From<oneshot::Receiver<R>> for SpawnHandle<R> {
+        fn from(receiver: oneshot::Receiver<R>) -> Self {
+            Self {
+                inner: SpawnHandleInner::Pending(receiver),
+            }
+        }
+    }
+
+    impl<R> Future for SpawnHandle<R> {
+        type Output = R;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
+            // The `Context` is only used by the `Pending` variant; silence any unused
+            // warnings in `no_std` builds where that variant does not exist.
+            #[cfg(not(feature = "std"))]
+            let _ = cx;
+
+            let this = Pin::into_inner(self);
+            match &mut this.inner {
+                SpawnHandleInner::Ready(slot) => {
+                    Poll::Ready(slot.take().expect("SpawnHandle polled after resolving"))
+                }
+                #[cfg(feature = "std")]
+                SpawnHandleInner::Pending(rx) => match Pin::new(rx).poll(cx) {
+                    Poll::Ready(Ok(value)) => Poll::Ready(value),
+                    Poll::Ready(Err(_)) => {
+                        panic!("commonware-parallel: worker panicked before sending result")
+                    }
+                    Poll::Pending => Poll::Pending,
+                },
+            }
+        }
+    }
+
     /// A strategy for executing fold operations.
     ///
     /// This trait abstracts over sequential and parallel execution, allowing algorithms
@@ -457,7 +514,6 @@ commonware_macros::stability_scope!(BETA {
         /// });
         /// assert_eq!(block_on(handle), 15);
         /// ```
-        #[cfg(feature = "std")]
         fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
         where
             F: FnOnce(Self) -> R + Send + 'static,
@@ -525,15 +581,12 @@ commonware_macros::stability_scope!(BETA {
             1
         }
 
-        #[cfg(feature = "std")]
         fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
         where
             F: FnOnce(Self) -> R + Send + 'static,
             R: Send + 'static,
         {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(f(self.clone()));
-            rx.into()
+            SpawnHandle::ready(f(self.clone()))
         }
     }
 });
