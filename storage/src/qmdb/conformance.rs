@@ -13,7 +13,7 @@ use crate::{
     qmdb::{
         any::{
             self,
-            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            traits::{DbAny, UnmerkleizedBatch as _},
         },
         current, immutable, keyless,
     },
@@ -48,12 +48,13 @@ type AnyMmbOrderedVariable =
     any::ordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap>;
 
 type CurrentMmrUnorderedFixed =
-    current::unordered::fixed::Db<Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::unordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
 type CurrentMmrUnorderedVariable =
-    current::unordered::variable::Db<Ctx, Digest, Digest, Sha256, OneCap, 32>;
-type CurrentMmrOrderedFixed = current::ordered::fixed::Db<Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::unordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+type CurrentMmrOrderedFixed =
+    current::ordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
 type CurrentMmrOrderedVariable =
-    current::ordered::variable::Db<Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::ordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
 
 type ImmutableMmrFixed = immutable::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
 type ImmutableMmbFixed = immutable::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
@@ -127,9 +128,9 @@ fn any_variable_config(
 fn current_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> current::FixedConfig<OneCap> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        mmr_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
-        grafted_mmr_metadata_partition: format!("{suffix}-graft"),
+        grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
     }
 }
@@ -140,9 +141,9 @@ fn current_variable_config(
 ) -> current::VariableConfig<OneCap, ((), ())> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        mmr_config: merkle_config(suffix, &pc),
+        merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
-        grafted_mmr_metadata_partition: format!("{suffix}-graft"),
+        grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
     }
 }
@@ -220,8 +221,8 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
     for (k, v) in writes {
         batch = batch.write(k, v);
     }
-    let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-    db.apply_batch(finalized).await.unwrap();
+    let merkleized = batch.merkleize(db, None).await.unwrap();
+    db.apply_batch(merkleized).await.unwrap();
 }
 
 /// Apply a batch of immutable sets to the database.
@@ -231,9 +232,8 @@ macro_rules! apply_sets {
         for (k, v) in $ops {
             batch = batch.set(k, v);
         }
-        $db.apply_batch(batch.merkleize(None).finalize())
-            .await
-            .unwrap();
+        let merkleized = batch.merkleize(&$db, None);
+        $db.apply_batch(merkleized).await.unwrap();
     }};
 }
 
@@ -244,9 +244,8 @@ macro_rules! apply_appends {
         for v in $vals {
             batch = batch.append(v);
         }
-        $db.apply_batch(batch.merkleize(None).finalize())
-            .await
-            .unwrap();
+        let merkleized = batch.merkleize(&$db, None);
+        $db.apply_batch(merkleized).await.unwrap();
     }};
 }
 
@@ -613,17 +612,15 @@ macro_rules! assert_immutable_order_independent {
         for &(k, v) in &ops {
             batch = batch.set(k, v);
         }
-        $fwd.apply_batch(batch.merkleize(None).finalize())
-            .await
-            .unwrap();
+        let merkleized = batch.merkleize(&$fwd, None);
+        $fwd.apply_batch(merkleized).await.unwrap();
 
         let mut batch = $rev.new_batch();
         for &(k, v) in ops.iter().rev() {
             batch = batch.set(k, v);
         }
-        $rev.apply_batch(batch.merkleize(None).finalize())
-            .await
-            .unwrap();
+        let merkleized = batch.merkleize(&$rev, None);
+        $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
             $fwd.root().to_vec(),
