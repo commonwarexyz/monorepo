@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::{Cache, LastBuilt},
+        application::validation::{LastBuilt, Stage},
         core::Mailbox,
         standard::{
             validation::{
@@ -411,7 +411,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
-                    Cache::Verified,
+                    Stage::Verified,
                 )
                 .await
                 {

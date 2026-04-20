@@ -74,7 +74,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{is_inferred_reproposal_at_certify, Cache, LastBuilt},
+            validation::{is_inferred_reproposal_at_certify, LastBuilt, Stage},
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
@@ -203,7 +203,7 @@ where
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
-        cache: Cache,
+        stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -227,7 +227,7 @@ where
                     &mut application,
                     &mut marshal,
                     &mut tx,
-                    cache,
+                    stage,
                 )
                 .await
                 {
@@ -502,7 +502,7 @@ where
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.deferred_verify(context, block, Cache::Verified);
+                let task = marshaled.deferred_verify(context, block, Stage::Verified);
                 marshaled.verification_tasks.insert(round, digest, task);
 
                 tx.send_lossy(true);
@@ -598,7 +598,7 @@ where
                 }
 
                 let verify_rx =
-                    marshaled.deferred_verify(embedded_context, block, Cache::Certified);
+                    marshaled.deferred_verify(embedded_context, block, Stage::Certified);
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }

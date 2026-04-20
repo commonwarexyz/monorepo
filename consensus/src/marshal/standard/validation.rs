@@ -2,7 +2,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Cache,
+            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
         core::Mailbox,
         standard::Standard,
@@ -125,7 +125,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
-    cache: Cache,
+    stage: Stage,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -202,7 +202,7 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid && !cache.store(marshal, context.round, block).await {
+    if application_valid && !stage.store(marshal, context.round, block).await {
         debug!(round = ?context.round, "marshal unable to accept block");
         return None;
     }

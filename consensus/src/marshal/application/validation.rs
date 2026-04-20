@@ -15,17 +15,18 @@ use std::sync::Arc;
 /// proposer task and the broadcast path.
 pub(crate) type LastBuilt<B> = Arc<Mutex<Option<(Round, B)>>>;
 
-/// Which marshal cache a verified block should land in.
+/// Which verification stage a block has reached; selects the marshal cache
+/// the block should land in.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Cache {
-    /// Write to `verified_blocks` via [`Mailbox::verified`].
+pub(crate) enum Stage {
+    /// Application verification passed; store via [`Mailbox::verified`].
     Verified,
-    /// Write to `notarized_blocks` via [`Mailbox::certified`].
+    /// Caller holds a notarization certificate; store via [`Mailbox::certified`].
     Certified,
 }
 
-impl Cache {
-    /// Store `block` in the corresponding marshal cache.
+impl Stage {
+    /// Store `block` in the marshal cache for this stage.
     pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
         marshal: &mut Mailbox<S, V>,
