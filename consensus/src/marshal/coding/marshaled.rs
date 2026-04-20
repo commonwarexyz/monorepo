@@ -968,10 +968,10 @@ where
     type Plan = Plan<Self::PublicKey>;
 
     async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
-        // Coding only disseminates on the initial proposer broadcast; peers
-        // reconstruct blocks from erasure-coded shards rather than receiving
-        // targeted full-block forwards. TODO(#3389): checked data forwarding
-        // for PhasedScheme.
+        // Coding variant does not support targeted forwarding;
+        // peers reconstruct blocks from erasure-coded shards.
+        //
+        // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
             return;
         };
