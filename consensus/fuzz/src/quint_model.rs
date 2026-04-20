@@ -1,9 +1,7 @@
-use crate::{
-    tracing::{
-        data::TraceData,
-        encoder::{self, ActionItem, CertItem, EncoderConfig},
-        sniffer::{TraceEntry, TracedCert, TracedVote},
-    },
+use crate::tracing::{
+    data::TraceData,
+    encoder::{self, ActionItem, CertItem, EncoderConfig},
+    sniffer::{TraceEntry, TracedCert, TracedVote},
 };
 use sha1::{Digest, Sha1};
 use std::{
@@ -105,8 +103,7 @@ fn run_quint_test_module(label: &str, suffix: &str, qnt_source: &str) -> Result<
     let output = command.output().map_err(|e| {
         ModelError::new(format!(
             "failed to run quint for {} [{}]: {e}",
-            label,
-            suffix,
+            label, suffix,
         ))
     })?;
 

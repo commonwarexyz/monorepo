@@ -308,7 +308,8 @@ fn next_candidate_trace(
     faults_override: Option<usize>,
     allow_base_fallback: bool,
 ) -> Option<TraceData> {
-    let candidate = mutate_once(base, rng).map(|trace| with_faults_override(trace, faults_override));
+    let candidate =
+        mutate_once(base, rng).map(|trace| with_faults_override(trace, faults_override));
     if candidate.is_some() {
         return candidate;
     }
@@ -1164,10 +1165,7 @@ pub fn run() {
         .map(|trace| with_faults_override(trace, faults_override))
         .collect::<Vec<_>>();
     if base_seeds.is_empty() {
-        eprintln!(
-            "no usable seed traces under {}",
-            seed_dir.display(),
-        );
+        eprintln!("no usable seed traces under {}", seed_dir.display(),);
         process::exit(1);
     }
 
@@ -1276,7 +1274,8 @@ pub fn run() {
                 let mut generated = None;
                 for _ in 0..base_seeds.len().max(1) {
                     let base = &base_seeds[rng.gen_range(0..base_seeds.len())];
-                    if let Some(trace) = next_candidate_trace(base, &mut rng, faults_override, false)
+                    if let Some(trace) =
+                        next_candidate_trace(base, &mut rng, faults_override, false)
                     {
                         generated = Some(trace);
                         break;

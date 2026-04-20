@@ -191,6 +191,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tlc_watch"
+path = "src/bin/tlc_watch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ist"
 path = "src/bin/ist.rs"
 test = false

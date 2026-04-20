@@ -3,6 +3,7 @@
 #
 #   make mbf_live          # run both in parallel (fuzz + watch)
 #   make mbf_live_fuzz     # mutator + tlc-controlled only
+#   make mbf_live_fuzz_fast # libfuzzer trace generation + async tlc-controlled feedback
 #   make mbf_live_watch    # replay watcher only
 #   mbf_live_trace_gen     # run a libfuzzer target and get interesting traces from it
 
@@ -10,12 +11,18 @@ MBF_FAULTS ?= 0 # number of faulty nodes
 
 MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
+MBF_TRACE_GEN_CORPUS ?= ../fuzz/corpus/$(MBF_TRACE_GEN_TARGET)
 MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)
+MBF_FAST_TRACE_SELECTION_STRATEGY ?= smallscope
+MBF_FAST_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(MBF_FAST_TRACE_SELECTION_STRATEGY)
 MBF_TRACE_STATIC_MAX_VIEWS ?= 4
 MBF_TRACE_STATIC_MAX_CONTAINERS ?= 4
 MBF_VALIDATED_SEEDS_FOLDER ?= ../fuzz/artifacts/mutated_traces
+MBF_TLC_APPROVED_CORPUS ?= ../fuzz/corpus/$(MBF_TRACE_GEN_TARGET)_tlc
+MBF_TLC_STATE_DIR ?= ../fuzz/artifacts/tlc_watch/$(MBF_TRACE_GEN_TARGET)_$(MBF_FAST_TRACE_SELECTION_STRATEGY)
+MBF_TLC_WATCH_INTERVAL_SECS ?= 2
 
-.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen mbf_prepare_validated_seeds
+.PHONY: mutate_traces replay_mutated_traces clean_mutated_traces mbf_live_fuzz mbf_live_fuzz_fast mbf_live_watch mbf_live mbf_live_trace_fuzz_gen mbf_live_trace_static_gen mbf_prepare_validated_seeds
 
 mutate_traces:
 	MUTATOR_ITERATIONS=$(MUTATOR_ITERATIONS) \
@@ -79,6 +86,73 @@ mbf_live_fuzz:
 		MUTATION_SEEDS_FOLDER=$(MUTATION_SEEDS_FOLDER) \
 		MUTATOR_FAULTS=$(MBF_FAULTS) \
 		cargo run -p commonware-consensus-fuzz --bin trace_mutator; \
+	'
+
+mbf_live_fuzz_fast:
+	@bash -eu -o pipefail -c '\
+		$(MAKE) -s tlc_compile; \
+		port=$$(./scripts/free_port.sh); \
+		echo "using port $$port"; \
+		TLC_PORT=$$port ./scripts/tlc.sh run & \
+		tlc_pid=$$!; \
+		watcher_pid=""; \
+		fuzz_pid=""; \
+		cleanup() { \
+			if [ -n "$$watcher_pid" ]; then \
+				kill $$watcher_pid 2>/dev/null || true; \
+				wait $$watcher_pid 2>/dev/null || true; \
+			fi; \
+			if [ -n "$$fuzz_pid" ]; then \
+				kill $$fuzz_pid 2>/dev/null || true; \
+				wait $$fuzz_pid 2>/dev/null || true; \
+			fi; \
+			kill $$tlc_pid 2>/dev/null || true; \
+			wait $$tlc_pid 2>/dev/null || true; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		url="http://localhost:$$port/health"; \
+		deadline=$$((SECONDS + 40)); \
+		while ! curl -fsS --max-time 2 "$$url" >/dev/null 2>&1; do \
+			if [ $$SECONDS -ge $$deadline ]; then \
+				echo "tlc-controlled did not start within 40s"; \
+				exit 1; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "tlc-controlled ready on port $$port"; \
+		src="$(MBF_FAST_TRACE_GEN_SRC)"; \
+		corpus="$(MBF_TRACE_GEN_CORPUS)"; \
+		approved="$(MBF_TLC_APPROVED_CORPUS)"; \
+		state="$(MBF_TLC_STATE_DIR)"; \
+		mkdir -p "$$src" "$$corpus" "$$approved" "$$state"; \
+		TLC_URL="http://localhost:$$port/execute" \
+		TLC_WATCH_INTERVAL_SECS="$(MBF_TLC_WATCH_INTERVAL_SECS)" \
+		cargo run -p commonware-consensus-fuzz --bin tlc_watch -- "$$src" "$$approved" "$$state" & \
+		watcher_pid=$$!; \
+		echo "generating traces into $$src"; \
+		echo "TLC-interesting inputs will be copied into $$approved"; \
+		TRACE_SELECTION_STRATEGY="$(MBF_FAST_TRACE_SELECTION_STRATEGY)" \
+		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
+		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" "$$corpus" "$$approved" -- -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) -reload=1 & \
+		fuzz_pid=$$!; \
+		while kill -0 $$watcher_pid 2>/dev/null && kill -0 $$fuzz_pid 2>/dev/null; do \
+			sleep 1; \
+		done; \
+		if ! kill -0 $$watcher_pid 2>/dev/null; then \
+			status=0; \
+			wait $$watcher_pid || status=$$?; \
+			kill $$fuzz_pid 2>/dev/null || true; \
+			wait $$fuzz_pid 2>/dev/null || true; \
+			exit $$status; \
+		fi; \
+		status=0; \
+		wait $$fuzz_pid || status=$$?; \
+		echo "fuzzer finished, draining TLC watcher..."; \
+		sleep 5; \
+		kill $$watcher_pid 2>/dev/null || true; \
+		wait $$watcher_pid 2>/dev/null || true; \
+		exit $$status; \
 	'
 
 mbf_live_watch:

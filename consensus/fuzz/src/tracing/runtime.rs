@@ -633,6 +633,7 @@ fn persist_trace_if_selected(
     hash_hex: &str,
     trace_data: &TraceData,
     filter_n0: bool,
+    corpus_bytes: &[u8],
 ) -> bool {
     let strategy = configured_trace_selection_strategy();
     let metrics = TraceMetrics::from_entries(
@@ -651,13 +652,17 @@ fn persist_trace_if_selected(
     fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
     log_trace_selection(strategy, &artifacts_dir, &metrics, selected);
 
+    let bytes_path = artifacts_dir.join(format!("{hash_hex}.bytes"));
+    fs::write(&bytes_path, corpus_bytes).expect("failed to write trace corpus bytes");
+
     let json = serde_json::to_string_pretty(trace_data).expect("failed to serialize trace");
     let json_path = artifacts_dir.join(format!("{hash_hex}.json"));
     fs::write(&json_path, &json).expect("failed to write trace JSON");
     let line = format!(
-        "wrote {} trace entries to {}",
+        "wrote {} trace entries to {} and corpus bytes to {}",
         trace_data.entries.len(),
-        json_path.display()
+        json_path.display(),
+        bytes_path.display()
     );
     emit_trace_log(strategy, &artifacts_dir, &line);
     true
@@ -1203,7 +1208,13 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             reporter_states,
         };
 
-        persist_trace_if_selected("simplex_ed25519_quint_twins", &hash_hex, &trace_data, false);
+        persist_trace_if_selected(
+            "simplex_ed25519_quint_twins",
+            &hash_hex,
+            &trace_data,
+            false,
+            corpus_bytes,
+        );
     });
 }
 
@@ -1453,6 +1464,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             &hash_hex,
             &trace_data,
             matches!(actor, ByzantineActor::Disrupter),
+            corpus_bytes,
         );
     });
 }
@@ -1772,6 +1784,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             &hash_hex,
             &trace_data,
             false,
+            corpus_bytes,
         );
     });
 }
