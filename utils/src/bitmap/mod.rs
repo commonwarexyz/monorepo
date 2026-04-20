@@ -967,7 +967,13 @@ pub trait Readable<const N: usize> {
     where
         Self: Sized,
     {
-        OnesIter { bitmap: self, pos }
+        let len = self.len();
+        let pruned_start = (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS;
+        OnesIter {
+            bitmap: self,
+            pos: pos.max(pruned_start),
+            len,
+        }
     }
 }
 
@@ -1002,19 +1008,19 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     pos: u64,
+    /// Cached `bitmap.len()` at iterator construction. The underlying bitmap is borrowed
+    /// immutably for the iterator's lifetime, so this can never change mid-iteration.
+    /// For layered bitmaps (e.g. `BitmapBatch`), `len()` walks the layer chain, so caching
+    /// this avoids that walk on every `next`.
+    len: u64,
 }
 
 impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
     type Item = u64;
 
     fn next(&mut self) -> Option<u64> {
-        let len = self.bitmap.len();
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let pruned_start = self.bitmap.pruned_chunks() as u64 * chunk_bits;
-        if self.pos < pruned_start {
-            self.pos = pruned_start;
-        }
-        while self.pos < len {
+        while self.pos < self.len {
             let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
             let chunk = self.bitmap.get_chunk(chunk_idx);
             let chunk_start = chunk_idx as u64 * chunk_bits;
@@ -1027,7 +1033,7 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
                     let found = chunk_start
                         + (byte_idx * 8 + bit_in_byte) as u64
                         + masked.trailing_zeros() as u64;
-                    if found >= len {
+                    if found >= self.len {
                         return None;
                     }
                     self.pos = found + 1;
