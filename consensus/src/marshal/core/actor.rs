@@ -24,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
@@ -210,7 +210,7 @@ where
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
-    T: Strategy,
+    T: Bridge,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -275,7 +275,7 @@ where
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
-    T: Strategy,
+    T: Bridge,
     A: Acknowledgement,
 {
     /// Create a new application actor.

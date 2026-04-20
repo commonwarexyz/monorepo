@@ -20,7 +20,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
@@ -78,7 +78,7 @@ pub struct Engine<
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-    T: Strategy,
+    T: Bridge,
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
@@ -161,7 +161,7 @@ impl<
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-        T: Strategy,
+        T: Bridge,
     > Engine<E, P, D, A, Z, M, B, T>
 {
     /// Creates a new engine with the given context and configuration.
@@ -385,7 +385,7 @@ impl<
                 }
 
                 // Validate that we need to process the ack
-                if let Err(err) = self.validate_ack(&ack, &sender) {
+                if let Err(err) = self.validate_ack(&ack, &sender).await {
                     if err.blockable() {
                         commonware_p2p::block!(
                             self.blocker,
@@ -613,7 +613,7 @@ impl<
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
+    async fn validate_ack(
         &mut self,
         ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
@@ -679,7 +679,12 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme, &self.strategy) {
+        let ack_clone = ack.clone();
+        let scheme = scheme.clone();
+        let mut context = self.context.as_present().clone();
+        if !self.strategy.spawn(move |s| {
+            ack_clone.verify(&mut context, &*scheme, &s)
+        }).await {
             return Err(Error::InvalidAckSignature);
         }
 

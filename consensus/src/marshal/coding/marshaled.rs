@@ -106,7 +106,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics, Spawner, Storage,
@@ -140,7 +140,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     /// The underlying application to wrap.
@@ -173,7 +173,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     context: E,
@@ -206,7 +206,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
@@ -448,7 +448,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     type Digest = Commitment;
@@ -825,7 +825,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
@@ -935,7 +935,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     type Digest = Commitment;
@@ -988,7 +988,7 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
+    S: Bridge,
     ES: Epocher,
 {
     type Activity = A::Activity;

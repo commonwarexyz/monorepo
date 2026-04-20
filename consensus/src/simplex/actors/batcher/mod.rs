@@ -11,12 +11,12 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 pub use verifier::Verifier;
 
-pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
+pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Bridge> {
     pub scheme: S,
 
     pub blocker: B,

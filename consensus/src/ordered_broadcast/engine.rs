@@ -29,7 +29,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
@@ -72,7 +72,7 @@ pub struct Engine<
     R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    T: Strategy,
+    T: Bridge,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -210,7 +210,7 @@ impl<
         R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        T: Strategy,
+        T: Bridge,
     > Engine<E, C, S, P, D, A, R, Z, M, T>
 {
     /// Creates a new engine with the given context and configuration.
@@ -404,7 +404,7 @@ impl<
                         continue;
                     }
                 };
-                let result = match self.validate_node(&node, &sender) {
+                let result = match self.validate_node(&node, &sender).await {
                     Ok(result) => result,
                     Err(err) => {
                         debug!(?err, ?sender, "node validate failed");
@@ -453,7 +453,7 @@ impl<
                         continue;
                     }
                 };
-                if let Err(err) = self.validate_ack(&ack, &sender) {
+                if let Err(err) = self.validate_ack(&ack, &sender).await {
                     debug!(?err, ?sender, "ack validate failed");
                     continue;
                 };
@@ -879,7 +879,7 @@ impl<
     /// If valid (and not already the tracked tip for the sender), returns the implied
     /// parent chunk and its certificate.
     /// Else returns an error if the `Node` is invalid.
-    fn validate_node(
+    async fn validate_node(
         &mut self,
         node: &Node<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
@@ -900,20 +900,21 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Verify the node
-        node.verify(
-            &mut self.context,
-            &self.chunk_verifier,
-            &self.validators_provider,
-            &self.strategy,
-        )
+        // Verify the node (spawned to avoid blocking the async worker)
+        let node = node.clone();
+        let chunk_verifier = self.chunk_verifier.clone();
+        let validators_provider = self.validators_provider.clone();
+        let mut context = self.context.as_present().clone();
+        self.strategy.spawn(move |s| {
+            node.verify(&mut context, &chunk_verifier, &validators_provider, &s)
+        }).await
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
+    async fn validate_ack(
         &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
@@ -963,7 +964,12 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
+        let ack_clone = ack.clone();
+        let scheme = scheme.clone();
+        let mut context = self.context.as_present().clone();
+        if !self.strategy.spawn(move |s| {
+            ack_clone.verify(&mut context, &*scheme, &s)
+        }).await {
             return Err(Error::InvalidAckSignature);
         }
 

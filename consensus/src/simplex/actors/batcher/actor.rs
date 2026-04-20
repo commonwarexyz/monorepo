@@ -15,7 +15,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
@@ -51,7 +51,7 @@ where
     D: Digest,
     Re: Reporter<Activity = Activity<S, D>>,
     Rl: Relay,
-    T: Strategy,
+    T: Bridge,
 {
     context: ContextCell<E>,
 
@@ -88,7 +88,7 @@ where
     D: Digest,
     Re: Reporter<Activity = Activity<S, D>>,
     Rl: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
-    T: Strategy,
+    T: Bridge,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let participants = cfg.scheme.participants().clone();
@@ -424,7 +424,12 @@ where
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        let n = notarization.clone();
+                        let scheme = self.scheme.clone();
+                        let mut context = self.context.as_present().clone();
+                        if !self.strategy.spawn(move |s| {
+                            n.verify(&mut context, &scheme, &s)
+                        }).await {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
@@ -445,11 +450,12 @@ where
                         }
 
                         // Verify the certificate
-                        if !nullification.verify::<_, D>(
-                            &mut self.context,
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
+                        let n = nullification.clone();
+                        let scheme = self.scheme.clone();
+                        let mut context = self.context.as_present().clone();
+                        if !self.strategy.spawn(move |s| {
+                            n.verify::<_, D>(&mut context, &scheme, &s)
+                        }).await {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
                             continue;
                         }
@@ -470,7 +476,12 @@ where
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        let f = finalization.clone();
+                        let scheme = self.scheme.clone();
+                        let mut context = self.context.as_present().clone();
+                        if !self.strategy.spawn(move |s| {
+                            f.verify(&mut context, &scheme, &s)
+                        }).await {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }

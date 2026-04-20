@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -28,7 +28,7 @@ pub struct Engine<
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
-    T: Strategy,
+    T: Bridge,
 > {
     context: ContextCell<E>,
 
@@ -51,7 +51,7 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
+        T: Bridge,
     > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.

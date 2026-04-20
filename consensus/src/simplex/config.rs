@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -50,7 +50,7 @@ where
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
-    T: Strategy,
+    T: Bridge,
 {
     /// Signing scheme for the consensus engine.
     ///
@@ -153,7 +153,7 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
+        T: Bridge,
     > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.

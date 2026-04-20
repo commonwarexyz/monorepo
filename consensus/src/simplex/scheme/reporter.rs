@@ -23,7 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -36,7 +36,7 @@ pub struct AttributableReporter<
     E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
-    T: Strategy,
+    T: Bridge,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
@@ -55,7 +55,7 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
-        T: Strategy,
+        T: Bridge,
         R: Reporter<Activity = Activity<S, D>>,
     > AttributableReporter<E, S, D, T, R>
 {
@@ -75,7 +75,7 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
-        T: Strategy,
+        T: Bridge,
         R: Reporter<Activity = Activity<S, D>>,
     > Reporter for AttributableReporter<E, S, D, T, R>
 {
@@ -83,12 +83,16 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify
-            && !activity.verified()
-            && !activity.verify(&mut self.rng, &self.scheme, &self.strategy)
-        {
-            // Drop unverified peer activity
-            return;
+        if self.verify && !activity.verified() {
+            let a = activity.clone();
+            let scheme = self.scheme.clone();
+            let mut rng = self.rng.clone();
+            if !self.strategy.spawn(move |s| {
+                a.verify(&mut rng, &scheme, &s)
+            }).await {
+                // Drop unverified peer activity
+                return;
+            }
         }
 
         // Filter based on scheme attributability

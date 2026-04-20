@@ -6,13 +6,13 @@ use crate::types::Epoch;
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
 use std::time::Duration;
 
-pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
+pub struct Config<S: Scheme, B: Blocker, T: Bridge> {
     pub scheme: S,
 
     pub blocker: B,

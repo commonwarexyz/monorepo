@@ -3,7 +3,7 @@ use crate::{
     Block,
 };
 use commonware_cryptography::certificate::Provider;
-use commonware_parallel::Strategy;
+use commonware_parallel::Bridge;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -31,7 +31,7 @@ where
     B: Block,
     P: Provider<Scope = Epoch>,
     ES: Epocher,
-    T: Strategy,
+    T: Bridge,
 {
     /// Provider for epoch-specific signing schemes.
     ///

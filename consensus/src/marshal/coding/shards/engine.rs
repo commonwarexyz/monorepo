@@ -159,7 +159,7 @@ use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::{Bridge, Strategy};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{histogram::HistogramExt, status::GaugeExt},
@@ -219,7 +219,7 @@ where
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
-    T: Strategy,
+    T: Bridge,
 {
     /// The scheme provider.
     pub scheme_provider: S,
@@ -280,7 +280,7 @@ where
     H: Hasher,
     B: CertifiableBlock,
     P: PublicKey,
-    T: Strategy,
+    T: Bridge,
 {
     /// Context held by the actor.
     context: ContextCell<E>,
@@ -367,7 +367,7 @@ where
     H: Hasher,
     B: CertifiableBlock,
     P: PublicKey,
-    T: Strategy,
+    T: Bridge,
 {
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
@@ -1268,22 +1268,22 @@ where
 struct InsertCtx<'a, Sch, S>
 where
     Sch: CertificateScheme,
-    S: Strategy,
+    S: Bridge,
 {
     scheme: &'a Sch,
     strategy: &'a S,
     participants_len: u64,
 }
 
-impl<Sch: CertificateScheme, S: Strategy> Clone for InsertCtx<'_, Sch, S> {
+impl<Sch: CertificateScheme, S: Bridge> Clone for InsertCtx<'_, Sch, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<Sch: CertificateScheme, S: Strategy> Copy for InsertCtx<'_, Sch, S> {}
+impl<Sch: CertificateScheme, S: Bridge> Copy for InsertCtx<'_, Sch, S> {}
 
-impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
+impl<'a, Sch: CertificateScheme, S: Bridge> InsertCtx<'a, Sch, S> {
     fn new(scheme: &'a Sch, strategy: &'a S) -> Self {
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
@@ -1407,7 +1407,7 @@ where
     ) -> bool
     where
         Sch: CertificateScheme<PublicKey = P>,
-        S: Strategy,
+        S: Bridge,
         X: Blocker<PublicKey = P>,
     {
         let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
