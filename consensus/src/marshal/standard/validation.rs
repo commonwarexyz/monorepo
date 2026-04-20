@@ -3,6 +3,7 @@ use crate::{
         ancestry::AncestorStream,
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
+            PersistMode,
         },
         core::Mailbox,
         standard::Standard,
@@ -56,18 +57,6 @@ where
 pub(super) enum Decision<B> {
     Complete(bool),
     Continue(B),
-}
-
-/// Which marshal cache a verified block should land in.
-///
-/// Selected by the caller based on context: `Verified` for the initial verify
-/// path, `Certified` when the caller has a notarization for the block.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum PersistMode {
-    /// Write to `verified_blocks` via `Mailbox::verified`.
-    Verified,
-    /// Write to `notarized_blocks` via `Mailbox::certified`.
-    Certified,
 }
 
 /// Performs shared pre-checks used by both inline and deferred verification paths.
@@ -214,15 +203,9 @@ where
         valid = validity_request => valid,
     };
 
-    if application_valid {
-        let persisted = match persist {
-            PersistMode::Verified => marshal.verified(context.round, block).await,
-            PersistMode::Certified => marshal.certified(context.round, block).await,
-        };
-        if !persisted {
-            debug!(round = ?context.round, "marshal unable to accept block");
-            return None;
-        }
+    if application_valid && !persist.persist(marshal, context.round, block).await {
+        debug!(round = ?context.round, "marshal unable to accept block");
+        return None;
     }
     Some(application_valid)
 }

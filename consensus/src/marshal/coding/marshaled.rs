@@ -84,6 +84,7 @@ use crate::{
         application::{
             validation::{
                 is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
+                PersistMode,
             },
             verification_tasks::VerificationTasks,
         },
@@ -124,15 +125,6 @@ use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
-
-/// Which marshal cache a verified coded block should land in.
-#[derive(Clone, Copy, Debug)]
-enum CodingPersistMode {
-    /// Write to `verified_blocks` via `Mailbox::verified`.
-    Verified,
-    /// Write to `notarized_blocks` via `Mailbox::certified`.
-    Certified,
-}
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
@@ -308,7 +300,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
-        persist: CodingPersistMode,
+        persist: PersistMode,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -434,15 +426,9 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid {
-                    let persisted = match persist {
-                        CodingPersistMode::Verified => marshal.verified(round, block).await,
-                        CodingPersistMode::Certified => marshal.certified(round, block).await,
-                    };
-                    if !persisted {
-                        debug!(?round, "marshal unable to accept block");
-                        return;
-                    }
+                if application_valid && !persist.persist(&mut marshal, round, block).await {
+                    debug!(?round, "marshal unable to accept block");
+                    return;
                 }
                 tx.send_lossy(application_valid);
             });
@@ -795,12 +781,7 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(
-            consensus_context,
-            payload,
-            None,
-            CodingPersistMode::Verified,
-        );
+        let task = self.deferred_verify(consensus_context, payload, None, PersistMode::Verified);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -942,7 +923,7 @@ where
                     embedded_context,
                     payload,
                     Some(block),
-                    CodingPersistMode::Certified,
+                    PersistMode::Certified,
                 );
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);

@@ -74,14 +74,13 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{is_inferred_reproposal_at_certify, LastBuilt},
+            validation::{is_inferred_reproposal_at_certify, LastBuilt, PersistMode},
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
-                PersistMode,
             },
             Standard,
         },

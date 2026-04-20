@@ -45,12 +45,11 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::LastBuilt,
+        application::validation::{LastBuilt, PersistMode},
         core::Mailbox,
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
-                PersistMode,
             },
             Standard,
         },
