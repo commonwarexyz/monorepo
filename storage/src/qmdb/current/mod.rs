@@ -2969,6 +2969,65 @@ pub mod tests {
         });
     }
 
+    /// Build a child batch from a still-live parent whose apply was followed by a prune, then
+    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the shared
+    /// committed bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
+    /// child is constructed via `parent.new_batch()`, the internal `trim_committed` call must
+    /// observe the advanced boundary and produce a correct child chain; merkleize and apply must
+    /// then produce correct state for keys at and beyond the advanced floor.
+    #[test_traced("INFO")]
+    fn test_current_live_batch_child_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("child-after-prune", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Seed enough ops to span multiple bitmap chunks.
+            let mut seed = db.new_batch();
+            for i in 0u64..300 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed_m = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
+            let mut a_batch = db.new_batch();
+            for i in 0u64..250 {
+                a_batch = a_batch.write(key(i), Some(val(i + 10_000)));
+            }
+            let a = a_batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(Arc::clone(&a)).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
+            let floor = db.inactivity_floor_loc();
+            db.prune(floor).await.unwrap();
+
+            // Extend `a` into `b` AFTER the prune. Building `b` off `a` triggers
+            // `trim_committed` on `a`'s chain, which must correctly see the advanced pruning
+            // boundary on the shared bitmap.
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(300), Some(val(300)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            db.apply_batch(b).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
+            assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Regression: applying a batch after its ancestor Arc is dropped (without
     /// committing) must still apply the ancestor's bitmap pushes/clears and
     /// snapshot diffs.
