@@ -310,13 +310,15 @@ where
             .spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal). Building a fresh
-                // block would land on the same prunable archive index and be
-                // silently dropped, so the stored block is the only proposal
-                // we can broadcast for this round. The recovered block is
-                // safe to reuse only if its embedded context matches the
-                // context simplex just recovered. Otherwise the cached block
-                // was built against a different parent and cannot be
+                // notarize vote never reached the journal).
+                //
+                // Building a fresh block would land on the same prunable archive
+                // index and be silently dropped, so the stored block is the only proposal
+                // we can broadcast for this round.
+                //
+                // The recovered block is safe to reuse only if its embedded
+                // context matches the context simplex just recovered. Otherwise the
+                // cached block was built against a different parent and cannot be
                 // broadcast under the current header, so drop the receiver
                 // and let the voter nullify the view via timeout.
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
@@ -1213,8 +1215,7 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::zero(), genesis.digest()),
             };
-            let stale_block =
-                B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
+            let stale_block = B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
             assert!(marshal.verified(round, stale_block).await);
 
             // Simulate a replay where parent selection now points to a
