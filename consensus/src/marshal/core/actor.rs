@@ -483,13 +483,7 @@ where
                     return;
                 }
 
-                // Tell the buffer that the last acked block (and, for
-                // variants that cascade by height, every block at or below
-                // its height) is archived, synced, delivered, and acked.
-                // Gap repair is done for those heights, so variant-specific
-                // cleanup can safely cascade. One call is enough for the
-                // whole batch since the cascading prune subsumes any earlier
-                // acked commitments in this drain.
+                // Inform the buffer of the last acknowledged commitment (anything below this is safe to prune).
                 buffer.finalized(last_acked_commitment).await;
 
                 // Fill the pipeline
