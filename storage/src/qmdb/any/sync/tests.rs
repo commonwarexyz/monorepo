@@ -1863,6 +1863,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
