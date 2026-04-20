@@ -269,17 +269,12 @@ mod tests {
         harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
     }
 
-    /// Regression test for issue #167: finalizing a descendant must not
-    /// height-prune the shard-engine buffer before `try_repair_gaps` has
-    /// consumed buffer-only ancestors.
+    /// Finalizing a descendant must not height-prune the shard-engine buffer before
+    /// `try_repair_gaps` has consumed buffer-only ancestors.
     ///
     /// Places parent (height 1) and descendant (height 2) in the shard engine's
     /// reconstructed-block cache via `proposed()`, then reports a finalization
-    /// for the descendant only. With the fix, the gap repair pass pulls the
-    /// parent from the buffer and archives it before any height-prune runs. The
-    /// pre-fix behavior would prune the parent from the buffer inside
-    /// `store_finalization(descendant)` and leave the finalized chain waiting
-    /// on a network fetch that never arrives.
+    /// for the descendant only.
     #[test_traced("WARN")]
     fn test_coding_store_finalization_does_not_prune_buffer_before_repair() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -352,17 +347,17 @@ mod tests {
                 CodingHarness::make_finalization(descendant_proposal, &schemes, QUORUM);
             CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization).await;
 
-            context.sleep(Duration::from_millis(200)).await;
+            // Wait until the descendant is archived: that proves finalization processing
+            // has completed, at which point the parent must already have been repaired
+            // from the shard buffer.
+            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
 
             let parent = handle.mailbox.get_block(Height::new(1)).await;
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
-            );
-            let descendant = handle.mailbox.get_block(Height::new(2)).await;
-            assert!(
-                descendant.is_some(),
-                "descendant must be archived after finalization"
             );
         });
     }
