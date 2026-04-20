@@ -135,7 +135,7 @@ where
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(net).await)
+        spawn_cell!(self.context, self.run(net))
     }
 
     /// Main event loop: multiplexes mailbox messages and engine callbacks.

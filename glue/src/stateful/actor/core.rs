@@ -337,7 +337,7 @@ where
             .context
             .with_label("state_sync_bootstrap")
             .spawn(move |_| bootstrap(marshal, mailbox, bootstrap_config));
-        spawn_cell!(service.shared.context, service.run().await)
+        spawn_cell!(service.shared.context, service.run())
     }
 }
 
