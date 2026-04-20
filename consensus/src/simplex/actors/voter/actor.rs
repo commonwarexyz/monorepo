@@ -743,6 +743,14 @@ impl<
                 self.state.replay(&artifact);
                 match artifact {
                     Artifact::Notarize(notarize) => {
+                        // We deliberately do not re-seed the batcher with our
+                        // own journaled notarize on replay. A crashed validator
+                        // exits the recovered view rather than resurrecting
+                        // in-flight quorum state: the batcher stays oblivious
+                        // to our pre-crash vote, the view nullifies via
+                        // timeout, and consensus advances. `broadcast_notarize`
+                        // is still set by `state.replay` so we do not double-
+                        // vote if the view survives.
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
                     }
