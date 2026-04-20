@@ -1261,7 +1261,7 @@ mod tests {
             for _ in 0..5 {
                 populate_fixed_db::<mmr::Family, _>(&mut db, 0, 512).await;
             }
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             assert!(
                 db.status.pruned_chunks() > 0,
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
