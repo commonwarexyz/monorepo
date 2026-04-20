@@ -183,6 +183,66 @@ where
         db.get(loc).await
     }
 
+    /// Read values at multiple locations.
+    ///
+    /// Acquires the journal reader once for all DB-fallthrough reads.
+    /// Locations must be sorted in ascending order.
+    pub async fn get_many<E, C>(
+        &self,
+        locs: &[Location<F>],
+        db: &Keyless<F, E, V, C, H>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+    {
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut results = Vec::with_capacity(locs.len());
+        let mut db_indices = Vec::new();
+        let mut db_locs = Vec::new();
+
+        for (i, &loc) in locs.iter().enumerate() {
+            let loc_val = *loc;
+
+            // Check this batch's pending appends.
+            if loc_val >= self.base_size {
+                let idx = (loc_val - self.base_size) as usize;
+                results.push(if idx < self.appends.len() {
+                    Some(self.appends[idx].clone())
+                } else {
+                    None
+                });
+                continue;
+            }
+
+            // Check parent operation chain.
+            if let Some(parent) = self.parent.as_ref() {
+                if loc_val >= self.db_size {
+                    if let Some(op) = read_chain_op(parent, loc_val) {
+                        results.push(op.into_value());
+                        continue;
+                    }
+                }
+            }
+
+            // Need DB fallthrough -- record index for reassembly.
+            db_indices.push(i);
+            db_locs.push(loc);
+            results.push(None); // placeholder
+        }
+
+        if !db_locs.is_empty() {
+            let db_results = db.get_many(&db_locs).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub fn merkleize<E, C>(
         self,
@@ -262,6 +322,52 @@ where
 
         // Fall through to base DB.
         db.get(loc).await
+    }
+
+    /// Read values at multiple locations.
+    ///
+    /// Acquires the journal reader once for all DB-fallthrough reads.
+    /// Locations must be sorted in ascending order.
+    pub async fn get_many<E, H, C>(
+        &self,
+        locs: &[Location<F>],
+        db: &Keyless<F, E, V, C, H>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        H: Hasher<Digest = D>,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+    {
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut results = Vec::with_capacity(locs.len());
+        let mut db_indices = Vec::new();
+        let mut db_locs = Vec::new();
+
+        for (i, &loc) in locs.iter().enumerate() {
+            let loc_val = *loc;
+
+            if loc_val >= self.db_size {
+                if let Some(op) = read_chain_op(self, loc_val) {
+                    results.push(op.into_value());
+                    continue;
+                }
+            }
+
+            db_indices.push(i);
+            db_locs.push(loc);
+            results.push(None); // placeholder
+        }
+
+        if !db_locs.is_empty() {
+            let db_results = db.get_many(&db_locs).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.

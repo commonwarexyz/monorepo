@@ -137,6 +137,30 @@ where
         Ok(op.into_value())
     }
 
+    /// Get values at multiple locations in the database.
+    ///
+    /// Acquires the journal reader once, amortizing lock overhead across all reads.
+    /// Positions must be sorted in ascending order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocationOutOfBounds`] if any location >= `bounds().end`.
+    pub async fn get_many(&self, locs: &[Location<F>]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let reader = self.journal.reader().await;
+        let op_count = reader.bounds().end;
+        for &loc in locs {
+            if loc >= op_count {
+                return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
+            }
+        }
+        let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
+        let ops = reader.read_many(&positions).await?;
+        Ok(ops.into_iter().map(|op| op.into_value()).collect())
+    }
+
     /// Returns the location of the last commit.
     pub const fn last_commit_loc(&self) -> Location<F> {
         self.last_commit_loc

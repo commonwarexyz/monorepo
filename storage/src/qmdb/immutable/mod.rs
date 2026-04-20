@@ -212,6 +212,62 @@ where
         Ok(None)
     }
 
+    /// Get values of multiple keys, amortizing reader lock acquisition and journal I/O.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
+
+        let reader = self.journal.reader().await;
+        let oldest = reader.bounds().start;
+
+        for (key_idx, key) in keys.iter().enumerate() {
+            for &loc in self.snapshot.get(*key) {
+                if loc < oldest {
+                    continue;
+                }
+                candidates.push((key_idx, *loc));
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(results);
+        }
+
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+
+        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
+        for &(_, pos) in &candidates {
+            if positions.last() != Some(&pos) {
+                positions.push(pos);
+            }
+        }
+
+        let ops = reader.read_many(&positions).await?;
+
+        for &(key_idx, pos) in &candidates {
+            if results[key_idx].is_some() {
+                continue;
+            }
+            let op_idx = positions
+                .binary_search(&pos)
+                .expect("position was deduped from candidates");
+            let Operation::Set(k, v) = &ops[op_idx] else {
+                continue;
+            };
+            if k == keys[key_idx] {
+                results[key_idx] = Some(v.clone());
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
     /// location is otherwise assumed valid.
