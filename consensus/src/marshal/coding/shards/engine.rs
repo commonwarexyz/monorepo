@@ -596,9 +596,11 @@ where
         // recovery) so we can yield while it runs.
         let shards = state.take_checked_shards();
         let start = self.context.current();
-        let blob = self.strategy.spawn(move |s| {
-            C::decode(&commitment.config(), &commitment.root(), shards.iter(), &s)
-        }).await.map_err(Error::Coding)?;
+        let blob = self
+            .strategy
+            .spawn(move |s| C::decode(&commitment.config(), &commitment.root(), shards.iter(), &s))
+            .await
+            .map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
             .observe_between(start, self.context.current());
@@ -1230,17 +1232,19 @@ where
         // Spawn batch-validation of all pending weak shards so we can yield
         // while the work runs.
         let pending = std::mem::take(&mut self.pending_shards);
-        let (new_checked, to_block) = strategy.spawn(move |s| {
-            s.map_partition_collect_vec(pending, |(peer, shard)| {
-                let checked = C::check(
-                    &commitment.config(),
-                    &commitment.root(),
-                    shard.index,
-                    &shard.data,
-                );
-                (peer, checked.ok())
+        let (new_checked, to_block) = strategy
+            .spawn(move |s| {
+                s.map_partition_collect_vec(pending, |(peer, shard)| {
+                    let checked = C::check(
+                        &commitment.config(),
+                        &commitment.root(),
+                        shard.index,
+                        &shard.data,
+                    );
+                    (peer, checked.ok())
+                })
             })
-        }).await;
+            .await;
 
         for peer in to_block {
             commonware_p2p::block!(blocker, peer, "invalid shard received");

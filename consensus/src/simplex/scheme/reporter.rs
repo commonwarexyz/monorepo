@@ -87,9 +87,11 @@ impl<
             let a = activity.clone();
             let scheme = self.scheme.clone();
             let mut rng = self.rng.clone();
-            if !self.strategy.spawn(move |s| {
-                a.verify(&mut rng, &scheme, &s)
-            }).await {
+            if !self
+                .strategy
+                .spawn(move |s| a.verify(&mut rng, &scheme, &s))
+                .await
+            {
                 // Drop unverified peer activity
                 return;
             }
