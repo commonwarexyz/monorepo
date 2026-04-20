@@ -36,7 +36,7 @@ use thiserror::Error;
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures).
-pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
+pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
 
@@ -71,11 +71,11 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
 
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
-    /// The default implementation returns the peaks of the sub-structure at `prune_loc`,
-    /// which is sufficient for both root computation and re-merkleization of retained leaves.
-    /// Implementations may override to return a conservative superset of the minimally
-    /// required nodes. Callers must therefore treat the result as "safe to retain" rather
-    /// than assuming it is minimal or canonical.
+    /// Pinned nodes are the minimal set of pruned digests required to continue growing the
+    /// structure and recomputing its root after pruning. The default implementation returns the
+    /// peaks of the sub-structure at `prune_loc`, which is sufficient for both root computation and
+    /// re-merkleization of retained leaves. Implementations may override this if their family
+    /// requires a different canonical pinned-node set for the pruning boundary.
     ///
     /// # Panics
     ///
@@ -98,6 +98,88 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// `size_for(N+1)`, where `N` is the given leaf count. These are the nodes created
     /// when the `N`-th leaf is appended.
     fn parent_heights(leaves: Location<Self>) -> impl Iterator<Item = u32>;
+
+    /// Return the height of the node at `pos`.
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic if `pos` does not correspond to a node that exists in some valid
+    /// instance of this family (i.e., it is not a position that would appear in a structure of any
+    /// size).
+    fn pos_to_height(pos: Position<Self>) -> u32;
+}
+
+/// Extension of [`Family`] with methods needed for grafting bitmap chunks onto a Merkle structure.
+/// Grafting combines an activity bitmap with an ops Merkle structure by hashing bitmap chunks
+/// together with ops subtree roots. These methods provide the coordinate conversions and
+/// chunk-to-peak mappings required by that process.
+pub trait Graftable: Family {
+    /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of
+    /// the given `size`.
+    ///
+    /// A chunk at index `chunk_idx` with grafting height `grafting_height` covers leaves
+    /// `[chunk_idx << grafting_height, (chunk_idx + 1) << grafting_height)`. The returned nodes
+    /// partition that range: each node's leaf range is entirely within the chunk, and together they
+    /// cover it exactly.
+    ///
+    /// Results are returned in oldest-to-newest (left-to-right) order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is not a valid size or if the chunk's leaf range exceeds the structure's
+    /// leaf count.
+    fn chunk_peaks(
+        size: Position<Self>,
+        chunk_idx: u64,
+        grafting_height: u32,
+    ) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
+
+    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
+    /// `leaf_start`.
+    ///
+    /// For some families, this position corresponds to a node that physically exists in any
+    /// structure containing those leaves. For others (e.g. MMB with delayed merging), it may be a
+    /// "virtual" position that no actual node occupies, but is still deterministic and unique for
+    /// the given leaf range and height.
+    ///
+    /// Used by grafting to map grafted-structure positions to ops-structure positions for domain
+    /// separation in hash pre-images.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
+    /// computation overflows the bounds of the underlying numeric types.
+    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
+
+    /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
+    /// leaf (height 0), returns its own location.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if an invalid combination of
+    /// `pos` and `height` results in arithmetic underflow/overflow.
+    fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
+
+    /// Return the minimum leaf count at which the node at `pos` with `height` exists in the
+    /// structure.
+    ///
+    /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
+    /// in its span have been appended. For families with delayed merging (e.g. MMB), the
+    /// node is created some number of leaf insertions _after_ its last leaf, so the birth
+    /// size is larger. The MMB override accounts for this delay.
+    ///
+    /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
+    /// parent has been born in the ops tree, which controls when it is safe to prune the
+    /// pair's individual grafted leaves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
+    fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
+        let leftmost = *Self::leftmost_leaf(pos, height);
+        let width = 1u64.checked_shl(height).expect("height excessively large");
+        leftmost.checked_add(width).expect("birth size overflow")
+    }
 }
 
 /// Errors that can occur when interacting with a Merkle-family data structure.
@@ -139,12 +221,22 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Changeset was created against a different state.
-    #[error("stale changeset: expected size {expected}, actual {actual}")]
-    StaleChangeset {
-        /// The size the changeset was built against.
+    /// Structure has diverged incompatibly from the batch's ancestor chain.
+    #[error("stale batch: base size {expected}, current size {actual}")]
+    StaleBatch {
+        /// The base size when the batch chain was forked.
         expected: Position<F>,
-        /// The current size.
+        /// The current structure size.
+        actual: Position<F>,
+    },
+
+    /// An ancestor batch was dropped before this batch was applied, causing
+    /// data loss. All ancestors must be kept alive until descendants are applied.
+    #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
+    AncestorDropped {
+        /// The expected size after applying all ancestors + this batch.
+        expected: Position<F>,
+        /// The actual size (less than expected due to missing ancestor data).
         actual: Position<F>,
     },
 

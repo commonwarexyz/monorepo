@@ -172,7 +172,6 @@ pub(crate) mod test {
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
-
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
@@ -276,8 +275,8 @@ pub(crate) mod test {
                 }
             }
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
@@ -333,29 +332,27 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
             let val = Sha256::fill(1u8);
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert!(db.get(&key2).await.unwrap().is_none());
             assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
             // Batch-insert the middle key.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
@@ -387,25 +384,23 @@ pub(crate) mod test {
 
             // Delete the previous key of a newly created key.
             let mut db = open_variable_db(context.with_label("first")).await;
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), None)
                 .write(key2.clone(), Some(val2))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert!(db.get(&key1).await.unwrap().is_none());
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -418,25 +413,23 @@ pub(crate) mod test {
 
             // Create a key that becomes the previous key of a concurrently deleted key.
             let mut db = open_variable_db(context.with_label("second")).await;
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key2.clone(), Some(val2))
                 .write(key3.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -459,10 +452,10 @@ pub(crate) mod test {
     }
 
     /// Parent inserts a key, child inserts another; commit parent then
-    /// apply child via `finalize_from`. Verifies next-key pointers
+    /// apply child sequentially. Verifies next-key pointers
     /// are correct after both commits.
     #[test_traced("WARN")]
-    fn test_ordered_finalize_from_basic() {
+    fn test_ordered_sequential_commit_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context).await;
@@ -476,30 +469,28 @@ pub(crate) mod test {
             // Parent batch: insert key_a.
             let key_a = Digest::random(&mut test_rng_seeded(800));
             let val_a = vec![1u8; 10];
-            let parent_batch = {
-                let batch = base.new_batch::<Sha256>().write(key_a, Some(val_a.clone()));
-                batch.merkleize(None, &db).await.unwrap()
-            };
+            let parent_batch = base
+                .new_batch::<Sha256>()
+                .write(key_a, Some(val_a.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
 
             // Child batch: insert key_b.
             let key_b = Digest::random(&mut test_rng_seeded(801));
             let val_b = vec![2u8; 10];
-            let child_batch = {
-                let batch = parent_batch
-                    .new_batch::<Sha256>()
-                    .write(key_b, Some(val_b.clone()));
-                batch.merkleize(None, &db).await.unwrap()
-            };
-
-            // Commit parent.
-            db.apply_batch(parent_batch.finalize()).await.unwrap();
-            db.commit().await.unwrap();
-
-            // Commit child via finalize_from.
-            let current_db_size = *db.bounds().await.end;
-            db.apply_batch(child_batch.finalize_from(current_db_size))
+            let child_batch = parent_batch
+                .new_batch::<Sha256>()
+                .write(key_b, Some(val_b.clone()))
+                .merkleize(&db, None)
                 .await
                 .unwrap();
+
+            db.apply_batch(parent_batch).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Commit child.
+            db.apply_batch(child_batch).await.unwrap();
             db.commit().await.unwrap();
 
             // Both keys should be readable.
@@ -511,10 +502,10 @@ pub(crate) mod test {
     }
 
     /// Parent inserts key_x, child deletes key_x. After committing parent
-    /// then child via `finalize_from`, key_x should be gone and the
+    /// then child sequentially, key_x should be gone and the
     /// next-key ring should exclude it.
     #[test_traced("WARN")]
-    fn test_ordered_finalize_from_delete_after_insert() {
+    fn test_ordered_sequential_commit_delete_after_insert() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context).await;
@@ -526,26 +517,26 @@ pub(crate) mod test {
 
             let key_x = Digest::random(&mut test_rng_seeded(810));
             let val_x = vec![10u8; 8];
-            let parent_batch = {
-                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_x.clone()));
-                batch.merkleize(None, &db).await.unwrap()
-            };
+            let parent_batch = base
+                .new_batch::<Sha256>()
+                .write(key_x, Some(val_x.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
 
-            let child_batch = {
-                let batch = parent_batch.new_batch::<Sha256>().write(key_x, None);
-                batch.merkleize(None, &db).await.unwrap()
-            };
+            let child_batch = parent_batch
+                .new_batch::<Sha256>()
+                .write(key_x, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
 
-            // Commit parent.
-            db.apply_batch(parent_batch.finalize()).await.unwrap();
+            db.apply_batch(parent_batch).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
 
-            // Commit child via finalize_from.
-            let current_db_size = *db.bounds().await.end;
-            db.apply_batch(child_batch.finalize_from(current_db_size))
-                .await
-                .unwrap();
+            // Commit child.
+            db.apply_batch(child_batch).await.unwrap();
             db.commit().await.unwrap();
 
             // key_x should be deleted.
@@ -556,9 +547,9 @@ pub(crate) mod test {
     }
 
     /// Parent and child both modify the same key. After committing parent
-    /// then child via `finalize_from`, the child's value wins.
+    /// then child sequentially, the child's value wins.
     #[test_traced("WARN")]
-    fn test_ordered_finalize_from_overlapping_keys() {
+    fn test_ordered_sequential_commit_overlapping_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context).await;
@@ -570,29 +561,27 @@ pub(crate) mod test {
 
             let key_x = Digest::random(&mut test_rng_seeded(820));
             let val_a = vec![10u8; 8];
-            let parent_batch = {
-                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_a.clone()));
-                batch.merkleize(None, &db).await.unwrap()
-            };
+            let parent_batch = base
+                .new_batch::<Sha256>()
+                .write(key_x, Some(val_a.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
 
             let val_b = vec![20u8; 8];
-            let child_batch = {
-                let batch = parent_batch
-                    .new_batch::<Sha256>()
-                    .write(key_x, Some(val_b.clone()));
-                batch.merkleize(None, &db).await.unwrap()
-            };
+            let child_batch = parent_batch
+                .new_batch::<Sha256>()
+                .write(key_x, Some(val_b.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
 
-            // Commit parent.
-            db.apply_batch(parent_batch.finalize()).await.unwrap();
+            db.apply_batch(parent_batch).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
-            // Commit child via finalize_from.
-            let current_db_size = *db.bounds().await.end;
-            db.apply_batch(child_batch.finalize_from(current_db_size))
-                .await
-                .unwrap();
+            // Commit child.
+            db.apply_batch(child_batch).await.unwrap();
             db.commit().await.unwrap();
 
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);

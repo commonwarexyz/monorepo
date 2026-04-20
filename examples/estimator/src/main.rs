@@ -12,7 +12,10 @@ use commonware_runtime::{
     deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
     Runner, Spawner,
 };
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    NZUsize,
+};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
@@ -295,17 +298,31 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
     commands: &[(usize, Command)],
     latencies: &Latencies,
 ) -> Steps {
-    let (network, mut oracle) = Network::new(
+    let mut peer_addresses: Vec<(ed25519::PublicKey, String)> = Vec::with_capacity(peers);
+    for (region, config) in distribution {
+        for _ in 0..config.count {
+            let peer_idx = peer_addresses.len() as u64;
+            peer_addresses.push((
+                ed25519::PrivateKey::from_seed(peer_idx).public_key(),
+                region.clone(),
+            ));
+        }
+    }
+
+    let (network, mut oracle) = Network::new_with_peers(
         context.with_label("network"),
         Config {
             max_size: u32::MAX,
             disconnect_on_block: true,
-            tracked_peer_sets: None,
+            tracked_peer_sets: NZUsize!(1),
         },
-    );
+        peer_addresses.iter().map(|(k, _)| k.clone()),
+    )
+    .await;
     network.start();
 
     let identities = setup_network_identities(
+        &peer_addresses,
         context.network_buffer_pool().clone(),
         &mut oracle,
         distribution,
@@ -336,29 +353,24 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
 
 /// Set up network identities for all peers across regions
 async fn setup_network_identities<C: Clock>(
+    peers: &[(ed25519::PublicKey, String)],
     pool: BufferPool,
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
 ) -> Vec<PeerIdentity<C>> {
-    let peers = count_peers(distribution);
-    let mut identities = Vec::with_capacity(peers);
-    let mut peer_idx = 0;
+    let mut identities = Vec::with_capacity(peers.len());
 
     // Register all peers
-    for (region, config) in distribution {
-        for _ in 0..config.count {
-            let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
-            let (sender, receiver) = oracle
-                .control(identity.clone())
-                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
-                .await
-                .unwrap();
-            let codec_config = (commonware_codec::RangeCfg::from(..), ());
-            let (sender, receiver) =
-                wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
-            identities.push((identity, region.clone(), sender, receiver));
-            peer_idx += 1;
-        }
+    for (identity, region) in peers {
+        let (sender, receiver) = oracle
+            .control(identity.clone())
+            .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
+            .await
+            .unwrap();
+        let codec_config = (commonware_codec::RangeCfg::from(..), ());
+        let (sender, receiver) =
+            wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
+        identities.push((identity.clone(), region.clone(), sender, receiver));
     }
 
     // Set bandwidth limits for each peer based on their region config

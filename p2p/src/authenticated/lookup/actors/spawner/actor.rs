@@ -89,7 +89,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, router).await)
+        spawn_cell!(self.context, self.run(tracker, router))
     }
 
     async fn run(

@@ -71,10 +71,10 @@ mod tests {
             },
             mocks::{
                 harness::{
-                    self, default_leader, genesis_commitment, make_coding_block, setup_network,
-                    setup_network_links, CodingB, CodingCtx, CodingHarness, TestHarness,
-                    BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK,
-                    V,
+                    self, default_leader, genesis_commitment, make_coding_block,
+                    setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
+                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
+                    NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -91,10 +91,9 @@ mod tests {
         Committable, Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZU16;
+    use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
     #[test_group("slow")]
@@ -240,12 +239,14 @@ mod tests {
     fn test_certify_lower_view_after_higher_view() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -361,12 +362,14 @@ mod tests {
     fn test_marshaled_reproposal_validation() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -579,12 +582,14 @@ mod tests {
     fn test_marshaled_rejects_mismatched_context_digest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -670,12 +675,12 @@ mod tests {
     fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone()).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -747,12 +752,12 @@ mod tests {
     fn test_reproposal_missing_block_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone()).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -839,12 +844,14 @@ mod tests {
     fn test_core_subscription_closes_when_coding_buffer_prunes_missing_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let setup = CodingHarness::setup_validator(
                 context.with_label("validator_0"),
@@ -931,12 +938,14 @@ mod tests {
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1035,12 +1044,14 @@ mod tests {
     fn test_marshaled_rejects_invalid_ancestry() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1208,12 +1219,14 @@ mod tests {
         //   4. Return Ok(true) for a valid block
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1326,12 +1339,14 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // 1) Set up a single validator marshal stack.
-            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1415,12 +1430,17 @@ mod tests {
         // the block unless V::commitment(block) matches the finalization payload.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(1));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                NZUsize!(1),
+                participants[..2].iter().cloned(),
+            )
+            .await;
 
             let coding_config_a = coding_config_for_participants(NUM_VALIDATORS as u16);
             // Same total shards (4) but different min/extra split produces a different
@@ -1446,10 +1466,6 @@ mod tests {
             .await;
 
             setup_network_links(&mut oracle, &participants[..2], LINK).await;
-            oracle
-                .manager()
-                .track(0, participants[..2].to_vec().try_into().unwrap())
-                .await;
 
             let mut v0_mailbox = v0_setup.mailbox;
             let v1_mailbox = v1_setup.mailbox;
@@ -1517,5 +1533,66 @@ mod tests {
                 "finalization should not be archived until matching block is available"
             );
         })
+    }
+
+    /// When the scheme provider has no entry for the current epoch,
+    /// `Marshaled::propose` and `Marshaled::verify` must return a dropped
+    /// receiver (the consensus engine treats `RecvError` as "abstain").
+    #[test_traced("WARN")]
+    fn test_marshaled_missing_scheme_skips_propose_and_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle =
+                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                    .await;
+
+            let me = participants[0].clone();
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: setup.mailbox,
+                shards: setup.extra,
+                scheme_provider: EmptyProvider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+
+            // propose with a missing scheme returns a dropped sender
+            let rx = marshaled.propose(ctx.clone()).await;
+            assert!(rx.await.is_err());
+
+            // verify with a missing scheme returns a dropped sender
+            let rx = marshaled.verify(ctx, genesis_commitment()).await;
+            assert!(rx.await.is_err());
+        });
     }
 }

@@ -21,11 +21,7 @@
 //! 3. Merkleize the batch -- this resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Finalize the batch into a changeset.
-//! 6. Apply the changeset to the database.
-//!
-//! A merkleized batch can spawn child batches, forming a tree of speculative states that
-//! share a common ancestor. Only the finalized leaf needs to be applied.
+//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
@@ -110,9 +106,15 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The changeset was created from a different database state than the current one.
-    #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
-    StaleChangeset { expected: u64, actual: u64 },
+    /// The batch was created from a different database state than the current one.
+    #[error(
+        "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
+    )]
+    StaleBatch {
+        db_size: u64,
+        batch_db_size: u64,
+        batch_base_size: u64,
+    },
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
