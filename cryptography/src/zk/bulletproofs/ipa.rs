@@ -57,12 +57,14 @@
 //! Given a [`Setup`], [`Witness`], and [`Claim`], you can create a [`Proof`]
 //! with [`prove`].
 //!
-//! Both [`prove`] and [`verify`] also take a [`Transcript`]. The proof is only
+//! Both [`prove`] and [`pre_verify`] also take a [`Transcript`]. The proof is only
 //! valid for the transcript state used to produce it, so the verifier must
-//! replay the same transcript history before calling [`verify`].
+//! replay the same transcript history before calling [`pre_verify`] or [`verify`].
 //!
 //! On the verifier side, we don't have a [`Witness`], and can instead check
 //! that the prover had a valid witness, using their [`Proof`], through [`verify`].
+//! If you need the verification equation itself for batching or deferred
+//! evaluation, use [`pre_verify`] to obtain the corresponding [`Tangle`].
 //!
 //! ## Example
 //!
@@ -134,7 +136,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{powers, Additive, CryptoGroup, Field, Random, Space},
-    tangle::Tangle,
+    tangle::{Tangle, TangleIdx},
 };
 use commonware_parallel::Strategy;
 
@@ -239,59 +241,48 @@ impl<G> Setup<G> {
 }
 
 impl<G: Clone> Setup<G> {
-    #[must_use]
-    pub fn check_tangle<F>(
+    pub fn tangle_points<F>(
         &self,
         log_len: u8,
-        tangle: Tangle<F, G>,
-        strategy: &impl Strategy,
-    ) -> bool
+    ) -> impl Iterator<Item = (TangleIdx, G)> + use<'_, F, G>
     where
         F: Additive,
         G: Space<F>,
     {
-        let Some(len) = 1usize.checked_shl(u32::from(log_len)) else {
-            return false;
-        };
-        tangle
-            .eval(
-                std::iter::once(((2, 0), self.product_generator().clone()))
-                    .chain(
-                        self.g()
-                            .iter()
-                            .take(len)
-                            .cloned()
-                            .enumerate()
-                            .map(|(i, g_i)| {
-                                (
-                                    (
-                                        0,
-                                        i.try_into().expect("generator index should fit in u32"),
-                                    ),
-                                    g_i,
-                                )
-                            }),
-                    )
-                    .chain(
-                        self.h()
-                            .iter()
-                            .take(len)
-                            .cloned()
-                            .enumerate()
-                            .map(|(i, h_i)| {
-                                (
-                                    (
-                                        1,
-                                        i.try_into().expect("generator index should fit in u32"),
-                                    ),
-                                    h_i,
-                                )
-                            }),
-                    ),
-                strategy,
+        let len = 1usize.checked_shl(u32::from(log_len)).unwrap_or(usize::MAX);
+        std::iter::once(((2, 0), self.product_generator().clone()))
+            .chain(
+                self.g()
+                    .iter()
+                    .take(len)
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, g_i)| {
+                        (
+                            (
+                                0,
+                                i.try_into().expect("generator index should fit in u32"),
+                            ),
+                            g_i,
+                        )
+                    }),
             )
-            .map(|res| res == G::zero())
-            .unwrap_or(false)
+            .chain(
+                self.h()
+                    .iter()
+                    .take(len)
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, h_i)| {
+                        (
+                            (
+                                1,
+                                i.try_into().expect("generator index should fit in u32"),
+                            ),
+                            h_i,
+                        )
+                    }),
+            )
     }
 }
 
@@ -674,22 +665,21 @@ where
     })
 }
 
-/// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
-///  
+/// Construct the verification equation for a [`Proof`], relative to a [`Claim`].
+///
 /// If the check succeeds, we are convinced that the prover knows a valid
 /// [`Witness`] to this particular [`Claim`].
 ///
-/// It's important that the verifier uses a [`Setup`] that they know to be
-/// correct, rather than one that the prover is telling them to use. For example,
-/// by using one generated from a deterministic seed that's agreed upon, or
-/// something similar.
+/// When evaluating the returned [`Tangle`], it's important that the verifier
+/// uses a [`Setup`] that they know to be correct, rather than one that the
+/// prover is telling them to use. For example, by using one generated from a
+/// deterministic seed that's agreed upon, or something similar.
 ///
 /// The return will be `None` if the proof is incorrect in an obvious way.
 /// Otherwise, we have a [`Tangle`] which should [`Tangle::eval`] to 0 if the
 /// proof is correct, using [`Setup::g`] as row 0, [`Setup::h`] as row 1, and
 /// [`Setup::product_generator`] as row 2.
-#[must_use]
-pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
+pub fn pre_verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     claim: &Claim<F, G>,
     proof: Proof<F, G>,
@@ -837,6 +827,28 @@ where
     out -= &(Tangle::free_row(0, g_weights) * &a_final);
     out -= &Tangle::free_point((2, 0), a_final * &b_final * &w);
     Some(out)
+}
+
+/// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
+#[must_use]
+pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
+    transcript: &mut Transcript,
+    setup: &Setup<G>,
+    claim: &Claim<F, G>,
+    proof: Proof<F, G>,
+    strategy: &impl Strategy,
+) -> bool
+where
+    Claim<F, G>: Encode,
+{
+    pre_verify(transcript, claim, proof)
+        .map(|check| {
+            check
+                .eval(setup.tangle_points(claim.log_len), strategy)
+                .expect("should be enough setup points for IPA verification")
+                == G::zero()
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -1017,11 +1029,13 @@ pub mod fuzz {
             } else {
                 NAMESPACE
             };
-            let Some(check) = verify(&mut Transcript::new(ns), &self.claim, self.proof) else {
-                return false;
-            };
-            self.setup
-                .check_tangle(self.claim.log_len, check, &Sequential)
+            verify(
+                &mut Transcript::new(ns),
+                self.setup,
+                &self.claim,
+                self.proof,
+                &Sequential,
+            )
         }
     }
 
