@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::{LastBuilt, Stage},
+        application::validation::Stage,
         core::Mailbox,
         standard::{
             validation::{
@@ -62,6 +62,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
+use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics, Spawner,
@@ -73,7 +74,7 @@ use commonware_utils::{
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Tracks `(round, digest)` pairs for which `verify` has already fetched the
 /// block, so `certify` can return immediately without re-subscribing to marshal.
@@ -141,7 +142,6 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    last_built: LastBuilt<B>,
     available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed<E>,
@@ -162,8 +162,7 @@ where
 {
     /// Creates a new inline-verification wrapper.
     ///
-    /// Registers a `build_duration` histogram for proposal latency and initializes
-    /// the shared "last built block" cache used by [`Relay::broadcast`].
+    /// Registers a `build_duration` histogram for proposal latency.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
@@ -178,7 +177,6 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
             available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
         }
@@ -224,18 +222,15 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
-    /// The built block is cached in memory (`last_built`) for the subsequent
-    /// `Relay::broadcast(Plan::Propose)` call, which invokes `marshal.proposed()`
-    /// as the durable persistence boundary before consensus continues. Receiving
-    /// a digest from `propose()` alone does not mean the block is recoverable
-    /// after restart.
+    /// The built block is persisted via [`Mailbox::verified`] before the digest is
+    /// delivered, so a digest received from `propose()` implies the block is
+    /// recoverable after restart.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let build_duration = self.build_duration.clone();
 
@@ -252,10 +247,6 @@ where
                 // stored block instead.
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
                     let digest = block.digest();
-                    {
-                        let mut lock = last_built.lock();
-                        *lock = Some((consensus_context.round, block));
-                    }
                     let success = tx.send_lossy(digest);
                     debug!(
                         round = ?consensus_context.round,
@@ -302,11 +293,14 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
-                    {
-                        let mut lock = last_built.lock();
-                        *lock = Some((consensus_context.round, parent));
+                    if !marshal.verified(consensus_context.round, parent).await {
+                        debug!(
+                            round = ?consensus_context.round,
+                            ?digest,
+                            "marshal rejected re-proposed boundary block"
+                        );
+                        return;
                     }
-
                     let success = tx.send_lossy(digest);
                     debug!(
                         round = ?consensus_context.round,
@@ -347,9 +341,13 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
-                {
-                    let mut lock = last_built.lock();
-                    *lock = Some((consensus_context.round, built_block));
+                if !marshal.verified(consensus_context.round, built_block).await {
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        "marshal rejected proposed block"
+                    );
+                    return;
                 }
                 let success = tx.send_lossy(digest);
                 debug!(
@@ -524,33 +522,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> bool {
-        match plan {
-            Plan::Propose => {
-                let Some((round, block)) = self.last_built.lock().take() else {
-                    warn!(?digest, "missing block to broadcast");
-                    return false;
-                };
-                if block.digest() != digest {
-                    warn!(
-                        round = %round,
-                        digest = %block.digest(),
-                        height = %block.height(),
-                        "skipping requested broadcast of block with mismatched digest"
-                    );
-                    return false;
-                };
-                if !self.marshal.proposed(round, block).await {
-                    warn!(?round, ?digest, "marshal unable to accept block");
-                    return false;
-                }
-                true
-            }
-            Plan::Forward { round, peers } => {
-                self.marshal.forward(round, digest, peers).await;
-                true
-            }
-        }
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+        let (round, recipients) = match plan {
+            Plan::Propose { round } => (round, Recipients::All),
+            Plan::Forward { round, recipients } => (round, recipients),
+        };
+        self.marshal.forward(round, digest, recipients).await;
     }
 }
 
@@ -587,9 +564,7 @@ mod tests {
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context, Plan,
-        },
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
@@ -670,7 +645,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.proposed(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -681,7 +656,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.proposed(round, block).await);
+            assert!(marshal.verified(round, block).await);
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -748,7 +723,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.proposed(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -759,7 +734,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.proposed(round, block).await);
+            assert!(marshal.verified(round, block).await);
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;
@@ -824,7 +799,7 @@ mod tests {
                 1900,
             );
             let boundary_digest = boundary_block.digest();
-            assert!(marshal.proposed(boundary_round, boundary_block).await);
+            assert!(marshal.verified(boundary_round, boundary_block).await);
 
             let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = Ctx {
@@ -1192,9 +1167,9 @@ mod tests {
     }
 
     /// Regression: if marshal persisted a verified block for a round before
-    /// a crash (say, via a prior `Relay::broadcast(Plan::Propose)` landing on
-    /// the verified cache) but the simplex notarize artifact never reached
-    /// the journal, a restarted leader must re-use the persisted block.
+    /// a crash (via a prior `propose` call) but the simplex notarize artifact
+    /// never reached the journal, a restarted leader must re-use the persisted
+    /// block.
     ///
     /// Otherwise the application is asked to build afresh, returns a new
     /// block whose digest does not match the one marshal already stored
@@ -1235,7 +1210,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
             let digest_a = block_a.digest();
-            assert!(marshal.proposed(round, block_a.clone()).await);
+            assert!(marshal.verified(round, block_a.clone()).await);
 
             // After restart, the fresh application would build a different
             // block for the same round (distinct timestamp -> distinct digest).
@@ -1257,14 +1232,6 @@ mod tests {
             assert_eq!(
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
-            );
-
-            // After the automaton hands the digest to the voter, the voter
-            // calls Relay::broadcast(Plan::Propose). That call must succeed so
-            // the leader actually votes instead of bailing out.
-            assert!(
-                inline.broadcast(digest_a, Plan::Propose).await,
-                "relay broadcast must succeed after re-propose"
             );
         });
     }

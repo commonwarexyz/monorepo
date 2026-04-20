@@ -757,7 +757,7 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
+/// Contract: `marshal.verified(...)=true` means the block survives an
 /// immediate crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
@@ -835,7 +835,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                         .await;
                         assert!(
                         restarted.mailbox.get_block(&digest).await.is_some(),
-                        "marshal.proposed() returning true must imply the block is recoverable \
+                        "marshal.verified() returning true must imply the block is recoverable \
                          after restart (seed={seed}, cycle={cycle})"
                     );
                     }
@@ -995,6 +995,8 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         let orphan_digest = H::digest(&orphan);
 
         // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
+        // The chain below starts at V=2 to avoid overwriting V=1 in the
+        // verified archive (which drops subsequent writes at an existing view).
         let v_early = Round::new(Epoch::zero(), View::new(1));
         let v_late = Round::new(Epoch::zero(), View::new(25));
         let mut peers: [ValidatorHandle<H>; 0] = [];
@@ -1010,7 +1012,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // Drive the finalized chain forward to advance `last_processed_round`
         // past V=1's retention boundary but not past V=25's. With
         // view_retention_timeout=10 and prunable_items_per_section=10,
-        // processing views 1..=21 leaves `oldest_allowed=10` in both prunable
+        // processing views 2..=22 leaves `oldest_allowed=12` in both prunable
         // archives. V=1 is dropped, V=25 is retained.
         const CHAIN_LEN: u64 = 21;
         let mut parent = Sha256::hash(b"");
@@ -1025,11 +1027,11 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
-            let round = Round::new(Epoch::zero(), View::new(i));
+            let round = Round::new(Epoch::zero(), View::new(i + 1));
             H::propose(&mut handle, round, &block).await;
             let proposal = Proposal {
                 round,
-                parent: View::new(i - 1),
+                parent: View::new(i),
                 payload: commitment,
             };
             let finalization = H::make_finalization(proposal, &schemes, QUORUM);
@@ -1471,7 +1473,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
     async fn verify(
@@ -2295,7 +2297,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
+        assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
     async fn verify(

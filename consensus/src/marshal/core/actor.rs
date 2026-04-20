@@ -529,18 +529,12 @@ where
                             .map(Into::into);
                         response.send_lossy(block);
                     }
-                    Message::Proposed { round, block, ack } => {
-                        self.cache_verified(round, block.digest(), block.clone())
-                            .await;
-                        buffer.send(round, block, Recipients::All).await;
-                        ack.send_lossy(());
-                    }
                     Message::Forward {
                         round,
                         commitment,
-                        peers,
+                        recipients,
                     } => {
-                        if peers.is_empty() {
+                        if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                             continue;
                         }
                         let Some(block) = self.find_block_by_commitment(&buffer, commitment).await
@@ -548,7 +542,7 @@ where
                             debug!(?commitment, "block not found for forwarding");
                             continue;
                         };
-                        buffer.send(round, block, Recipients::Some(peers)).await;
+                        buffer.send(round, block, recipients).await;
                     }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,

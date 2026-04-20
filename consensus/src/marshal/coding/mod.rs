@@ -80,11 +80,9 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
         },
-        simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal, Plan,
-        },
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, Relay,
+        Automaton, CertifiableAutomaton,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -432,7 +430,6 @@ mod tests {
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
             shards
-                .clone()
                 .proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent)
                 .await;
 
@@ -446,7 +443,7 @@ mod tests {
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
             let coded_block_a = CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_block_a.commitment();
-            shards.clone().proposed(round_a, coded_block_a).await;
+            shards.proposed(round_a, coded_block_a).await;
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -459,7 +456,7 @@ mod tests {
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
             let coded_block_b = CodedBlock::new(block_b.clone(), coding_config, &Sequential);
             let commitment_b = coded_block_b.commitment();
-            shards.clone().proposed(round_b, coded_block_b).await;
+            shards.proposed(round_b, coded_block_b).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -558,7 +555,7 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
-                shards.clone().proposed(round, coded_block).await;
+                shards.proposed(round, coded_block).await;
                 parent = block.digest();
                 last_view = View::new(i);
             }
@@ -580,10 +577,7 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards
-                .clone()
-                .proposed(boundary_round, coded_boundary)
-                .await;
+            shards.proposed(boundary_round, coded_boundary).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -645,7 +639,6 @@ mod tests {
 
             // Make the non-boundary block available
             shards
-                .clone()
                 .proposed(non_boundary_round, coded_non_boundary)
                 .await;
 
@@ -773,7 +766,6 @@ mod tests {
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
             shards
-                .clone()
                 .proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent)
                 .await;
 
@@ -1134,7 +1126,6 @@ mod tests {
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
             shards
-                .clone()
                 .proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent)
                 .await;
 
@@ -1148,7 +1139,6 @@ mod tests {
             let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
             let block_commitment = coded_block.commitment();
             shards
-                .clone()
                 .proposed(Round::new(Epoch::new(1), View::new(20)), coded_block)
                 .await;
 
@@ -1248,7 +1238,6 @@ mod tests {
             let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
             shards
-                .clone()
                 .proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent)
                 .await;
 
@@ -1270,10 +1259,7 @@ mod tests {
             let coded_malicious =
                 CodedBlock::new(malicious_block.clone(), coding_config, &Sequential);
             let malicious_commitment = coded_malicious.commitment();
-            shards
-                .clone()
-                .proposed(byzantine_round, coded_malicious)
-                .await;
+            shards.proposed(byzantine_round, coded_malicious).await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1318,10 +1304,7 @@ mod tests {
             let coded_malicious2 =
                 CodedBlock::new(malicious_block2.clone(), coding_config, &Sequential);
             let malicious_commitment2 = coded_malicious2.commitment();
-            shards
-                .clone()
-                .proposed(byzantine_round2, coded_malicious2)
-                .await;
+            shards.proposed(byzantine_round2, coded_malicious2).await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1410,7 +1393,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.clone().proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent).await;
 
             // Create child at height 2.
             let child_round = Round::new(Epoch::zero(), View::new(2));
@@ -1422,7 +1405,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::new(child, coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
-            shards.clone().proposed(child_round, coded_child).await;
+            shards.proposed(child_round, coded_child).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1531,7 +1514,7 @@ mod tests {
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.clone().proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent).await;
 
             // 3) Publish a valid child so optimistic verify can succeed.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1544,7 +1527,7 @@ mod tests {
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = CodedBlock::new(block, coding_config, &Sequential);
             let commitment = coded_block.commitment();
-            shards.clone().proposed(round, coded_block).await;
+            shards.proposed(round, coded_block).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1639,7 +1622,7 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            assert!(v1_mailbox.proposed(round1, coded_block_b.clone()).await);
+            assert!(v1_mailbox.verified(round1, coded_block_b.clone()).await);
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -1799,7 +1782,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.clone().proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent).await;
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
@@ -1811,7 +1794,7 @@ mod tests {
             let coded_child = CodedBlock::new(child.clone(), coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
             let child_digest = coded_child.digest();
-            shards.clone().proposed(child_round, coded_child).await;
+            shards.proposed(child_round, coded_child).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1870,10 +1853,10 @@ mod tests {
     }
 
     /// Regression: a proposer must be able to recover its own block after a
-    /// crash that occurs between `Marshaled::propose()` + `Relay::broadcast(Plan::Propose)`
-    /// and any verify-driven persistence. Without persisting on the broadcast
-    /// path, the block lives only in the in-memory shards cache and is lost
-    /// across restart.
+    /// crash that occurs immediately after `Marshaled::propose()` returns a
+    /// commitment. `propose` is responsible for persisting the block via
+    /// `marshal.verified`, so the block must survive restart even if
+    /// `Relay::broadcast` never runs or marshal aborts in between.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -1944,19 +1927,16 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
-            // Drive the full leader-side propose + broadcast path.
+            // Drive the leader-side propose path. `propose` must persist the
+            // block before returning the commitment.
             let commitment = marshaled
                 .propose(propose_context)
                 .await
                 .await
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
-            assert!(
-                marshaled.broadcast(commitment, Plan::Propose).await,
-                "broadcast should persist the proposed block before returning"
-            );
 
-            // Abort marshal immediately after broadcast returns; the propose
+            // Abort marshal immediately after propose returns; the propose
             // path must already have persisted the block.
             marshal_actor_handle.abort();
             drop(marshaled);
@@ -2036,7 +2016,7 @@ mod tests {
             let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_a.commitment();
-            assert!(marshal.proposed(round, coded_a).await);
+            assert!(marshal.verified(round, coded_a).await);
 
             // After restart, a fresh application would build a different
             // block for the same round.
@@ -2069,11 +2049,6 @@ mod tests {
             assert_eq!(
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
-            );
-
-            assert!(
-                marshaled.broadcast(commitment_a, Plan::Propose).await,
-                "relay broadcast must succeed after re-propose"
             );
         });
     }

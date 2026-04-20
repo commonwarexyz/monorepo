@@ -82,7 +82,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -479,12 +479,12 @@ mod tests {
             .mailbox;
             assert!(
                 peer_mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
                     .await
             );
             assert!(
                 peer_mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
                     .await
             );
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -576,17 +576,17 @@ mod tests {
             .mailbox;
             assert!(
                 peer_mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
                     .await
             );
             assert!(
                 peer_mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
                     .await
             );
             assert!(
                 peer_mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
+                    .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
                     .await
             );
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
@@ -768,7 +768,7 @@ mod tests {
             for (i, block) in blocks.iter().enumerate() {
                 assert!(
                     peer_mailbox
-                        .proposed(
+                        .verified(
                             Round::new(Epoch::zero(), View::new(block.height().get())),
                             (*block).clone(),
                         )
@@ -1200,7 +1200,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .proposed(boundary_round, boundary_block.clone())
+                        .verified(boundary_round, boundary_block.clone())
                         .await
                 );
 
@@ -1272,7 +1272,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .proposed(boundary_round, boundary_block)
+                        .verified(boundary_round, boundary_block)
                         .await
                 );
 
@@ -1311,7 +1311,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .proposed(non_boundary_round, non_boundary_block)
+                        .verified(non_boundary_round, non_boundary_block)
                         .await
                 );
 
@@ -1416,7 +1416,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .proposed(malformed_round, malformed_block)
+                        .verified(malformed_round, malformed_block)
                         .await
                 );
 
@@ -1456,7 +1456,7 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                assert!(marshal.clone().proposed(parent_round, parent).await);
+                assert!(marshal.verified(parent_round, parent).await);
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -1474,7 +1474,7 @@ mod tests {
                 assert!(
                     marshal
                         .clone()
-                        .proposed(mismatch_round, mismatched_block)
+                        .verified(mismatch_round, mismatched_block)
                         .await
                 );
 
@@ -1549,7 +1549,7 @@ mod tests {
                 };
                 let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-                assert!(marshal.clone().proposed(parent_round, parent).await);
+                assert!(marshal.verified(parent_round, parent).await);
 
                 // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
@@ -1560,7 +1560,7 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
                 let digest = block.digest();
-                assert!(marshal.clone().proposed(round, block).await);
+                assert!(marshal.verified(round, block).await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1703,67 +1703,6 @@ mod tests {
                 panic!("{label} did not hold within {deadline:?}");
             }
             context.sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// A buffer whose `send` blocks until released, and signals when entered.
-    /// Used to verify `proposed` only resolves after `buffer.send` completes.
-    #[derive(Clone)]
-    struct GatingBuffer {
-        send_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    }
-
-    impl GatingBuffer {
-        fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (entered_tx, entered_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    send_entered: Arc::new(Mutex::new(Some(entered_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                entered_rx,
-                release_tx,
-            )
-        }
-    }
-
-    impl crate::marshal::core::Buffer<Standard<B>> for GatingBuffer {
-        type PublicKey = PublicKey;
-        type CachedBlock = B;
-
-        async fn find_by_digest(&self, _digest: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn find_by_commitment(&self, _commitment: D) -> Option<Self::CachedBlock> {
-            None
-        }
-
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn subscribe_by_commitment(
-            &self,
-            _commitment: D,
-        ) -> oneshot::Receiver<Self::CachedBlock> {
-            let (_sender, receiver) = oneshot::channel();
-            receiver
-        }
-
-        async fn finalized(&self, _commitment: D) {}
-
-        async fn send(&self, _round: Round, _block: B, _recipients: Recipients<PublicKey>) {
-            if let Some(entered) = self.send_entered.lock().take() {
-                entered.send_lossy(());
-            }
-            let release = self.release.lock().take();
-            if let Some(release) = release {
-                let _ = release.await;
-            }
         }
     }
 
@@ -1912,70 +1851,6 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
-    }
-
-    /// Regression: `marshal.proposed` must not ack until the block has been
-    /// handed off to the provided buffer.
-    #[test_traced("WARN")]
-    fn test_standard_proposed_waits_for_buffer_send() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-            let partition_prefix = format!("proposed-waits-buffer-{me}");
-
-            let (buffer, send_entered, release) = GatingBuffer::new();
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.with_label("validator_0"),
-                &partition_prefix,
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                buffer,
-            )
-            .await;
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-
-            // Drive `proposed` from a spawned task so we can observe its state
-            // from the main task via a completion channel.
-            let (done_tx, done_rx) = oneshot::channel();
-            context
-                .with_label("proposed_caller")
-                .spawn(move |_| async move {
-                    let ok = mailbox.proposed(round, block).await;
-                    done_tx.send_lossy(ok);
-                });
-
-            // Wait for the marshal actor to enter `buffer.send`.
-            send_entered
-                .await
-                .expect("buffer.send should be entered after cache_verified");
-
-            // With the buffer held in `send`, `proposed` must remain pending.
-            // Poll it against a generous timer; the timer should always win.
-            futures::pin_mut!(done_rx);
-            select! {
-                _ = context.sleep(Duration::from_millis(500)) => {},
-                _ = &mut done_rx => {
-                    panic!("proposed returned before buffer.send released");
-                },
-            }
-
-            // Releasing the gate lets `send` complete; `proposed` must then ack.
-            release.send_lossy(());
-            let ok = select! {
-                result = &mut done_rx => result.expect("proposed channel closed"),
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("proposed did not complete after buffer release");
-                },
-            };
-            assert!(ok, "proposed should return true after durable dispatch");
-        });
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries
@@ -2362,7 +2237,11 @@ mod tests {
             .await;
 
             mailbox
-                .forward(round, unknown, vec![participants[1].clone()])
+                .forward(
+                    round,
+                    unknown,
+                    Recipients::Some(vec![participants[1].clone()]),
+                )
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
@@ -2401,7 +2280,9 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
-            mailbox.forward(round, digest, targets.clone()).await;
+            mailbox
+                .forward(round, digest, Recipients::Some(targets.clone()))
+                .await;
 
             wait_until(&context, Duration::from_secs(5), "buffer.send", || {
                 !buffer.sends.lock().is_empty()
