@@ -527,10 +527,12 @@ where
             .spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
                 // for this round (persisted before voting in consensus).
+                //
                 // Building a fresh block would land on the same prunable
                 // archive index and be silently dropped, so the stored block
-                // is the only proposal we can broadcast for this round. The
-                // recovered block is safe to reuse only if its embedded
+                // is the only proposal we can broadcast for this round.
+
+                // The recovered block is safe to reuse only if its embedded
                 // context matches the context simplex just recovered.
                 // Otherwise the cached block was built against a different
                 // parent and cannot be broadcast under the current header, so
