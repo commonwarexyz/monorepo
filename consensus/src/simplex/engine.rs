@@ -16,7 +16,7 @@ use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use rand_core::CryptoRngCore;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -237,13 +237,13 @@ impl<
                 debug!("context shutdown, stopping engine");
             },
             _ = &mut voter_task => {
-                warn!("voter stopped, shutting down engine");
+                debug!("voter stopped, shutting down engine");
             },
             _ = &mut batcher_task => {
-                warn!("batcher stopped, shutting down engine");
+                debug!("batcher stopped, shutting down engine");
             },
             _ = &mut resolver_task => {
-                warn!("resolver stopped, shutting down engine");
+                debug!("resolver stopped, shutting down engine");
             },
         }
     }

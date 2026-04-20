@@ -19,7 +19,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
 use rand_core::CryptoRngCore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
@@ -213,19 +213,19 @@ impl<
                 debug!("context shutdown, stopping network");
             },
             tracker = &mut tracker_task => {
-                warn!(?tracker, "tracker stopped, shutting down network");
+                debug!(?tracker, "tracker stopped, shutting down network");
             },
             router = &mut router_task => {
-                warn!(?router, "router stopped, shutting down network");
+                debug!(?router, "router stopped, shutting down network");
             },
             spawner = &mut spawner_task => {
-                warn!(?spawner, "spawner stopped, shutting down network");
+                debug!(?spawner, "spawner stopped, shutting down network");
             },
             listener = &mut listener_task => {
-                warn!(?listener, "listener stopped, shutting down network");
+                debug!(?listener, "listener stopped, shutting down network");
             },
             dialer = &mut dialer_task => {
-                warn!(?dialer, "dialer stopped, shutting down network");
+                debug!(?dialer, "dialer stopped, shutting down network");
             },
         }
     }
