@@ -155,7 +155,7 @@ where
         let mut results: Vec<Option<U::Value>> = vec![None; keys.len()];
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(*key) {
+            for &loc in self.snapshot.get(key) {
                 candidates.push((key_idx, *loc));
             }
         }
