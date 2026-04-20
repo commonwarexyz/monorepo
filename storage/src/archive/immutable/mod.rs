@@ -5,9 +5,9 @@
 //!
 //! # Uniqueness
 //!
-//! [Archive] assumes all stored indices are unique. If the same key is associated with
-//! multiple indices, there is no guarantee which value will be returned. If the key is written to
-//! an existing index, it is a no-op.
+//! [Archive] assumes all stored indices are unique. Writing to an occupied index is a no-op.
+//! If the same key is associated with multiple indices, there is no guarantee which value will
+//! be returned.
 //!
 //! # Compression
 //!

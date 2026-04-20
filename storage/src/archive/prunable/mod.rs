@@ -30,11 +30,13 @@
 //!
 //! # Uniqueness
 //!
-//! Indices are unique for [Archive] and writing to an occupied index it is a no-op. Duplicate indices
-//! can be stored via [`crate::archive::MultiArchive::put_multi`].
+//! Indices are unique for [Archive] and writing to an occupied index is a no-op. Duplicate
+//! indices can be stored via [`crate::archive::MultiArchive::put_multi`].
 //!
-//! Keys may be stored at multiple indices with either put variant: a lookup by [`crate::archive::Identifier::Key`] may return any
-//! of the values at that key.
+//! Keys may be stored at multiple indices with either put variant. A lookup by
+//! [`crate::archive::Identifier::Key`] may return any of the values at that key. Entries
+//! whose index has been pruned are never returned or reported as present, so a key matching
+//! both a pruned and a non-pruned entry resolves to the non-pruned entry.
 //!
 //! ## Conflicts
 //!
