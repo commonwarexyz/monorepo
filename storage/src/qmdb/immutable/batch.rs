@@ -166,6 +166,73 @@ where
         db.get(key).await
     }
 
+    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, T>(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+        T: Translator,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local mutations.
+            if let Some(value) = self.mutations.get(*key) {
+                results.push(Some(value.clone()));
+                continue;
+            }
+
+            // Check parent diff chain.
+            let mut found = false;
+            if let Some(parent) = self.parent.as_ref() {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(Some(entry.value.clone()));
+                    found = true;
+                }
+                if !found {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(Some(entry.value.clone()));
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None); // placeholder
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
@@ -273,6 +340,66 @@ where
             }
         }
         db.get(key).await
+    }
+
+    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, H, T>(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+        H: CHasher<Digest = D>,
+        T: Translator,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local diff.
+            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+                results.push(Some(entry.value.clone()));
+                continue;
+            }
+
+            // Walk parent chain.
+            let mut found = false;
+            for batch in self.ancestors() {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                    results.push(Some(entry.value.clone()));
+                    found = true;
+                    break;
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None); // placeholder
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
