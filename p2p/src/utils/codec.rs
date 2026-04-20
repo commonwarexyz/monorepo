@@ -361,6 +361,16 @@ mod tests {
         fn parallelism_hint(&self) -> usize {
             self.0
         }
+
+        fn spawn<F, R>(&self, f: F) -> commonware_parallel::SpawnHandle<R>
+        where
+            F: FnOnce(Self) -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            let (tx, rx) = commonware_utils::channel::oneshot::channel();
+            let _ = tx.send(f(*self));
+            rx.into()
+        }
     }
 
     #[derive(Debug)]

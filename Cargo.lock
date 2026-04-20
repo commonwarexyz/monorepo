@@ -1519,6 +1519,8 @@ version = "2026.4.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "commonware-utils",
+ "futures",
  "proptest",
  "rayon",
 ]

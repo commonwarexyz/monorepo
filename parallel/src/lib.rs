@@ -66,11 +66,55 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(feature = "std")] {
+            use commonware_utils::channel::oneshot;
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
-            use std::{num::NonZeroUsize, sync::Arc};
+            use std::{
+                num::NonZeroUsize,
+                sync::Arc,
+                future::Future,
+                pin::Pin,
+                task::{Context, Poll},
+            };
+
+            /// A handle to computation dispatched via [`Strategy::spawn`].
+            ///
+            /// `SpawnHandle` implements [`Future`] and resolves with the value returned by
+            /// the spawned closure. A panic in the closure is treated as fatal: under
+            /// rayon's default behavior the worker aborts the process, so polling the
+            /// handle after such a panic is not observable in practice. If a custom
+            /// executor does let the sender drop without sending (e.g. a user-supplied
+            /// pool that installs its own panic handler), polling the handle panics.
+            #[derive(Debug)]
+            pub struct SpawnHandle<R> {
+                inner: oneshot::Receiver<R>,
+            }
+
+            /// Construct a [`SpawnHandle`] from a oneshot receiver.
+            ///
+            /// Intended for implementors of [`Strategy::spawn`] in other crates.
+            impl<R> From<oneshot::Receiver<R>> for SpawnHandle<R> {
+                fn from(receiver: oneshot::Receiver<R>) -> Self {
+                    Self { inner: receiver }
+                }
+            }
+
+            impl<R> Future for SpawnHandle<R> {
+                type Output = R;
+
+                fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
+                    let this = Pin::into_inner(self);
+                    match Pin::new(&mut this.inner).poll(cx) {
+                        Poll::Ready(Ok(value)) => Poll::Ready(value),
+                        Poll::Ready(Err(_)) => {
+                            panic!("commonware-parallel: worker panicked before sending result")
+                        }
+                        Poll::Pending => Poll::Pending,
+                    }
+                }
+            }
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -380,6 +424,44 @@ commonware_macros::stability_scope!(BETA {
 
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
+
+        /// Dispatch `f` to the underlying executor and return a [`SpawnHandle`] that
+        /// resolves to its result.
+        ///
+        /// The closure receives an owned clone of the strategy, which lets it invoke other
+        /// [`Strategy`] methods without the caller having to pre-clone `self`. The handle
+        /// is a [`Future`], so callers can `.await` it from async contexts without blocking
+        /// the calling thread.
+        ///
+        /// For [`Rayon`], `f` runs on a thread-pool worker (via [`rayon::ThreadPool::spawn`]),
+        /// so the caller's thread is free to make progress on other work while `f` executes.
+        /// For [`Sequential`], `f` runs inline on the calling thread before the handle is
+        /// returned; the handle is already resolved when the caller first polls it.
+        ///
+        /// # Panics
+        ///
+        /// If `f` panics, the spawned task's oneshot sender is dropped without sending a
+        /// value. The returned [`SpawnHandle`] will panic when polled in that case, matching
+        /// the behavior the caller would observe if they had invoked `f` inline.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        /// use futures::executor::block_on;
+        ///
+        /// let strategy = Sequential;
+        /// let data = vec![1, 2, 3, 4, 5];
+        /// let handle = strategy.spawn(move |s| {
+        ///     s.fold(&data, || 0, |acc, &x| acc + x, |a, b| a + b)
+        /// });
+        /// assert_eq!(block_on(handle), 15);
+        /// ```
+        #[cfg(feature = "std")]
+        fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
+        where
+            F: FnOnce(Self) -> R + Send + 'static,
+            R: Send + 'static;
     }
 
     /// A sequential execution strategy.
@@ -441,6 +523,17 @@ commonware_macros::stability_scope!(BETA {
 
         fn parallelism_hint(&self) -> usize {
             1
+        }
+
+        #[cfg(feature = "std")]
+        fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
+        where
+            F: FnOnce(Self) -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(f(self.clone()));
+            rx.into()
         }
     }
 });
@@ -561,6 +654,19 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         fn parallelism_hint(&self) -> usize {
             self.thread_pool.current_num_threads()
         }
+
+        fn spawn<F, R>(&self, f: F) -> SpawnHandle<R>
+        where
+            F: FnOnce(Self) -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            let (tx, rx) = oneshot::channel();
+            let me = self.clone();
+            self.thread_pool.spawn(move || {
+                let _ = tx.send(f(me));
+            });
+            rx.into()
+        }
     }
 });
 
@@ -568,10 +674,20 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 mod test {
     use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
+    use futures::executor::block_on;
     use proptest::prelude::*;
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[should_panic(expected = "worker failure")]
+    fn spawn_sequential_panic_propagates() {
+        let s = Sequential;
+        // Sequential runs `f` inline before returning the handle, so a panic in `f`
+        // unwinds through `spawn` itself - the original payload propagates directly.
+        let _handle = s.spawn(|_| -> () { panic!("worker failure") });
     }
 
     proptest! {
@@ -661,6 +777,54 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold_init);
+        }
+
+        #[test]
+        fn spawn_sequential_matches_direct_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let s = Sequential;
+
+            let direct: i32 = s.fold(
+                &data,
+                || 0i32,
+                |acc, &x| acc.wrapping_add(x),
+                |a, b| a.wrapping_add(b),
+            );
+
+            let handle = s.spawn(move |s| {
+                s.fold(
+                    &data,
+                    || 0i32,
+                    |acc, &x| acc.wrapping_add(x),
+                    |a, b| a.wrapping_add(b),
+                )
+            });
+            let via_spawn = block_on(handle);
+
+            prop_assert_eq!(direct, via_spawn);
+        }
+
+        #[test]
+        fn spawn_rayon_matches_direct_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let s = parallel_strategy();
+
+            let direct: i32 = s.fold(
+                &data,
+                || 0i32,
+                |acc, &x| acc.wrapping_add(x),
+                |a, b| a.wrapping_add(b),
+            );
+
+            let handle = s.spawn(move |s| {
+                s.fold(
+                    &data,
+                    || 0i32,
+                    |acc, &x| acc.wrapping_add(x),
+                    |a, b| a.wrapping_add(b),
+                )
+            });
+            let via_spawn = block_on(handle);
+
+            prop_assert_eq!(direct, via_spawn);
         }
 
         #[test]
