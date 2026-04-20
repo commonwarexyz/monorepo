@@ -52,7 +52,7 @@ use std::{
     pin::Pin,
     sync::Arc,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
@@ -491,7 +491,7 @@ where
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
-                info!("mailbox closed, shutting down");
+                debug!("mailbox closed, shutting down");
                 break;
             } => {
                 match message {
@@ -745,7 +745,7 @@ where
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
             Some(message) = resolver_rx.recv() else {
-                info!("handler closed, shutting down");
+                debug!("handler closed, shutting down");
                 return;
             } => {
                 // Drain up to max_repair messages: blocks handled immediately,
