@@ -1456,7 +1456,7 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and application.
+        // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
