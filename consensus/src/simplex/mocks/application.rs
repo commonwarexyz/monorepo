@@ -186,6 +186,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     fail_verification: bool,
     drop_proposals: bool,
+    stall_proposals: bool,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -201,6 +202,10 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
     verify_observer: Option<VerifyObserver<H, P>>,
+
+    /// Senders held alive to simulate proposals that hang indefinitely
+    /// (used when `stall_proposals` is set).
+    pending_proposes: Vec<oneshot::Sender<H::Digest>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -236,6 +241,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 fail_verification: false,
                 drop_proposals: false,
+                stall_proposals: false,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -243,6 +249,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 verified: HashSet::new(),
                 propose_observer: None,
                 verify_observer: None,
+                pending_proposes: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -255,6 +262,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub const fn set_drop_proposals(&mut self, drop: bool) {
         self.drop_proposals = drop;
+    }
+
+    /// When set, `Message::Propose` requests are held open indefinitely: the
+    /// response sender is parked in `pending_proposes`, keeping the oneshot
+    /// alive so the caller's `receiver` never resolves. This simulates a
+    /// propose that is still in flight at the moment the voter crashes.
+    pub const fn set_stall_proposals(&mut self, stall: bool) {
+        self.stall_proposals = stall;
     }
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
@@ -415,6 +430,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     Message::Propose { context, response } => {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
+                        }
+                        if self.stall_proposals {
+                            self.pending_proposes.push(response);
+                            continue;
                         }
                         if self.drop_proposals {
                             continue;

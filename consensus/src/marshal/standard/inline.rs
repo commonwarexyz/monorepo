@@ -1193,33 +1193,58 @@ mod tests {
                     .await;
 
             let me = participants[0].clone();
-            let setup = StandardHarness::setup_validator(
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+
+            // Pre-crash: seed `verified_blocks[V=1]` through the live mailbox,
+            // mirroring an aborted pre-crash `Inline::propose` that persisted
+            // its verified block before the voter could journal a notarize.
+            let pre_setup = StandardHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let marshal = setup.mailbox;
+            let pre_marshal = pre_setup.mailbox;
+            let pre_actor = pre_setup.actor_handle;
+            let pre_extra = pre_setup.extra;
+            let pre_application = pre_setup.application;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let ctx = Ctx {
-                round,
-                leader: me.clone(),
-                parent: (View::zero(), genesis.digest()),
-            };
             let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            assert!(marshal.verified(round, stale_block).await);
+            assert!(pre_marshal.verified(round, stale_block).await);
+
+            // Simulate a crash: abort the actor and drop every handle so the
+            // storage partition is fully released before reopening.
+            pre_actor.abort();
+            drop(pre_marshal);
+            drop(pre_extra);
+            drop(pre_application);
+
+            // Post-crash: reopen the same partition. The verified block must
+            // be recovered from storage during archive restore so that
+            // `Message::GetVerified` on the new mailbox observes it.
+            let post_setup = StandardHarness::setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let post_marshal = post_setup.mailbox;
 
             let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
-
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
-                marshal.clone(),
+                post_marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 

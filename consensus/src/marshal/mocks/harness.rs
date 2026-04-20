@@ -1216,11 +1216,15 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         );
         let repeated_digest = H::digest(&repeated);
 
-        // Negative control: a verify-only block at the same early view. Because
-        // it is never certified, it lives solely in `verified_blocks[V=1]` and
-        // must disappear once retention pruning advances past V=1. Asserting it
-        // is gone confirms the prune actually fires at the expected floor, so
-        // the `repeated` survivor assertion below is genuinely load-bearing.
+        // Negative control: a verify-only block at a distinct early view.
+        // Placing `orphan` at V=2 (instead of V=1, where `repeated` already
+        // occupies the verified index) guarantees the write actually lands in
+        // `verified_blocks[V=2]` rather than being silently dropped as a
+        // duplicate index. Because it is never certified, it lives solely in
+        // that verified entry and must disappear once retention pruning
+        // advances past V=2. Asserting it is gone (after asserting it was
+        // present before pruning) confirms the prune actually fires at the
+        // expected floor.
         let orphan = H::make_test_block(
             Sha256::hash(b"orphan"),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
@@ -1231,9 +1235,11 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         let orphan_digest = H::digest(&orphan);
 
         // Verify `repeated` at V=1, then certify at V=25 (reproposal-style gap).
-        // The chain below starts at V=2 to avoid overwriting V=1 in the
-        // verified archive (which drops subsequent writes at an existing view).
+        // The chain below starts at V=3 to avoid overwriting V=1 (`repeated`)
+        // or V=2 (`orphan`) in the verified archive (which drops subsequent
+        // writes at an existing view).
         let v_early = Round::new(Epoch::zero(), View::new(1));
+        let v_orphan = Round::new(Epoch::zero(), View::new(2));
         let v_late = Round::new(Epoch::zero(), View::new(25));
         let mut peers: [ValidatorHandle<H>; 0] = [];
         H::verify(&mut handle, v_early, &repeated, &mut peers).await;
@@ -1242,14 +1248,20 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             "certify must ack"
         );
 
-        // Verify `orphan` at V=1 only (no certify).
-        H::verify(&mut handle, v_early, &orphan, &mut peers).await;
+        // Verify `orphan` at its own distinct view V=2 (no certify).
+        H::verify(&mut handle, v_orphan, &orphan, &mut peers).await;
+        assert!(
+            handle.mailbox.get_block(&orphan_digest).await.is_some(),
+            "negative control assumes `orphan` is present before pruning; \
+             if it is not, the V=2 write was dropped and the post-prune \
+             assertion would pass vacuously"
+        );
 
         // Drive the finalized chain forward to advance `last_processed_round`
-        // past V=1's retention boundary but not past V=25's. With
-        // view_retention_timeout=10 and prunable_items_per_section=10,
-        // processing views 2..=22 leaves `oldest_allowed=12` in both prunable
-        // archives. V=1 is dropped, V=25 is retained.
+        // past V=2's retention boundary but not past V=25's. With
+        // view_retention_timeout=10 and prunable_items_per_section=10, the
+        // prune floor snaps down to the section boundary and evicts V=1 and
+        // V=2 while leaving V=25 intact.
         const CHAIN_LEN: u64 = 21;
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
@@ -1263,7 +1275,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
-            let round = Round::new(Epoch::zero(), View::new(i + 1));
+            let round = Round::new(Epoch::zero(), View::new(i + 2));
             H::propose(&mut handle, round, &block).await;
             let proposal = Proposal {
                 round,
@@ -1280,11 +1292,12 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         }
         context.sleep(Duration::from_millis(100)).await;
 
-        // Negative control: the verify-only orphan at V=1 must be gone, which
-        // proves retention pruning actually evicted V=1 at the expected floor.
+        // Negative control: the verify-only orphan at V=2 must be gone, which
+        // proves retention pruning actually evicted the early-view entries at
+        // the expected floor.
         assert!(
             handle.mailbox.get_block(&orphan_digest).await.is_none(),
-            "verify-only block at V=1 must be evicted by retention pruning"
+            "verify-only block at V=2 must be evicted by retention pruning"
         );
 
         // The repeated block must still be retrievable: verified_blocks[V=1]
