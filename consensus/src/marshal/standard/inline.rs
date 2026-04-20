@@ -239,20 +239,18 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                // On leader recovery, marshal may already hold a verified
-                // block for this round (persisted by a pre-crash propose
-                // whose notarize vote never reached the journal). Building
-                // a fresh block would land on the same view index in the
-                // prunable archive and be silently dropped, so reuse the
-                // stored block instead.
-                if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                    let digest = block.digest();
-                    let success = tx.send_lossy(digest);
+                // On leader recovery, marshal may already hold a verified block
+                // for this round (persisted by a pre-crash propose whose
+                // notarize vote never reached the journal). The parent context
+                // recovered by simplex may differ from the one the cached block
+                // was built against, so the stored block is not safe to reuse
+                // and building a fresh block would land on the same prunable
+                // archive index and be silently dropped. Skip this view and let
+                // the voter nullify it via timeout.
+                if marshal.get_verified(consensus_context.round).await.is_some() {
                     debug!(
                         round = ?consensus_context.round,
-                        ?digest,
-                        success,
-                        "reused verified block from marshal on leader recovery"
+                        "skipping proposal: verified block already exists for round on restart"
                     );
                     return;
                 }
@@ -1168,16 +1166,15 @@ mod tests {
 
     /// Regression: if marshal persisted a verified block for a round before
     /// a crash (via a prior `propose` call) but the simplex notarize artifact
-    /// never reached the journal, a restarted leader must re-use the persisted
-    /// block.
-    ///
-    /// Otherwise the application is asked to build afresh, returns a new
-    /// block whose digest does not match the one marshal already stored
-    /// (the prunable archive silently drops the second write at the same
-    /// view index), the leader broadcasts a `Notarize` for a digest no peer
-    /// can serve, and the view stalls until timeout.
+    /// never reached the journal, the restarted leader must skip proposing
+    /// for that round. The cached block was built against a parent context
+    /// that replay may have changed, so reusing it can broadcast a proposal
+    /// whose payload no longer matches the recovered header. Building a
+    /// fresh block would also be unsafe because the prunable archive silently
+    /// drops the second write at the same view index. Dropping the receiver
+    /// lets the voter nullify the view via `MissingProposal`.
     #[test_traced("WARN")]
-    fn test_propose_reuses_verified_block_on_restart() {
+    fn test_propose_skips_when_verified_block_exists_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1199,8 +1196,6 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            // Seed block A for round V=1 in marshal's verified cache as if
-            // the pre-crash leader had built and broadcasted it.
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = Ctx {
@@ -1208,18 +1203,15 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::zero(), genesis.digest()),
             };
-            let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            let digest_a = block_a.digest();
-            assert!(marshal.verified(round, block_a.clone()).await);
+            let stale_block =
+                B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            assert!(marshal.verified(round, stale_block).await);
 
-            // After restart, the fresh application would build a different
-            // block for the same round (distinct timestamp -> distinct digest).
-            let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let digest_b = block_b.digest();
-            assert_ne!(digest_a, digest_b, "test requires distinct digests");
+            let fresh_block =
+                B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
 
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(block_b);
+                MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.clone(),
                 mock_app,
@@ -1228,10 +1220,9 @@ mod tests {
             );
 
             let digest_rx = inline.propose(ctx).await;
-            let digest = digest_rx.await.expect("propose must return a digest");
-            assert_eq!(
-                digest, digest_a,
-                "propose must reuse the block marshal already persisted for this round"
+            assert!(
+                digest_rx.await.is_err(),
+                "propose must drop the receiver so the voter nullifies the round via timeout"
             );
         });
     }
