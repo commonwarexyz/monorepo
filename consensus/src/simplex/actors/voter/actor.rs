@@ -543,34 +543,15 @@ impl<
 
     /// Infer certifications for rounds whose notarizations prove certification without
     /// requiring an automaton response, then journal and signal them.
-    ///
-    /// All inferred artifacts are appended then synced once together so a crash between
-    /// inference and signaling cannot leave signaled-but-unjournaled state.
     async fn apply_inferred_certifications(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
     ) {
-        let inferred = self.state.infer_certifications(view);
-        if inferred.is_empty() {
-            return;
-        }
-
-        let epoch = self.state.epoch();
-        for notarization in &inferred {
-            let inferred_view = notarization.view();
-            let artifact = Artifact::Certification(Rnd::new(epoch, inferred_view), true);
-            self.append_journal(inferred_view, artifact).await;
-        }
-        if let Some(journal) = &self.journal {
-            journal
-                .sync_all()
-                .await
-                .expect("unable to sync journal after inferring certifications");
-        }
-
-        for notarization in inferred {
-            let inferred_view = notarization.view();
+        for inferred_view in self.state.infer_certifications(view) {
+            let Some(notarization) = self.handle_certification(inferred_view, true).await else {
+                continue;
+            };
             debug!(%view, %inferred_view, "inferred certification from notarization");
             resolver.certified(inferred_view, true).await;
             self.reporter
@@ -777,6 +758,7 @@ impl<
 
         // Rebuild from journal
         let start = self.context.current();
+        let mut replayed_notarized_views = Vec::new();
         {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -792,6 +774,7 @@ impl<
                         self.reporter.report(Activity::Notarize(notarize)).await;
                     }
                     Artifact::Notarization(notarization) => {
+                        replayed_notarized_views.push(notarization.view());
                         self.handle_notarization(notarization.clone()).await;
                         resolver
                             .updated(Certificate::Notarization(notarization.clone()))
@@ -855,7 +838,9 @@ impl<
         // Replay surfaces notarizations but cannot signal inferred certifications that were
         // never journaled before a crash. Walk the ancestry of every notarized view now that
         // the journal is writable again to recover any missing certification records.
-        for view in self.state.notarized_views_descending() {
+        replayed_notarized_views.sort_unstable();
+        replayed_notarized_views.dedup();
+        for view in replayed_notarized_views.into_iter().rev() {
             self.apply_inferred_certifications(&mut resolver, view)
                 .await;
         }

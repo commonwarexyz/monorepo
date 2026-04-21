@@ -238,9 +238,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         )
     }
 
-    /// Returns true if certification has been concluded (succeeded, declined, or aborted).
-    pub const fn is_certify_decided(&self) -> bool {
-        !self.is_certify_inferable()
+    /// Returns the terminal certification result, if any.
+    pub const fn certify_result(&self) -> Option<bool> {
+        match self.certify {
+            CertifyState::Certified(result) => Some(result),
+            CertifyState::Ready | CertifyState::Outstanding(_) | CertifyState::Aborted => None,
+        }
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.

@@ -229,6 +229,44 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: ElectorConfig<S>,
     {
+        setup_voter_with_partition_and_certifier(
+            context,
+            oracle,
+            participants,
+            schemes,
+            elector,
+            format!("voter_test_{}", participants[0]),
+            leader_timeout,
+            certification_timeout,
+            timeout_retry,
+            should_certify,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn setup_voter_with_partition_and_certifier<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+        partition: String,
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        should_certify: mocks::application::Certifier<Sha256Digest>,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        mpsc::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
         let signing = schemes[0].clone();
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
@@ -259,7 +297,7 @@ mod tests {
             automaton: application.clone(),
             relay: application.clone(),
             reporter: reporter.clone(),
-            partition: format!("voter_test_{me}"),
+            partition,
             epoch: Epoch::new(333),
             mailbox_size: 128,
             leader_timeout,
@@ -8934,71 +8972,20 @@ mod tests {
             // Start a fresh voter with the same partition. Certifier::Cancel guarantees the
             // automaton cannot certify, so any Certified{view=3,...} emission must come from
             // the post-replay inference pass.
-            let me = participants[0].clone();
-            let elector = RoundRobin::<Sha256>::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: me.clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Cancel,
-            };
-            let (app_actor, application) = mocks::application::Application::new(
-                context.with_label("app_post_replay"),
-                app_cfg,
-            );
-            app_actor.start();
-
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(me.clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition,
-                epoch,
-                mailbox_size: 128,
-                leader_timeout: Duration::from_secs(600),
-                certification_timeout: Duration::from_secs(600),
-                timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, _mailbox) = Actor::new(context.with_label("voter_post_replay"), voter_cfg);
-
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(16);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
-            let (vote_sender, _) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (cert_sender, _) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            let (_, mut batcher_receiver, mut resolver_receiver, _relay, reporter) =
+                setup_voter_with_partition_and_certifier(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    partition,
+                    Duration::from_secs(600),
+                    Duration::from_secs(600),
+                    Duration::from_mins(60),
+                    mocks::application::Certifier::Cancel,
+                )
+                .await;
 
             // Observe Certified{view=3, success=true} arriving from the post-replay pass.
             loop {

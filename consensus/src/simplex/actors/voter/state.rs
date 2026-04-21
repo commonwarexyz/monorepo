@@ -619,10 +619,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // This protects against double-emission when inference races with a late
         // automaton response, and against double-processing when the post-replay
         // pass revisits a view whose certification was already journaled.
-        if round.is_certify_decided() {
-            if round.is_certified() && !is_success {
-                panic!("certification should not conflict: view {view} already certified");
-            }
+        if let Some(previous) = round.certify_result() {
+            assert_eq!(
+                previous, is_success,
+                "certification should not conflict: view {view}"
+            );
+            return None;
+        }
+        if !round.is_certify_inferable() {
             return None;
         }
 
@@ -650,19 +654,19 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some(notarization)
     }
 
-    /// Walks backward through the ancestry of `view` and marks each ancestor as certified
-    /// when its notarization proves f+1 honest parties certified it.
+    /// Walks backward through the ancestry of `view` and identifies each round whose
+    /// certification can be inferred from notarization evidence.
     ///
     /// A notarization for `view` implies f+1 honest voters certified its parent (a precondition
     /// to voting). If that parent's notarization exists and its certify state is still open,
-    /// we mark it certified and continue walking via its own proposal.parent.
+    /// we infer it and continue walking via its own proposal.parent.
     ///
     /// If `view` itself is in an open certify state and has a notarized descendant whose
     /// proposal.parent points at `view`, we also infer it (handles out-of-order arrival).
     ///
-    /// Returns the notarizations of each inferred ancestor (and optionally `view`) in the
-    /// order they were inferred. Callers are responsible for journaling and signaling.
-    pub fn infer_certifications(&mut self, view: View) -> Vec<Notarization<S, D>> {
+    /// Returns the views whose certifications can be inferred, in the order they should be
+    /// applied. Callers are responsible for transitioning state, journaling, and signaling.
+    pub fn infer_certifications(&self, view: View) -> Vec<View> {
         let mut inferred = Vec::new();
 
         // If `view` itself is still open and we have evidence it was certified by a notarized
@@ -673,13 +677,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .is_some_and(|round| round.is_certify_inferable() && round.notarization().is_some())
             && self.has_notarized_child_with_parent(view)
         {
-            if let Some(notarization) = self.certified(view, true) {
-                inferred.push(notarization);
-            }
+            inferred.push(view);
         }
 
         // Walk backward from `view`'s parent via proposal.parent pointers.
-        let Some(notarization) = self.notarization(view).cloned() else {
+        let Some(notarization) = self.notarization(view) else {
             return inferred;
         };
         let mut cursor = notarization.proposal.parent;
@@ -697,12 +699,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 break;
             }
 
-            // Transition to Certified(true) and continue via this ancestor's proposal.parent.
-            let ancestor_notarization = self
-                .certified(cursor, true)
-                .expect("round was inferable with notarization; must transition");
-            cursor = ancestor_notarization.proposal.parent;
-            inferred.push(ancestor_notarization);
+            inferred.push(cursor);
+            cursor = round
+                .notarization()
+                .expect("checked above")
+                .proposal
+                .parent;
         }
 
         inferred
@@ -716,15 +718,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 .notarization()
                 .is_some_and(|n| n.proposal.parent == view)
         })
-    }
-
-    /// Returns all tracked views that have a notarization, sorted in descending order.
-    pub fn notarized_views_descending(&self) -> Vec<View> {
-        self.views
-            .iter()
-            .rev()
-            .filter_map(|(view, round)| round.notarization().map(|_| *view))
-            .collect()
     }
 
     /// Drops any views that fall below the activity horizon and returns them for logging.
@@ -2707,6 +2700,20 @@ mod tests {
         Finalization::from_finalizes(verifier, votes.iter(), &Sequential).unwrap()
     }
 
+    fn apply_inferred_certifications(
+        state: &mut State<deterministic::Context, ed25519::Scheme, RoundRobin, Sha256Digest>,
+        view: View,
+    ) -> Vec<View> {
+        let inferred = state.infer_certifications(view);
+        for inferred_view in &inferred {
+            assert!(
+                state.certified(*inferred_view, true).is_some(),
+                "expected inferred certification for view {inferred_view}"
+            );
+        }
+        inferred
+    }
+
     #[test]
     fn infer_certifications_marks_parent_certified() {
         let runtime = deterministic::Runner::default();
@@ -2735,9 +2742,8 @@ mod tests {
                 parent_view,
             ));
 
-            let inferred = state.infer_certifications(child_view);
-            assert_eq!(inferred.len(), 1);
-            assert_eq!(inferred[0].view(), parent_view);
+            let inferred = apply_inferred_certifications(&mut state, child_view);
+            assert_eq!(inferred, vec![parent_view]);
             assert!(state.views.get(&parent_view).unwrap().is_certified());
         });
     }
@@ -2761,12 +2767,8 @@ mod tests {
             }
 
             // Inference from v4 should certify v3, v2, v1 (v4 itself has no child yet).
-            let inferred = state.infer_certifications(View::new(4));
-            let inferred_views: Vec<View> = inferred.iter().map(|n| n.view()).collect();
-            assert_eq!(
-                inferred_views,
-                vec![View::new(3), View::new(2), View::new(1)]
-            );
+            let inferred = apply_inferred_certifications(&mut state, View::new(4));
+            assert_eq!(inferred, vec![View::new(3), View::new(2), View::new(1)]);
             for raw in 1u64..=3 {
                 assert!(state.views.get(&View::new(raw)).unwrap().is_certified());
             }
@@ -2801,8 +2803,7 @@ mod tests {
             ));
 
             let inferred = state.infer_certifications(View::new(5));
-            let inferred_views: Vec<View> = inferred.iter().map(|n| n.view()).collect();
-            assert_eq!(inferred_views, vec![View::new(4), View::new(3)]);
+            assert_eq!(inferred, vec![View::new(4), View::new(3)]);
         });
     }
 
@@ -2890,9 +2891,8 @@ mod tests {
             ));
 
             // Inference triggered by v1's arrival should certify v1 via v2's evidence.
-            let inferred = state.infer_certifications(View::new(1));
-            let inferred_views: Vec<View> = inferred.iter().map(|n| n.view()).collect();
-            assert_eq!(inferred_views, vec![View::new(1)]);
+            let inferred = apply_inferred_certifications(&mut state, View::new(1));
+            assert_eq!(inferred, vec![View::new(1)]);
             assert!(state.views.get(&View::new(1)).unwrap().is_certified());
         });
     }
@@ -2938,37 +2938,11 @@ mod tests {
                 View::new(1),
                 GENESIS_VIEW,
             ));
-            assert!(state.certified(View::new(1), true).is_some());
+            assert!(state.certified(View::new(1), false).is_some());
 
-            // Contradicting a successful certification signals a protocol/automaton fault.
-            let _ = state.certified(View::new(1), false);
+            // Contradicting a failed certification signals a protocol/automaton fault.
+            let _ = state.certified(View::new(1), true);
         });
     }
 
-    #[test]
-    fn notarized_views_descending_returns_sorted_notarized_views() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let mut state = make_inference_state(context, &schemes, verifier.clone());
-
-            // Add notarizations for views 1, 3, 5 (skipping 2 and 4).
-            for raw in [1u64, 3, 5] {
-                state.add_notarization(make_notarization(
-                    &schemes,
-                    &verifier,
-                    View::new(raw),
-                    GENESIS_VIEW,
-                ));
-            }
-
-            assert_eq!(
-                state.notarized_views_descending(),
-                vec![View::new(5), View::new(3), View::new(1)]
-            );
-        });
-    }
 }
