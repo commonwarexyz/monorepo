@@ -180,7 +180,7 @@ decryption on an M5 MacBook Pro in single-threaded mode (available [here](https:
 _[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against. We expect decryption to scale well with parallelization but have not yet implemented or benchmarked such an implementation._
 
 **Pipelined decryption.** Observe that the cross-term $C_i$ depends only on the ciphertexts and public parameters -- it does *not* depend on the combined partial decryption $\mathsf{pd}$. This means the bulk of the FFT work (the three FFTs and $2B$ pairings) can be *pipelined* as soon as the batch of ciphertexts is known, without waiting for any partial decryptions. 
-All that remains is a lightweight finalization phase ($B$ pairings + $B$ group operations). We benchmarked the split and found that at $B = 2048$, the finalization phase only takes 1.05 s out of 12.91 s total, yielding an $\approx 12\times$ reduction in latency.
+All that remains is a lightweight finalization phase ($B$ pairings + $B$ group operations). We benchmarked the split and found that at $B = 2048$, the finalization phase only takes 1.05 s out of 12.91 s total.
 
 <div align="center">
 
