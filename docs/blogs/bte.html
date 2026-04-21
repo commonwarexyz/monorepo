@@ -105,7 +105,7 @@ Vamsi Policharla</a></div>
         <span class="math inline">\(t\)</span> out of <span
         class="math inline">\(n\)</span> members can
         <em>non-interactively</em> decrypt the message.</p>
-        <p>A popular application of threshold encryption are encrypted
+        <p>A popular application of threshold encryption is encrypted
         mempools, to protect the privacy of pending transactions. Users
         encrypt transactions to a validator set, who wait to finalize
         them before decryption. However, decrypting <span
@@ -338,25 +338,25 @@ Vamsi Policharla</a></div>
         <tbody>
         <tr>
         <td style="text-align: center;">32</td>
-        <td style="text-align: center;">121.81 ms</td>
+        <td style="text-align: center;">121.50 ms</td>
         <td style="text-align: center;">100.7 ms</td>
         <td style="text-align: center;">301 ms</td>
         </tr>
         <tr>
         <td style="text-align: center;">128</td>
-        <td style="text-align: center;">593.62 ms</td>
+        <td style="text-align: center;">593.63 ms</td>
         <td style="text-align: center;">638.4 ms</td>
         <td style="text-align: center;">1.4 s</td>
         </tr>
         <tr>
         <td style="text-align: center;">512</td>
-        <td style="text-align: center;">2.79 s</td>
+        <td style="text-align: center;">2.80 s</td>
         <td style="text-align: center;">5.39 s</td>
         <td style="text-align: center;">6.6 s</td>
         </tr>
         <tr>
         <td style="text-align: center;">2048</td>
-        <td style="text-align: center;">12.82 s</td>
+        <td style="text-align: center;">12.91 s</td>
         <td style="text-align: center;">46.2 s</td>
         <td style="text-align: center;">28.4 s</td>
         </tr>
@@ -368,6 +368,56 @@ Vamsi Policharla</a></div>
         expect decryption to scale well with parallelization but have
         not yet implemented or benchmarked such an
         implementation.</em></p>
+        <p><strong>Pipelined decryption.</strong> Observe that the
+        cross-term <span class="math inline">\(C_i\)</span> depends only
+        on the ciphertexts and public parameters – it does <em>not</em>
+        depend on the combined partial decryption <span
+        class="math inline">\(\mathsf{pd}\)</span>. This means the bulk
+        of the FFT work (the three FFTs and <span
+        class="math inline">\(2B\)</span> pairings) can be
+        <em>pipelined</em> as soon as the batch of ciphertexts is known,
+        without waiting for any partial decryptions. All that remains is
+        a lightweight finalization phase (<span
+        class="math inline">\(B\)</span> pairings + <span
+        class="math inline">\(B\)</span> group operations). We
+        benchmarked the split and found that at <span
+        class="math inline">\(B = 2048\)</span>, the finalization phase
+        only takes 1.05 s out of 12.91 s total, yielding an <span
+        class="math inline">\(\approx 12\times\)</span> reduction in
+        latency.</p>
+        <div data-align="center">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Phase</th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        32\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        128\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        512\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        2048\)</span></th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;">Pre-decrypt (ms)</td>
+        <td style="text-align: center;">105.31</td>
+        <td style="text-align: center;">528.25</td>
+        <td style="text-align: center;">2542.16</td>
+        <td style="text-align: center;">11864.87</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Finalize (ms)</td>
+        <td style="text-align: center;">16.19</td>
+        <td style="text-align: center;">65.38</td>
+        <td style="text-align: center;">262.41</td>
+        <td style="text-align: center;">1048.68</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
         <p>Chop down the <a
         href="https://www.paradigm.xyz/2020/08/ethereum-is-a-dark-forest">Dark
         Forest</a>.</p>
