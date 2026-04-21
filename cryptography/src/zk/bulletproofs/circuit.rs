@@ -1,3 +1,139 @@
+//! This module provides a Bulletproofs circuit proof built on top of the
+//! [inner product argument](super::ipa).
+//!
+//! # Background
+//!
+//! We start with Pedersen commitments to committed values `v_i`:
+//!
+//! `V_i = v_i * B + v_blind_i * B_blind`.
+//!
+//! A [`Circuit`] then constrains these committed values using:
+//!
+//! - multiplication gates `l_i * r_i = o_i`, and
+//! - linear constraints over the concatenated vector
+//!   `1 | committed values | left wires | right wires | output wires`.
+//!
+//! Concretely, the circuit stores a sparse weight matrix `W`, where each row
+//! enforces a linear relation over that concatenated vector.
+//!
+//! Given a set of commitments, the prover wants to convince the verifier that
+//! the committed values satisfy the circuit, without revealing the committed
+//! values, their Pedersen blindings, or the internal wire values.
+//!
+//! # Usage
+//!
+//! First construct a [`Setup`]. This wraps an IPA [`super::ipa::Setup`] and
+//! adds two generators used for Pedersen commitments.
+//!
+//! Next, describe the constraint system as a [`SparseMatrix`], and turn it
+//! into a [`Circuit`] with [`Circuit::new`]. The circuit fixes the column
+//! layout to:
+//!
+//! `1 | committed values | left wires | right wires | output wires`
+//!
+//! A prover-side assignment is represented by [`Witness`]. [`Witness::new`]
+//! checks that the value vectors have compatible lengths, and
+//! [`Witness::claim`] derives the public [`Claim`] for those committed values.
+//!
+//! Given a [`Setup`], [`Circuit`], [`Claim`], and [`Witness`], create a
+//! [`Proof`] with [`prove`].
+//!
+//! The proof is bound to the current [`Transcript`] state. The verifier must
+//! replay the same transcript history before calling [`pre_verify`],
+//! [`verify`], or [`batch_verify`].
+//!
+//! Use [`verify`] for a single proof, [`batch_verify`] for many proofs, or
+//! [`pre_verify`] if you need the verification equation as a [`Tangle`] for
+//! deferred evaluation, or more advanced batching.
+//!
+//! ## Example
+//!
+//! ```rust
+//! # use commonware_cryptography::{
+//! #     bls12381::primitives::group::{G1, Scalar},
+//! #     transcript::Transcript,
+//! #     zk::bulletproofs::{
+//! #         circuit::{prove, verify, Circuit, Setup, SparseMatrix, Witness},
+//! #         ipa,
+//! #     },
+//! # };
+//! # use commonware_math::algebra::{CryptoGroup, Random, Ring};
+//! # use commonware_parallel::Sequential;
+//! # use commonware_utils::test_rng;
+//! # type F = Scalar;
+//! # type G = G1;
+//! # let generators: [G; 5] =
+//! #     core::array::from_fn(|i| G::generator() * &F::from(i as u64 + 1));
+//!
+//! // This is a toy setup for documentation. Real generators must not have
+//! // known discrete-log relationships.
+//! let setup = Setup::new(
+//!     ipa::Setup::new(
+//!         generators[0].clone(),
+//!         [(generators[1].clone(), generators[2].clone())],
+//!     ),
+//!     generators[3].clone(),
+//!     generators[4].clone(),
+//! );
+//!
+//! // Build a one-gate circuit proving that the committed values are 3 and 4,
+//! // with a product wire fixed to 12.
+//! let mut weights = SparseMatrix::default();
+//! weights[(0, 1)] = F::one();
+//! weights[(0, 3)] = -F::one();
+//! weights[(1, 2)] = F::one();
+//! weights[(1, 4)] = -F::one();
+//! weights[(2, 0)] = F::from(12u64);
+//! weights[(2, 5)] = -F::one();
+//! let circuit = Circuit::new(2, weights).expect("matrix width should fit");
+//!
+//! let mut prover_rng = test_rng();
+//! let witness = Witness::new(
+//!     vec![F::from(3u64), F::from(4u64)],
+//!     vec![F::random(&mut prover_rng), F::random(&mut prover_rng)],
+//!     vec![F::from(3u64)],
+//!     vec![F::from(4u64)],
+//!     vec![F::from(12u64)],
+//! )
+//! .expect("witness lengths should match");
+//! let claim = witness.claim(&setup);
+//!
+//! let mut prover_transcript = Transcript::new(b"circuit-example");
+//! prover_transcript.commit(b"context".as_slice());
+//! let proof = prove(
+//!     &mut prover_rng,
+//!     &mut prover_transcript,
+//!     &setup,
+//!     &circuit,
+//!     &claim,
+//!     &witness,
+//!     &Sequential,
+//! )
+//! .expect("witness should satisfy the claim and circuit");
+//!
+//! let mut verifier_rng = test_rng();
+//! let mut verifier_transcript = Transcript::new(b"circuit-example");
+//! verifier_transcript.commit(b"context".as_slice());
+//! assert!(verify(
+//!     &mut verifier_rng,
+//!     &mut verifier_transcript,
+//!     &setup,
+//!     &circuit,
+//!     &claim,
+//!     proof,
+//!     &Sequential,
+//! ));
+//! ```
+//!
+//! # References
+//!
+//! The [Dalek crate notes](https://doc-internal.dalek.rs/bulletproofs/notes/inner_product_proof/index.html)
+//! were useful prior art when implementing and documenting the IPA layer used by
+//! this module.
+//!
+//! The original [Bulletproofs paper](https://eprint.iacr.org/2017/1066) and the
+//! implementation notes from the IPA module are also useful background for this file.
+
 use super::ipa;
 use crate::transcript::Transcript;
 use bytes::BufMut;
@@ -13,6 +149,9 @@ use std::{
     ops::{Index, IndexMut},
 };
 
+/// A sparse matrix indexed by `(row, column)`.
+///
+/// Missing entries are treated as 0.
 pub struct SparseMatrix<F> {
     width: usize,
     height: usize,
@@ -80,6 +219,7 @@ impl<F: EncodeSize> EncodeSize for SparseMatrix<F> {
     }
 }
 
+/// A circuit describing the constraints the prover must satisfy.
 pub struct Circuit<F> {
     committed_vars: usize,
     internal_vars: usize,
@@ -106,6 +246,18 @@ impl<F: EncodeSize> EncodeSize for Circuit<F> {
 }
 
 impl<F: Ring> Circuit<F> {
+    /// Create a new circuit from a committed-value count and a weight matrix.
+    ///
+    /// The circuit enforces:
+    ///
+    /// - `l_i * r_i = o_i`, and
+    /// - one linear constraint per row of `weights`.
+    ///
+    /// The columns are interpreted as:
+    ///
+    /// `1 | committed values | left wires | right wires | output wires`
+    ///
+    /// This returns `None` if the matrix width is incompatible with that layout.
     pub fn new(committed_vars: usize, weights: SparseMatrix<F>) -> Option<Self> {
         let remaining_vars = weights.width.checked_sub(committed_vars.checked_add(1)?)?;
         if remaining_vars % 3 != 0 {
@@ -118,10 +270,11 @@ impl<F: Ring> Circuit<F> {
             weights,
         })
     }
+
     /// Checks whether a certain assignment to committed variables satisfies this circuit.
     ///
-    /// This will return false is the assignment has the wrong length (rather than
-    /// implicitly truncating or padding the assignment).
+    /// This returns false if the assignment has the wrong length, rather than
+    /// implicitly truncating or padding the assignment.
     #[must_use]
     pub fn is_satisfied(
         &self,
@@ -155,6 +308,10 @@ impl<F: Ring> Circuit<F> {
     }
 }
 
+/// Generators used by the circuit proof system.
+///
+/// This wraps the underlying IPA setup and adds two Pedersen generators used
+/// for commitments to committed values and blindings.
 pub struct Setup<G> {
     ipa: ipa::Setup<G>,
     pedersen_value: G,
@@ -162,11 +319,26 @@ pub struct Setup<G> {
 }
 
 impl<G> Setup<G> {
+    /// Create a new [`Setup`] from an [`ipa::Setup`] and two Pedersen generators.
+    ///
+    /// You MUST ensure that all generators are unique.
+    pub const fn new(ipa: ipa::Setup<G>, pedersen_value: G, pedersen_blinding: G) -> Self {
+        Self {
+            ipa,
+            pedersen_value,
+            pedersen_blinding,
+        }
+    }
+
     /// Check if this setup supports claims of a given length.
     pub const fn supports(&self, lg_len: u8) -> bool {
         self.ipa.supports(lg_len)
     }
 
+    /// Return the points needed to evaluate verification tangles.
+    ///
+    /// Rows 0-2 come from the underlying IPA setup. Row 3 contains the
+    /// Pedersen value and blinding generators.
     pub fn tangle_points<F>(
         &self,
         log_len: u8,
@@ -198,6 +370,10 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
     }
 }
 
+/// A prover-side assignment for a circuit proof.
+///
+/// This contains the committed values, their Pedersen blindings, and the
+/// internal left, right, and output wire values.
 #[allow(dead_code)]
 pub struct Witness<F> {
     values: Vec<F>,
@@ -207,8 +383,62 @@ pub struct Witness<F> {
     out: Vec<F>,
 }
 
+impl<F> Witness<F> {
+    /// Create a new witness, given all committed values, and internal values.
+    ///
+    /// This is a very low level method, with the only safety guard being to check
+    /// that certain vectors have matching lengths. Beyond that, we don't check
+    /// that the values satisfy a circuit relationship, or match the commitments.
+    pub fn new(
+        values: Vec<F>,
+        blinding: Vec<F>,
+        left: Vec<F>,
+        right: Vec<F>,
+        out: Vec<F>,
+    ) -> Option<Self> {
+        if values.len() != blinding.len() {
+            return None;
+        }
+        if left.len() != right.len() || right.len() != out.len() {
+            return None;
+        }
+        Some(Self {
+            values,
+            blinding,
+            left,
+            right,
+            out,
+        })
+    }
+
+    /// Create the public claim corresponding to this witness for the given setup.
+    ///
+    /// The resulting claim contains Pedersen commitments to the witness's
+    /// committed values and blindings.
+    pub fn claim<G: Space<F>>(&self, setup: &Setup<G>) -> Claim<G> {
+        Claim {
+            commitments: self
+                .values
+                .iter()
+                .zip(&self.blinding)
+                .map(|(value, blind)| {
+                    setup.pedersen_value.clone() * value
+                        + &(setup.pedersen_blinding.clone() * blind)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The public claim for the protocol.
+///
+/// The claim consists of Pedersen commitments to values, which the prover claims
+/// satisfy a [`Circuit`].
+///
+/// The claim does not contain the [`Circuit`] itself, so that the verifier is
+/// in control of what properties they want the committed values to satisfy.
 pub struct Claim<G> {
-    commitments: Vec<G>,
+    pub commitments: Vec<G>,
 }
 
 impl<G: Write> Write for Claim<G> {
@@ -223,6 +453,10 @@ impl<G: EncodeSize> EncodeSize for Claim<G> {
     }
 }
 
+/// A proof demonstrating knowledge of a [`Witness`] satisfying a [`Claim`] relative
+/// to a [`Circuit`].
+///
+/// See [`prove`] and [`verify`].
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct Proof<F, G> {
@@ -237,6 +471,14 @@ pub struct Proof<F, G> {
     ipa_proof: ipa::Proof<F, G>,
 }
 
+/// Prove that a given [`Witness`] satisfies a [`Circuit`] and matches a [`Claim`].
+///
+/// The proof is bound to the transcript state at the time of the call, so the
+/// verifier must replay the same transcript history before verification.
+///
+/// This returns `None` if the setup does not support the circuit size, if the
+/// witness lengths are inconsistent with the circuit, or if the claim does not
+/// match the witness.
 pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRngCore,
     transcript: &mut Transcript,
@@ -670,6 +912,12 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 }
 
 /// Construct the verification equation for a circuit proof.
+///
+/// When the returned [`Tangle`] is evaluated with [`Setup::tangle_points`], a
+/// correct proof will evaluate to 0.
+///
+/// The extra randomness is used to compress the circuit-specific checks into a
+/// single equation before combining them with the inner product argument.
 pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRngCore,
     transcript: &mut Transcript,
@@ -809,6 +1057,9 @@ pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encod
 }
 
 /// Check a circuit proof against the provided setup.
+///
+/// This returns false if the setup is too short for the circuit, if the proof
+/// is malformed, or if the verification equation does not evaluate to 0.
 #[must_use]
 pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRngCore,
@@ -838,6 +1089,10 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         .unwrap_or(false)
 }
 
+/// Like [`verify`], but efficiently checking multiple proofs at once.
+///
+/// On success this returns `Ok(())`. Otherwise it returns the indices of the
+/// proofs that were rejected.
 pub fn batch_verify<
     'p,
     F: Field + Random + Encode + 'p,
@@ -935,16 +1190,16 @@ pub mod fuzz {
                 .map(|i| G::generator() * &F::from(i as u8))
                 .collect::<Vec<_>>();
             let ipa_generators = &generators[1..1 + 2 * MAX_PADDED_INTERNAL_VARS];
-            Setup {
-                ipa: ipa::Setup::new(
+            Setup::new(
+                ipa::Setup::new(
                     generators[0],
                     ipa_generators
                         .chunks_exact(2)
                         .map(|chunk| (chunk[0], chunk[1])),
                 ),
-                pedersen_value: generators[1 + 2 * MAX_PADDED_INTERNAL_VARS],
-                pedersen_blinding: generators[2 + 2 * MAX_PADDED_INTERNAL_VARS],
-            }
+                generators[1 + 2 * MAX_PADDED_INTERNAL_VARS],
+                generators[2 + 2 * MAX_PADDED_INTERNAL_VARS],
+            )
         })
     }
 
@@ -1046,23 +1301,9 @@ pub mod fuzz {
             let blinding = (0..committed_vars)
                 .map(|_| u.arbitrary::<F>())
                 .collect::<arbitrary::Result<Vec<_>>>()?;
-            let claim = Claim {
-                commitments: committed_values
-                    .iter()
-                    .cloned()
-                    .zip(&blinding)
-                    .map(|(value, blind)| {
-                        setup.pedersen_value * &value + &(setup.pedersen_blinding * blind)
-                    })
-                    .collect(),
-            };
-            let witness = Witness {
-                values: committed_values,
-                blinding,
-                left,
-                right,
-                out,
-            };
+            let witness = Witness::new(committed_values, blinding, left, right, out)
+                .expect("generated witness should have matching vector lengths");
+            let claim = witness.claim(setup);
             assert!(
                 circuit.is_satisfied(&witness.values, &witness.left, &witness.right),
                 "generated circuit should be satisfied by the generated witness",
@@ -1091,6 +1332,21 @@ pub mod fuzz {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Tamper {
+        Honest,
+        Commitment,
+        Tx,
+        MBig,
+    }
+
+    struct BatchCase {
+        circuit: Circuit<F>,
+        claim: Claim<G>,
+        proof: Proof<F, G>,
+        tamper: Tamper,
+    }
+
     impl<'a> Arbitrary<'a> for Instance {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             let committed_vars = u.int_in_range(1..=MAX_COMMITTED_VARS)?;
@@ -1099,6 +1355,107 @@ pub mod fuzz {
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<Vec<_>>>()?;
             Self::generate(test_setup(), committed_values, internal_vars, u)
+        }
+    }
+
+    pub struct Plan {
+        instances: Vec<Instance>,
+    }
+
+    impl<'a> Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            let num_proofs = u.int_in_range(0..=4)?;
+            let instances = (0..num_proofs)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            Ok(Self { instances })
+        }
+    }
+
+    impl Plan {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            let setup = test_setup();
+            let mut cases = self
+                .instances
+                .into_iter()
+                .map(|instance| {
+                    let (circuit, claim, proof) = instance.prove();
+                    Ok(BatchCase {
+                        circuit,
+                        claim,
+                        proof,
+                        tamper: match u.int_in_range(0..=3)? {
+                            0 => Tamper::Honest,
+                            1 => Tamper::Commitment,
+                            2 => Tamper::Tx,
+                            3 => Tamper::MBig,
+                            _ => unreachable!("tamper variant out of range"),
+                        },
+                    })
+                })
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+
+            for case in &mut cases {
+                match case.tamper {
+                    Tamper::Honest => {}
+                    Tamper::Commitment => {
+                        case.claim.commitments[0] += &setup.pedersen_value;
+                    }
+                    Tamper::Tx => {
+                        case.proof.t_x += &F::one();
+                    }
+                    Tamper::MBig => {
+                        case.proof.m_big += &setup.pedersen_value;
+                    }
+                }
+            }
+
+            let expected_invalid = cases
+                .iter()
+                .enumerate()
+                .filter_map(|(i, case)| {
+                    let mut rng = test_rng();
+                    let mut transcript = Transcript::new(NAMESPACE);
+                    (!verify(
+                        &mut rng,
+                        &mut transcript,
+                        setup,
+                        &case.circuit,
+                        &case.claim,
+                        case.proof.clone(),
+                        &Sequential,
+                    ))
+                    .then_some(i)
+                })
+                .collect::<Vec<_>>();
+
+            let mut batch_rng = test_rng();
+            let actual_invalid = batch_verify(
+                &mut batch_rng,
+                setup,
+                cases.iter().map(|case| {
+                    (
+                        Transcript::new(NAMESPACE),
+                        &case.circuit,
+                        &case.claim,
+                        case.proof.clone(),
+                    )
+                }),
+                &Sequential,
+            )
+            .err()
+            .unwrap_or_default();
+
+            assert_eq!(
+                actual_invalid,
+                expected_invalid,
+                "cases={:?}",
+                cases
+                    .iter()
+                    .map(|case| (case.circuit.internal_vars, case.tamper))
+                    .collect::<Vec<_>>()
+            );
+            Ok(())
         }
     }
 }
@@ -1276,9 +1633,6 @@ mod test {
 
     #[test]
     fn test_fuzz() {
-        minifuzz::test(|u| {
-            u.arbitrary::<fuzz::Instance>()?.run();
-            Ok(())
-        });
+        minifuzz::test(|u| u.arbitrary::<fuzz::Plan>()?.run(u));
     }
 }
