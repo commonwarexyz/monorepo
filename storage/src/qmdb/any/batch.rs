@@ -25,7 +25,7 @@ use commonware_cryptography::{Digest, Hasher};
 use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Weak},
 };
 use tracing::debug;
@@ -1081,21 +1081,22 @@ where
             prev_candidates.push((data.key, (data.value, old_loc)));
         }
 
-        // Add ancestor-diff keys that may be predecessors or successors of this batch's
-        // mutations but are invisible to the base-DB-only `prev_translated_key` lookup above.
-        // Each ancestor's diff is already sorted by key; walk them directly and skip entries
-        // shadowed by a closer (earlier-in-list) ancestor.
+        // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
+        // but are invisible to the base-DB-only `prev_translated_key` lookup above.
         //
-        // The skip-shadowed check uses binary_search, which is cheap compared to the
-        // previous BTreeMap::entry(k).or_insert build since it short-circuits per key.
+        // Walk ancestors closest-first; a BTreeSet tracks keys already seen so each key is
+        // processed only once (closest-ancestor's entry wins). BTreeSet is faster than HashMap
+        // for 32-byte Digest keys because Digest cmp (~5ns, SIMD) is cheaper than SipHash
+        // (~200ns) per op at the sizes involved.
+        //
+        // Depth-1 chains skip the BTreeSet entirely — a single ancestor can't shadow itself,
+        // and each diff's keys are unique by construction.
+        let track_shadow = m.ancestors.len() > 1;
+        let mut seen: BTreeSet<&K> = BTreeSet::new();
         let mut ancestor_deleted: Vec<K> = Vec::new();
-        for (i, batch) in m.ancestors.iter().enumerate() {
+        for batch in m.ancestors.iter() {
             for (key, entry) in batch.diff.iter() {
-                // Skip if a closer ancestor (earlier in `m.ancestors`) already has this key.
-                if m.ancestors[..i]
-                    .iter()
-                    .any(|b| lookup_sorted(b.diff.as_slice(), key).is_some())
-                {
+                if track_shadow && !seen.insert(key) {
                     continue;
                 }
                 // Skip keys already handled by this batch's mutations.
@@ -1716,7 +1717,7 @@ mod tests {
                 },
             ),
         ];
-        base_diff.sort_by(|a, b| a.0.cmp(&b.0));
+        base_diff.sort_by_key(|a| a.0);
 
         let creates = extract_parent_deleted_creates(&mut mutations, &base_diff);
 
