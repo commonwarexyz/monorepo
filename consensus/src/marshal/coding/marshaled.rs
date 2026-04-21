@@ -161,7 +161,6 @@ where
 /// This wrapper intercepts consensus operations to enforce epoch boundaries. It prevents
 /// blocks from being produced outside their valid epoch and handles the special case of
 /// re-proposing boundary blocks during epoch transitions.
-#[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
@@ -174,7 +173,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: E,
+    context: Arc<E>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
@@ -184,10 +183,40 @@ where
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
-    build_duration: Timed<E>,
-    verify_duration: Timed<E>,
-    proposal_parent_fetch_duration: Timed<E>,
-    erasure_encode_duration: Timed<E>,
+    build_duration: Timed,
+    verify_duration: Timed,
+    proposal_parent_fetch_duration: Timed,
+    erasure_encode_duration: Timed,
+}
+
+impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
+where
+    E: Rng + Storage + Spawner + Metrics + Clock,
+    A: Application<E>,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    C: CodingScheme,
+    H: Hasher,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    S: Strategy,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            shards: self.shards.clone(),
+            scheme_provider: self.scheme_provider.clone(),
+            epocher: self.epocher.clone(),
+            strategy: self.strategy.clone(),
+            verification_tasks: self.verification_tasks.clone(),
+            cached_genesis: self.cached_genesis.clone(),
+            build_duration: self.build_duration.clone(),
+            verify_duration: self.verify_duration.clone(),
+            proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
+            erasure_encode_duration: self.erasure_encode_duration.clone(),
+        }
+    }
 }
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
@@ -221,39 +250,34 @@ where
             epocher,
         } = cfg;
 
-        let clock = Arc::new(context.clone());
-
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let context = Arc::new(context);
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
-        let build_duration = Timed::new(build_histogram, clock.clone());
+        let build_duration = Timed::new(build_histogram);
 
-        let verify_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let verify_histogram = context.register(
             "verify_duration",
             "Histogram of time taken for the application to verify a block, in seconds",
-            verify_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
-        let verify_duration = Timed::new(verify_histogram, clock.clone());
+        let verify_duration = Timed::new(verify_histogram);
 
-        let parent_fetch_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let parent_fetch_histogram = context.register(
             "parent_fetch_duration",
             "Histogram of time taken to fetch a parent block in proposal, in seconds",
-            parent_fetch_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
-        let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram, clock.clone());
+        let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
 
-        let erasure_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let erasure_histogram = context.register(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",
-            erasure_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
-        let erasure_encode_duration = Timed::new(erasure_histogram, clock);
+        let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
             context,
@@ -305,7 +329,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("deferred_verify")
+            .child("deferred_verify")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let round = consensus_context.round;
@@ -402,14 +426,14 @@ where
                 );
                 let validity_request = application.verify(
                     (
-                        runtime_context.with_label("app_verify"),
+                        runtime_context.child("app_verify"),
                         consensus_context.clone(),
                     ),
                     ancestry_stream,
                 );
 
                 // If consensus drops the receiver, we can stop work early.
-                let mut timer = verify_duration.timer();
+                let verify_duration = verify_duration.start(&runtime_context);
                 let application_valid = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -420,7 +444,7 @@ where
                     },
                     is_valid = validity_request => is_valid,
                 };
-                timer.observe();
+                verify_duration.record(&runtime_context);
                 if application_valid && !stage.store(&mut marshal, round, block).await {
                     debug!(?round, "marshal unable to accept block");
                     return;
@@ -522,7 +546,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("propose")
+            .child("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
@@ -574,7 +598,7 @@ where
                 )
                 .await;
 
-                let mut parent_timer = proposal_parent_fetch_duration.timer();
+                let parent_fetch_duration = proposal_parent_fetch_duration.start(&runtime_context);
                 let parent = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -583,6 +607,7 @@ where
                     result = parent_request => match result {
                         Ok(parent) => parent,
                         Err(_) => {
+                            parent_fetch_duration.record(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "failed to fetch parent block",
@@ -592,7 +617,7 @@ where
                         }
                     },
                 };
-                parent_timer.observe();
+                parent_fetch_duration.record(&runtime_context);
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -624,13 +649,13 @@ where
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent.into_inner()]);
                 let build_request = application.propose(
                     (
-                        runtime_context.with_label("app_propose"),
+                        runtime_context.child("app_propose"),
                         consensus_context.clone(),
                     ),
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -639,6 +664,7 @@ where
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
+                            build_duration.record(&runtime_context);
                             debug!(
                                 ?parent_commitment,
                                 reason = "block building failed",
@@ -648,11 +674,11 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.record(&runtime_context);
 
-                let mut erasure_timer = erasure_encode_duration.timer();
+                let erasure_encode_duration = erasure_encode_duration.start(&runtime_context);
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-                erasure_timer.observe();
+                erasure_encode_duration.record(&runtime_context);
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
@@ -755,7 +781,7 @@ where
 
             let (mut tx, rx) = oneshot::channel();
             self.context
-                .with_label("verify_reproposal")
+                .child("verify_reproposal")
                 .spawn(move |_| async move {
                     let block = select! {
                         _ = tx.closed() => {
@@ -827,7 +853,7 @@ where
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context
-                    .with_label("shard_validity_wait")
+                    .child("shard_validity_wait")
                     .spawn(|_| async move {
                         if validity_rx.await.is_ok() {
                             tx.send_lossy(true);
@@ -890,7 +916,7 @@ where
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("certify")
+            .child("certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
                 let block = select! {

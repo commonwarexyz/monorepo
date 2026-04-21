@@ -8,11 +8,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef,
-    deterministic::{self, Context},
-    Metrics as _, Runner,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     mmr::{self, journaled::Config as MmrConfig, Location},
@@ -88,15 +84,12 @@ struct FuzzInput {
 }
 
 fn make_config(
-    ctx: &Context,
     suffix: &str,
-    page_size: NonZeroU16,
-    page_cache_size: NonZeroUsize,
+    page_cache: CacheRef,
     mmr_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ())> {
-    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
         merkle_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),
@@ -201,13 +194,12 @@ fn fuzz(input: FuzzInput) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut db = Db::init(
-                ctx.with_label("db"),
+                ctx.child("db"),
                 make_config(
-                    &ctx,
                     &suffix,
-                    page_size,
-                    page_cache_size,
+                    page_cache,
                     mmr_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
@@ -284,13 +276,12 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut db = Db::init(
-                ctx.with_label("recovered"),
+                ctx.child("recovered"),
                 make_config(
-                    &ctx,
                     &suffix,
-                    page_size,
-                    page_cache_size,
+                    page_cache,
                     mmr_items_per_blob,
                     log_items_per_blob,
                     write_buffer,

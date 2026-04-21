@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
@@ -109,7 +109,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         let operations = data.operations.clone();
         async move {
             let page_cache = CacheRef::from_pooler(
-                &context,
+                context.child("cache"),
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             );
@@ -132,7 +132,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.clone(), cfg, None, |_, _| {})
+                commonware_storage::qmdb::any::init(context.child("db"), cfg, None, |_, _| {})
                     .await
                     .expect("init qmdb");
 

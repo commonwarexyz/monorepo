@@ -433,9 +433,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
-    };
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
@@ -447,10 +445,10 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(pooler: &impl BufferPooler) -> Config {
+    fn test_cfg(page_cache: CacheRef) -> Config {
         Config {
             partition: "test-partition".into(),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache,
             write_buffer: NZUsize!(2048),
         }
     }
@@ -459,8 +457,12 @@ mod tests {
     fn test_segmented_fixed_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -505,8 +507,10 @@ mod tests {
     fn test_segmented_fixed_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -526,9 +530,13 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             let items = {
                 let stream = journal
@@ -568,8 +576,10 @@ mod tests {
         // Test that replay with a non-zero start_position correctly skips items.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -590,9 +600,13 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
             {
@@ -688,8 +702,12 @@ mod tests {
     fn test_segmented_fixed_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -720,8 +738,12 @@ mod tests {
     fn test_segmented_fixed_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -766,8 +788,12 @@ mod tests {
     fn test_segmented_fixed_rewind_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -823,10 +849,11 @@ mod tests {
     fn test_segmented_fixed_rewind_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
             // Create sections 1-5
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
             for section in 1u64..=5 {
@@ -844,9 +871,13 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
@@ -874,8 +905,12 @@ mod tests {
     fn test_segmented_fixed_corruption_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let first_cfg = test_cfg(first_cache);
+            let partition = first_cfg.partition.clone();
+            let mut journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to init");
 
@@ -889,15 +924,19 @@ mod tests {
             drop(journal);
 
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&partition, &1u64.to_be_bytes())
                 .await
                 .expect("failed to open blob");
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             let count = {
                 let stream = journal
@@ -923,10 +962,11 @@ mod tests {
     fn test_segmented_fixed_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
             // Create and populate journal
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -940,9 +980,13 @@ mod tests {
             drop(journal);
 
             // Reopen and verify data persisted
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg)
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             for i in 0u64..5 {
                 let item = journal.get(1, i).await.expect("failed to get");
@@ -957,8 +1001,12 @@ mod tests {
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -984,8 +1032,10 @@ mod tests {
         // Sections 1, 5, 10 should all be independent and accessible.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -1022,9 +1072,13 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay and verify all items in order
             {
@@ -1075,8 +1129,10 @@ mod tests {
         // Section 1 has data, section 2 is empty, section 3 has data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut journal = Journal::init(first_ctx.child("journal"), test_cfg(first_cache))
                 .await
                 .expect("failed to init");
 
@@ -1112,9 +1168,13 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
@@ -1176,8 +1236,12 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+            let first_ctx = context.child("first");
+            let first_cache =
+                CacheRef::from_pooler(first_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let first_cfg = test_cfg(first_cache);
+            let partition = first_cfg.partition.clone();
+            let mut journal = Journal::init(first_ctx.child("journal"), first_cfg)
                 .await
                 .expect("failed to init");
 
@@ -1199,7 +1263,7 @@ mod tests {
 
             // Truncate the blob by exactly 1 byte to simulate partial write
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&partition, &1u64.to_be_bytes())
                 .await
                 .expect("failed to open blob");
             blob.resize(size - 1).await.expect("failed to truncate");
@@ -1208,9 +1272,13 @@ mod tests {
 
             // Reopen journal - should recover by truncating last page due to failed checksum, and
             // end up with a correct blob size due to partial-item trimming.
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
+            let second_ctx = context.child("second");
+            let second_cache =
+                CacheRef::from_pooler(second_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let journal =
+                Journal::<_, Digest>::init(second_ctx.child("journal"), test_cfg(second_cache))
+                    .await
+                    .expect("failed to re-init");
 
             // Verify section now has only 2 items
             assert_eq!(journal.section_len(1).await.unwrap(), 2);
@@ -1243,12 +1311,16 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
             let mut journal: Journal<_, Digest> =
-                Journal::init(context.with_label("journal"), cfg.clone())
+                Journal::init(context.child("journal"), cfg.clone())
                     .await
                     .expect("Failed to initialize journal");
 
@@ -1304,8 +1376,12 @@ mod tests {
     fn test_last_missing_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1326,8 +1402,12 @@ mod tests {
     fn test_last_after_rewind_to_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1348,8 +1428,12 @@ mod tests {
     fn test_last_pruned_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1373,8 +1457,12 @@ mod tests {
     fn test_get_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).await.unwrap(), 1);
 
@@ -1390,8 +1478,12 @@ mod tests {
     fn test_get_many_single_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
             for i in 0..5 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1419,8 +1511,12 @@ mod tests {
         // Read a sparse subset of positions.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
             for i in 0..10 {
                 journal.append(0, &test_digest(i)).await.unwrap();
@@ -1444,8 +1540,12 @@ mod tests {
     fn test_get_many_bad_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
                 .await
                 .unwrap();
 
@@ -1462,8 +1562,12 @@ mod tests {
         // Verify batch read matches individual reads.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            let cfg = test_cfg(CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ));
+            let mut journal = Journal::init(context.child("journal"), cfg).await.unwrap();
 
             for i in 0..8 {
                 journal.append(0, &test_digest(i)).await.unwrap();

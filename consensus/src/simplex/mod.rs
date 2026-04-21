@@ -432,8 +432,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
-        Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Observer, Quota,
+        Runner, Spawner, Supervisor,
     };
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -605,7 +605,7 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
     {
         let (network, oracle) = Network::new_with_peers(
-            context.with_label("network"),
+            context.child("network"),
             Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block,
@@ -629,7 +629,7 @@ mod tests {
         J: IntoIterator<Item = PublicKey>,
     {
         let (network, oracle) = Network::new_with_split_peers(
-            context.with_label("network"),
+            context.child("network"),
             Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block,
@@ -733,7 +733,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -751,7 +752,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -760,7 +763,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -772,11 +775,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -797,10 +802,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -813,7 +818,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -983,7 +988,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             let link = Link {
@@ -1001,14 +1006,14 @@ mod tests {
             let mut engine_handlers = Vec::new();
             let dishonest = Participant::new(0);
             for (idx, validator) in participants.iter().enumerate() {
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context.child("validator").with_attribute("idx", idx);
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
                 let application_cfg = mocks::application::Config {
@@ -1024,7 +1029,7 @@ mod tests {
                     })),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
@@ -1050,10 +1055,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -1063,7 +1068,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -1126,7 +1131,7 @@ mod tests {
             let public_key_observer = private_key_observer.public_key();
 
             let mut oracle = start_test_network_with_split_peers(
-                context.clone(),
+                context.child("network"),
                 participants.clone(),
                 [public_key_observer.clone()],
                 true,
@@ -1156,7 +1161,9 @@ mod tests {
                 let is_observer = *validator == public_key_observer;
 
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let signing = if is_observer {
@@ -1170,7 +1177,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1182,11 +1189,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -1207,10 +1216,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -1223,7 +1232,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -1298,9 +1307,12 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle =
-                    start_test_network_with_peers(context.clone(), participants.clone(), true)
-                        .await;
+                let mut oracle = start_test_network_with_peers(
+                    context.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
 
                 // Link all validators
@@ -1318,7 +1330,9 @@ mod tests {
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
                     // Create scheme context
-                    let context = context.with_label(&format!("validator_{}", *validator));
+                    let context = context
+                        .child("validator")
+                        .with_attribute("validator", validator);
 
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
@@ -1338,11 +1352,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -1363,10 +1379,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
 
                     // Start engine
                     let (pending, recovered, resolver) = registrations
@@ -1379,7 +1395,7 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
                             latest = monitor.recv().await.expect("event missing");
                         }
@@ -1469,7 +1485,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1498,7 +1515,9 @@ mod tests {
                 }
 
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1507,7 +1526,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1519,11 +1538,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1544,10 +1565,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -1560,7 +1581,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -1596,7 +1617,7 @@ mod tests {
 
             // Configure engine for first peer
             let me = participants[0].clone();
-            let context = context.with_label(&format!("validator_{me}"));
+            let context = context.child("validator").with_attribute("validator", &me);
 
             // Link first peer to all (except second)
             link_validators(
@@ -1628,7 +1649,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let mut reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1639,12 +1660,12 @@ mod tests {
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(me.clone());
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1665,10 +1686,10 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let engine = Engine::new(context.with_label("engine"), cfg);
+            let engine = Engine::new(context.child("engine"), cfg);
 
             // Start engine
             let (pending, recovered, resolver) = registrations
@@ -1724,7 +1745,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1753,7 +1775,9 @@ mod tests {
                 }
 
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1762,7 +1786,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1774,11 +1798,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1799,10 +1825,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -1815,7 +1841,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -1955,7 +1981,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1973,7 +2000,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -1982,7 +2011,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -2006,11 +2035,13 @@ mod tests {
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2031,10 +2062,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -2047,7 +2078,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2132,7 +2163,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2150,7 +2182,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2159,7 +2193,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2171,11 +2205,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2196,10 +2232,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -2212,18 +2248,14 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (_, mut monitor) = reporter.subscribe().await;
-                finalizers.push(
-                    context
-                        .with_label("finalizer")
-                        .spawn(move |context| async move {
-                            select! {
-                                _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.recv() => {
-                                    panic!("engine should not notarize or finalize anything");
-                                },
-                            }
-                        }),
-                );
+                finalizers.push(context.child("finalizer").spawn(move |context| async move {
+                    select! {
+                        _timeout = context.sleep(Duration::from_secs(60)) => {},
+                        _done = monitor.recv() => {
+                            panic!("engine should not notarize or finalize anything");
+                        },
+                    }
+                }));
             }
             join_all(finalizers).await;
 
@@ -2255,7 +2287,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2333,7 +2365,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2351,7 +2384,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2360,7 +2395,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2372,11 +2407,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2397,10 +2434,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -2413,7 +2450,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2435,18 +2472,14 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (_, mut monitor) = reporter.subscribe().await;
-                finalizers.push(
-                    context
-                        .with_label("finalizer")
-                        .spawn(move |context| async move {
-                            select! {
-                                _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.recv() => {
-                                    panic!("engine should not notarize or finalize anything");
-                                },
-                            }
-                        }),
-                );
+                finalizers.push(context.child("finalizer").spawn(move |context| async move {
+                    select! {
+                        _timeout = context.sleep(Duration::from_secs(60)) => {},
+                        _done = monitor.recv() => {
+                            panic!("engine should not notarize or finalize anything");
+                        },
+                    }
+                }));
             }
             join_all(finalizers).await;
 
@@ -2464,7 +2497,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2524,7 +2557,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2548,7 +2582,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -2557,7 +2593,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2569,11 +2605,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2594,10 +2632,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -2610,7 +2648,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2768,7 +2806,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2785,7 +2824,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -2794,7 +2835,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -2804,10 +2845,7 @@ mod tests {
                     };
 
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
-                        mocks::conflicter::Conflicter::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
+                        mocks::conflicter::Conflicter::new(context.child("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -2821,11 +2859,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -2846,10 +2886,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -2858,7 +2898,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -2959,7 +2999,8 @@ mod tests {
                 .collect();
 
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2976,7 +3017,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -2984,7 +3027,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
                 let application_cfg = mocks::application::Config {
@@ -2997,11 +3040,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3022,10 +3067,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -3038,7 +3083,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3114,8 +3159,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
@@ -3145,14 +3194,16 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
                 let application_cfg = mocks::application::Config {
@@ -3165,11 +3216,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3190,10 +3243,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -3304,7 +3357,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3321,7 +3375,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3330,7 +3386,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -3341,7 +3397,7 @@ mod tests {
 
                     let engine: mocks::impersonator::Impersonator<_, _, Sha256> =
                         mocks::impersonator::Impersonator::new(
-                            context.with_label("byzantine_engine"),
+                            context.child("byzantine_engine"),
                             cfg,
                         );
                     engine.start(pending);
@@ -3357,11 +3413,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3382,10 +3440,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -3394,7 +3452,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3461,7 +3519,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3479,7 +3538,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3488,7 +3549,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
@@ -3503,7 +3564,7 @@ mod tests {
                     };
 
                     let engine = mocks::equivocator::Equivocator::new(
-                        context.with_label("byzantine_engine"),
+                        context.child("byzantine_engine"),
                         cfg,
                     );
                     engines.push(engine.start(pending, recovered));
@@ -3518,11 +3579,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3543,10 +3606,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
                 }
             }
@@ -3555,7 +3618,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3576,7 +3639,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 2) {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3586,7 +3649,10 @@ mod tests {
 
             // Recreate engine
             info!(idx, ?validator, "restarting validator");
-            let context = context.with_label(&format!("validator_{}_restarted", *validator));
+            let context = context
+                .child("validator")
+                .with_attribute("validator", validator)
+                .with_attribute("state", "restarted");
 
             // Start engine
             let reporter_config = mocks::reporter::Config {
@@ -3595,7 +3661,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let (pending, recovered, resolver) =
                 register_validator(&mut oracle, validator.clone()).await;
             reporters.push(reporter.clone());
@@ -3608,12 +3674,12 @@ mod tests {
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(validator.clone());
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3634,17 +3700,17 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let engine = Engine::new(context.with_label("engine"), cfg);
+            let engine = Engine::new(context.child("engine"), cfg);
             engine.start(pending, recovered, resolver);
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 3) {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3781,7 +3847,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3798,7 +3865,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3807,7 +3876,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -3817,7 +3886,7 @@ mod tests {
                     };
                     let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
                         mocks::reconfigurer::Reconfigurer::new(
-                            context.with_label("byzantine_engine"),
+                            context.child("byzantine_engine"),
                             cfg,
                         );
                     engine.start(pending);
@@ -3833,11 +3902,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3858,10 +3929,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -3870,7 +3941,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -3937,7 +4008,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3954,7 +4026,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -3963,7 +4037,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -3972,7 +4046,7 @@ mod tests {
                         scheme: schemes[idx_scheme].clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
-                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
+                        mocks::nuller::Nuller::new(context.child("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -3986,11 +4060,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4011,10 +4087,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -4023,7 +4099,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -4106,7 +4182,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4123,7 +4200,9 @@ mod tests {
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
@@ -4132,7 +4211,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -4142,7 +4221,7 @@ mod tests {
                         view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
-                        mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
+                        mocks::outdated::Outdated::new(context.child("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -4156,11 +4235,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -4181,10 +4262,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -4193,7 +4274,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -4253,7 +4334,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4271,7 +4353,9 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -4280,7 +4364,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -4292,11 +4376,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4317,10 +4403,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -4333,7 +4419,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -4424,7 +4510,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4443,7 +4530,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -4454,12 +4541,12 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(participants[0].clone());
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4480,10 +4567,10 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
                 forwarding: ForwardingPolicy::Disabled,
             };
-            let engine = Engine::new(context.with_label("engine"), cfg);
+            let engine = Engine::new(context.child("engine"), cfg);
 
             // Start engine
             let (pending, recovered, resolver) = registrations
@@ -4510,13 +4597,13 @@ mod tests {
 
             // Shutdown engine and ensure children stop
             let running_after = if graceful {
-                let metrics_context = context.clone();
+                let observer_context = context.child("observer");
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
                 assert!(
                     result.is_ok(),
                     "graceful shutdown should complete: {result:?}"
                 );
-                count_running_tasks(&metrics_context, "engine")
+                count_running_tasks(&observer_context, "engine")
             } else {
                 handle.abort();
                 let _ = handle.await; // ensure parent tear-down runs
@@ -4625,8 +4712,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4642,21 +4733,21 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                 };
-                let mock_reporter = mocks::reporter::Reporter::new(
-                    context.with_label("mock_reporter"),
-                    reporter_config,
-                );
+                let mock_reporter =
+                    mocks::reporter::Reporter::new(context.child("mock_reporter"), reporter_config);
 
                 // Wrap with `AttributableReporter`
                 let attributable_reporter = scheme::reporter::AttributableReporter::new(
-                    context.with_label("rng"),
+                    context.child("rng"),
                     schemes[idx].clone(),
                     mock_reporter.clone(),
                     Sequential,
@@ -4674,11 +4765,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4699,10 +4792,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -4715,7 +4808,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
@@ -4852,8 +4945,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
@@ -4986,6 +5083,9 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -4996,10 +5096,7 @@ mod tests {
                         scheme: schemes[idx].clone(),
                     };
                     let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
-                        mocks::nullify_only::NullifyOnly::new(
-                            context.with_label(&format!("byzantine_{}", *validator)),
-                            cfg,
-                        );
+                        mocks::nullify_only::NullifyOnly::new(context.child("byzantine"), cfg);
                     engine.start(pending);
                     // Recovered/resolver channels are unused for byzantine actors.
                     drop(recovered);
@@ -5011,10 +5108,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.with_label(&format!("reporter_{}", *validator)),
-                        reporter_config,
-                    );
+                    let reporter =
+                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     honest_reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -5027,11 +5122,13 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label(&format!("application_{}", *validator)),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -5052,11 +5149,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine =
-                        Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -5134,13 +5230,15 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for reporter in honest_reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("resume_finalizer").spawn(
-                        move |_| async move {
-                            while latest < target {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        },
-                    ));
+                    finalizers.push(
+                        context
+                            .child("resume_finalizer")
+                            .spawn(move |_| async move {
+                                while latest < target {
+                                    latest = monitor.recv().await.expect("event missing");
+                                }
+                            }),
+                    );
                 }
                 join_all(finalizers).await;
             }
@@ -5187,7 +5285,8 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5206,7 +5305,9 @@ mod tests {
             let monitor_reporter = Arc::new(Mutex::new(None));
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
@@ -5215,7 +5316,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 if idx == 0 {
                     *monitor_reporter.lock() = Some(reporter.clone());
@@ -5232,11 +5333,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5257,10 +5360,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -5333,7 +5436,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut oracle =
-                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5351,7 +5455,9 @@ mod tests {
             let mut engine_handlers = BTreeMap::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator_{}", *validator));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -5360,7 +5466,7 @@ mod tests {
                     elector: elector.clone(),
                 };
                 let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -5372,11 +5478,13 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5397,10 +5505,10 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
@@ -5419,7 +5527,7 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
                             latest = monitor.recv().await.expect("event missing");
                         }
@@ -5441,7 +5549,7 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
                             latest = monitor.recv().await.expect("event missing");
                         }
@@ -5452,8 +5560,11 @@ mod tests {
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
-                let context =
-                    context.with_label(&format!("validator_{}_restarted_{}", *validator, i));
+                let context = context
+                    .child("validator")
+                    .with_attribute("validator", validator)
+                    .with_attribute("restart", i)
+                    .with_attribute("state", "restarted");
 
                 // Start engine
                 let (pending, recovered, resolver) =
@@ -5468,12 +5579,14 @@ mod tests {
                     should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
+                    context.child("application"),
                     application_cfg,
                 );
                 actor.start();
                 reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
+                let page_cache =
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5494,17 +5607,17 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache,
                     forwarding: ForwardingPolicy::Disabled,
                 };
-                let engine = Engine::new(context.with_label("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
                             latest = monitor.recv().await.expect("event missing");
                         }
@@ -5839,7 +5952,7 @@ mod tests {
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
                 let mut oracle = start_test_network_with_peers(
-                    context.clone(),
+                    context.child("network"),
                     participants.iter().cloned(),
                     false,
                 )
@@ -5914,14 +6027,16 @@ mod tests {
                         vote_sender.split_with(make_vote_forwarder());
                     let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver
                         .split_with(
-                            context.with_label(&format!("pending_split_{idx}")),
+                            context.child("pending_split").with_attribute("split", idx),
                             make_vote_router(),
                         );
                     let (certificate_sender_primary, certificate_sender_secondary) =
                         certificate_sender.split_with(make_certificate_forwarder());
                     let (certificate_receiver_primary, certificate_receiver_secondary) =
                         certificate_receiver.split_with(
-                            context.with_label(&format!("recovered_split_{idx}")),
+                            context
+                                .child("recovered_split")
+                                .with_attribute("split", idx),
                             make_certificate_router(),
                         );
 
@@ -5938,7 +6053,10 @@ mod tests {
                         ),
                     ] {
                         let label = format!("twin_{idx}_{twin_label}");
-                        let context = context.with_label(&label);
+                        let context = context
+                            .child("twin")
+                            .with_attribute("twin", idx)
+                            .with_attribute("branch", twin_label);
 
                         let reporter_config = mocks::reporter::Config {
                             participants: participants.as_ref().try_into().unwrap(),
@@ -5946,7 +6064,7 @@ mod tests {
                             elector: elector.clone(),
                         };
                         let reporter = mocks::reporter::Reporter::new(
-                            context.with_label("reporter"),
+                            context.child("reporter"),
                             reporter_config,
                         );
                         reporters.push(reporter.clone());
@@ -5961,12 +6079,17 @@ mod tests {
                             should_certify: mocks::application::Certifier::Always,
                         };
                         let (actor, application) = mocks::application::Application::new(
-                            context.with_label("application"),
+                            context.child("application"),
                             application_cfg,
                         );
                         actor.start();
 
                         let blocker = oracle.control(validator.clone());
+                        let page_cache = CacheRef::from_pooler(
+                            context.child("cache"),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        );
                         let cfg = config::Config {
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
@@ -5987,10 +6110,10 @@ mod tests {
                             fetch_concurrent: 4,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                            page_cache,
                             forwarding: ForwardingPolicy::Disabled,
                         };
-                        let engine = Engine::new(context.with_label("engine"), cfg);
+                        let engine = Engine::new(context.child("engine"), cfg);
                         engine_handlers.push(engine.start(
                             pending,
                             recovered,
@@ -6007,17 +6130,15 @@ mod tests {
                     }
 
                     let label = format!("honest_{idx}");
-                    let context = context.with_label(&label);
+                    let context = context.child("honest").with_attribute("validator", idx);
 
                     let reporter_config = mocks::reporter::Config {
                         participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.with_label("reporter"),
-                        reporter_config,
-                    );
+                    let reporter =
+                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -6030,12 +6151,14 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
+                        context.child("application"),
                         application_cfg,
                     );
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
+                    let page_cache =
+                        CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -6056,10 +6179,10 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache,
                         forwarding: ForwardingPolicy::Disabled,
                     };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    let engine = Engine::new(context.child("engine"), cfg);
 
                     let (
                         (pending_sender, pending_receiver),
@@ -6089,16 +6212,17 @@ mod tests {
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
                     let required = trailing_finalizations;
-                    let label = format!("finalizer_{i}");
-                    finalizers.push(context.with_label(&label).spawn(move |_| async move {
-                        let mut count = 0usize;
-                        while count < required {
-                            let view = monitor.recv().await.expect("event missing");
-                            if view > prefix_end {
-                                count += 1;
+                    finalizers.push(context.child("finalizer").with_attribute("index", i).spawn(
+                        move |_| async move {
+                            let mut count = 0usize;
+                            while count < required {
+                                let view = monitor.recv().await.expect("event missing");
+                                if view > prefix_end {
+                                    count += 1;
+                                }
                             }
-                        }
-                    }));
+                        },
+                    ));
                 }
                 join_all(finalizers).await;
 

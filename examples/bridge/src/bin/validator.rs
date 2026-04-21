@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager as _};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
+    buffer::paged::CacheRef, tokio, Network, Quota, Runner, Supervisor, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -180,19 +180,13 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(
-            context.with_label("dialer"),
-            indexer_cfg,
-            indexer,
-            stream,
-            sink,
-        )
-        .await
-        .expect("Failed to upgrade connection with indexer");
+        let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
+            .await
+            .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =
-            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
+            authenticated::discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -221,14 +215,17 @@ fn main() {
         );
 
         // Initialize application
-        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+        let strategy = context
+            .child("strategy")
+            .create_strategy(NZUsize!(2))
+            .unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
                 .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
-            context.with_label("application"),
+            context.child("application"),
             application::Config {
                 indexer,
                 hasher: Sha256::default(),
@@ -239,8 +236,10 @@ fn main() {
         );
 
         // Initialize consensus
+        let page_cache =
+            CacheRef::from_pooler(context.child("cache"), NZU16!(16_384), NZUsize!(10_000));
         let engine = Engine::new(
-            context.with_label("engine"),
+            context.child("engine"),
             simplex::Config {
                 scheme,
                 elector: RoundRobin::<Sha256>::default(),
@@ -260,7 +259,7 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache,
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

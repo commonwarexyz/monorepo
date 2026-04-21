@@ -82,7 +82,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the directory
         let directory = Directory::init(
-            context.with_label("directory"),
+            context.child("directory"),
             cfg.crypto.public_key(),
             directory_cfg,
             releaser,
@@ -275,7 +275,7 @@ mod tests {
     };
     use commonware_runtime::{
         deterministic::{self},
-        Clock, Runner,
+        Clock, Runner, Supervisor,
     };
     use commonware_utils::{
         ordered::{Map, Set},
@@ -336,7 +336,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
+            let TestHarness { mut mailbox, .. } = setup_actor(context.child("tracker"), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
@@ -359,7 +359,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
@@ -391,7 +391,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
@@ -422,7 +422,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
 
@@ -446,7 +446,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             // None acceptable because not registered
             assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
@@ -493,7 +493,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             // Unknown peer is NOT acceptable (bypass_ip_check only skips IP check)
             assert!(
@@ -545,7 +545,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
@@ -591,7 +591,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
             oracle
                 .track(
                     0,
@@ -618,7 +618,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg_initial);
+            } = setup_actor(context.child("tracker"), cfg_initial);
 
             oracle
                 .track(
@@ -655,7 +655,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let mut subscription = oracle.subscribe().await;
 
@@ -715,7 +715,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let mut subscription = oracle.subscribe().await;
 
@@ -761,7 +761,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             // 2) Register & connect an authorized peer
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
@@ -819,7 +819,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             // Register set with myself and one other peer
             oracle
@@ -880,7 +880,7 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
             let (cfg, mut listener_receiver) = test_config(my_sk, false);
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("tracker"), cfg);
 
             oracle
                 .track(
@@ -916,7 +916,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let (_, pk) = new_signer_and_pk(1);
             let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
@@ -960,7 +960,7 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
             let (cfg, mut listener_receiver) = test_config(my_sk, false);
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("tracker"), cfg);
 
             oracle
                 .track(
@@ -995,7 +995,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("tracker"), cfg);
 
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
@@ -1020,7 +1020,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             oracle
                 .track(
@@ -1051,7 +1051,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let (_, pk) = new_signer_and_pk(1);
             let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
@@ -1091,7 +1091,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let (_, pk) = new_signer_and_pk(1);
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
@@ -1141,7 +1141,7 @@ mod tests {
                 mut mailbox,
                 mut oracle,
                 ..
-            } = setup_actor(context.clone(), cfg);
+            } = setup_actor(context.child("tracker"), cfg);
 
             let (_, pk_tracked) = new_signer_and_pk(1);
             let (_, pk_unchanged) = new_signer_and_pk(2);

@@ -1,13 +1,12 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
-use std::sync::Arc;
 
 /// Label for sequencer height metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -26,7 +25,7 @@ impl SequencerLabel {
 }
 
 /// Metrics for the [super::Engine]
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,
     /// Number of acks processed by status
@@ -42,76 +41,62 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
-    pub verify_duration: histogram::Timed<E>,
+    pub verify_duration: histogram::Timed,
     /// Histogram of time from new proposal to certificate generation
-    pub e2e_duration: histogram::Timed<E>,
+    pub e2e_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
-        let sequencer_heights = Family::default();
-        context.register(
-            "sequencer_heights",
-            "Height per sequencer tracked",
-            sequencer_heights.clone(),
-        );
-        let acks = status::Counter::default();
-        context.register("acks", "Number of acks processed by status", acks.clone());
-        let nodes = status::Counter::default();
-        context.register(
-            "nodes",
-            "Number of nodes processed by status",
-            nodes.clone(),
-        );
-        let verify = status::Counter::default();
-        context.register(
-            "verify",
-            "Number of application verifications by status",
-            verify.clone(),
-        );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let propose = status::Counter::default();
-        context.register(
-            "propose",
-            "Number of propose attempts by status",
-            propose.clone(),
-        );
-        let rebroadcast = status::Counter::default();
-        context.register(
-            "rebroadcast",
-            "Number of rebroadcast attempts by status",
-            rebroadcast.clone(),
-        );
-        let verify_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
+        let verify_duration = context.register(
             "verify_duration",
             "Histogram of application verification durations",
-            verify_duration.clone(),
+            Histogram::new(histogram::Buckets::LOCAL),
         );
-        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK);
-        context.register(
+        let e2e_duration = context.register(
             "e2e_duration",
             "Histogram of time from new proposal to certificate generation",
-            e2e_duration.clone(),
+            Histogram::new(histogram::Buckets::NETWORK),
         );
-        let clock = Arc::new(context);
-
         Self {
-            sequencer_heights,
-            acks,
-            nodes,
-            verify,
-            certificates,
-            propose,
-            rebroadcast,
-            verify_duration: histogram::Timed::new(verify_duration, clock.clone()),
-            e2e_duration: histogram::Timed::new(e2e_duration, clock),
+            sequencer_heights: context.register(
+                "sequencer_heights",
+                "Height per sequencer tracked",
+                Family::default(),
+            ),
+            acks: context.register(
+                "acks",
+                "Number of acks processed by status",
+                status::Counter::default(),
+            ),
+            nodes: context.register(
+                "nodes",
+                "Number of nodes processed by status",
+                status::Counter::default(),
+            ),
+            verify: context.register(
+                "verify",
+                "Number of application verifications by status",
+                status::Counter::default(),
+            ),
+            certificates: context.register(
+                "certificates",
+                "Number of certificates produced",
+                Counter::default(),
+            ),
+            propose: context.register(
+                "propose",
+                "Number of propose attempts by status",
+                status::Counter::default(),
+            ),
+            rebroadcast: context.register(
+                "rebroadcast",
+                "Number of rebroadcast attempts by status",
+                status::Counter::default(),
+            ),
+            verify_duration: histogram::Timed::new(verify_duration),
+            e2e_duration: histogram::Timed::new(e2e_duration),
         }
     }
 }

@@ -172,7 +172,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Metrics, Runner,
+        Observer, Runner, Supervisor,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 
@@ -199,7 +199,11 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
             value_partition: "test-value".into(),
             compression,
             codec_config: (),
@@ -208,7 +212,9 @@ mod tests {
             value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         };
-        prunable::Archive::init(context, cfg).await.unwrap()
+        prunable::Archive::init(context.child("archive"), cfg)
+            .await
+            .unwrap()
     }
 
     async fn create_immutable(
@@ -222,7 +228,11 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test-key".into(),
-            freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_page_cache: CacheRef::from_pooler(
+                context.child("cache"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            ),
             freezer_value_partition: "test-value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
@@ -234,7 +244,9 @@ mod tests {
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
         };
-        immutable::Archive::init(context, cfg).await.unwrap()
+        immutable::Archive::init(context.child("archive"), cfg)
+            .await
+            .unwrap()
     }
 
     async fn test_put_get_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
@@ -526,7 +538,7 @@ mod tests {
     {
         // Create and populate archive
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
 
             // Insert multiple keys
             let keys = vec![
@@ -548,7 +560,7 @@ mod tests {
 
         // Reopen and verify data
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
 
             // Verify all keys are still present
             let keys = vec![
@@ -615,7 +627,7 @@ mod tests {
     {
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
 
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
@@ -644,7 +656,7 @@ mod tests {
         }
 
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
             let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
             // Check gap before the first element
@@ -739,7 +751,7 @@ mod tests {
         // Insert many keys
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.with_label("first"), compression).await;
+            let mut archive = creator(context.child("first"), compression).await;
             while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
@@ -779,7 +791,7 @@ mod tests {
 
         // Reinitialize and verify
         {
-            let archive = creator(context.with_label("second"), compression).await;
+            let archive = creator(context.child("second"), compression).await;
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -807,12 +819,12 @@ mod tests {
     {
         let executor = deterministic::Runner::default();
         let state1 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression, num).await;
+            test_many_keys_impl(context.child("archive"), creator, compression, num).await;
             context.auditor().state()
         });
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression, num).await;
+            test_many_keys_impl(context.child("archive"), creator, compression, num).await;
             context.auditor().state()
         });
         assert_eq!(state1, state2);
@@ -900,7 +912,7 @@ mod tests {
     fn test_put_multi_and_get_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("archive"), None).await;
             test_put_multi_and_get_impl(context, archive).await;
         });
     }
@@ -933,7 +945,7 @@ mod tests {
     fn test_put_multi_duplicate_key_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("archive"), None).await;
             test_put_multi_duplicate_key_impl(context, archive).await;
         });
     }
@@ -1043,7 +1055,7 @@ mod tests {
     {
         // Write multi-items, sync, and drop
         {
-            let mut archive = creator(context.with_label("init1"), compression).await;
+            let mut archive = creator(context.child("init1"), compression).await;
             archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
             archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
             archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
@@ -1051,7 +1063,7 @@ mod tests {
         }
 
         // Reinitialize and verify
-        let archive = creator(context.with_label("init2"), compression).await;
+        let archive = creator(context.child("init2"), compression).await;
 
         assert_eq!(
             archive
@@ -1153,7 +1165,7 @@ mod tests {
     fn test_put_multi_mixed_indices_prunable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context.clone(), None).await;
+            let archive = create_prunable(context.child("archive"), None).await;
             test_put_multi_mixed_indices_impl(context, archive).await;
         });
     }

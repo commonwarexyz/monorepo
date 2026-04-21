@@ -54,25 +54,25 @@ impl<
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
-        let sent_messages = Family::<metrics::Message, Counter>::default();
-        let received_messages = Family::<metrics::Message, Counter>::default();
-        let dropped_messages = Family::<metrics::Message, Counter>::default();
-        let rate_limited = Family::<metrics::Message, Counter>::default();
-        context.register("messages_sent", "messages sent", sent_messages.clone());
-        context.register(
+        let sent_messages = context.register(
+            "messages_sent",
+            "messages sent",
+            Family::<metrics::Message, Counter>::default(),
+        );
+        let received_messages = context.register(
             "messages_received",
             "messages received",
-            received_messages.clone(),
+            Family::<metrics::Message, Counter>::default(),
         );
-        context.register(
+        let dropped_messages = context.register(
             "messages_dropped",
             "messages dropped due to full application buffer",
-            dropped_messages.clone(),
+            Family::<metrics::Message, Counter>::default(),
         );
-        context.register(
+        let rate_limited = context.register(
             "messages_rate_limited",
             "messages rate limited",
-            rate_limited.clone(),
+            Family::<metrics::Message, Counter>::default(),
         );
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
@@ -124,7 +124,9 @@ impl<
                         reservation,
                     } => {
                         // Spawn peer
-                        self.context.with_label("peer").spawn({
+                        self.context.child("connection")
+                            .with_attribute("peer", &peer)
+                            .spawn({
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
                             let dropped_messages = self.dropped_messages.clone();

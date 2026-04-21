@@ -129,7 +129,6 @@ where
 /// This wrapper requires only [`crate::Block`] for `B`, not
 /// [`crate::CertifiableBlock`]. It is designed for applications that cannot
 /// recover consensus context directly from block payloads.
-#[derive(Clone)]
 pub struct Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -138,13 +137,33 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: E,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     available_blocks: AvailableBlocks<B::Digest>,
 
-    build_duration: Timed<E>,
+    build_duration: Timed,
+}
+
+impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E>,
+    B: Block + Clone,
+    ES: Epocher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            application: self.application.clone(),
+            marshal: self.marshal.clone(),
+            epocher: self.epocher.clone(),
+            available_blocks: self.available_blocks.clone(),
+            build_duration: self.build_duration.clone(),
+        }
+    }
 }
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
@@ -164,13 +183,13 @@ where
     ///
     /// Registers a `build_duration` histogram for proposal latency.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let context = Arc::new(context);
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
-        let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
+        let build_duration = Timed::new(build_histogram);
 
         Self {
             context,
@@ -236,7 +255,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("propose")
+            .child("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 // On leader recovery, marshal may already hold a verified block
@@ -318,13 +337,13 @@ where
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
                 let build_request = application.propose(
                     (
-                        runtime_context.with_label("app_propose"),
+                        runtime_context.child("app_propose"),
                         consensus_context.clone(),
                     ),
                     ancestor_stream,
                 );
 
-                let mut build_timer = build_duration.timer();
+                let build_duration = build_duration.start(&runtime_context);
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -333,6 +352,7 @@ where
                     result = build_request => match result {
                         Some(block) => block,
                         None => {
+                            build_duration.record(&runtime_context);
                             debug!(
                                 ?parent_digest,
                                 reason = "block building failed",
@@ -342,7 +362,7 @@ where
                         }
                     },
                 };
-                build_timer.observe();
+                build_duration.record(&runtime_context);
 
                 let digest = built_block.digest();
                 if !marshal.verified(consensus_context.round, built_block).await {
@@ -386,7 +406,7 @@ where
 
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("inline_verify")
+            .child("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 let block_request = marshal
@@ -488,7 +508,7 @@ where
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("inline_certify")
+            .child("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
                 let Some(block) =
@@ -579,7 +599,7 @@ mod tests {
         Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
     use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
     use rand::Rng;
     use std::time::Duration;
@@ -617,13 +637,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -634,7 +657,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -695,13 +718,16 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("inline"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -712,7 +738,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -767,12 +793,12 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -784,7 +810,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -866,13 +892,13 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -886,7 +912,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -940,7 +966,7 @@ mod tests {
             // persisted - otherwise the validator would have voted notarize
             // for a block it cannot serve from local storage.
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context.child("validator").with_attribute("restart", true),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -979,13 +1005,13 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -998,7 +1024,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1042,7 +1068,7 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context.child("validator").with_attribute("restart", true),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1068,13 +1094,13 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
 
             let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1088,7 +1114,7 @@ mod tests {
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new(genesis.clone());
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1154,7 +1180,7 @@ mod tests {
             drop(buffer);
 
             let setup2 = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context.child("validator").with_attribute("restart", true),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1189,7 +1215,7 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle =
-                setup_network_with_participants(context.clone(), NZUsize!(1), participants.clone())
+                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
                     .await;
 
             let me = participants[0].clone();
@@ -1205,7 +1231,7 @@ mod tests {
             // mirroring an aborted pre-crash `Inline::propose` that persisted
             // its verified block before the voter could journal a notarize.
             let pre_setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
+                context.child("validator"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1230,7 +1256,7 @@ mod tests {
             // be recovered from storage during archive restore so that
             // `Message::GetVerified` on the new mailbox observes it.
             let post_setup = StandardHarness::setup_validator(
-                context.with_label("validator_0_restart"),
+                context.child("validator").with_attribute("restart", true),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1242,7 +1268,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
             let mut inline = Inline::new(
-                context.clone(),
+                context.child("inline"),
                 mock_app,
                 post_marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),

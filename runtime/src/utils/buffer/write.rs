@@ -17,7 +17,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, BufferPooler, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, BufferPooler, Metrics, Supervisor, Observer, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
 /// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();
@@ -27,7 +27,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
+///     let mut blob = Write::from_pooler(context.child("writer"), blob, 0, NZUsize!(16));
 ///     blob.write_at(0, b"hello").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
@@ -38,7 +38,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
+///     let mut reader = Read::from_pooler(context.child("reader"), blob, size, NZUsize!(8));
 ///     let buf = reader.read(size as usize).await.expect("read failed");
 ///     assert_eq!(buf.coalesce().as_ref(), b"hello world!");
 /// });
@@ -64,7 +64,7 @@ impl<B: Blob> Write<B> {
 
     /// Creates a new [Write], extracting the storage [BufferPool] from a [BufferPooler].
     pub fn from_pooler(
-        pooler: &impl BufferPooler,
+        pooler: impl BufferPooler,
         blob: B,
         size: u64,
         capacity: NonZeroUsize,

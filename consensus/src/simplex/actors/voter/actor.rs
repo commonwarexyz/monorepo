@@ -142,23 +142,20 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
+        let outbound_messages = context.register(
             "outbound_messages",
             "number of outbound messages",
-            outbound_messages.clone(),
+            Family::<Outbound, Counter>::default(),
         );
-        context.register(
+        let notarization_latency = context.register(
             "notarization_latency",
             "notarization latency",
-            notarization_latency.clone(),
+            Histogram::new(LATENCY),
         );
-        context.register(
+        let finalization_latency = context.register(
             "finalization_latency",
             "finalization latency",
-            finalization_latency.clone(),
+            Histogram::new(LATENCY),
         );
 
         // Initialize store
@@ -166,7 +163,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
-            context.with_label("state"),
+            context.child("state"),
             StateConfig {
                 scheme: cfg.scheme,
                 elector: cfg.elector,
@@ -718,7 +715,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
-            self.context.with_label("journal").into_present(),
+            self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

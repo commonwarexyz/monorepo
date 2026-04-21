@@ -6,7 +6,7 @@ use crate::journal::{
 };
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Buf, BufMut, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Buf, BufMut, Runner, Supervisor};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
@@ -26,10 +26,14 @@ impl Conformance for ContiguousFixed {
             let config = fixed::Config {
                 partition: format!("contiguous-fixed-conformance-{seed}"),
                 items_per_blob: ITEMS_PER_BLOB,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: WRITE_BUFFER,
             };
-            let journal = fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
+            let journal = fixed::Journal::<_, u64>::init(context.child("journal"), config)
                 .await
                 .unwrap();
 
@@ -57,15 +61,18 @@ impl Conformance for ContiguousVariable {
             let config = variable::Config {
                 partition: format!("contiguous-variable-conformance-{seed}"),
                 items_per_section: ITEMS_PER_BLOB,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let journal =
-                variable::Journal::<_, Vec<u8>>::init(context.with_label("journal"), config)
-                    .await
-                    .unwrap();
+            let journal = variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                .await
+                .unwrap();
 
             let mut data_to_write =
                 vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
@@ -94,11 +101,15 @@ impl Conformance for SegmentedFixed {
         runner.start(|mut context| async move {
             let config = segmented_fixed::Config {
                 partition: format!("segmented-fixed-conformance-{seed}"),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: WRITE_BUFFER,
             };
             let mut journal =
-                segmented_fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
+                segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config)
                     .await
                     .unwrap();
 
@@ -136,7 +147,7 @@ impl Conformance for SegmentedGlob {
                 codec_config: (RangeCfg::new(0..256), ()),
                 write_buffer: WRITE_BUFFER,
             };
-            let mut journal = glob::Glob::<_, Vec<u8>>::init(context.with_label("journal"), config)
+            let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config)
                 .await
                 .unwrap();
 
@@ -174,17 +185,19 @@ impl Conformance for SegmentedVariable {
         runner.start(|mut context| async move {
             let config = segmented_variable::Config {
                 partition: format!("segmented-variable-conformance-{seed}"),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let mut journal = segmented_variable::Journal::<_, Vec<u8>>::init(
-                context.with_label("journal"),
-                config,
-            )
-            .await
-            .unwrap();
+            let mut journal =
+                segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                    .await
+                    .unwrap();
 
             // Write variable-size items across multiple sections
             let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
@@ -268,14 +281,18 @@ impl Conformance for SegmentedOversized {
             let config = oversized::Config {
                 index_partition: format!("segmented-oversized-index-conformance-{seed}"),
                 value_partition: format!("segmented-oversized-value-conformance-{seed}"),
-                index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                index_page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 index_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
             let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
-                context.with_label("journal"),
+                context.child("journal"),
                 config,
             )
             .await

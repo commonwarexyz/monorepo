@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Metrics, Supervisor, Observer, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     archive::{
@@ -44,7 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         freezer_key_page_cache: CacheRef::from_pooler(context.child("cache"), NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -144,37 +144,68 @@ mod tests {
     fn test_unclean_shutdown() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                metadata_partition: "test-metadata2".into(),
-                freezer_table_partition: "test-table2".into(),
-                freezer_table_initial_size: 8192, // Must be power of 2
-                freezer_table_resize_frequency: 4,
-                freezer_table_resize_chunk_size: 8192,
-                freezer_key_partition: "test-key2".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: "test-value2".into(),
-                freezer_value_target_size: 1024 * 1024,
-                freezer_value_compression: Some(3),
-                ordinal_partition: "test-ordinal2".into(),
-                items_per_section: NZU64!(512),
-                freezer_key_write_buffer: NZUsize!(1024),
-                freezer_value_write_buffer: NZUsize!(1024),
-                ordinal_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-                codec_config: (),
-            };
-
             // First initialization
-            let archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let first_ctx = context.child("first");
+            let archive: Archive<_, Digest, i32> = Archive::init(
+                first_ctx.child("archive"),
+                Config {
+                    metadata_partition: "test-metadata2".into(),
+                    freezer_table_partition: "test-table2".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "test-key2".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        first_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "test-value2".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "test-ordinal2".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
             drop(archive);
 
             // Second initialization
-            let mut archive = Archive::init(context.with_label("second"), cfg.clone())
-                .await
-                .unwrap();
+            let second_ctx = context.child("second");
+            let mut archive = Archive::init(
+                second_ctx.child("archive"),
+                Config {
+                    metadata_partition: "test-metadata2".into(),
+                    freezer_table_partition: "test-table2".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "test-key2".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        second_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "test-value2".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "test-ordinal2".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
 
             // Add some data
             let key1 = Sha256::hash(b"key1");
@@ -187,9 +218,35 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let archive = Archive::init(context.with_label("third"), cfg)
-                .await
-                .unwrap();
+            let third_ctx = context.child("third");
+            let archive = Archive::init(
+                third_ctx.child("archive"),
+                Config {
+                    metadata_partition: "test-metadata2".into(),
+                    freezer_table_partition: "test-table2".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "test-key2".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        third_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "test-value2".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "test-ordinal2".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
 
             // Verify data persisted
             assert_eq!(
@@ -213,39 +270,69 @@ mod tests {
     fn test_sync_empty_archive_then_restart() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                metadata_partition: "empty-metadata".into(),
-                freezer_table_partition: "empty-table".into(),
-                freezer_table_initial_size: 8192,
-                freezer_table_resize_frequency: 4,
-                freezer_table_resize_chunk_size: 8192,
-                freezer_key_partition: "empty-key".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: "empty-value".into(),
-                freezer_value_target_size: 1024 * 1024,
-                freezer_value_compression: Some(3),
-                ordinal_partition: "empty-ordinal".into(),
-                items_per_section: NZU64!(512),
-                freezer_key_write_buffer: NZUsize!(1024),
-                freezer_value_write_buffer: NZUsize!(1024),
-                ordinal_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-                codec_config: (),
-            };
-
             // Initialize archive, sync without writing anything, then drop
-            let mut archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let first_ctx = context.child("first");
+            let mut archive: Archive<_, Digest, i32> = Archive::init(
+                first_ctx.child("archive"),
+                Config {
+                    metadata_partition: "empty-metadata".into(),
+                    freezer_table_partition: "empty-table".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "empty-key".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        first_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "empty-value".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "empty-ordinal".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
             archive.sync().await.unwrap();
             drop(archive);
 
             // Re-initialize -- should not fail with SectionOutOfRange(0)
-            let mut archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("second"), cfg.clone())
-                    .await
-                    .unwrap();
+            let second_ctx = context.child("second");
+            let mut archive: Archive<_, Digest, i32> = Archive::init(
+                second_ctx.child("archive"),
+                Config {
+                    metadata_partition: "empty-metadata".into(),
+                    freezer_table_partition: "empty-table".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "empty-key".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        second_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "empty-value".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "empty-ordinal".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
 
             // Write data after restart to confirm archive is functional
             let key = Sha256::hash(b"after-restart");
@@ -254,9 +341,35 @@ mod tests {
             drop(archive);
 
             // Third init to verify persistence
-            let archive: Archive<_, Digest, i32> = Archive::init(context.with_label("third"), cfg)
-                .await
-                .unwrap();
+            let third_ctx = context.child("third");
+            let archive: Archive<_, Digest, i32> = Archive::init(
+                third_ctx.child("archive"),
+                Config {
+                    metadata_partition: "empty-metadata".into(),
+                    freezer_table_partition: "empty-table".into(),
+                    freezer_table_initial_size: 8192,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 8192,
+                    freezer_key_partition: "empty-key".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        third_ctx.child("cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: "empty-value".into(),
+                    freezer_value_target_size: 1024 * 1024,
+                    freezer_value_compression: Some(3),
+                    ordinal_partition: "empty-ordinal".into(),
+                    items_per_section: NZU64!(512),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 archive
                     .get(crate::archive::Identifier::Key(&key))

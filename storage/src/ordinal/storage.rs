@@ -166,8 +166,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             }
 
             // Initialize read buffer
-            let mut replay_blob =
-                ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
+            let mut replay_blob = ReadBuffer::from_pooler(
+                context.child("replay").with_attribute("section", *section),
+                blob.clone(),
+                *size,
+                config.replay_buffer,
+            );
 
             // Iterate over all records in the blob
             let mut offset = 0;
@@ -226,22 +230,22 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             .map(|(index, (blob, len))| {
                 (
                     index,
-                    Write::from_pooler(&context, blob, len, config.write_buffer),
+                    Write::from_pooler(
+                        context.child("writer").with_attribute("section", index),
+                        blob,
+                        len,
+                        config.write_buffer,
+                    ),
                 )
             })
             .collect();
 
         // Initialize metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        let pruned = Counter::default();
-        context.register("puts", "Number of put calls", puts.clone());
-        context.register("gets", "Number of get calls", gets.clone());
-        context.register("has", "Number of has calls", has.clone());
-        context.register("syncs", "Number of sync calls", syncs.clone());
-        context.register("pruned", "Number of pruned blobs", pruned.clone());
+        let puts = context.register("puts", "Number of put calls", Counter::default());
+        let gets = context.register("gets", "Number of get calls", Counter::default());
+        let has = context.register("has", "Number of has calls", Counter::default());
+        let syncs = context.register("syncs", "Number of sync calls", Counter::default());
+        let pruned = context.register("pruned", "Number of pruned blobs", Counter::default());
 
         Ok(Self {
             context,
@@ -271,7 +275,9 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;
             entry.insert(Write::from_pooler(
-                &self.context,
+                self.context
+                    .child("writer")
+                    .with_attribute("section", section),
                 blob,
                 len,
                 self.config.write_buffer,

@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as JournalConfig, Journal},
@@ -108,20 +108,30 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = JournalConfig {
+        let make_cfg = |page_cache: CacheRef| JournalConfig {
             partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache,
         };
 
-        let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+        let mut restarts = 0usize;
+        let mut journal = Journal::init(
+            context
+                .child("journal")
+                .with_attribute("instance", restarts),
+            make_cfg(CacheRef::from_pooler(
+                context.child("cache").with_attribute("instance", restarts),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            )),
+        )
+        .await
+        .unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
         let mut oldest_retained_pos = 0u64;
-        let mut restarts = 0usize;
-
         for op in input.ops.iter() {
             match op {
                 JournalOperation::Append { value } => {
@@ -219,15 +229,19 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Restart => {
                     drop(journal);
+                    restarts += 1;
                     journal = Journal::init(
                         context
-                            .with_label("journal")
+                            .child("journal")
                             .with_attribute("instance", restarts),
-                        cfg.clone(),
+                        make_cfg(CacheRef::from_pooler(
+                            context.child("cache").with_attribute("instance", restarts),
+                            PAGE_SIZE,
+                            NZUsize!(PAGE_CACHE_SIZE),
+                        )),
                     )
                     .await
                     .unwrap();
-                    restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size().await;
                     oldest_retained_pos = journal.reader().await.bounds().start;
@@ -318,16 +332,20 @@ fn fuzz(input: FuzzInput) {
                     // Cap to avoid excessive memory use
                     let target_size = *size % 256;
                     drop(journal);
+                    restarts += 1;
                     journal = Journal::init_at_size(
                         context
-                            .with_label("journal")
+                            .child("journal")
                             .with_attribute("instance", restarts),
-                        cfg.clone(),
+                        make_cfg(CacheRef::from_pooler(
+                            context.child("cache").with_attribute("instance", restarts),
+                            PAGE_SIZE,
+                            NZUsize!(PAGE_CACHE_SIZE),
+                        )),
                         target_size,
                     )
                     .await
                     .unwrap();
-                    restarts += 1;
                     journal_size = journal.size().await;
                     oldest_retained_pos = journal.reader().await.bounds().start;
                 }

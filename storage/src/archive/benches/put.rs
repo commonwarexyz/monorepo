@@ -1,5 +1,8 @@
 use super::utils::{append_random, Archive, Variant};
-use commonware_runtime::benchmarks::{context, tokio};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    Supervisor,
+};
 use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -29,7 +32,7 @@ fn bench_put(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let mut archive =
-                                Archive::init(ctx.clone(), variant, compression).await;
+                                Archive::init(ctx.child("archive"), variant, compression).await;
 
                             let start = Instant::now();
                             append_random(&mut archive, items).await;

@@ -5,9 +5,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, journaled::Config, mmb, mmr, Family as MerkleFamily,
     Location,
@@ -88,9 +86,7 @@ struct FuzzInput {
 
 fn merkle_config(
     partition_suffix: &str,
-    pooler: &impl BufferPooler,
-    page_size: NonZeroU16,
-    page_cache_size: NonZeroUsize,
+    page_cache: CacheRef,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> Config {
@@ -100,7 +96,7 @@ fn merkle_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
+        page_cache,
     }
 }
 
@@ -237,17 +233,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new();
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut merkle = Journaled::<F>::init(
-                ctx.with_label("merkle"),
+                ctx.child("merkle"),
                 &hasher,
-                merkle_config(
-                    &partition_suffix,
-                    &ctx,
-                    page_size,
-                    page_cache_size,
-                    items_per_blob,
-                    write_buffer,
-                ),
+                merkle_config(&partition_suffix, page_cache, items_per_blob, write_buffer),
             )
             .await
             .unwrap();
@@ -269,17 +259,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new();
+        let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
         let mut merkle = Journaled::<F>::init(
-            ctx.with_label("recovered"),
+            ctx.child("recovered"),
             &hasher,
-            merkle_config(
-                &partition_suffix,
-                &ctx,
-                page_size,
-                page_cache_size,
-                items_per_blob,
-                write_buffer,
-            ),
+            merkle_config(&partition_suffix, page_cache, items_per_blob, write_buffer),
         )
         .await
         .expect("recovery should succeed");

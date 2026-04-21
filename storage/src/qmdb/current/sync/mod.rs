@@ -113,7 +113,7 @@ where
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
     let mmr = mmr::journaled::Mmr::init_sync(
-        context.with_label("mmr"),
+        context.child("mmr"),
         mmr::journaled::SyncConfig {
             config: mmr_config,
             range: range.clone(),
@@ -122,7 +122,7 @@ where
         &hasher,
     )
     .await?;
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<Family, _, _, _>::from_components(
         mmr,
         log,
@@ -217,11 +217,9 @@ where
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
-        context.with_label("metadata"),
-        &metadata_partition,
-    )
-    .await?;
+    let (metadata, _, _) =
+        db::init_metadata::<Family, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
+            .await?;
 
     let current_db = db::Db {
         any,

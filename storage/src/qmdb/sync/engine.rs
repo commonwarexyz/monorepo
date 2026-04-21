@@ -16,7 +16,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::Metrics as _;
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -267,7 +267,7 @@ where
         // any engine-owned handles.
         let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
-                config.context.with_label("local_target_probe"),
+                config.context.child("local_target_probe"),
                 &config.db_config,
                 &config.target,
             )
@@ -278,7 +278,7 @@ where
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal>::new(
-            config.context.with_label("journal"),
+            config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone().into(),
         )

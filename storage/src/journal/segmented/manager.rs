@@ -169,12 +169,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         // Initialize metrics
-        let tracked = Gauge::default();
-        let synced = Counter::default();
-        let pruned = Counter::default();
-        context.register("tracked", "Number of blobs", tracked.clone());
-        context.register("synced", "Number of syncs", synced.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
+        let tracked = context.register("tracked", "Number of blobs", Gauge::default());
+        let synced = context.register("synced", "Number of syncs", Counter::default());
+        let pruned = context.register("pruned", "Number of blobs pruned", Counter::default());
         let _ = tracked.try_set(blobs.len());
 
         Ok(Self {

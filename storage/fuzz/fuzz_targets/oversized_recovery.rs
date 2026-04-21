@@ -8,8 +8,8 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler,
-    Error as RuntimeError, Metrics, Runner, Storage as _,
+    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Error as RuntimeError, Runner,
+    Storage as _, Supervisor,
 };
 use commonware_storage::journal::{
     segmented::oversized::{Config, Oversized, Record},
@@ -169,11 +169,11 @@ fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool
     offset < blob_size && end > offset
 }
 
-fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
+fn test_cfg(page_cache: CacheRef) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
-        index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        index_page_cache: page_cache,
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
@@ -185,11 +185,12 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_cfg(&context);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = test_cfg(page_cache);
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.with_label("initial"), cfg.clone())
+            Oversized::init(context.child("initial"), cfg.clone())
                 .await
                 .expect("Failed to init");
 
@@ -307,7 +308,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 3: Recovery - this should not panic
         let mut recovered: Oversized<_, TestEntry, TestValue> =
-            match Oversized::init(context.with_label("recovered"), cfg.clone()).await {
+            match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.

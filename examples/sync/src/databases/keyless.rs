@@ -7,7 +7,7 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
@@ -20,7 +20,7 @@ use commonware_storage::{
         operation::Committable,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU64};
 use std::num::NonZeroU64;
 use tracing::error;
 
@@ -31,12 +31,7 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
 pub type Operation = fixed::Operation<Value>;
 
 /// Create a database configuration for the keyless variant.
-pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
-    let page_cache = buffer::paged::CacheRef::from_pooler(
-        &context.with_label("page_cache"),
-        NZU16!(2048),
-        NZUsize!(10),
-    );
+pub fn create_config(page_cache: CacheRef) -> fixed::Config {
     keyless::Config {
         merkle: MmrConfig {
             journal_partition: "mmr-journal".into(),

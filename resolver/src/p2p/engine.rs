@@ -31,8 +31,8 @@ use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
-struct Serve<E: Clock, P: PublicKey> {
-    timer: histogram::Timer<E>,
+struct Serve<P: PublicKey> {
+    duration: histogram::Started,
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
@@ -74,20 +74,20 @@ pub struct Engine<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
-    /// Track the start time of fetch operations
-    fetch_timers: HashMap<Key, histogram::Timer<E>>,
+    /// Track the duration of fetch operations.
+    fetch_timers: HashMap<Key, histogram::Started>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<E, P>>,
+    serves: FuturesPool<Serve<P>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
 
     /// Metrics for the peer actor
-    metrics: metrics::Metrics<E>,
+    metrics: metrics::Metrics,
 
     /// Phantom data for networking types
     _r: PhantomData<NetR>,
@@ -111,10 +111,9 @@ impl<
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
-            context.with_label("fetcher"),
+            context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
                 initial: cfg.initial,
@@ -240,24 +239,27 @@ impl<
                                     }
                                 }
                                 None => self.fetcher.clear_targets(&key),
-                            }
+                                }
 
-                            // Only start new fetch if not already in progress
-                            if is_new {
-                                self.fetch_timers
-                                    .insert(key.clone(), self.metrics.fetch_duration.timer());
-                                self.fetcher.add_ready(key);
-                            } else {
-                                trace!(?key, "updated targets for existing fetch");
+                                // Only start new fetch if not already in progress
+                                if is_new {
+                                    self.fetch_timers
+                                        .insert(
+                                            key.clone(),
+                                            self.metrics.fetch_duration.start(self.context.as_ref()),
+                                        );
+                                    self.fetcher.add_ready(key);
+                                } else {
+                                    trace!(?key, "updated targets for existing fetch");
+                                }
                             }
-                        }
                     }
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
                         if self.fetcher.cancel(&key) {
                             guard.set(Status::Success);
-                            self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
+                            let _ = self.fetch_timers.remove(&key).expect("must exist");
                             self.consumer.failed(key.clone(), ()).await;
                         }
                     }
@@ -273,8 +275,7 @@ impl<
                             .fetch_timers
                             .extract_if(|k, _| !predicate(k))
                             .collect::<Vec<_>>();
-                        for (key, timer) in removed {
-                            timer.cancel();
+                        for (key, _) in removed {
                             self.consumer.failed(key, ()).await;
                         }
 
@@ -294,8 +295,7 @@ impl<
 
                         // Drain timers and notify consumer
                         let removed = self.fetch_timers.len() as u64;
-                        for (key, timer) in self.fetch_timers.drain() {
-                            timer.cancel();
+                        for (key, _) in self.fetch_timers.drain() {
                             self.consumer.failed(key, ()).await;
                         }
 
@@ -312,20 +312,20 @@ impl<
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve {
-                    timer,
+                    duration,
                     peer,
                     id,
                     result,
                 } = serve;
 
                 // Metrics and logs
-                match result {
+                let success = result.is_ok();
+                match &result {
                     Ok(_) => {
                         self.metrics.serve.inc(Status::Success);
                     }
-                    Err(ref err) => {
+                    Err(err) => {
                         debug!(?err, ?peer, ?id, "serve failed");
-                        timer.cancel();
                         self.metrics.serve.inc(Status::Failure);
                     }
                 }
@@ -333,6 +333,9 @@ impl<
                 // Send response to peer
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
                     .await;
+                if success {
+                    duration.record(self.context.as_ref());
+                }
             },
             // Handle network messages
             msg = receiver.recv() => {
@@ -398,12 +401,12 @@ impl<
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let timer = self.metrics.serve_duration.timer();
+        let duration = self.metrics.serve_duration.start(self.context.as_ref());
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
             Serve {
-                timer,
+                duration,
                 peer,
                 id,
                 result,
@@ -425,7 +428,8 @@ impl<
         if self.consumer.deliver(key.clone(), response).await {
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
-            self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+            let duration = self.fetch_timers.remove(&key).unwrap(); // must exist in the map
+            duration.record(self.context.as_ref());
 
             // Clear all targets for this key
             self.fetcher.clear_targets(&key);

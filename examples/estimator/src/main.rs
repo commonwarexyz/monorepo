@@ -310,7 +310,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
     }
 
     let (network, mut oracle) = Network::new_with_peers(
-        context.with_label("network"),
+        context.child("network"),
         Config {
             max_size: u32::MAX,
             disconnect_on_block: true,
@@ -424,7 +424,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
         let proposer_identity = proposer_identity.clone();
         let tx = tx.clone();
-        let job = context.with_label("job");
+        let job = context.child("job");
         let commands = commands.to_vec();
         jobs.push(job.spawn(move |ctx| async move {
             let start = ctx.current();

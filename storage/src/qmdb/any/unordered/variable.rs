@@ -157,7 +157,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -166,11 +166,10 @@ pub(crate) mod test {
         sync::Arc,
     };
 
-    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
+    pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    pub(crate) fn create_test_config(seed: u64, page_cache: CacheRef) -> VarConfig {
         VariableConfig {
             merkle_config: crate::mmr::journaled::Config {
                 journal_partition: format!("journal-{seed}"),
@@ -202,8 +201,9 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
-        AnyTest::init(context, config).await.unwrap()
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let config = create_test_config(seed, page_cache);
+        AnyTest::init(context.child("db"), config).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -268,15 +268,16 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = create_test_config(0, &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = create_test_config(0, page_cache);
+        AnyTest::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
     pub fn test_any_variable_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.child("db")).await;
             crate::qmdb::any::test::test_any_db_build_and_authenticate(
                 context,
                 db,
@@ -293,7 +294,7 @@ pub(crate) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = open_db(context.with_label("open1")).await;
+            let db = open_db(context.child("open1")).await;
             let root = db.root();
 
             // Build a batch but don't apply it (simulate failure before commit).
@@ -310,7 +311,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open2")).await;
+            let mut db = open_db(context.child("open2")).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -341,7 +342,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open3")).await;
+            let mut db = open_db(context.child("open3")).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -374,7 +375,7 @@ pub(crate) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let mut db = open_db(context.with_label("open4")).await;
+            let mut db = open_db(context.child("open4")).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -401,7 +402,7 @@ pub(crate) mod test {
             drop(db);
 
             // Confirm state is preserved after reopen.
-            let db = open_db(context.with_label("open5")).await;
+            let db = open_db(context.child("open5")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds().await, bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
@@ -415,7 +416,7 @@ pub(crate) mod test {
     fn test_any_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             // Add some operations
             let key1 = Digest::random(&mut context);
@@ -451,7 +452,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -498,7 +499,7 @@ pub(crate) mod test {
     fn test_stale_batch_rejected_different_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             // A writes 1 key, B writes 5 keys -- different total_size.
             let batch_a = db
@@ -540,7 +541,7 @@ pub(crate) mod test {
     fn test_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -585,7 +586,7 @@ pub(crate) mod test {
     fn test_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -640,7 +641,7 @@ pub(crate) mod test {
     fn test_sequential_commit_parent_then_child() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
@@ -674,7 +675,7 @@ pub(crate) mod test {
     fn test_stale_batch_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.child("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);

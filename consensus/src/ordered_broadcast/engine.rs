@@ -54,8 +54,8 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: PublicKey, D: Digest, E: Clock> {
-    timer: histogram::Timer<E>,
+struct Verify<C: PublicKey, D: Digest> {
+    duration: histogram::Started,
     context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
@@ -133,7 +133,7 @@ pub struct Engine<
     //
     // There is no limit to the number of futures in this pool, so the automaton
     // can apply backpressure by dropping the verification requests if necessary.
-    pending_verifies: FuturesPool<Verify<C::PublicKey, D, E>>,
+    pending_verifies: FuturesPool<Verify<C::PublicKey, D>>,
 
     ////////////////////////////////////////
     // Storage
@@ -194,10 +194,10 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // Metrics
-    metrics: metrics::Metrics<E>,
+    metrics: metrics::Metrics,
 
     // The timer of my last new proposal
-    propose_timer: Option<histogram::Timer<E>>,
+    propose_timer: Option<histogram::Started>,
 }
 
 impl<
@@ -215,8 +215,7 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
 
         Self {
             context: ContextCell::new(context),
@@ -469,12 +468,12 @@ impl<
             // Handle completed verification futures.
             verify = self.pending_verifies.next_completed() => {
                 let Verify {
-                    timer,
+                    duration,
                     context,
                     payload,
                     result,
                 } = verify;
-                drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
+                duration.record(self.context.as_ref());
                 match result {
                     Err(err) => {
                         warn!(?err, ?context, "verified returned error");
@@ -606,7 +605,9 @@ impl<
         // If the certificate is for my sequencer, record metric
         if let Some(ref signer) = self.sequencer_signer {
             if chunk.sequencer == signer.public_key() {
-                self.propose_timer.take();
+                if let Some(start) = self.propose_timer.take() {
+                    start.record(self.context.as_ref());
+                }
             }
         }
 
@@ -671,12 +672,12 @@ impl<
         };
         let payload = node.chunk.payload;
         let mut automaton = self.automaton.clone();
-        let timer = self.metrics.verify_duration.timer();
+        let duration = self.metrics.verify_duration.start(self.context.as_ref());
         self.pending_verifies.push(async move {
             let receiver = automaton.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
-                timer,
+                duration,
                 context,
                 payload,
                 result,
@@ -776,7 +777,7 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Record the start time of the proposal
-        self.propose_timer = Some(self.metrics.e2e_duration.timer());
+        self.propose_timer = Some(self.metrics.e2e_duration.start(self.context.as_ref()));
 
         // Broadcast to network
         if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
@@ -902,7 +903,7 @@ impl<
 
         // Verify the node
         node.verify(
-            &mut self.context,
+            self.context.as_mut(),
             &self.chunk_verifier,
             &self.validators_provider,
             &self.strategy,
@@ -963,7 +964,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
+        if !ack.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -1036,9 +1037,8 @@ impl<
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
-                .with_label("journal")
-                .with_attribute("sequencer", sequencer)
-                .into_present(),
+                .child("journal")
+                .with_attribute("sequencer", sequencer),
             cfg,
         )
         .await

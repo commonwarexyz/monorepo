@@ -2,7 +2,8 @@
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Metrics, Runner, Storage,
+    Supervisor,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
@@ -16,7 +17,7 @@ const TOTAL_SIZE: usize = PAGE_SIZE_USIZE * TOTAL_PAGES;
 fn bench_backend<R>(c: &mut Criterion, backend: &str, read_size: usize)
 where
     R: Runner + Default,
-    R::Context: Storage + BufferPooler,
+    R::Context: Storage + BufferPooler + Metrics,
 {
     c.bench_function(
         &format!("{}/backend={backend} size={read_size}", module_path!()),
@@ -26,17 +27,18 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref =
+                        CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, NZUsize!(CACHE_SIZE));
 
                     // Setup: populate the blob
-                    let append = create_append(&ctx, &name, cache_ref.clone()).await;
+                    let append = create_append(ctx.child("setup"), &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
                     append.append(&data).await.unwrap();
                     append.sync().await.unwrap();
                     drop(append);
 
                     // Benchmark: random reads
-                    let append = create_append(&ctx, &name, cache_ref).await;
+                    let append = create_append(ctx.child("bench"), &name, cache_ref).await;
                     let mut buf = vec![0u8; read_size];
                     let max_offset = TOTAL_SIZE - read_size;
                     let mut rng = StdRng::seed_from_u64(42);
@@ -52,7 +54,7 @@ where
                     let elapsed = start.elapsed();
 
                     // Cleanup
-                    destroy_append(&ctx, append, &name).await;
+                    destroy_append(ctx.child("destroy"), append, &name).await;
 
                     elapsed
                 })

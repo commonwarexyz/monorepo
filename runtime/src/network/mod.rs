@@ -28,7 +28,7 @@ mod tests {
     pub(super) async fn test_network_trait<N, F>(new_network: F)
     where
         F: Fn() -> N,
-        N: crate::Network,
+        N: crate::Network + Clone,
     {
         test_network_bind_and_dial(new_network()).await;
         test_network_vectored_send(new_network()).await;
@@ -147,7 +147,7 @@ mod tests {
     }
 
     // Test handling multiple clients
-    async fn test_network_multiple_clients<N: crate::Network>(network: N) {
+    async fn test_network_multiple_clients<N: crate::Network + Clone>(network: N) {
         const NUM_CLIENTS: usize = 3;
 
         // Start a server
@@ -369,14 +369,14 @@ mod tests {
     pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
     where
         F: Fn() -> N,
-        N: crate::Network,
+        N: crate::Network + Clone,
     {
         stress_concurrent_streams(new_network()).await;
     }
 
     /// Creates a large number of concurrent streams and sends messages
     /// back and forth between them.
-    async fn stress_concurrent_streams<N: crate::Network>(network: N) {
+    async fn stress_concurrent_streams<N: crate::Network + Clone>(network: N) {
         const NUM_CLIENTS: usize = 96;
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;

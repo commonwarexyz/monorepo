@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::Family as _,
@@ -138,9 +138,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    page_cache: CacheRef,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
@@ -167,11 +166,19 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
-        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
-            .await
-            .expect("Failed to init source db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context.child("cache").with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(1),
+        );
+        let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
+        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
+            context.child("db").with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut historical_roots: BTreeMap<
             Location,
@@ -319,16 +326,19 @@ fn fuzz(input: FuzzInput) {
                     historical_roots.clear();
                     drop(db);
 
-                    let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context.child("cache").with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(1),
+                    );
+                    let cfg = test_config("qmdb-any-variable-fuzz-test", page_cache.clone());
                     db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init source db");
-                    restarts += 1;
                 }
             }
         }

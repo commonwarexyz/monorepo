@@ -27,12 +27,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics};
+//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics, Supervisor, Observer};
 //!
 //! let executor =  deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     println!("Parent started");
-//!     let result = context.with_label("child").spawn(|_| async move {
+//!     let result = context.child("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -54,13 +54,13 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        add_attribute,
+        add_attribute, get_or_register,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeGuard,
+        MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
+    Name, Panicked, Spawner as _, Supervisor as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -85,14 +85,13 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
+    registry::Registry as PrometheusRegistry,
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
@@ -368,13 +367,63 @@ impl Default for Config {
     }
 }
 
-/// A (prefixed_name, attributes) pair identifying a unique metric registration.
-type MetricKey = (String, Vec<(String, String)>);
+/// Per-level deterministic-runtime namespace guard. Catches collisions between
+/// child labels and registered metric names at the same context level.
+///
+/// Each [`Context`] owns its own guard (shared across any handle produced by
+/// consuming modifiers like [`with_attribute`](crate::Supervisor::with_attribute),
+/// [`with_scope`](crate::Observer::with_scope), or
+/// [`with_span`](crate::Observer::with_span)). A call to
+/// [`child`](crate::Supervisor::child) produces a handle with a fresh guard.
+#[derive(Clone, Default)]
+pub(crate) struct NamespaceGuard {
+    inner: Arc<Mutex<NamespaceGuardInner>>,
+}
+
+#[derive(Default)]
+struct NamespaceGuardInner {
+    child_labels: HashSet<String>,
+    registered_names: HashSet<String>,
+}
+
+impl NamespaceGuard {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a new child namespace at this level and assert no registered
+    /// metric name at this level is prefixed by it.
+    pub(crate) fn cross_check_child(&self, label: &str) {
+        let mut inner = self.inner.lock();
+        let prefix = format!("{label}_");
+        for name in &inner.registered_names {
+            assert!(
+                !name.starts_with(&prefix),
+                "child '{label}' collides with registered metric '{name}'",
+            );
+        }
+        inner.child_labels.insert(label.to_string());
+    }
+
+    /// Record a new metric name at this level and assert no registered child
+    /// namespace at this level is a prefix of it.
+    pub(crate) fn cross_check_register(&self, name: &str) {
+        let mut inner = self.inner.lock();
+        for child in &inner.child_labels {
+            let prefix = format!("{child}_");
+            assert!(
+                !name.starts_with(&prefix),
+                "metric '{name}' collides with child namespace '{child}'",
+            );
+        }
+        inner.registered_names.insert(name.to_string());
+    }
+}
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<MetricKey>>,
+    registered_metrics: Mutex<HashMap<MetricKey, RegisteredMetric>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -888,6 +937,15 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
+///
+/// # Not `Clone`
+///
+/// The context is intentionally not [`Clone`]. To obtain a new handle either
+/// use [`crate::Supervisor::child`] (new supervision-tree node, non-consuming)
+/// or move the context with consuming modifiers
+/// ([`with_attribute`](crate::Supervisor::with_attribute),
+/// [`with_scope`](crate::Observer::with_scope),
+/// [`with_span`](crate::Observer::with_span)).
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -900,26 +958,7 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
-}
-
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        let (child, _) = Tree::child(&self.tree);
-        Self {
-            name: self.name.clone(),
-            attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
-
-            tree: child,
-            execution: Execution::default(),
-            traced: false,
-        }
-    }
+    guard: NamespaceGuard,
 }
 
 impl Context {
@@ -972,7 +1011,7 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registered_metrics: Mutex::new(HashMap::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -999,6 +1038,7 @@ impl Context {
                 tree: Tree::root(),
                 execution: Execution::default(),
                 traced: false,
+                guard: NamespaceGuard::new(),
             },
             executor,
             panicked,
@@ -1051,7 +1091,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registered_metrics: Mutex::new(HashMap::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1071,6 +1111,7 @@ impl Context {
                 tree: Tree::root(),
                 execution: Execution::default(),
                 traced: false,
+                guard: NamespaceGuard::new(),
             },
             executor,
             panicked,
@@ -1133,22 +1174,24 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
-    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.spawn_with(Execution::default(), f)
+    }
+
+    fn spawn_with<F, Fut, T>(mut self, execution: Execution, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Apply execution mode for this spawn.
+        self.execution = execution;
+
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
@@ -1235,7 +1278,7 @@ impl crate::ThreadPooler for Context {
 
         builder
             .spawn_handler(move |thread| {
-                self.with_label("rayon_thread")
+                self.child("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
@@ -1245,85 +1288,103 @@ impl crate::ThreadPooler for Context {
     }
 }
 
-impl crate::Metrics for Context {
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn with_label(&self, label: &str) -> Self {
+impl crate::Supervisor for Context {
+    fn child(&self, label: &'static str) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
 
         // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
+        let name = if self.name.is_empty() {
+            label.to_string()
+        } else {
+            format!("{}_{}", self.name, label)
         };
         assert!(
             !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
         );
+
+        // Record the child creation in the auditor so determinism hashes account
+        // for the supervision topology.
+        let executor = self.executor();
+        executor.auditor.event(b"child", |hasher| {
+            hasher.update(name.as_bytes());
+        });
+
+        // Cross-check registered metrics at this level: no metric registered on
+        // the parent may start with the child's namespace.
+        self.guard.cross_check_child(&name);
+
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name,
-            ..self.clone()
+            attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
+            tree,
+            execution: Execution::default(),
+            traced: false,
+            guard: NamespaceGuard::new(),
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+    fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
 
-        // Add the attribute to the list of attributes
-        let mut attributes = self.attributes.clone();
-        assert!(
-            add_attribute(&mut attributes, key, value),
-            "duplicate attribute key: {key}"
-        );
-        Self {
-            attributes,
-            ..self.clone()
-        }
+        // Add the attribute to the list of attributes (consuming). Earlier layers win.
+        add_attribute(&mut self.attributes, key, value);
+        self
     }
 
-    fn with_scope(&self) -> Self {
+    fn name(&self) -> Name {
+        Name {
+            label: self.name.clone(),
+            attributes: self.attributes.clone(),
+        }
+    }
+}
+
+impl crate::Observer for Context {
+    fn with_scope(mut self) -> Self {
         let executor = self.executor();
         executor.auditor.event(b"with_scope", |_| {});
 
-        // If already scoped, inherit the existing scope
+        // If already scoped, inherit the existing scope.
         if self.scope.is_some() {
-            return self.clone();
+            return self;
         }
 
-        // RAII guard removes the scoped registry when all clones drop.
+        // RAII guard removes the scoped registry when the last handle is dropped.
         let weak = self.executor.clone();
         let scope_id = executor.registry.lock().create_scope();
         let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
                 exec.registry.lock().remove_scope(id);
+                exec.registered_metrics
+                    .lock()
+                    .retain(|_, entry| entry.scope_id != Some(id));
             }
         }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
+        self.scope = Some(guard);
+        self
     }
 
-    fn with_span(&self) -> Self {
-        Self {
-            traced: true,
-            ..self.clone()
-        }
+    fn with_span(mut self) -> Self {
+        self.traced = true;
+        self
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
-        let name = name.into();
-        let help = help.into();
-
+    fn register<M: prometheus_client::registry::Metric + Clone>(
+        &self,
+        name: &str,
+        help: &str,
+        default: M,
+    ) -> M {
         // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
@@ -1334,34 +1395,25 @@ impl crate::Metrics for Context {
                 hasher.update(v.as_bytes());
             }
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
+        let prefixed_name = if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
         };
 
-        // Check for duplicate registration (O(1) lookup)
-        let metric_key = (prefixed_name.clone(), self.attributes.clone());
-        let is_new = executor.registered_metrics.lock().insert(metric_key);
-        assert!(
-            is_new,
-            "duplicate metric: {} with attributes {:?}",
-            prefixed_name, self.attributes
-        );
+        // Cross-check with any previously-created child namespaces at this level.
+        self.guard.cross_check_register(&prefixed_name);
 
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
+        let scope_id = self.scope.as_ref().map(|s| s.scope_id());
+        get_or_register(
+            &executor.registered_metrics,
+            &executor.registry,
+            &self.attributes,
+            scope_id,
+            prefixed_name,
+            help,
+            default,
+        )
     }
 
     fn encode(&self) -> String {
@@ -1675,7 +1727,9 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, Observer, Resolver, Runner as _, Storage, Supervisor,
+    };
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1699,7 +1753,7 @@ mod tests {
         runner.start(|context| async move {
             let mut handles = FuturesUnordered::new();
             for i in 0..=tasks - 1 {
-                handles.push(context.clone().spawn(move |_| task(i)));
+                handles.push(context.child("task").spawn(move |_| task(i)));
             }
 
             let mut outputs = Vec::new();
@@ -1871,7 +1925,6 @@ mod tests {
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(0, data).await.unwrap();
         });
@@ -2085,7 +2138,7 @@ mod tests {
             });
 
             // Wait for a delay sampled before the external send occurs
-            let first = context.clone().spawn({
+            let first = context.child("sample_before_send").spawn({
                 let results_tx = results_tx.clone();
                 move |context| async move {
                     first_rx.pace(&context, Duration::ZERO).await.unwrap();
@@ -2098,14 +2151,16 @@ mod tests {
             });
 
             // Wait for a delay sampled after the external send occurs
-            let second = context.clone().spawn(move |context| async move {
-                second_rx.pace(&context, first_wait).await.unwrap();
-                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
-                assert!(elapsed_real >= first_wait);
-                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
-                assert!(elapsed_sim >= first_wait);
-                results_tx.send(2).await.unwrap();
-            });
+            let second = context
+                .child("sample_after_send")
+                .spawn(move |context| async move {
+                    second_rx.pace(&context, first_wait).await.unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real >= first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim >= first_wait);
+                    results_tx.send(2).await.unwrap();
+                });
 
             // Wait for both tasks to complete
             second.await.unwrap();
@@ -2171,7 +2226,7 @@ mod tests {
     fn test_metrics_label_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("");
+            let _ = context.child("");
         });
     }
 
@@ -2180,7 +2235,7 @@ mod tests {
     fn test_metrics_label_invalid_first_char() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("1invalid");
+            let _ = context.child("1invalid");
         });
     }
 
@@ -2189,7 +2244,7 @@ mod tests {
     fn test_metrics_label_invalid_char() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label("invalid-label");
+            let _ = context.child("invalid-label");
         });
     }
 
@@ -2198,19 +2253,7 @@ mod tests {
     fn test_metrics_label_reserved_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.with_label(METRICS_PREFIX);
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate attribute key: epoch")]
-    fn test_metrics_duplicate_attribute_panics() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let _ = context
-                .with_label("test")
-                .with_attribute("epoch", "old")
-                .with_attribute("epoch", "new");
+            let _ = context.child(METRICS_PREFIX);
         });
     }
 
@@ -2338,7 +2381,7 @@ mod tests {
                 // Spawn multiple tasks that do storage operations
                 let mut handles = Vec::new();
                 for i in 0..5 {
-                    let ctx = ctx.clone();
+                    let ctx = ctx.child("task");
                     handles.push(ctx.spawn(move |ctx| async move {
                         let mut successes = 0u32;
                         for j in 0..4 {

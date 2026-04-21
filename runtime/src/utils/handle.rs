@@ -276,10 +276,15 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{deterministic, Metrics, Runner, Spawner};
+    use crate::{deterministic, Observer, Runner, Spawner, Supervisor};
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
+    const TASK_LABEL: &str = "task";
+
+    fn child_label(parent: &str, child: &str) -> String {
+        format!("{parent}_{child}")
+    }
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
@@ -299,12 +304,13 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move { "done" });
+            let context = context.child(LABEL);
+            let task_label = child_label(LABEL, TASK_LABEL);
+            let handle = context.child(TASK_LABEL).spawn(|_| async move { "done" });
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "expected tasks_running gauge to be 1 before completion: {metrics}",
             );
@@ -314,7 +320,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(0),
                 "expected tasks_running gauge to return to 0 after completion: {metrics}",
             );
@@ -327,14 +333,15 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let context = context.child(LABEL);
+            let task_label = child_label(LABEL, TASK_LABEL);
+            let handle = context.child(TASK_LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "expected tasks_running gauge to be 1 before dropping handle: {metrics}",
             );
@@ -343,7 +350,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "dropping handle should not finish metrics: {metrics}",
             );
@@ -356,14 +363,15 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let context = context.child(LABEL);
+            let task_label = child_label(LABEL, TASK_LABEL);
+            let handle = context.child(TASK_LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "expected tasks_running gauge to be 1 before abort: {metrics}",
             );
@@ -372,7 +380,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(0),
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
@@ -385,16 +393,17 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
+            let context = context.child(LABEL);
+            let task_label = child_label(LABEL, TASK_LABEL);
 
-            let blocking_handle = context.clone().shared(true).spawn(|_| async move {
+            let blocking_handle = context.child(TASK_LABEL).shared(true).spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "expected tasks_running gauge to be 1 while blocking task runs: {metrics}",
             );
@@ -404,7 +413,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(0),
                 "expected tasks_running gauge to return to 0 after blocking task completes: {metrics}",
             );
@@ -417,14 +426,15 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let context = context.with_label(LABEL);
-            let handle = context.clone().spawn(|_| async move {
+            let context = context.child(LABEL);
+            let task_label = child_label(LABEL, TASK_LABEL);
+            let handle = context.child(TASK_LABEL).spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(1),
                 "expected tasks_running gauge to be 1 before abort: {metrics}",
             );
@@ -434,7 +444,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                running_tasks_for_label(&metrics, LABEL),
+                running_tasks_for_label(&metrics, &task_label),
                 Some(0),
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );

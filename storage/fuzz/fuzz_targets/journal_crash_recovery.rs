@@ -3,7 +3,7 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
@@ -115,29 +115,21 @@ struct FuzzInput {
 
 fn fixed_config(
     partition: &str,
-    pooler: &impl BufferPooler,
-    page_size: NonZeroU16,
-    page_cache_size: NonZeroUsize,
+    page_cache: CacheRef,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
 ) -> FixedConfig {
     FixedConfig {
         partition: partition.into(),
         items_per_blob: NZU64!(items_per_section),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            pooler,
-            page_size,
-            page_cache_size,
-        ),
+        page_cache,
         write_buffer,
     }
 }
 
 fn variable_config(
     partition: &str,
-    pooler: &impl BufferPooler,
-    page_size: NonZeroU16,
-    page_cache_size: NonZeroUsize,
+    page_cache: CacheRef,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<()> {
@@ -146,11 +138,7 @@ fn variable_config(
         items_per_section: NZU64!(items_per_section),
         compression: None,
         codec_config: (),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            pooler,
-            page_size,
-            page_cache_size,
-        ),
+        page_cache,
         write_buffer,
     }
 }
@@ -161,9 +149,7 @@ trait FuzzJournal: Sized {
 
     fn config(
         partition: &str,
-        pooler: &impl BufferPooler,
-        page_size: NonZeroU16,
-        page_cache_size: NonZeroUsize,
+        page_cache: CacheRef,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
     ) -> Self::Config;
@@ -220,20 +206,11 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
-        pooler: &impl BufferPooler,
-        page_size: NonZeroU16,
-        page_cache_size: NonZeroUsize,
+        page_cache: CacheRef,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
     ) -> Self::Config {
-        fixed_config(
-            partition,
-            pooler,
-            page_size,
-            page_cache_size,
-            items_per_section,
-            write_buffer,
-        )
+        fixed_config(partition, page_cache, items_per_section, write_buffer)
     }
 
     async fn init(
@@ -302,20 +279,11 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
-        pooler: &impl BufferPooler,
-        page_size: NonZeroU16,
-        page_cache_size: NonZeroUsize,
+        page_cache: CacheRef,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
     ) -> Self::Config {
-        variable_config(
-            partition,
-            pooler,
-            page_size,
-            page_cache_size,
-            items_per_section,
-            write_buffer,
-        )
+        variable_config(partition, page_cache, items_per_section, write_buffer)
     }
 
     async fn init(
@@ -542,16 +510,10 @@ where
         let partition_name = partition_name.clone();
         let operations = operations.clone();
         async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
             let mut journal = J::init(
-                ctx.with_label("journal"),
-                J::config(
-                    &partition_name,
-                    &ctx,
-                    page_size,
-                    page_cache_size,
-                    items_per_section,
-                    write_buffer,
-                ),
+                ctx.child("journal"),
+                J::config(&partition_name, page_cache, items_per_section, write_buffer),
             )
             .await
             .unwrap();
@@ -571,16 +533,10 @@ where
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
+        let page_cache = CacheRef::from_pooler(ctx.child("cache"), page_size, page_cache_size);
         let mut journal = J::init(
-            ctx.with_label("recovered"),
-            J::config(
-                &partition_name,
-                &ctx,
-                page_size,
-                page_cache_size,
-                items_per_section,
-                write_buffer,
-            ),
+            ctx.child("recovered"),
+            J::config(&partition_name, page_cache, items_per_section, write_buffer),
         )
         .await
         .expect("Journal recovery should succeed without panic");

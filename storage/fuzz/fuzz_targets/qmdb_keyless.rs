@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
@@ -126,9 +126,8 @@ type Db<F> = Keyless<F, deterministic::Context, Vec<u8>, Sha256>;
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    page_cache: CacheRef,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
             journal_partition: format!("{test_name}-journal"),
@@ -154,11 +153,23 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
-        let cfg = test_config(suffix, &context);
-        let mut db: Db<F> = Db::init(context.clone(), cfg)
-            .await
-            .expect("Failed to init keyless db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context
+                .child("cache")
+                .with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
+        let cfg = test_config(suffix, page_cache.clone());
+        let mut db: Db<F> = Db::init(
+            context
+                .child("db")
+                .with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init keyless db");
 
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
 
@@ -301,14 +312,23 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     pending_appends.clear();
                     drop(db);
 
-                    let cfg = test_config(suffix, &context);
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context
+                            .child("cache")
+                            .with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(PAGE_CACHE_SIZE),
+                    );
+                    let cfg = test_config(suffix, page_cache.clone());
                     db = Db::init(
-                        context.with_label("db").with_attribute("instance", restarts),
+                        context
+                            .child("db")
+                            .with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init keyless db");
-                    restarts += 1;
                 }
             }
         }

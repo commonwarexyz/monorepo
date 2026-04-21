@@ -312,7 +312,7 @@ where
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
     let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
+        db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
@@ -321,7 +321,7 @@ where
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
     let any = any::init(
-        context.with_label("any"),
+        context.child("any"),
         config.into(),
         Some(last_known_inactivity_floor),
         |append: bool, loc: Option<Location<F>>| {
@@ -398,7 +398,7 @@ pub mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics as _, Runner as _,
+        Runner as _, Supervisor,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -411,15 +411,14 @@ pub mod tests {
     type WriteVec<F, C> = Vec<(<C as DbAny<F>>::Key, Option<<C as DbAny<F>>::Value>)>;
 
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+    pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
+        page_cache: CacheRef,
     ) -> FixedConfig<T> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -443,9 +442,8 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
+        page_cache: CacheRef,
     ) -> VariableConfig<T, ((), ())> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -576,7 +574,7 @@ pub mod tests {
         let state1 = executor.start(|mut context| async move {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
+            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -587,7 +585,7 @@ pub mod tests {
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db: C = open_db_clone(context.with_label("second"), partition).await;
+            let db: C = open_db_clone(context.child("second"), partition).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -601,7 +599,7 @@ pub mod tests {
         let state2 = executor.start(|mut context| async move {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db(context.with_label("first"), partition.clone()).await;
+            let mut db: C = open_db(context.child("first"), partition.clone()).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -611,7 +609,7 @@ pub mod tests {
 
             let root = db.root();
             drop(db);
-            let db: C = open_db(context.with_label("second"), partition).await;
+            let db: C = open_db(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -642,7 +640,7 @@ pub mod tests {
             Box::pin(async move {
                 let partition = "build-random-fail-commit".to_string();
                 let rng_seed = context.next_u64();
-                let mut db: C = open_db(context.with_label("first"), partition.clone()).await;
+                let mut db: C = open_db(context.child("first"), partition.clone()).await;
                 db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                     .await
                     .unwrap();
@@ -660,7 +658,7 @@ pub mod tests {
                 // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
                 // state of the DB should be as of the last commit.
                 drop(db);
-                let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
+                let db: C = open_db(context.child("scenario1"), partition.clone()).await;
                 assert_eq!(db.root(), committed_root);
                 assert_eq!(db.bounds().await.end, committed_op_count);
 
@@ -677,13 +675,13 @@ pub mod tests {
 
                 // We should be able to recover, so the root should differ from the previous commit, and
                 // the op count should be greater than before.
-                let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
+                let db: C = open_db(context.child("scenario2"), partition.clone()).await;
                 let scenario_2_root = db.root();
 
                 // To confirm the second committed hash is correct we'll re-build the DB in a new
                 // partition, but without any failures. They should have the exact same state.
                 let fresh_partition = "build-random-fail-commit-fresh".to_string();
-                let mut db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
+                let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
                 db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                     .await
                     .unwrap();
@@ -721,9 +719,8 @@ pub mod tests {
         executor.start(|context| async move {
             // Create two databases that are identical other than how they are pruned.
             let mut db_no_pruning: C =
-                open_db_clone(context.with_label("no_pruning"), "no-pruning-test".into()).await;
-            let mut db_pruning: C =
-                open_db(context.with_label("pruning"), "pruning-test".into()).await;
+                open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
+            let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
 
             // Apply identical operations to both databases, but only prune one.
             // Accumulate writes between commits.
@@ -796,7 +793,7 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "sync-bitmap-pruning".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
+            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
 
             // Apply random operations with commits to advance the inactivity floor.
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db).await.unwrap();
@@ -829,7 +826,7 @@ pub mod tests {
             drop(db);
 
             // Reopen the database.
-            let db: C = open_db(context.with_label("second"), partition).await;
+            let db: C = open_db(context.child("second"), partition).await;
 
             // The pruned bits count should match. If sync() didn't persist the bitmap pruned
             // state, this would be 0.
@@ -867,7 +864,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let mut db: C = open_db_clone(context.with_label("first"), "build-big".into()).await;
+            let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
 
             let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
@@ -916,7 +913,7 @@ pub mod tests {
             drop(db);
 
             // Reopen the db and verify it has exactly the same state.
-            let db: C = open_db(context.with_label("second"), "build-big".into()).await;
+            let db: C = open_db(context.child("second"), "build-big".into()).await;
             assert_eq!(root, db.root());
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -948,8 +945,7 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db: C =
-                open_db(context.with_label("db"), "stale-side-effect-free".into()).await;
+            let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
@@ -1171,7 +1167,9 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                <$db>::init(ctx.clone(), $cfg::<OneCap>(&partition, &ctx))
+                let page_cache =
+                    CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+                <$db>::init(ctx.child("db"), $cfg::<OneCap>(&partition, page_cache))
                     .await
                     .unwrap()
             }
@@ -1419,11 +1417,15 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "current-rewind-recovery";
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
             let initial_size = db.bounds().await.end;
             let initial_root = db.root();
             let initial_ops_root = db.ops_root();
@@ -1475,8 +1477,11 @@ pub mod tests {
             drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("reopen_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1504,8 +1509,15 @@ pub mod tests {
             drop(reopened);
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen_initial"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen_initial"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(
+                        context.child("reopen_initial_cfg"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                ),
             )
             .await
             .unwrap();
@@ -1529,9 +1541,8 @@ pub mod tests {
             const COMMITS: u64 = 96;
 
             let partition = "current-rewind-pruned-recovery";
-            let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                UnorderedVariableDb::init(context.child("db"), variable_config::<OneCap>(partition, CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -1588,8 +1599,11 @@ pub mod tests {
             drop(db);
 
             let mut reopened: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen_pruned_recovery"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen_pruned_recovery"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("reopen_pruned_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1617,8 +1631,11 @@ pub mod tests {
 
             drop(reopened);
             let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen_pruned_after_new_write"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen_pruned_after_new_write"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("reopen_after_write_cfg"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1648,10 +1665,12 @@ pub mod tests {
             const COMMITS: u64 = 100;
 
             let partition = "current-mmb-reopen-prove-after-prune";
-            let ctx = context.with_label("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                ctx.clone(),
-                variable_config::<OneCap>(partition, &ctx),
+                context.child("db"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -1680,8 +1699,15 @@ pub mod tests {
 
             // Reopen: settlement guard deferred pruning, so state is unchanged.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(
+                        context.child("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                ),
             )
             .await
             .unwrap();
@@ -1705,10 +1731,11 @@ pub mod tests {
             const N: usize = 32;
 
             let partition = "current-mmb-rewind-unsettled-window";
-            let ctx = context.with_label("db");
+            let cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                ctx.clone(),
-                variable_config::<OneCap>(partition, &ctx),
+                context.child("db"),
+                variable_config::<OneCap>(partition, cache),
             )
             .await
             .unwrap();
@@ -1769,9 +1796,11 @@ pub mod tests {
             );
             drop(db);
 
+            let reopen_cache =
+                CacheRef::from_pooler(context.child("reopen_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen"),
+                variable_config::<OneCap>(partition, reopen_cache),
             )
             .await
             .unwrap();
@@ -1785,10 +1814,11 @@ pub mod tests {
     fn test_current_mmb_reopen_and_prove_after_prune_delayed_merge() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db_ctx = context.with_label("db_init");
+            let cache =
+                CacheRef::from_pooler(context.child("cache_init"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                db_ctx.clone(),
-                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+                context.child("db_init"),
+                variable_config::<OneCap>("test_prune_delayed_merge", cache),
             )
             .await
             .unwrap();
@@ -1820,10 +1850,11 @@ pub mod tests {
             let target_root = db.root();
             drop(db);
 
-            let reopen_ctx = context.with_label("db_reopen");
+            let reopen_cache =
+                CacheRef::from_pooler(context.child("cache_reopen"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                reopen_ctx.clone(),
-                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+                context.child("db_reopen"),
+                variable_config::<OneCap>("test_prune_delayed_merge", reopen_cache),
             )
             .await
             .unwrap();
@@ -1849,10 +1880,10 @@ pub mod tests {
     fn test_current_mmb_reopen_after_prune_two_chunks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db_ctx = context.with_label("db");
+            let cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                db_ctx.clone(),
-                variable_config::<OneCap>("test_prune_two", &db_ctx),
+                context.child("db"),
+                variable_config::<OneCap>("test_prune_two", cache),
             )
             .await
             .unwrap();
@@ -1882,10 +1913,11 @@ pub mod tests {
             let target_root = db.root();
             drop(db);
 
-            let reopen_ctx = context.with_label("db_reopen");
+            let reopen_cache =
+                CacheRef::from_pooler(context.child("cache_reopen"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                reopen_ctx.clone(),
-                variable_config::<OneCap>("test_prune_two", &reopen_ctx),
+                context.child("db_reopen"),
+                variable_config::<OneCap>("test_prune_two", reopen_cache),
             )
             .await
             .unwrap();
@@ -1901,10 +1933,11 @@ pub mod tests {
     fn test_current_mmb_repeated_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db_ctx = context.with_label("db_init");
+            let cache =
+                CacheRef::from_pooler(context.child("cache_init"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                db_ctx.clone(),
-                variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                context.child("db_init"),
+                variable_config::<OneCap>("test_repeated_prune", cache),
             )
             .await
             .unwrap();
@@ -1921,12 +1954,17 @@ pub mod tests {
                 db.sync().await.unwrap();
 
                 let root_before = db.root();
-                db_ctx = context.with_label(&format!("db_{round}"));
+                let round_cache = CacheRef::from_pooler(
+                    context.child("cache").with_attribute("round", round),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let round_ctx = context.child("db").with_attribute("round", round);
 
                 let prev_db = db;
                 db = UnorderedVariableMmbDb::init(
-                    db_ctx.clone(),
-                    variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                    round_ctx,
+                    variable_config::<OneCap>("test_repeated_prune", round_cache),
                 )
                 .await
                 .unwrap();
@@ -1945,18 +1983,23 @@ pub mod tests {
     fn test_current_mmb_stepwise_growth_matches_unpruned_reference() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db_ctx = context.with_label("db_stepwise");
+            let db_cache =
+                CacheRef::from_pooler(context.child("cache_stepwise"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                db_ctx.clone(),
-                variable_config::<OneCap>("test_stepwise", &db_ctx),
+                context.child("db_stepwise"),
+                variable_config::<OneCap>("test_stepwise", db_cache),
             )
             .await
             .unwrap();
 
-            let ref_ctx = context.with_label("ref_stepwise");
+            let ref_cache = CacheRef::from_pooler(
+                context.child("cache_ref_stepwise"),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
+            );
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                ref_ctx.clone(),
-                variable_config::<OneCap>("test_stepwise_ref", &ref_ctx),
+                context.child("ref_stepwise"),
+                variable_config::<OneCap>("test_stepwise_ref", ref_cache),
             )
             .await
             .unwrap();
@@ -2015,18 +2058,20 @@ pub mod tests {
             const ROUNDS: u64 = 8;
             const COMMITS_PER_ROUND: u64 = 120;
 
-            let mut db_ctx = context.with_label("db_init");
+            let cache =
+                CacheRef::from_pooler(context.child("cache_init"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                db_ctx.clone(),
-                variable_config::<OneCap>("test_large_prune", &db_ctx),
+                context.child("db_init"),
+                variable_config::<OneCap>("test_large_prune", cache),
             )
             .await
             .unwrap();
 
-            let ref_ctx = context.with_label("ref");
+            let ref_cache =
+                CacheRef::from_pooler(context.child("cache_ref"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                ref_ctx.clone(),
-                variable_config::<OneCap>("test_large_prune_ref", &ref_ctx),
+                context.child("ref"),
+                variable_config::<OneCap>("test_large_prune_ref", ref_cache),
             )
             .await
             .unwrap();
@@ -2070,11 +2115,16 @@ pub mod tests {
                     "proof verification failed at round {round}"
                 );
 
-                db_ctx = context.with_label(&format!("db_reopen_{round}"));
+                let round_cache = CacheRef::from_pooler(
+                    context.child("cache_reopen").with_attribute("round", round),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                );
+                let round_ctx = context.child("db_reopen").with_attribute("round", round);
                 let prev_db = db;
                 db = UnorderedVariableMmbDb::init(
-                    db_ctx.clone(),
-                    variable_config::<OneCap>("test_large_prune", &db_ctx),
+                    round_ctx,
+                    variable_config::<OneCap>("test_large_prune", round_cache),
                 )
                 .await
                 .unwrap();
@@ -2119,11 +2169,13 @@ pub mod tests {
             const COMMITS: u64 = 160;
 
             let partition = "current-prune-beyond-floor";
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
-                    .await
-                    .unwrap();
+            let cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(partition, cache),
+            )
+            .await
+            .unwrap();
 
             let key0 = key(0);
             for round in 0..COMMITS {
@@ -2153,9 +2205,11 @@ pub mod tests {
 
             drop(db);
 
+            let reopen_cache =
+                CacheRef::from_pooler(context.child("reopen_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen"),
+                variable_config::<OneCap>(partition, reopen_cache),
             )
             .await
             .unwrap();
@@ -2175,11 +2229,15 @@ pub mod tests {
             const COMMITS: u64 = 200;
 
             let partition = "current-rewind-small-delta";
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let key0 = key(0);
             let key1 = key(1);
@@ -2225,8 +2283,15 @@ pub mod tests {
             drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen_small_delta"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen_small_delta"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(
+                        context.child("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                ),
             )
             .await
             .unwrap();
@@ -2247,9 +2312,8 @@ pub mod tests {
             const KEYS: u64 = 384;
 
             let partition = "current-rewind-pruned";
-            let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                UnorderedVariableDb::init(context.child("db"), variable_config::<OneCap>(partition, CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -2306,9 +2370,8 @@ pub mod tests {
             const COMMITS: u64 = 96;
 
             let partition = "current-rewind-bitmap-floor";
-            let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                UnorderedVariableDb::init(context.child("db"), variable_config::<OneCap>(partition, CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE)))
                     .await
                     .unwrap();
 
@@ -2387,7 +2450,7 @@ pub mod tests {
             // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
             // next partial chunk. This ensures the grafted root computation must handle the
             // newly completed chunk.
-            let mut db: C = open_db_clone(context.with_label("init"), partition.clone()).await;
+            let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
             let mut batch = db.new_batch();
             for i in 0..260 {
                 batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
@@ -2400,7 +2463,7 @@ pub mod tests {
             db.sync().await.unwrap();
             drop(db);
 
-            let db: C = open_db(context.with_label("reopen"), partition).await;
+            let db: C = open_db(context.child("reopen"), partition).await;
             assert_eq!(db.root(), speculative_root);
 
             db.destroy().await.unwrap();
@@ -2420,11 +2483,15 @@ pub mod tests {
     fn test_current_batch_merkleized_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("mg", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "mg",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let ka = key(0);
             let kb = key(1);
@@ -2460,11 +2527,15 @@ pub mod tests {
     fn test_current_batch_chaining() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("ch", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "ch",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Parent batch writes keys 0..5.
             let mut parent = db.new_batch();
@@ -2505,11 +2576,15 @@ pub mod tests {
     fn test_current_unordered_root_matches_between_pending_and_committed_paths() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedFixedDb =
-                UnorderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ucr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>(
+                    "ucr",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -2577,11 +2652,15 @@ pub mod tests {
     fn test_current_ordered_root_matches_between_pending_and_committed_paths() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: OrderedFixedDb =
-                OrderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ocr", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: OrderedFixedDb = OrderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>(
+                    "ocr",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -2648,11 +2727,15 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "apply_requires_commit";
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let committed_root = db.root();
 
@@ -2669,8 +2752,15 @@ pub mod tests {
             drop(db);
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.with_label("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                context.child("reopen"),
+                variable_config::<OneCap>(
+                    partition,
+                    CacheRef::from_pooler(
+                        context.child("cache_reopen"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                ),
             )
             .await
             .unwrap();
@@ -2686,11 +2776,15 @@ pub mod tests {
     fn test_current_batch_single_stage_pipeline() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("pipe", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "pipe",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let mut batch = db.new_batch();
             batch = batch.write(key(0), Some(val(0)));
@@ -2724,11 +2818,15 @@ pub mod tests {
     fn test_current_sequential_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("ff", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "ff",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Parent batch: insert key(0).
             let parent_m = db
@@ -2755,11 +2853,16 @@ pub mod tests {
 
             // Build the same result via two sequential plain batches in a fresh DB
             // and verify the roots match.
-            let ctx2 = context.with_label("db2");
-            let mut db2: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ff2", &ctx2))
-                    .await
-                    .unwrap();
+            let ctx2 = context.child("db2");
+            let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx2.child("db"),
+                variable_config::<OneCap>(
+                    "ff2",
+                    CacheRef::from_pooler(ctx2.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
             let m1 = db2
                 .new_batch()
                 .write(key(0), Some(val(0)))
@@ -2788,11 +2891,15 @@ pub mod tests {
     fn test_current_to_batch_then_chain() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("tb", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "tb",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Apply an initial batch.
             let m = db
@@ -2832,11 +2939,15 @@ pub mod tests {
     fn test_flatten_noop_on_fresh_db() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-noop", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "fl-noop",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let root_before = db.root();
             db.flatten();
@@ -2851,11 +2962,15 @@ pub mod tests {
     fn test_flatten_preserves_root_after_batches() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-root", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "fl-root",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Apply several batches to accumulate layers.
             for i in 0u64..5 {
@@ -2886,11 +3001,15 @@ pub mod tests {
     fn test_flatten_idempotent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-idem", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "fl-idem",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let m = db
                 .new_batch()
@@ -2915,11 +3034,15 @@ pub mod tests {
     fn test_flatten_then_new_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-then", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "fl-then",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Apply a batch, flatten, then apply another.
             let m = db
@@ -2953,11 +3076,15 @@ pub mod tests {
     fn test_current_apply_after_ancestor_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("adrop", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "adrop",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Chain: DB <- A <- B <- C
             let mut a = db.new_batch();
@@ -3012,11 +3139,16 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // -- Path 1: build a 3-deep chain and apply the tip directly. --
-            let ctx1 = context.with_label("db1");
-            let mut db1: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx1.clone(), variable_config::<OneCap>("ord1", &ctx1))
-                    .await
-                    .unwrap();
+            let ctx1 = context.child("db1");
+            let mut db1: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx1.child("db"),
+                variable_config::<OneCap>(
+                    "ord1",
+                    CacheRef::from_pooler(ctx1.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Seed some committed data so there's a base bitmap to clear.
             commit_writes_with_metadata(
@@ -3068,11 +3200,16 @@ pub mod tests {
             let chain_then_d_root = d1.root();
 
             // -- Path 2: apply the same operations sequentially. --
-            let ctx2 = context.with_label("db2");
-            let mut db2: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ord2", &ctx2))
-                    .await
-                    .unwrap();
+            let ctx2 = context.child("db2");
+            let mut db2: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx2.child("db"),
+                variable_config::<OneCap>(
+                    "ord2",
+                    CacheRef::from_pooler(ctx2.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             commit_writes_with_metadata(
                 &mut db2,
@@ -3141,10 +3278,12 @@ pub mod tests {
     fn test_current_stale_bitmap_clears_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
-                ctx.clone(),
-                variable_config::<OneCap>("stale-clears", &ctx),
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "stale-clears",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();
@@ -3195,11 +3334,15 @@ pub mod tests {
     fn test_current_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("pac", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "pac",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             let a = db
                 .new_batch()
@@ -3241,11 +3384,15 @@ pub mod tests {
     fn test_current_partial_ancestor_bitmap_ordering() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let ctx = context.with_label("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("bmo", &ctx))
-                    .await
-                    .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>(
+                    "bmo",
+                    CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
+            )
+            .await
+            .unwrap();
 
             // Build A -> B -> C -> D. Each writes a distinct key.
             let a = db
@@ -3292,10 +3439,13 @@ pub mod tests {
             db.apply_batch(e).await.unwrap();
 
             // Reference: apply all five sequentially.
-            let ref_ctx = context.with_label("ref");
+            let ref_ctx = context.child("ref");
             let mut ref_db: UnorderedVariableDb = UnorderedVariableDb::init(
-                ref_ctx.clone(),
-                variable_config::<OneCap>("bmo_ref", &ref_ctx),
+                ref_ctx.child("db"),
+                variable_config::<OneCap>(
+                    "bmo_ref",
+                    CacheRef::from_pooler(ref_ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
+                ),
             )
             .await
             .unwrap();

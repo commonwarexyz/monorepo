@@ -109,7 +109,8 @@ where
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
+        let page_cache_ref =
+            CacheRef::from_pooler(context.child("cache"), NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = Gauge::default();
@@ -169,7 +170,7 @@ where
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
-            self.context.with_label("vote_mux"),
+            self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
             self.muxer_size,
@@ -178,7 +179,7 @@ where
         .build();
         mux.start();
         let (mux, mut certificate_mux) = Muxer::builder(
-            self.context.with_label("certificate_mux"),
+            self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
@@ -186,7 +187,7 @@ where
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
-            self.context.with_label("resolver_mux"),
+            self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
             self.muxer_size,
@@ -195,7 +196,7 @@ where
 
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-        let mut engines: BTreeMap<Epoch, (Handle<()>, ContextCell<E>)> = BTreeMap::new();
+        let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
 
         select_loop! {
             self.context,
@@ -251,7 +252,7 @@ where
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                     // Enter the new epoch.
-                    let (handle, scope) = self
+                    let handle = self
                         .enter_epoch(
                             transition.epoch,
                             scheme,
@@ -260,14 +261,14 @@ where
                             &mut resolver_mux,
                         )
                         .await;
-                    engines.insert(transition.epoch, (handle, scope));
+                    engines.insert(transition.epoch, handle);
                     let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                     info!(epoch = %transition.epoch, "entered epoch");
                 }
                 Message::Exit(epoch) => {
                     // Remove the engine and abort it.
-                    let Some((handle, _scope)) = engines.remove(&epoch) else {
+                    let Some(handle) = engines.remove(&epoch) else {
                         warn!(%epoch, "exited non-existent epoch");
                         continue;
                     };
@@ -298,16 +299,16 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-    ) -> (Handle<()>, ContextCell<E>) {
+    ) -> Handle<()> {
         // Start the new engine
         let elector = L::default();
         let scope = self
             .context
-            .with_label("consensus_engine")
+            .child("consensus_engine")
             .with_attribute("epoch", epoch)
             .with_scope();
         let engine = simplex::Engine::new(
-            scope.clone(),
+            scope,
             simplex::Config {
                 scheme,
                 elector,
@@ -338,8 +339,6 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
-        // Retain the scoped context so its metrics registry stays alive
-        // until the epoch is exited and the engine is aborted.
-        (engine.start(vote, certificate, resolver), scope)
+        engine.start(vote, certificate, resolver)
     }
 }

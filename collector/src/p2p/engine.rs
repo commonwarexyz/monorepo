@@ -74,16 +74,10 @@ where
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
 
         // Create metrics
-        let outstanding = Gauge::default();
-        let requests = Counter::default();
-        let responses = Counter::default();
-        context.register(
-            "outstanding",
-            "outstanding commitments",
-            outstanding.clone(),
-        );
-        context.register("requests", "processed requests", requests.clone());
-        context.register("responses", "sent responses", responses.clone());
+        let outstanding =
+            context.register("outstanding", "outstanding commitments", Gauge::default());
+        let requests = context.register("requests", "processed requests", Counter::default());
+        let responses = context.register("responses", "sent responses", Counter::default());
 
         (
             Self {

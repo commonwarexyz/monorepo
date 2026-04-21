@@ -49,7 +49,7 @@ impl<
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, K, V, H> = Journal::new(
-            context.clone(),
+            context.child("db"),
             cfg.merkle_config,
             cfg.log,
             Operation::<K, V>::is_commit,
@@ -70,7 +70,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -78,8 +78,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ())> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(suffix: &str, page_cache: CacheRef) -> Config<TwoCap, ((), ())> {
         super::BaseConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -104,8 +103,9 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
-        let cfg = config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = config("partition", page_cache);
+        Db::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -135,8 +135,8 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ())> {
-        let mut cfg = config(suffix, pooler);
+    fn small_sections_config(suffix: &str, page_cache: CacheRef) -> Config<TwoCap, ((), ())> {
+        let mut cfg = config(suffix, page_cache);
         cfg.log.items_per_section = NZU64!(1);
         cfg
     }
@@ -144,8 +144,9 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
-        let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        let page_cache = CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = small_sections_config("partition", page_cache);
+        Db::init(context.child("db"), cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]

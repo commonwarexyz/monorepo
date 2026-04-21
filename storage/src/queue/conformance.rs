@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -16,11 +16,11 @@ const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+fn config(seed: u64, page_cache: CacheRef) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache,
         write_buffer: WRITE_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),
@@ -33,8 +33,10 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, &context))
+                Queue::<_, Vec<u8>>::init(context.child("queue"), config(seed, page_cache))
                     .await
                     .unwrap();
 
@@ -62,8 +64,10 @@ impl Conformance for QueueConformance {
             drop(queue);
 
             // Re-open and verify surviving items are readable
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache2"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, &context))
+                Queue::<_, Vec<u8>>::init(context.child("queue2"), config(seed, page_cache))
                     .await
                     .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {

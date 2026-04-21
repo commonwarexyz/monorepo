@@ -12,8 +12,9 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler,
+    Supervisor as _, ThreadPooler,
 };
+use commonware_parallel::ThreadPool;
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{self, journaled, mmb::Family as Mmb},
@@ -48,37 +49,33 @@ type CurOFix32Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMAL
 type CurUFix256Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
 type CurOFix256Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
+fn merkle_cfg(thread_pool: ThreadPool, page_cache: CacheRef) -> journaled::Config {
     journaled::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: pc,
+        thread_pool: Some(thread_pool),
+        page_cache,
     }
 }
 
-fn fix_log_cfg(pc: CacheRef) -> FConfig {
+fn fix_log_cfg(page_cache: CacheRef) -> FConfig {
     FConfig {
         partition: format!("log-journal-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
-        page_cache: pc,
+        page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
-}
-
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    thread_pool: ThreadPool,
+    page_cache: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap> {
-    let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle_config: merkle_cfg(thread_pool, page_cache.clone()),
+        journal_config: fix_log_cfg(page_cache),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
     }
@@ -127,10 +124,13 @@ const CURRENT_VARIANTS: [CurrentVariant; 4] = [
 /// Construct a Current database for `$variant`, bind it as `$db`, and execute `$body`.
 macro_rules! with_current_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+        let ctx = $ctx;
+        let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
+        let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
         macro_rules! init_db {
             ($DbType:ty) => {{
                 #[allow(unused_mut)]
-                let mut $db = <$DbType>::init($ctx.clone(), cur_fix_cfg(&$ctx))
+                let mut $db = <$DbType>::init(ctx.child("db"), cur_fix_cfg(thread_pool, page_cache))
                     .await
                     .unwrap();
                 $body
@@ -208,7 +208,7 @@ fn bench_chained_growth(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
-                            with_current_db!(ctx.clone(), variant, |mut db| {
+                            with_current_db!(ctx.child("bench"), variant, |mut db| {
                                 total += run_chained_growth(db, batches, |p| p.new_batch()).await;
                             });
                         }

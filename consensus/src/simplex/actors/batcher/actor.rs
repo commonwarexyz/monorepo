@@ -19,7 +19,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
-        histogram::{self, Buckets},
+        histogram::{Buckets, Timed},
         status::GaugeExt,
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
@@ -32,7 +32,7 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 use tracing::{debug, trace};
 
 /// Tracks the current view, its leader, and whether the voter has
@@ -76,8 +76,8 @@ where
     latest_vote: Family<Peer, Gauge>,
     latest_seen: Vec<View>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed<E>,
-    recover_latency: histogram::Timed<E>,
+    verify_latency: Timed,
+    recover_latency: Timed,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -93,50 +93,44 @@ where
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let participants = cfg.scheme.participants().clone();
         let participant_count = participants.len();
-        let added = Counter::default();
-        let verified = Counter::default();
-        let inbound_messages = Family::<Inbound, Counter>::default();
-        let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
-        context.register(
+        let added = context.register(
             "added",
             "number of messages added to the verifier",
-            added.clone(),
+            Counter::default(),
         );
-        context.register("verified", "number of messages verified", verified.clone());
-        context.register(
+        let verified = context.register(
+            "verified",
+            "number of messages verified",
+            Counter::default(),
+        );
+        let inbound_messages = context.register(
             "inbound_messages",
             "number of inbound messages",
-            inbound_messages.clone(),
+            Family::<Inbound, Counter>::default(),
         );
-        let latest_vote = Family::<Peer, Gauge>::default();
-        context.register(
+        let latest_vote = context.register(
             "latest_vote",
             "view of latest vote received per peer",
-            latest_vote.clone(),
+            Family::<Peer, Gauge>::default(),
         );
         for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
-        context.register(
+        let batch_size = context.register(
             "batch_size",
             "number of messages in a signature verification batch",
-            batch_size.clone(),
+            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let verify_latency = context.register(
             "verify_latency",
             "latency of signature verification",
-            verify_latency.clone(),
+            Histogram::new(Buckets::CRYPTOGRAPHY),
         );
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let recover_latency = context.register(
             "recover_latency",
             "certificate recover latency",
-            recover_latency.clone(),
+            Histogram::new(Buckets::CRYPTOGRAPHY),
         );
-        // TODO(#1833): Metrics should use the post-start context
-        let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -163,8 +157,8 @@ where
                 latest_vote,
                 latest_seen: vec![View::zero(); participant_count],
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
-                recover_latency: histogram::Timed::new(recover_latency, clock),
+                verify_latency: Timed::new(verify_latency),
+                recover_latency: Timed::new(recover_latency),
             },
             Mailbox::new(sender),
         )
@@ -424,7 +418,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
@@ -446,7 +440,7 @@ where
 
                         // Verify the certificate
                         if !nullification.verify::<_, D>(
-                            &mut self.context,
+                            self.context.as_mut(),
                             &self.scheme,
                             &self.strategy,
                         ) {
@@ -470,7 +464,7 @@ where
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
@@ -574,22 +568,28 @@ where
                     continue;
                 };
 
-                // Batch verify votes if ready
-                let mut timer = self.verify_latency.timer();
+                // Batch verify votes if ready, timing the cryptographic work.
                 let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(&mut self.context, &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_notarizes(self.context.as_mut(), &self.strategy);
+                    timer.record(self.context.as_ref());
+                    Some(result)
                 } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(&mut self.context, &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_nullifies(self.context.as_mut(), &self.strategy);
+                    timer.record(self.context.as_ref());
+                    Some(result)
                 } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(&mut self.context, &self.strategy))
+                    let timer = self.verify_latency.start(self.context.as_ref());
+                    let result = round.verify_finalizes(self.context.as_mut(), &self.strategy);
+                    timer.record(self.context.as_ref());
+                    Some(result)
                 } else {
                     None
                 };
 
                 // Process batch verification results
                 if let Some((voters, failed)) = verified {
-                    timer.observe();
-
                     // Process verified votes
                     let batch = voters.len() + failed.len();
                     trace!(view = %updated_view, batch, "batch verified votes");
@@ -612,7 +612,6 @@ where
                         round.add_verified(valid);
                     }
                 } else {
-                    timer.cancel();
                     trace!(
                         current = %current.view,
                         %finalized,
@@ -621,10 +620,10 @@ where
                 }
 
                 // Try to construct and forward certificates
-                if let Some(notarization) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
-                {
+                let started = self.recover_latency.start(self.context.as_ref());
+                let notarization = round.try_construct_notarization(&self.scheme, &self.strategy);
+                if let Some(notarization) = notarization {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Forward notarization to voter
@@ -632,19 +631,19 @@ where
                         .recovered(Certificate::Notarization(notarization))
                         .await;
                 }
-                if let Some(nullification) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_nullification(&self.scheme, &self.strategy))
-                {
+                let started = self.recover_latency.start(self.context.as_ref());
+                let nullification = round.try_construct_nullification(&self.scheme, &self.strategy);
+                if let Some(nullification) = nullification {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
                         .recovered(Certificate::Nullification(nullification))
                         .await;
                 }
-                if let Some(finalization) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_finalization(&self.scheme, &self.strategy))
-                {
+                let started = self.recover_latency.start(self.context.as_ref());
+                let finalization = round.try_construct_finalization(&self.scheme, &self.strategy);
+                if let Some(finalization) = finalization {
+                    started.record(self.context.as_ref());
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter
                         .recovered(Certificate::Finalization(finalization))

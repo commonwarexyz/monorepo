@@ -295,7 +295,7 @@ where
             key_page_cache: config.page_cache.clone(),
         };
         let cache = cache::Manager::init(
-            context.with_label("cache"),
+            context.child("cache"),
             prunable_config,
             config.block_codec_config.clone(),
         )
@@ -303,7 +303,7 @@ where
 
         // Initialize metadata tracking application progress
         let application_metadata = Metadata::init(
-            context.with_label("application_metadata"),
+            context.child("application_metadata"),
             metadata::Config {
                 partition: format!("{}-application-metadata", config.partition_prefix),
                 codec_config: (),
@@ -317,17 +317,15 @@ where
             .unwrap_or(Height::zero());
 
         // Create metrics
-        let finalized_height = Gauge::default();
-        context.register(
+        let finalized_height = context.register(
             "finalized_height",
             "Finalized height of application",
-            finalized_height.clone(),
+            Gauge::default(),
         );
-        let processed_height = Gauge::default();
-        context.register(
+        let processed_height = context.register(
             "processed_height",
             "Processed height of application",
-            processed_height.clone(),
+            Gauge::default(),
         );
         let _ = processed_height.try_set(last_processed_height.get());
 
@@ -1090,7 +1088,12 @@ where
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(&mut self.context, scheme.as_ref(), &certs, &self.strategy)
+            verify_certificates(
+                self.context.as_mut(),
+                scheme.as_ref(),
+                &certs,
+                &self.strategy,
+            )
         } else {
             let mut verified = vec![false; delivers.len()];
 
@@ -1110,8 +1113,12 @@ where
                     continue;
                 };
                 let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results =
-                    verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
+                let results = verify_certificates(
+                    self.context.as_mut(),
+                    scheme.as_ref(),
+                    &group,
+                    &self.strategy,
+                );
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];
                 }

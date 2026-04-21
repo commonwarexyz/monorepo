@@ -3,7 +3,6 @@ use commonware_runtime::Metrics as RuntimeMetrics;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 
 /// Metrics for the [super::Actor]
-#[derive(Default)]
 pub struct Metrics {
     /// The total number of unique peers in all peer sets being tracked.
     /// Includes bootstrappers, even if they are not in any peer set.
@@ -28,38 +27,38 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "tracked",
-            "Total number of unique peers in all peer sets being tracked",
-            metrics.tracked.clone(),
-        );
-        context.register(
-            "blocked",
-            "Blocked peers (value = expiry time as epoch millis)",
-            metrics.blocked.clone(),
-        );
-        context.register(
-            "reserved",
-            "Total number of outstanding reservations",
-            metrics.reserved.clone(),
-        );
-        context.register(
-            "connected",
-            "Unix timestamp in milliseconds when each connected peer became active",
-            metrics.connected.clone(),
-        );
-        context.register(
-            "limits",
-            "Count of the number of rate-limited reservation events for each peer",
-            metrics.limits.clone(),
-        );
-        context.register(
-            "updates",
-            "Count of the number of updates for each peer",
-            metrics.updates.clone(),
-        );
-        metrics
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
+        Self {
+            tracked: context.register(
+                "tracked",
+                "Total number of unique peers in all peer sets being tracked",
+                Gauge::default(),
+            ),
+            blocked: context.register(
+                "blocked",
+                "Blocked peers (value = expiry time as epoch millis)",
+                Family::default(),
+            ),
+            reserved: context.register(
+                "reserved",
+                "Total number of outstanding reservations",
+                Gauge::default(),
+            ),
+            connected: context.register(
+                "connected",
+                "Unix timestamp in milliseconds when each connected peer became active",
+                Family::default(),
+            ),
+            limits: context.register(
+                "limits",
+                "Count of the number of rate-limited reservation events for each peer",
+                Family::default(),
+            ),
+            updates: context.register(
+                "updates",
+                "Count of the number of updates for each peer",
+                Family::default(),
+            ),
+        }
     }
 }

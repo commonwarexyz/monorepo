@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -25,7 +25,11 @@ impl Conformance for ArchivePrunable {
             let config = prunable::Config {
                 translator: TwoCap,
                 key_partition: format!("archive-prunable-key-{seed}"),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 value_partition: format!("archive-prunable-value-{seed}"),
                 compression: None,
                 codec_config: (),
@@ -35,7 +39,7 @@ impl Conformance for ArchivePrunable {
                 replay_buffer: WRITE_BUFFER,
             };
             let mut archive = prunable::Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.with_label("archive"),
+                context.child("archive"),
                 config,
             )
             .await
@@ -70,7 +74,11 @@ impl Conformance for ArchiveImmutable {
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,
                 freezer_key_partition: format!("archive-immutable-key-{seed}"),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 freezer_value_partition: format!("archive-immutable-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: None,
@@ -83,7 +91,7 @@ impl Conformance for ArchiveImmutable {
                 codec_config: (),
             };
             let mut archive = immutable::Archive::<_, FixedBytes<64>, i32>::init(
-                context.with_label("archive"),
+                context.child("archive"),
                 config,
             )
             .await

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::mmr::Family,
@@ -91,8 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(test_name: &str, page_cache: CacheRef) -> Config<TwoCap> {
     Config {
         merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
@@ -124,12 +123,13 @@ async fn test_sync<
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
+    page_cache: CacheRef,
 ) -> bool {
-    let db_config = test_config(test_name, &context);
+    let db_config = test_config(test_name, page_cache);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
-        context: context.with_label("sync").with_attribute("id", sync_id),
+        context: context.child("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
         reached_target_tx: None,
@@ -161,11 +161,19 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config(TEST_NAME, &context);
-        let mut db = FixedDb::init(context.clone(), cfg)
-            .await
-            .expect("Failed to init source db");
         let mut restarts = 0usize;
+        let mut page_cache = CacheRef::from_pooler(
+            context.child("cache").with_attribute("instance", restarts),
+            PAGE_SIZE,
+            NZUsize!(1),
+        );
+        let cfg = test_config(TEST_NAME, page_cache.clone());
+        let mut db = FixedDb::init(
+            context.child("db").with_attribute("instance", restarts),
+            cfg,
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -240,12 +248,13 @@ fn fuzz(mut input: FuzzInput) {
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(
-                        context.clone(),
+                        context.child("sync"),
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
                         sync_id,
+                        page_cache.clone(),
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
@@ -258,16 +267,19 @@ fn fuzz(mut input: FuzzInput) {
                     pending_writes.clear();
                     drop(db);
 
-                    let cfg = test_config(TEST_NAME, &context);
+                    restarts += 1;
+                    page_cache = CacheRef::from_pooler(
+                        context.child("cache").with_attribute("instance", restarts),
+                        PAGE_SIZE,
+                        NZUsize!(1),
+                    );
+                    let cfg = test_config(TEST_NAME, page_cache.clone());
                     db = FixedDb::init(
-                        context
-                            .with_label("db")
-                            .with_attribute("instance", restarts),
+                        context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init source db");
-                    restarts += 1;
                 }
             }
         }

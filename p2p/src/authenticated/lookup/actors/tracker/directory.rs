@@ -96,7 +96,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut peers = HashMap::new();
         peers.insert(myself, Record::myself());
 
-        let metrics = Metrics::init(context.clone());
+        let metrics = Metrics::init(&context);
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
@@ -522,7 +522,7 @@ mod tests {
         AddressableTrackedPeers, Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Observer, Runner, Supervisor};
     use commonware_utils::{
         hostname,
         ordered::{Map, Set},
@@ -1099,7 +1099,8 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory
                 .track(
                     0,
@@ -1115,14 +1116,17 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
                 Some(connected_at)
             );
 
             directory.release(super::Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
+            assert_eq!(
+                metric_value(&metrics, "directory_connected", &pk_1.to_string()),
+                None
+            );
         });
     }
 
@@ -1147,7 +1151,8 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2235);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk.clone(), config, releaser);
 
             directory.track(
                 0,
@@ -1462,7 +1467,8 @@ mod tests {
         let addr_2 = Address::Symmetric(SocketAddr::new(shared_ip, 8081));
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add both peers with the same IP
             directory.track(
@@ -1523,7 +1529,8 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             directory.track(
                 0,
@@ -1607,7 +1614,8 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Initially no blocked peers
             assert!(
@@ -1716,7 +1724,8 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add all peers
             directory.track(
@@ -1801,7 +1810,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk.clone(), config, releaser);
 
             // Blocking myself should be ignored (Myself is unblockable)
             directory.block(&my_pk);
@@ -1846,7 +1856,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Block a peer that doesn't exist yet
             directory.block(&unknown_pk);
@@ -1940,7 +1951,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Register a peer
             directory.track(
@@ -2043,7 +2055,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add peer to a set
             directory.track(
@@ -2097,7 +2110,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2149,7 +2163,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2188,7 +2203,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let directory = Directory::init(context.child("directory"), my_pk, config, releaser);
 
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
@@ -2215,7 +2230,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2253,7 +2269,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2302,7 +2319,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2346,7 +2364,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add peer to a set
             directory.track(
@@ -2400,7 +2419,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add peer to a set
             directory.track(
@@ -2454,7 +2474,8 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             // Add peer to a set
             directory.track(
@@ -2615,7 +2636,8 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            let mut directory =
+                Directory::init(context.child("directory"), my_pk, config, releaser);
 
             directory.track(
                 0,

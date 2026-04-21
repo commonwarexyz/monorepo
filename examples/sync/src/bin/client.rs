@@ -6,7 +6,8 @@
 use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
+    buffer::paged::CacheRef, tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner,
+    Spawner, Storage, Supervisor,
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
@@ -15,7 +16,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
-    DurationExt,
+    DurationExt, NZUsize, NZU16,
 };
 use rand::Rng;
 use std::{
@@ -115,22 +116,21 @@ where
     info!("starting Any database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver = Resolver::<any::Operation, Digest>::connect(
-            context.with_label("resolver"),
-            config.server,
-        )
-        .await?;
+        let resolver =
+            Resolver::<any::Operation, Digest>::connect(context.child("resolver"), config.server)
+                .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any::create_config(&context);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = any::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
+            context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -143,7 +143,7 @@ where
 
         let sync_config =
             sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -182,21 +182,22 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver = Resolver::<current::Operation, Digest>::connect(
-            context.with_label("resolver"),
+            context.child("resolver"),
             config.server,
         )
         .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = current::create_config(&context);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = current::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
+            context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -209,7 +210,7 @@ where
 
         let engine_config =
             sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Digest>> {
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -245,21 +246,22 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver = Resolver::<immutable::Operation, Key>::connect(
-            context.with_label("resolver"),
+            context.child("resolver"),
             config.server,
         )
         .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = immutable::create_config(&context);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = immutable::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
+            context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -272,7 +274,7 @@ where
 
         let sync_config =
             sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -307,22 +309,21 @@ where
     info!("starting Keyless database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver = Resolver::<keyless::Operation, Key>::connect(
-            context.with_label("resolver"),
-            config.server,
-        )
-        .await?;
+        let resolver =
+            Resolver::<keyless::Operation, Key>::connect(context.child("resolver"), config.server)
+                .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = keyless::create_config(&context);
+        let page_cache = CacheRef::from_pooler(context.child("cache"), NZU16!(2048), NZUsize!(10));
+        let db_config = keyless::create_config(page_cache);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target_update").spawn(move |context| {
+            context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -335,7 +336,7 @@ where
 
         let sync_config =
             sync::engine::Config::<keyless::Database<_>, Resolver<keyless::Operation, Key>> {
-                context: context.with_label("sync"),
+                context: context.child("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -506,7 +507,7 @@ fn main() {
     let executor = tokio_runtime::Runner::new(executor_config);
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
-            context.with_label("telemetry"),
+            context.child("telemetry"),
             tokio_runtime::telemetry::Logging {
                 level: tracing::Level::INFO,
                 json: false,
@@ -528,10 +529,10 @@ fn main() {
 
         // Dispatch based on database type
         let result = match config.database_type {
-            DatabaseType::Any => run_any(context.with_label("sync"), config).await,
-            DatabaseType::Current => run_current(context.with_label("sync"), config).await,
-            DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
-            DatabaseType::Keyless => run_keyless(context.with_label("sync"), config).await,
+            DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Current => run_current(context, config).await,
+            DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {

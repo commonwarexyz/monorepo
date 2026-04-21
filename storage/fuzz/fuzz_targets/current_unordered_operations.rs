@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, journaled::Config as MmrConfig, Location},
@@ -100,7 +100,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
         let page_cache = CacheRef::from_pooler(
-            &context,
+            context.child("cache"),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
         );
@@ -123,7 +123,7 @@ fn fuzz(data: FuzzInput) {
             translator: TwoCap,
         };
 
-        let mut db = Db::init(context.clone(), cfg)
+        let mut db = Db::init(context.child("db"), cfg)
             .await
             .expect("Failed to initialize Current database");
 

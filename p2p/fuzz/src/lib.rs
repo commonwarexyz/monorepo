@@ -10,7 +10,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     deterministic::{self, Context},
-    Clock, Handle, IoBuf, Metrics, Quota, Runner,
+    Clock, Handle, IoBuf, Quota, Runner, Supervisor,
 };
 use commonware_utils::{
     ordered::{Map, Set},
@@ -249,7 +249,7 @@ impl NetworkScheme for Discovery {
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("fuzzed_discovery_network"), config);
+            discovery::Network::new(context.child("fuzzed_discovery_network"), config);
 
         // Pre-register some peer subsets to seed the network
         // Each index gets a randomized subset of 3 peers
@@ -318,7 +318,7 @@ impl NetworkScheme for Lookup {
 
         // Create the network and oracle
         let (mut network, mut oracle) =
-            LookupNetwork::new(context.with_label("fuzzed_lookup_network"), config);
+            LookupNetwork::new(context.child("fuzzed_lookup_network"), config);
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
@@ -448,7 +448,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             };
 
             // Create network instance for this peer
-            let peer_context = context.with_label(&format!("peer_{id}"));
+            let peer_context = context.child("peer").with_attribute("index", id);
             let network = N::create_network(peer_context, &peer_ctx).await;
 
             // Create and store peer state

@@ -1005,7 +1005,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         codec_config: ((0..).into(), ()),
     };
     let metadata =
-        Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+        Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
 
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {
@@ -1054,14 +1054,17 @@ mod tests {
         merkle::{mmb, mmr},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
-            current::{tests::fixed_config, unordered::fixed},
+            current::{
+                tests::{fixed_config, PAGE_CACHE_SIZE, PAGE_SIZE},
+                unordered::fixed,
+            },
         },
         translator::OneCap,
     };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1175,9 +1178,10 @@ mod tests {
     fn test_ops_root_witness_verifies_without_partial_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db = MmrDb::init(
-                ctx.clone(),
-                fixed_config::<OneCap>("ops-root-witness-full", &ctx),
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-full", page_cache),
             )
             .await
             .unwrap();
@@ -1213,9 +1217,10 @@ mod tests {
     fn test_ops_root_witness_verifies_with_partial_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db = MmbDb::init(
-                ctx.clone(),
-                fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-partial", page_cache),
             )
             .await
             .unwrap();
@@ -1253,9 +1258,10 @@ mod tests {
     fn test_ops_root_witness_verifies_with_pruned_db() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut db = MmrDb::init(
-                ctx.clone(),
-                fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-pruned", page_cache),
             )
             .await
             .unwrap();
@@ -1290,9 +1296,10 @@ mod tests {
     fn test_ops_root_witness_verifies_on_fresh_db() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
             let db = MmrDb::init(
-                ctx.clone(),
-                fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-fresh", page_cache),
             )
             .await
             .unwrap();

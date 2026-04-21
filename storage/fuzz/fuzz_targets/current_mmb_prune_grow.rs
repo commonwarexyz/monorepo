@@ -13,7 +13,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{journaled::Config as MerkleConfig, mmb},
@@ -234,8 +234,9 @@ async fn reopen_pruned_db(
     let pruned_bits_before = db.pruned_bits();
     drop(db);
 
-    let reopen_label = format!("pruned_reopen_{reopen_count}");
-    let reopen_context = context.with_label(&reopen_label);
+    let reopen_context = context
+        .child("pruned_reopen")
+        .with_attribute("count", reopen_count);
     let reopened = Db::init(reopen_context, config.clone())
         .await
         .expect("reopen pruned current db");
@@ -362,17 +363,23 @@ fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let pruned_context = context.with_label("pruned");
-        let pruned_cache =
-            CacheRef::from_pooler(&pruned_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let pruned_context = context.child("pruned");
+        let pruned_cache = CacheRef::from_pooler(
+            pruned_context.child("cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let pruned_config = test_config("pruned", pruned_cache);
         let mut db = Db::init(pruned_context, pruned_config.clone())
             .await
             .expect("init pruned current db");
 
-        let reference_context = context.with_label("reference");
-        let reference_cache =
-            CacheRef::from_pooler(&reference_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let reference_context = context.child("reference");
+        let reference_cache = CacheRef::from_pooler(
+            reference_context.child("cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let mut reference_db =
             Db::init(reference_context, test_config("reference", reference_cache))
                 .await

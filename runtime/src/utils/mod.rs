@@ -2,10 +2,14 @@
 
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
-use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
+use prometheus_client::{
+    encoding::text::encode,
+    registry::{Metric, Registry as PrometheusRegistry},
+};
 use std::{
     any::Any,
-    collections::BTreeMap,
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -132,14 +136,14 @@ impl ArcWake for Blocker {
 /// # Example
 ///
 /// ```rust
-/// use commonware_runtime::{Clock, Metrics, Runner, Spawner, deterministic};
+/// use commonware_runtime::{Clock, Metrics, Supervisor, Observer, Runner, Spawner, deterministic};
 /// use commonware_runtime::utils::count_running_tasks;
 /// use std::time::Duration;
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Spawn a task under a labeled context
-///     let handle = context.with_label("worker").spawn(|ctx| async move {
+///     let handle = context.child("worker").spawn(|ctx| async move {
 ///         ctx.sleep(Duration::from_secs(100)).await;
 ///     });
 ///
@@ -197,7 +201,8 @@ pub fn validate_label(label: &str) {
 
 /// Add an attribute to a sorted attribute list, maintaining sorted order via binary search.
 ///
-/// Returns `true` if the key was new, `false` if it was a duplicate (value overwritten).
+/// Returns `true` if the key was new, `false` if it was a duplicate. Duplicate keys keep the
+/// existing value so earlier layers remain authoritative.
 pub fn add_attribute(
     attributes: &mut Vec<(String, String)>,
     key: &str,
@@ -207,10 +212,7 @@ pub fn add_attribute(
     let value_string = value.to_string();
 
     match attributes.binary_search_by(|(k, _)| k.cmp(&key_string)) {
-        Ok(pos) => {
-            attributes[pos].1 = value_string;
-            false
-        }
+        Ok(_) => false,
         Err(pos) => {
             attributes.insert(pos, (key_string, value_string));
             true
@@ -463,6 +465,68 @@ impl Drop for ScopeGuard {
     }
 }
 
+/// A (prefixed_name, attributes) pair identifying a unique metric registration.
+pub(crate) type MetricKey = (String, Vec<(String, String)>);
+
+/// Type-erased clone of a previously-registered metric.
+///
+/// Scoped registrations remember the owning scope so they can be removed from
+/// the dedup map when that scope is torn down. This allows a later scope to
+/// register the same `(prefixed_name, attributes)` pair again after cleanup.
+pub(crate) struct RegisteredMetric {
+    pub scope_id: Option<u64>,
+    pub metric: Box<dyn Any + Send + Sync>,
+}
+
+/// Implements `Observer::register()` get-or-register semantics. First call at a
+/// `(prefixed_name, attributes)` key inserts `default` into both the dedup map
+/// and the prometheus registry; later calls return a clone of the first-registered
+/// handle. Panics on type mismatch (e.g. a `Counter` registered where a `Gauge`
+/// already exists).
+pub(crate) fn get_or_register<M: Metric + Clone>(
+    registered_metrics: &Mutex<HashMap<MetricKey, RegisteredMetric>>,
+    registry: &Mutex<Registry>,
+    attributes: &[(String, String)],
+    scope_id: Option<u64>,
+    prefixed_name: String,
+    help: &str,
+    default: M,
+) -> M {
+    let metric_key = (prefixed_name.clone(), attributes.to_vec());
+    let mut registered = registered_metrics.lock();
+    if let Some(existing) = registered.get(&metric_key) {
+        return existing
+            .metric
+            .downcast_ref::<M>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "metric type mismatch for {}: previously registered as {:?}",
+                    prefixed_name,
+                    (*existing.metric).type_id(),
+                )
+            })
+            .clone();
+    }
+    registered.insert(
+        metric_key,
+        RegisteredMetric {
+            scope_id,
+            metric: Box::new(default.clone()),
+        },
+    );
+    drop(registered);
+
+    let mut registry = registry.lock();
+    let scoped = registry.get_scope(scope_id);
+    let sub_registry = attributes
+        .iter()
+        .fold(scoped, |reg, (k, v): &(String, String)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+    sub_registry.register(prefixed_name, help, default.clone());
+    default
+}
+
 /// Manages multiple prometheus registries with lifecycle-based scoping.
 ///
 /// Holds a permanent root registry for long-lived metrics (runtime internals)
@@ -523,7 +587,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics, Runner};
+    use crate::{deterministic, Observer, Runner, Supervisor};
     use commonware_macros::test_traced;
     use futures::task::waker;
     use prometheus_client::metrics::counter::Counter;
@@ -918,7 +982,7 @@ b_total 2
 
     #[test_traced]
     fn test_count_running_tasks() {
-        use crate::{Metrics, Runner, Spawner};
+        use crate::{Runner, Spawner, Supervisor};
         use futures::future;
 
         let executor = deterministic::Runner::default();
@@ -931,8 +995,8 @@ b_total 2
             );
 
             // Spawn a task under a labeled context that stays running
-            let worker_ctx = context.with_label("worker");
-            let handle1 = worker_ctx.clone().spawn(|_| async move {
+            let worker_ctx = context.child("worker");
+            let handle1 = worker_ctx.child("task").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
@@ -948,13 +1012,34 @@ b_total 2
             );
 
             // Spawn a nested task (worker_child)
-            let handle2 = worker_ctx.with_label("child").spawn(|_| async move {
+            let handle2 = worker_ctx.child("child").spawn(|_| async move {
                 future::pending::<()>().await;
             });
 
             // Count should include both parent and nested tasks
             let count = count_running_tasks(&context, "worker");
             assert_eq!(count, 2, "both worker and worker_child should be counted");
+
+            // Tasks with the same label but different attributes share one
+            // runtime task metric series, so the helper must sum the gauge
+            // value rather than count matching lines.
+            let attr_worker_a = context
+                .child("attr_worker")
+                .with_attribute("worker", "a")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
+            let attr_worker_b = context
+                .child("attr_worker")
+                .with_attribute("worker", "b")
+                .spawn(|_| async move {
+                    future::pending::<()>().await;
+                });
+            let count = count_running_tasks(&context, "attr_worker");
+            assert_eq!(
+                count, 2,
+                "both attribute-distinguished workers should be counted"
+            );
 
             // Abort parent task
             handle1.abort();
@@ -967,12 +1052,21 @@ b_total 2
             // Abort nested task
             handle2.abort();
             let _ = handle2.await;
+            attr_worker_a.abort();
+            let _ = attr_worker_a.await;
+            attr_worker_b.abort();
+            let _ = attr_worker_b.await;
 
             // All tasks stopped
             assert_eq!(
                 count_running_tasks(&context, "worker"),
                 0,
                 "all worker tasks should be stopped"
+            );
+            assert_eq!(
+                count_running_tasks(&context, "attr_worker"),
+                0,
+                "all attribute-distinguished workers should be stopped"
             );
         });
     }
@@ -983,23 +1077,37 @@ b_total 2
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
             let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
+            context.child("a").register("test", "help", c1);
             let c2 = Counter::<u64>::default();
-            context.with_label("b").register("test", "help", c2);
+            context.child("b").register("test", "help", c2);
         });
         // Test passes if runtime doesn't panic on shutdown
     }
 
-    #[test]
-    #[should_panic(expected = "duplicate metric:")]
-    fn test_duplicate_metrics_panics() {
+    #[test_traced]
+    fn test_duplicate_metrics_return_existing_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register metrics with the same label, causing duplicates
-            let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
-            let c2 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c2);
+            let c1 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+            let c2 = context
+                .child("a")
+                .register("test", "help", Counter::<u64>::default());
+
+            c1.inc();
+            c2.inc();
+
+            let output = context.encode();
+            assert_eq!(
+                output.matches("# HELP a_test").count(),
+                1,
+                "duplicate registration should not create duplicate HELP lines: {output}"
+            );
+            assert!(
+                output.contains("a_test_total 2"),
+                "duplicate registration should return the existing counter handle: {output}"
+            );
         });
     }
 }

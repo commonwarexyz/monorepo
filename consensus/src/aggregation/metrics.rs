@@ -1,12 +1,11 @@
 use commonware_runtime::{
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics,
+    Metrics as RuntimeMetrics,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
-use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics {
     /// Lowest height without a certificate
     pub tip: Gauge,
     /// Number of digests returned by the automaton by status
@@ -16,52 +15,44 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of certificates produced
     pub certificates: Counter,
     /// Histogram of application digest durations
-    pub digest_duration: histogram::Timed<E>,
+    pub digest_duration: histogram::Timed,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: E) -> Self {
-        let tip = Gauge::default();
-        context.register("tip", "Lowest height without a certificate", tip.clone());
-        let digest = status::Counter::default();
-        context.register(
-            "digest",
-            "Number of digests returned by the automaton by status",
-            digest.clone(),
-        );
-        let acks = status::Counter::default();
-        context.register(
-            "acks",
-            "Number of Ack messages processed by status",
-            acks.clone(),
-        );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let rebroadcast = status::Counter::default();
-        context.register(
+    pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
+        let _ = context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            rebroadcast,
+            status::Counter::default(),
         );
-        let digest_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let digest_duration = context.register(
             "digest_duration",
             "Histogram of application digest durations",
-            digest_duration.clone(),
+            Histogram::new(histogram::Buckets::LOCAL),
         );
-        let clock = Arc::new(context);
-
         Self {
-            tip,
-            digest,
-            acks,
-            certificates,
-            digest_duration: histogram::Timed::new(digest_duration, clock),
+            tip: context.register(
+                "tip",
+                "Lowest height without a certificate",
+                Gauge::default(),
+            ),
+            digest: context.register(
+                "digest",
+                "Number of digests returned by the automaton by status",
+                status::Counter::default(),
+            ),
+            acks: context.register(
+                "acks",
+                "Number of Ack messages processed by status",
+                status::Counter::default(),
+            ),
+            certificates: context.register(
+                "certificates",
+                "Number of certificates produced",
+                Counter::default(),
+            ),
+            digest_duration: histogram::Timed::new(digest_duration),
         }
     }
 }

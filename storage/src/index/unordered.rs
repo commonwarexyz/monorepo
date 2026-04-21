@@ -102,21 +102,17 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
 
     /// Create a new index with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
+        Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
+            keys: ctx.register(
+                "keys",
+                "Number of translated keys in the index",
+                Gauge::default(),
+            ),
+            items: ctx.register("items", "Number of items in the index", Gauge::default()),
+            pruned: ctx.register("pruned", "Number of items pruned", Counter::default()),
+        }
     }
 }
 

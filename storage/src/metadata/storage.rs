@@ -104,20 +104,17 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
-        let sync_rewrites = Counter::default();
-        let sync_overwrites = Counter::default();
-        let keys = Gauge::default();
-        context.register(
+        let sync_rewrites = context.register(
             "sync_rewrites",
             "number of syncs that rewrote all data",
-            sync_rewrites.clone(),
+            Counter::default(),
         );
-        context.register(
+        let sync_overwrites = context.register(
             "sync_overwrites",
             "number of syncs that modified existing data",
-            sync_overwrites.clone(),
+            Counter::default(),
         );
-        context.register("keys", "number of tracked keys", keys.clone());
+        let keys = context.register("keys", "number of tracked keys", Gauge::default());
 
         // Return metadata
         let _ = keys.try_set(map.len());

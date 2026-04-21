@@ -72,7 +72,7 @@ where
 {
     let hasher = StandardHasher::<H>::new();
     let peek = journaled::Mmr::<_, H::Digest>::peek_root(
-        context.with_label("local_target_probe"),
+        context.child("local_target_probe"),
         merkle_config,
         &hasher,
     )
@@ -108,7 +108,7 @@ where
     let hasher = StandardHasher::<H>::new();
 
     let mmr = crate::mmr::journaled::Mmr::init_sync(
-        context.with_label("mmr"),
+        context.child("mmr"),
         crate::mmr::journaled::SyncConfig {
             config: mmr_config,
             range: range.clone(),
@@ -118,7 +118,7 @@ where
     )
     .await?;
 
-    let index = I::new(context.with_label("index"), translator);
+    let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
         mmr,

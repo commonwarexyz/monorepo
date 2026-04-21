@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor};
 use commonware_storage::merkle::{
     hasher::Standard, journaled::Config, mem::Mem, mmb, mmr, Error, Family as MerkleFamily,
     Location, LocationRangeExt as _, Position,
@@ -76,14 +76,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
+fn test_config(partition_suffix: &str, page_cache: CacheRef) -> Config {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache,
     }
 }
 
@@ -115,10 +115,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new();
-            let mut merkle =
-                Journaled::<F, _, _>::init(context.clone(), &hasher, test_config(suffix, &context))
-                    .await
-                    .unwrap();
+            let page_cache =
+                CacheRef::from_pooler(context.child("cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let mut merkle = Journaled::<F, _, _>::init(
+                context.child("merkle"),
+                &hasher,
+                test_config(suffix, page_cache.clone()),
+            )
+            .await
+            .unwrap();
 
             // Historical leaf counts that are valid for proofs against the current lineage.
             let mut historical_sizes: Vec<Location<F>> = Vec::new();
@@ -324,11 +329,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         // Init a new merkle structure.
                         drop(merkle);
                         merkle = Journaled::<F, _, _>::init(
-                            context
-                                .with_label("merkle")
-                                .with_attribute("instance", restarts),
+                            context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
-                            test_config(suffix, &context),
+                            test_config(suffix, page_cache.clone()),
                         )
                         .await
                         .unwrap();
@@ -355,15 +358,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
                         let sync_suffix = format!("{suffix}-sync");
                         let sync_config = SyncConfig::<F, _> {
-                            config: test_config(&sync_suffix, &context),
+                            config: test_config(&sync_suffix, page_cache.clone()),
                             range: lower_bound_loc..upper_bound_loc,
                             pinned_nodes: None,
                         };
 
                         if let Ok(sync_merkle) = Journaled::<F, _, _>::init_sync(
-                            context
-                                .with_label("sync")
-                                .with_attribute("instance", restarts),
+                            context.child("sync").with_attribute("instance", restarts),
                             sync_config,
                             &hasher,
                         )

@@ -3,7 +3,7 @@ use crate::{
     Error,
 };
 use commonware_macros::select_loop;
-use commonware_runtime::{Handle, IoBufs, Sink, Spawner, Stream};
+use commonware_runtime::{Handle, IoBufs, Sink, Spawner, Stream, Supervisor};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ async fn run_loop<E, Si, St, M>(
     mut request_rx: mpsc::Receiver<Request<M>>,
     mut pending_requests: HashMap<RequestId, oneshot::Sender<Result<M, Error>>>,
 ) where
-    E: Spawner + Clone,
+    E: Spawner + Supervisor,
     Si: Sink,
     St: Stream,
     M: Message,
@@ -57,7 +57,7 @@ async fn run_loop<E, Si, St, M>(
 
     // Spawn dedicated recv task so recv_frame is never cancelled.
     let recv_handle = context
-        .clone()
+        .child("recv")
         .spawn(move |_| recv_loop(stream, response_tx));
 
     select_loop! {
@@ -112,7 +112,7 @@ pub(super) fn run<E, Si, St, M>(
     stream: St,
 ) -> Result<(mpsc::Sender<Request<M>>, Handle<()>), commonware_runtime::Error>
 where
-    E: Spawner,
+    E: Spawner + Supervisor,
     Si: Sink,
     St: Stream,
     M: Message,

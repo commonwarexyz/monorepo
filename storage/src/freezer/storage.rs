@@ -488,7 +488,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
-        pooler: &impl BufferPooler,
+        pooler: impl BufferPooler,
         blob: &E::Blob,
         table_size: u32,
         table_resize_frequency: u8,
@@ -645,7 +645,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             codec_config: config.codec_config,
         };
         let mut oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
+            Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -697,7 +697,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
-                    &context,
+                    context.child("recover_table"),
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -722,7 +722,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
-                    &context,
+                    context.child("recover_table"),
                     &table,
                     table_size,
                     config.table_resize_frequency,
@@ -752,27 +752,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.register("puts", "number of put operations", Counter::default());
+        let gets = context.register("gets", "number of get operations", Counter::default());
+        let unnecessary_reads = context.register(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
+            Counter::default(),
         );
-        context.register(
+        let unnecessary_writes = context.register(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
+            Counter::default(),
         );
-        context.register(
+        let resizes = context.register(
             "resizes",
             "number of table resizing operations",
-            resizes.clone(),
+            Counter::default(),
         );
 
         Ok(Self {
@@ -1168,7 +1163,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage, Supervisor,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1205,7 +1200,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1219,7 +1218,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -1260,7 +1259,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler(
+                    context.child("cache"),
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1275,12 +1278,10 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
-                    context.with_label("first"),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
                 freezer.put(test_key("key0"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
@@ -1304,7 +1305,7 @@ mod tests {
             // read_latest_entry would then see two "valid" entries with epoch=0 and
             // panic on unreachable!().
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.with_label("second"),
+                context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )

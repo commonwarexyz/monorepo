@@ -7,12 +7,13 @@ use crate::common::{
     any_fix_cfg, any_var_digest_cfg, any_var_vec_cfg, cur_fix_cfg, cur_var_digest_cfg,
     cur_var_vec_cfg, gen_random_kv, make_fixed_value, make_var_value, with_fixed_value_db,
     with_fixed_value_db_cfg, with_var_value_db, with_var_value_db_cfg, Digest,
-    FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
+    FIXED_VALUE_VARIANTS, PAGE_CACHE_SIZE, PAGE_SIZE, VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
-    Runner as _,
+    Runner as _, Supervisor, ThreadPooler,
 };
 use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
@@ -79,10 +80,17 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let af = any_fix_cfg(&ctx);
-                            let cf = cur_fix_cfg(&ctx);
-                            let av = any_var_digest_cfg(&ctx);
-                            let cv = cur_var_digest_cfg(&ctx);
+                            let page_cache = CacheRef::from_pooler(
+                                ctx.child("cache"),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            );
+                            let thread_pool =
+                                ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let af = any_fix_cfg(thread_pool.clone(), page_cache.clone());
+                            let cf = cur_fix_cfg(thread_pool.clone(), page_cache.clone());
+                            let av = any_var_digest_cfg(thread_pool.clone(), page_cache.clone());
+                            let cv = cur_var_digest_cfg(thread_pool, page_cache);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 with_fixed_value_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
@@ -142,8 +150,15 @@ fn bench_var_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let av = any_var_vec_cfg(&ctx);
-                            let cv = cur_var_vec_cfg(&ctx);
+                            let page_cache = CacheRef::from_pooler(
+                                ctx.child("cache"),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            );
+                            let thread_pool =
+                                ctx.create_thread_pool(crate::common::THREADS).unwrap();
+                            let av = any_var_vec_cfg(thread_pool.clone(), page_cache.clone());
+                            let cv = cur_var_vec_cfg(thread_pool, page_cache);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 with_var_value_db_cfg!(ctx, variant, av, cv, |mut db| {

@@ -134,7 +134,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
+            let rate_limiter = RateLimiter::direct_with_clock(
+                rate,
+                self.context
+                    .child("channel_rate_limiter")
+                    .with_attribute("idx", channel),
+            );
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
@@ -145,94 +150,92 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
         let ping_rate = Quota::with_period(half).unwrap();
-        let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
+        let ping_rate_limiter =
+            RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> =
-            self.context.with_label("sender").spawn({
-                let peer = peer.clone();
-                let rate_limits = rate_limits.clone();
-                move |context| async move {
-                    // Set the initial deadline (no need to send right away)
-                    let mut deadline = context.current() + self.ping_frequency;
+        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+            let peer = peer.clone();
+            let rate_limits = rate_limits.clone();
+            move |context| async move {
+                // Set the initial deadline (no need to send right away)
+                let mut deadline = context.current() + self.ping_frequency;
 
-                    // Enter into the main loop
-                    let mut batch = Vec::with_capacity(self.send_batch_size);
-                    let (control, high, low) = &mut (self.control, self.high, self.low);
-                    select_loop! {
-                        context,
-                        on_stopped => {},
-                        _ = context.sleep_until(deadline) => {
-                            // Periodically send a ping to the peer, batching
-                            // any already-queued messages into the same write.
-                            Self::push_batched(
-                                &self.sent_messages,
-                                &mut batch,
-                                metrics::Message::new_ping(&peer),
-                                types::Message::Ping.encode_with_pool(&pool),
-                            );
-                            Self::extend_send_many(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                control,
-                                high,
-                                low,
-                                &rate_limits,
-                                &self.sent_messages,
-                            )?;
-                            conn_sender
-                                .send_many(batch.drain(..))
-                                .await
-                                .map_err(Error::SendFailed)?;
-                            deadline = context.current() + self.ping_frequency;
-                        },
-                        // Await any outbound message (control, high, or low), then
-                        // drain already-queued messages into a single runtime write.
-                        // Priority order: control > high > low.
-                        msg = recv_prioritized(control, high, low) => {
-                            match msg {
-                                Prioritized::Closed => return Err(Error::PeerDisconnected),
-                                Prioritized::Control(msg) => match msg {
-                                    Message::Kill => {
-                                        return Err(Error::PeerKilled(peer.to_string()))
-                                    }
-                                },
-                                Prioritized::Data(encoded) => {
-                                    let (metric, payload) =
-                                        Self::prepare_data(&peer, encoded, &rate_limits);
-                                    Self::push_batched(
-                                        &self.sent_messages,
-                                        &mut batch,
-                                        metric,
-                                        payload,
-                                    );
+                // Enter into the main loop
+                let mut batch = Vec::with_capacity(self.send_batch_size);
+                let (control, high, low) = &mut (self.control, self.high, self.low);
+                select_loop! {
+                    context,
+                    on_stopped => {},
+                    _ = context.sleep_until(deadline) => {
+                        // Periodically send a ping to the peer, batching
+                        // any already-queued messages into the same write.
+                        Self::push_batched(
+                            &self.sent_messages,
+                            &mut batch,
+                            metrics::Message::new_ping(&peer),
+                            types::Message::Ping.encode_with_pool(&pool),
+                        );
+                        Self::extend_send_many(
+                            &peer,
+                            self.send_batch_size,
+                            &mut batch,
+                            control,
+                            high,
+                            low,
+                            &rate_limits,
+                            &self.sent_messages,
+                        )?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
+                        deadline = context.current() + self.ping_frequency;
+                    },
+                    // Await any outbound message (control, high, or low), then
+                    // drain already-queued messages into a single runtime write.
+                    // Priority order: control > high > low.
+                    msg = recv_prioritized(control, high, low) => {
+                        match msg {
+                            Prioritized::Closed => return Err(Error::PeerDisconnected),
+                            Prioritized::Control(msg) => match msg {
+                                Message::Kill => {
+                                    return Err(Error::PeerKilled(peer.to_string()))
                                 }
+                            },
+                            Prioritized::Data(encoded) => {
+                                let (metric, payload) =
+                                    Self::prepare_data(&peer, encoded, &rate_limits);
+                                Self::push_batched(
+                                    &self.sent_messages,
+                                    &mut batch,
+                                    metric,
+                                    payload,
+                                );
                             }
-                            Self::extend_send_many(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                control,
-                                high,
-                                low,
-                                &rate_limits,
-                                &self.sent_messages,
-                            )?;
-                            conn_sender
-                                .send_many(batch.drain(..))
-                                .await
-                                .map_err(Error::SendFailed)?;
-                        },
-                    }
-
-                    Ok(())
+                        }
+                        Self::extend_send_many(
+                            &peer,
+                            self.send_batch_size,
+                            &mut batch,
+                            control,
+                            high,
+                            low,
+                            &rate_limits,
+                            &self.sent_messages,
+                        )?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
+                    },
                 }
-            });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
-            .with_label("receiver")
-            .spawn(move |context| async move {
+
+                Ok(())
+            }
+        });
+        let mut receive_handler: Handle<Result<(), Error>> =
+            self.context.child("receiver").spawn(move |context| async move {
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
@@ -336,7 +339,8 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{
-        deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
+        deterministic, iobuf::BufferPool, mocks, BufferPooler, Error as RuntimeError, IoBuf,
+        IoBufs, Runner, Spawner, Supervisor,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
@@ -394,10 +398,9 @@ mod tests {
         }
     }
 
-    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
+    fn create_channels(pool: BufferPool) -> Channels<PublicKey> {
         let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+        let messenger = router::Messenger::new(pool, router_mailbox);
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -419,7 +422,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
@@ -437,7 +440,7 @@ mod tests {
             });
 
             let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -459,14 +462,14 @@ mod tests {
                 ..default_peer_config()
             };
             let (peer_actor, _mailbox, _relay) =
-                Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+                Actor::<deterministic::Context, PublicKey>::new(context.child("peer"), cfg);
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
+            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("peer"));
 
             // Simulate the attack: send a Data message with an arbitrary
             // unregistered channel value. Before the fix, this would create
@@ -524,7 +527,7 @@ mod tests {
             let remote_config = stream_config(remote_key.clone());
 
             let local_pk_clone = local_pk.clone();
-            let listener_handle = context.clone().spawn({
+            let listener_handle = context.child("peer").spawn({
                 let sends = sends.clone();
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
@@ -543,7 +546,7 @@ mod tests {
             });
 
             let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
-                context.clone(),
+                context.child("peer"),
                 local_config,
                 remote_pk.clone(),
                 local_stream,
@@ -563,11 +566,11 @@ mod tests {
                 ..default_peer_config()
             };
             let (peer_actor, peer_mailbox, relay) =
-                Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+                Actor::<deterministic::Context, PublicKey>::new(context.child("peer"), cfg);
 
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.network_buffer_pool().clone());
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
+            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("peer"));
 
             let pool = context.network_buffer_pool().clone();
             relay
@@ -583,7 +586,7 @@ mod tests {
                 )
                 .expect("second send failed");
 
-            let peer_handle = context.clone().spawn(move |_context| async move {
+            let peer_handle = context.child("peer").spawn(move |_context| async move {
                 peer_actor
                     .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
                     .await
