@@ -227,7 +227,8 @@ pub(super) fn ops_to_grafted_pos<F: Graftable>(
     F::subtree_root_position(grafted_leaf_loc, grafted_height)
 }
 
-/// Convert a grafted position back to the corresponding ops-family position.
+/// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
+/// range.
 pub(super) fn grafted_to_ops_pos<F: Graftable>(
     grafted_pos: Position<F>,
     grafting_height: u32,
@@ -436,8 +437,7 @@ impl<
     ///
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
-    /// [`super::db::Db::settled_bitmap_prune_loc`] ensures this case is unreachable for
-    /// pruned chunks.
+    /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
     fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<D> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);

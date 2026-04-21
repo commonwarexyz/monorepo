@@ -265,8 +265,7 @@ fn fuzz(input: FuzzInput) {
                         {
                             break;
                         }
-                        let floor = db.inactivity_floor_loc();
-                        if db.prune(floor).await.is_err() {
+                        if db.prune(db.sync_boundary()).await.is_err() {
                             break;
                         }
                     }
@@ -325,7 +324,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Verify range proofs over the recovered DB.
-            let floor = *db.inactivity_floor_loc();
+            let floor = *db.sync_boundary();
             let size = *db.bounds().await.end;
             for i in floor..size {
                 let loc = Location::new(i);

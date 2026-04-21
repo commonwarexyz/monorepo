@@ -67,7 +67,7 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// Return the peaks of a structure with the given `size` as `(position, height)` pairs
     /// in canonical oldest-to-newest order (suitable for
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
-    fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
+    fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
 
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
