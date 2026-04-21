@@ -42,8 +42,7 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type CurrentDbHandle<F, E, C, I, H, U, const N: usize> =
-    Arc<AsyncRwLock<Db<F, E, C, I, H, U, N>>>;
+type CurrentDbHandle<F, E, C, I, H, U, const N: usize> = Arc<AsyncRwLock<Db<F, E, C, I, H, U, N>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -244,14 +243,12 @@ where
 }
 
 /// Implement [`Merkleized`](MerkleizedTrait) for all supported `current` update kinds.
-impl<F, E, C, I, H, U, const N: usize> MerkleizedTrait
-    for CurrentMerkleized<F, E, C, I, H, U, N>
+impl<F, E, C, I, H, U, const N: usize> MerkleizedTrait for CurrentMerkleized<F, E, C, I, H, U, N>
 where
     F: Graftable,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     Operation<F, U>: Codec,
@@ -345,10 +342,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
@@ -387,10 +381,8 @@ mod open {
     };
     use commonware_utils::Array;
 
-    type VConfig<T, F, K, V> = VariableConfig<
-        T,
-        <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
-    >;
+    type VConfig<T, F, K, V> =
+        VariableConfig<T, <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg>;
 
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize>(
         context: E,
@@ -481,10 +473,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 

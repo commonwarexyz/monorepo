@@ -256,10 +256,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 
@@ -279,8 +276,13 @@ where
     V: VariableValue + 'static,
     H: Hasher + 'static,
 {
-    type Unmerkleized =
-        KeylessUnmerkleized<F, E, VariableEncoding<V>, VariableJournal<E, variable::Operation<V>>, H>;
+    type Unmerkleized = KeylessUnmerkleized<
+        F,
+        E,
+        VariableEncoding<V>,
+        VariableJournal<E, variable::Operation<V>>,
+        H,
+    >;
     type Merkleized =
         KeylessMerkleized<F, E, VariableEncoding<V>, VariableJournal<E, variable::Operation<V>>, H>;
     type Error = Error<F>;
@@ -314,10 +316,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 

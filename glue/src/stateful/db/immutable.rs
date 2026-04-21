@@ -36,8 +36,7 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableDbHandle<F, E, K, V, C, H, T> =
-    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T>>>;
+type ImmutableDbHandle<F, E, K, V, C, H, T> = Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -284,10 +283,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
@@ -359,10 +355,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 

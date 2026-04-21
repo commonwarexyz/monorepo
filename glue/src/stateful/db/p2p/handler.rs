@@ -340,10 +340,7 @@ mod tests {
         let response = Response::<mmr::Family, u64, sha256::Digest> {
             proof: Proof {
                 leaves: mmr::Location::new(10),
-                digests: vec![
-                    sha256::Digest::from([7; 32]);
-                    MAX_PROOF_DIGESTS_PER_ELEMENT
-                ],
+                digests: vec![sha256::Digest::from([7; 32]); MAX_PROOF_DIGESTS_PER_ELEMENT],
             },
             operations: vec![1],
             pinned_nodes: None,
@@ -353,10 +350,7 @@ mod tests {
         let decoded =
             Response::<mmr::Family, u64, sha256::Digest>::decode_cfg(encoded, &max_ops).unwrap();
         assert_eq!(decoded.operations, vec![1]);
-        assert_eq!(
-            decoded.proof.digests.len(),
-            MAX_PROOF_DIGESTS_PER_ELEMENT
-        );
+        assert_eq!(decoded.proof.digests.len(), MAX_PROOF_DIGESTS_PER_ELEMENT);
     }
 
     #[test]

@@ -560,10 +560,10 @@ where
             reached_target_tx: None,
             max_retained_roots: 1,
             progress_tx: None,
-            };
-            let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        };
+        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
-            update_sender
+        update_sender
             .send(Target {
                 root: initial_root,
                 range: non_empty_range!(

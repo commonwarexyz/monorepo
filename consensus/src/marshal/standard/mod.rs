@@ -2399,11 +2399,14 @@ mod tests {
             .await;
 
             // Raise the floor above the hint we are about to send.
-            mailbox.set_floor(Height::new(10)).await;
+            mailbox.set_floor(Height::new(10), false).await;
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox
-                .hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()))
+                .hint_finalized(
+                    Height::new(5),
+                    Some(NonEmptyVec::new(participants[1].clone())),
+                )
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
@@ -2453,7 +2456,10 @@ mod tests {
             }
 
             mailbox
-                .hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()))
+                .hint_finalized(
+                    Height::new(1),
+                    Some(NonEmptyVec::new(participants[1].clone())),
+                )
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
@@ -2488,7 +2494,7 @@ mod tests {
 
             let target = participants[1].clone();
             mailbox
-                .hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()))
+                .hint_finalized(Height::new(7), Some(NonEmptyVec::new(target.clone())))
                 .await;
 
             wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {

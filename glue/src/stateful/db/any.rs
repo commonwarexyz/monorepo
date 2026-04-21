@@ -261,8 +261,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     Operation<F, U>: Codec,
@@ -356,10 +355,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
@@ -441,10 +437,7 @@ where
         }
     }
 
-    async fn rewind_to_target(
-        &mut self,
-        target: Self::SyncTarget,
-    ) -> Result<(), Error<F>> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 

@@ -11,8 +11,10 @@ use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_storage::merkle::Family;
-use commonware_storage::qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver};
+use commonware_storage::{
+    merkle::Family,
+    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
     sync::AsyncRwLock,
@@ -26,8 +28,7 @@ type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
-type PendingSubs<F, DB> =
-    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
+type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>

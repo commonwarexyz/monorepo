@@ -615,10 +615,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    fn is_ready_to_complete(
-        &self,
-        journal_size: u64,
-    ) -> Result<bool, Error<DB, R>> {
+    fn is_ready_to_complete(&self, journal_size: u64) -> Result<bool, Error<DB, R>> {
         Ok(self.is_at_target(journal_size)? && self.has_boundary_state())
     }
 

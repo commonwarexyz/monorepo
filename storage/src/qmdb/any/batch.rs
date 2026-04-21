@@ -482,7 +482,8 @@ where
 
         // Slow path: at least one miss. Build Option vec for remaining locations,
         // batch-read disk misses, then merge.
-        let mut remaining: Vec<Option<Operation<F, U>>> = Vec::with_capacity(locations.len() - first_miss);
+        let mut remaining: Vec<Option<Operation<F, U>>> =
+            Vec::with_capacity(locations.len() - first_miss);
         let mut disk_locs = Vec::new();
         for loc in &locations[first_miss..] {
             if let Some(op) = self.try_read_op_sync(*loc, batch_ops, reader) {
