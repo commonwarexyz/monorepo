@@ -16,10 +16,6 @@ use futures::{
     future::try_join_all,
     stream::{self, Stream},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Bound,
-};
 
 pub mod fixed;
 pub mod variable;
@@ -210,18 +206,21 @@ where
     }
 }
 
-/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
-/// first key if `key` is the last key.
+/// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
+/// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
-    let next = possible_next
-        .range((Bound::Excluded(key), Bound::Unbounded))
-        .next();
-    if let Some(next) = next {
-        return next.clone();
+pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+    // Find the first index with entry > key. `binary_search` returns Ok on exact hit (jump past)
+    // or Err on no hit (insertion point).
+    let idx = match possible_next.binary_search(key) {
+        Ok(i) => i + 1,
+        Err(i) => i,
+    };
+    if idx < possible_next.len() {
+        return possible_next[idx].clone();
     }
     possible_next
         .first()
@@ -229,26 +228,28 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
-/// to the last key if `key` is the first key.
+/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
 pub(crate) fn find_prev_key<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a BTreeMap<K, V>,
+    possible_previous: &'a [(K, V)],
 ) -> (&'a K, &'a V) {
-    let prev = possible_previous
-        .range((Bound::Unbounded, Bound::Excluded(key)))
-        .next_back();
-    if let Some(prev) = prev {
-        return prev;
+    let idx = match possible_previous.binary_search_by(|(k, _)| k.cmp(key)) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
+    if idx > 0 {
+        let (k, v) = &possible_previous[idx - 1];
+        return (k, v);
     }
-    possible_previous
-        .iter()
-        .next_back()
-        .expect("possible_previous should not be empty")
+    let (k, v) = possible_previous
+        .last()
+        .expect("possible_previous should not be empty");
+    (k, v)
 }
 
 #[cfg(any(test, feature = "test-traits"))]
