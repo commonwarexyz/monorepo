@@ -16,10 +16,6 @@ use futures::{
     future::try_join_all,
     stream::{self, Stream},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Bound,
-};
 
 pub mod fixed;
 pub mod variable;
@@ -210,18 +206,16 @@ where
     }
 }
 
-/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
-/// first key if `key` is the last key.
+/// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
+/// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
-    let next = possible_next
-        .range((Bound::Excluded(key), Bound::Unbounded))
-        .next();
-    if let Some(next) = next {
-        return next.clone();
+pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+    let idx = possible_next.partition_point(|k| k <= key);
+    if idx < possible_next.len() {
+        return possible_next[idx].clone();
     }
     possible_next
         .first()
@@ -229,26 +223,25 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
-/// to the last key if `key` is the first key.
+/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
 pub(crate) fn find_prev_key<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a BTreeMap<K, V>,
+    possible_previous: &'a [(K, V)],
 ) -> (&'a K, &'a V) {
-    let prev = possible_previous
-        .range((Bound::Unbounded, Bound::Excluded(key)))
-        .next_back();
-    if let Some(prev) = prev {
-        return prev;
-    }
-    possible_previous
-        .iter()
-        .next_back()
-        .expect("possible_previous should not be empty")
+    let idx = possible_previous.partition_point(|(k, _)| k < key);
+    let (k, v) = if idx > 0 {
+        &possible_previous[idx - 1]
+    } else {
+        possible_previous
+            .last()
+            .expect("possible_previous should not be empty")
+    };
+    (k, v)
 }
 
 #[cfg(any(test, feature = "test-traits"))]
