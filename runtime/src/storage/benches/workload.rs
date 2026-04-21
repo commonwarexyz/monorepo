@@ -8,7 +8,7 @@ use crate::{
     runner::{random_blocks, run_read_loop, run_write_loop, sequential_blocks, warm_read_loop},
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{stream::FuturesUnordered, TryStreamExt};
 use rand::{
     rngs::{SmallRng, StdRng},
     Rng, SeedableRng,
@@ -86,10 +86,8 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
             }
         })
         .collect::<FuturesUnordered<_>>()
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
 
     Ok(Report::new(start.elapsed(), Some(workers), None, file_size))
 }
@@ -142,12 +140,11 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
             }
         })
         .collect::<FuturesUnordered<_>>()
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
 
-    // Final sync if deferred to end.
+    // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
+    // `SyncMode::End` still needs one final sync after all workers finish.
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
@@ -177,7 +174,8 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     )
     .await?;
 
-    // Final sync if deferred to end.
+    // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
+    // `SyncMode::End` still needs one final sync after the writer finishes.
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
@@ -255,13 +253,13 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                 run_read_loop(blob, deadline, cfg.io_size, random_block).await
             }
         })
-        .collect::<FuturesUnordered<_>>();
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>();
 
-    let (write_result, read_results) = tokio::join!(writer, readers.collect::<Vec<_>>());
-    let write_stats = write_result?;
-    let read_workers = read_results.into_iter().collect::<Result<Vec<_>>>()?;
+    let (write_stats, read_workers) = futures::try_join!(writer, readers)?;
 
-    // Final sync if deferred to end.
+    // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
+    // `SyncMode::End` still needs one final sync after the writer finishes.
     let final_file_size = initial_size + write_stats.bytes;
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
@@ -324,10 +322,8 @@ async fn prepare_cache(cfg: &Config, blob: &RuntimeBlob, total_blocks: u64) -> R
             }
         })
         .collect::<FuturesUnordered<_>>()
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
 
     Ok(())
 }

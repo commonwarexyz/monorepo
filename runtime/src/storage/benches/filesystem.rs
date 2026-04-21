@@ -109,8 +109,11 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
 }
 
 #[cfg(not(target_os = "linux"))]
-pub const fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
-    Ok(())
+pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "page cache eviction is only supported on Linux",
+    ))
 }
 
 /// Create a fixed-size, preallocated blob. Returns the open blob handle.

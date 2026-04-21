@@ -1,7 +1,7 @@
 //! CLI and configuration types.
 
 use clap::{builder::Styles, error::ErrorKind, value_parser, CommandFactory, Parser, ValueEnum};
-use std::{fmt, path::PathBuf, time::Duration};
+use std::{env, fmt, path::PathBuf, time::Duration};
 
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -154,7 +154,7 @@ pub struct Config {
     pub file_size: Option<u64>,
 
     /// Existing parent directory under which a unique benchmark directory is created.
-    #[arg(long, default_value = "/tmp")]
+    #[arg(long, default_value_os_t = default_root())]
     pub root: PathBuf,
 
     /// Best-effort cache preparation for read-heavy workloads.
@@ -260,6 +260,9 @@ impl Config {
         } else if self.cache.is_some() {
             return Err("--cache is only valid for read-heavy workloads".into());
         }
+        if matches!(self.cache, Some(CacheMode::Cold)) && !cfg!(target_os = "linux") {
+            return Err("--cache cold is only supported on Linux".into());
+        }
 
         if !self.workload.has_writes() {
             if self.write_shape != WriteShape::Contiguous {
@@ -276,6 +279,10 @@ impl Config {
 
 fn default_worker_threads() -> usize {
     commonware_runtime::tokio::Config::default().worker_threads()
+}
+
+fn default_root() -> PathBuf {
+    env::temp_dir()
 }
 
 fn parse_sync_mode(value: &str) -> Result<SyncMode, String> {

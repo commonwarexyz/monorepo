@@ -112,6 +112,13 @@ pub async fn run_write_loop(
             }
         }
     }
+
+    // Flush the last partial batch so `SyncMode::Every` reports only durable
+    // writes even when the timed phase ends mid-batch.
+    if matches!(sync_mode, SyncMode::Every(_)) && writes_since_sync != 0 {
+        blob.sync().await?;
+    }
+
     Ok(stats)
 }
 
