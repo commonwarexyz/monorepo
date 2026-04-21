@@ -111,6 +111,34 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .map(|idx| &entries[idx].1)
 }
 
+/// Merge two vecs sorted by their first element (key) into a single sorted vec.
+/// Both inputs must be sorted with no duplicates, and they must not share any keys.
+fn merge_sorted_vecs<K: Ord, V>(a: Vec<(K, V)>, b: Vec<(K, V)>) -> Vec<(K, V)> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let mut a_iter = a.into_iter().peekable();
+    let mut b_iter = b.into_iter().peekable();
+    loop {
+        match (a_iter.peek(), b_iter.peek()) {
+            (Some(a), Some(b)) => {
+                if a.0 <= b.0 {
+                    out.push(a_iter.next().unwrap());
+                } else {
+                    out.push(b_iter.next().unwrap());
+                }
+            }
+            (Some(_), None) => {
+                out.extend(a_iter);
+                break;
+            }
+            (None, _) => {
+                out.extend(b_iter);
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Where this batch's inherited state comes from.
 enum Base<F: Family, D: Digest, U: update::Update + Send + Sync>
 where
@@ -431,28 +459,42 @@ where
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Resolve hits synchronously: batch/ancestor first, then journal page cache.
-        let results: Vec<Option<Operation<F, U>>> = locations
-            .iter()
-            .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
-            .collect();
+        // Fast path: try to resolve everything synchronously. When all locations
+        // hit the batch/ancestor region or the journal page cache, this avoids
+        // the Vec<Option<_>> + try_join_all overhead entirely.
+        let mut out = Vec::with_capacity(locations.len());
+        let mut first_miss = None;
+        for (i, loc) in locations.iter().enumerate() {
+            if let Some(op) = self.try_read_op_sync(*loc, batch_ops, reader) {
+                out.push(op);
+            } else {
+                first_miss = Some(i);
+                break;
+            }
+        }
+        let Some(first_miss) = first_miss else {
+            return Ok(out);
+        };
 
-        // Batch-read disk misses concurrently.
-        let disk_results = try_join_all(
-            locations
-                .iter()
-                .zip(results.iter())
-                .filter(|(_, cached)| cached.is_none())
-                .map(|(loc, _)| reader.read(**loc)),
-        )
-        .await?;
+        // Slow path: at least one miss. Build Option vec for remaining locations,
+        // batch-read disk misses, then merge.
+        let mut remaining: Vec<Option<Operation<F, U>>> = Vec::with_capacity(locations.len() - first_miss);
+        let mut disk_locs = Vec::new();
+        for loc in &locations[first_miss..] {
+            if let Some(op) = self.try_read_op_sync(*loc, batch_ops, reader) {
+                remaining.push(Some(op));
+            } else {
+                remaining.push(None);
+                disk_locs.push(**loc);
+            }
+        }
 
-        // Merge disk results back in order.
+        let disk_results = try_join_all(disk_locs.iter().map(|&loc| reader.read(loc))).await?;
         let mut disk_iter = disk_results.into_iter();
-        Ok(results
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch")))
-            .collect())
+        out.extend(remaining.into_iter().map(|slot| {
+            slot.unwrap_or_else(|| disk_iter.next().expect("disk result count mismatch"))
+        }));
+        Ok(out)
     }
 
     /// Gather existing-key locations for all keys in `mutations`.
@@ -593,13 +635,15 @@ where
             let mut moved = 0u64;
             let mut scan_from = floor;
             let mut floor_diff = Vec::with_capacity(total_steps as usize);
+            let mut candidates: Vec<Location<F>> =
+                Vec::with_capacity(MAX_CONCURRENT_READS as usize);
 
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
+                candidates.clear();
                 let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
-                let mut candidates = Vec::with_capacity(limit);
                 while candidates.len() < limit {
                     let Some(candidate) = scan.next_candidate(scan_from, fixed_tip) else {
                         break;
@@ -616,7 +660,7 @@ where
                 let resolved = self.read_ops(&candidates, &ops, &reader).await?;
 
                 // Process results in order, moving active ops to the tip.
-                for (candidate, op) in candidates.into_iter().zip(resolved) {
+                for (candidate, op) in candidates.iter().copied().zip(resolved) {
                     floor = Location::new(*candidate + 1);
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
@@ -656,8 +700,9 @@ where
                 // `floor_diff` only accumulates keys that were not already present in `diff`.
                 // A key can only be moved once during this floor raise because, after it is
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
-                diff.extend(floor_diff);
-                diff.sort_by(|a, b| a.0.cmp(&b.0));
+                // Sort only floor_diff (diff is already sorted), then merge.
+                floor_diff.sort_by(|a, b| a.0.cmp(&b.0));
+                diff = merge_sorted_vecs(diff, floor_diff);
                 debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
@@ -994,6 +1039,9 @@ where
 
         diff.sort_by(|a, b| a.0.cmp(&b.0));
 
+        // Reserve for floor-raise ops (up to user_steps + 1) plus CommitFloor.
+        ops.reserve(user_steps as usize + 2);
+
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
             ops,
@@ -1305,6 +1353,9 @@ where
         }
 
         diff.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Reserve for floor-raise ops (up to user_steps + 1) plus CommitFloor.
+        ops.reserve(user_steps as usize + 2);
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
