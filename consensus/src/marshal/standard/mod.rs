@@ -2258,6 +2258,69 @@ mod tests {
         });
     }
 
+    /// A block admitted via `Proposed` must be broadcast straight from the
+    /// in-memory cache when `Forward` arrives: the `RecordingBuffer` reports
+    /// no `find_by_commitment` hits, so if the forward dispatches a block it
+    /// must have come from the in-memory slot populated by `Proposed`.
+    /// A subsequent `Forward` for the same `(round, commitment)` falls
+    /// through to storage because the slot is consumed.
+    #[test_traced("WARN")]
+    fn test_standard_proposed_is_served_from_in_memory_cache() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.with_label("validator_0"),
+                &format!("proposed-cache-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            assert!(mailbox.proposed(round, block.clone()).await);
+
+            let targets = vec![participants[1].clone()];
+            mailbox
+                .forward(round, digest, Recipients::Some(targets.clone()))
+                .await;
+
+            wait_until(&context, Duration::from_secs(5), "first forward", || {
+                !buffer.sends.lock().is_empty()
+            })
+            .await;
+
+            let sends = buffer.sends();
+            assert_eq!(sends.len(), 1, "cached proposal must dispatch exactly once");
+            assert_eq!(sends[0].0, round);
+            assert_eq!(sends[0].1.digest(), digest);
+
+            // The in-memory slot was consumed; a second forward for the same
+            // commitment must still succeed by falling back to storage (the
+            // block was persisted by `Proposed`, mirroring `Verified`).
+            mailbox
+                .forward(round, digest, Recipients::Some(targets))
+                .await;
+            wait_until(&context, Duration::from_secs(5), "second forward", || {
+                buffer.sends.lock().len() >= 2
+            })
+            .await;
+
+            let sends = buffer.sends();
+            assert_eq!(sends.len(), 2);
+            assert_eq!(sends[1].1.digest(), digest);
+        });
+    }
+
     /// `Forward` for a block that marshal has cached must dispatch that block
     /// to exactly the provided peer set via the buffer.
     #[test_traced("WARN")]

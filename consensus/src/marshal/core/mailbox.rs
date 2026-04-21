@@ -111,6 +111,20 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: oneshot::Sender<()>,
     },
+    /// A notification that a block has been locally proposed by this node.
+    ///
+    /// Durably persists the block like [`Self::Verified`] and additionally
+    /// retains it in memory so a subsequent [`Self::Forward`] can broadcast
+    /// without reloading from storage (or, for the coding variant,
+    /// recomputing erasure-coded shards).
+    Proposed {
+        /// The round in which the block was proposed.
+        round: Round,
+        /// The proposed block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
+    },
     /// A notification that a block has been certified by the application.
     Certified {
         /// The round in which the block was certified.
@@ -309,6 +323,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         self.sender
             .request(|ack| Message::Verified { round, block, ack })
+            .await
+            .is_some()
+    }
+
+    /// Notifies the actor that a block has been locally proposed, awaiting
+    /// the actor's confirmation that the block has been durably persisted
+    /// before returning.
+    ///
+    /// Equivalent to [`Self::verified`] for durability, with the additional
+    /// guarantee that the block is retained in memory until a subsequent
+    /// [`Self::forward`] for the same `(round, commitment)` consumes it.
+    /// This lets the broadcast path reuse the in-memory block instead of
+    /// reloading from storage.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Proposed { round, block, ack })
             .await
             .is_some()
     }

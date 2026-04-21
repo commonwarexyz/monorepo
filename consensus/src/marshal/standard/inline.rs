@@ -345,7 +345,7 @@ where
                 build_timer.observe();
 
                 let digest = built_block.digest();
-                if !marshal.verified(consensus_context.round, built_block).await {
+                if !marshal.proposed(consensus_context.round, built_block).await {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
