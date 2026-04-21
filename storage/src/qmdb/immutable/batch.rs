@@ -166,7 +166,7 @@ where
         db.get(key).await
     }
 
-    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
@@ -176,7 +176,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -220,7 +220,7 @@ where
             // Need DB fallthrough.
             db_indices.push(i);
             db_keys.push(*key);
-            results.push(None); // placeholder
+            results.push(None);
         }
 
         if !db_keys.is_empty() {
@@ -342,7 +342,7 @@ where
         db.get(key).await
     }
 
-    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, H, T>(
@@ -352,7 +352,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -389,7 +389,7 @@ where
             // Need DB fallthrough.
             db_indices.push(i);
             db_keys.push(*key);
-            results.push(None); // placeholder
+            results.push(None);
         }
 
         if !db_keys.is_empty() {

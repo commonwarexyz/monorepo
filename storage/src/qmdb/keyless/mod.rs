@@ -153,10 +153,10 @@ where
         Ok(op.into_value())
     }
 
-    /// Get values at multiple locations in the database.
+    /// Batch read values at multiple locations.
     ///
-    /// Acquires the journal reader once, amortizing lock overhead across all reads.
-    /// Positions must be sorted in ascending order.
+    /// Locations must be sorted in ascending order.
+    /// Returns results in the same order as the input locations.
     ///
     /// # Errors
     ///
@@ -165,6 +165,10 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
+        debug_assert!(
+            locs.is_sorted(),
+            "locations must be sorted in ascending order"
+        );
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
         for &loc in locs {
@@ -978,6 +982,52 @@ pub(crate) mod tests {
             new_committed_size - 1,
             "Last commit location should be correct after multiple appends"
         );
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `get_many` on the DB and on unmerkleized/merkleized batches returns
+    /// results consistent with individual `get` calls.
+    pub(crate) async fn test_keyless_get_many<F: Family, V, C>(
+        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+        Operation<V>: EncodeShared,
+    {
+        let v1 = V::Value::make(1);
+        let v2 = V::Value::make(2);
+        let v3 = V::Value::make(3);
+
+        // Commit v1 and v2 to disk.
+        let batch = db.new_batch();
+        let loc1 = batch.size();
+        let batch = batch.append(v1.clone());
+        let loc2 = batch.size();
+        let batch = batch.append(v2.clone());
+        db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
+        db.commit().await.unwrap();
+
+        // DB-level get_many.
+        let results = db.get_many(&[loc1, loc2]).await.unwrap();
+        assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);
+
+        // Empty input.
+        let results = db.get_many(&[]).await.unwrap();
+        assert!(results.is_empty());
+
+        // Unmerkleized batch: pending appends + DB fallthrough.
+        let batch = db.new_batch();
+        let loc3 = batch.size();
+        let batch = batch.append(v3.clone());
+        let results = batch.get_many(&[loc1, loc3], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v1.clone()), Some(v3.clone())]);
+
+        // Merkleized batch: parent chain + DB fallthrough.
+        let parent = db.new_batch().append(v3.clone()).merkleize(&db, None);
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(4));
+        let results = child.get_many(&[loc1, loc2], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);
 
         db.destroy().await.unwrap();
     }

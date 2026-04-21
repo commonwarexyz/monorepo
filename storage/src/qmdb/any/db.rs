@@ -145,7 +145,7 @@ where
         Ok(None)
     }
 
-    /// Get values of multiple keys, amortizing reader lock acquisition and journal I/O.
+    /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(

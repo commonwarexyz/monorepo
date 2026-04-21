@@ -389,7 +389,7 @@ where
         self.inner.get(key, &db.any).await
     }
 
-    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
@@ -452,7 +452,7 @@ where
         self.inner.get(key, &db.any).await
     }
 
-    /// Read multiple keys, amortizing DB lock acquisition for fallthrough reads.
+    /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(

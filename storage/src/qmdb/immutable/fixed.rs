@@ -412,6 +412,14 @@ mod tests {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_fixed_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_get_many(ctx, open::<mmr::Family>).await;
+        });
+    }
+
     // -- MMB test wrappers --
 
     #[test_traced("WARN")]

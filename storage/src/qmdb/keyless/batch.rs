@@ -191,10 +191,10 @@ where
         db.get(loc).await
     }
 
-    /// Read values at multiple locations.
+    /// Batch read values at multiple locations.
     ///
-    /// Acquires the journal reader once for all DB-fallthrough reads.
     /// Locations must be sorted in ascending order.
+    /// Returns results in the same order as the input locations.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -207,6 +207,10 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
+        debug_assert!(
+            locs.is_sorted(),
+            "locations must be sorted in ascending order"
+        );
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -238,7 +242,7 @@ where
             // Need DB fallthrough -- record index for reassembly.
             db_indices.push(i);
             db_locs.push(loc);
-            results.push(None); // placeholder
+            results.push(None);
         }
 
         if !db_locs.is_empty() {
@@ -343,10 +347,10 @@ where
         db.get(loc).await
     }
 
-    /// Read values at multiple locations.
+    /// Batch read values at multiple locations.
     ///
-    /// Acquires the journal reader once for all DB-fallthrough reads.
     /// Locations must be sorted in ascending order.
+    /// Returns results in the same order as the input locations.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -360,6 +364,10 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
+        debug_assert!(
+            locs.is_sorted(),
+            "locations must be sorted in ascending order"
+        );
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -376,7 +384,7 @@ where
 
             db_indices.push(i);
             db_locs.push(loc);
-            results.push(None); // placeholder
+            results.push(None);
         }
 
         if !db_locs.is_empty() {
