@@ -559,24 +559,31 @@ where
                         };
                         buffer.send(round, block, recipients).await;
                     }
+                    Message::Proposed { round, block, ack } => {
+                        // Mirror `Verified`: persist durably before acking so
+                        // the proposer can rely on the block surviving a
+                        // restart. Uses the reference-taking store path so
+                        // we do not clone the block's transient data (e.g.
+                        // erasure-coded shards) just to drop them on the
+                        // `V::Block -> V::StoredBlock` conversion.
+                        let commitment = V::commitment(&block);
+                        let digest = block.digest();
+                        self.notify_subscribers(&block);
+                        self.cache
+                            .put_verified(round, digest, V::stored_from_ref(&block))
+                            .await;
+                        // Retain the block in memory so the subsequent
+                        // `Forward` can broadcast it without reloading from
+                        // storage. An older retained proposal (if any) is
+                        // overwritten.
+                        self.proposed_block = Some((round, commitment, block));
+                        ack.send_lossy(());
+                    }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
                         // `cache_verified` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        self.cache_verified(round, block.digest(), block).await;
-                        ack.send_lossy(());
-                    }
-                    Message::Proposed { round, block, ack } => {
-                        // Retain the block in memory so the subsequent
-                        // `Forward` can broadcast it without reloading from
-                        // storage. An older retained proposal (if any) is
-                        // overwritten.
-                        let commitment = V::commitment(&block);
-                        self.proposed_block = Some((round, commitment, block.clone()));
-                        // Mirror `Verified`: persist durably before acking so
-                        // the proposer can rely on the block surviving a
-                        // restart.
                         self.cache_verified(round, block.digest(), block).await;
                         ack.send_lossy(());
                     }
