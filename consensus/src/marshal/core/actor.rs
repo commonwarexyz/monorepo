@@ -559,12 +559,12 @@ where
                         // `cache_verified` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        let commitment = V::commitment(&block);
                         self.cache_verified(round, block.digest(), block.clone()).await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
                         // overwritten.
+                        let commitment = V::commitment(&block);
                         self.last_proposed_block = Some((round, commitment, block));
                         ack.send_lossy(());
                     }
