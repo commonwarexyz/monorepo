@@ -848,7 +848,7 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.verified(...)=true` means the block survives an
+/// Contract: `marshal.proposed(...)=true` means the block survives an
 /// immediate crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
@@ -931,7 +931,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                                 .await
                                 .unwrap_or_else(|| {
                                     panic!(
-                                        "marshal.verified() returning true must imply \
+                                        "marshal.proposed() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
                                     )
@@ -1722,7 +1722,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -2546,7 +2546,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(

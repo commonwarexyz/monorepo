@@ -102,6 +102,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The recipients to forward the block to.
         recipients: Recipients<S::PublicKey>,
     },
+    /// A notification that a block has been locally proposed by this node.
+    Proposed {
+        /// The round in which the block was proposed.
+        round: Round,
+        /// The proposed block.
+        block: V::Block,
+        /// A channel signaled once the block is durably stored.
+        ack: oneshot::Sender<()>,
+    },
     /// A notification that a block has been verified by the application.
     Verified {
         /// The round in which the block was verified.
@@ -301,6 +310,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .request(|response| Message::GetVerified { round, response })
             .await
             .flatten()
+    }
+
+    /// Notifies the actor that a block has been locally proposed, awaiting
+    /// the actor's confirmation that the block has been durably persisted
+    /// before returning.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+        self.sender
+            .request(|ack| Message::Proposed { round, block, ack })
+            .await
+            .is_some()
     }
 
     /// Notifies the actor that a block has been verified, awaiting the actor's

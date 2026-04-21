@@ -656,7 +656,7 @@ where
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
-                if !marshal.verified(round, coded_block).await {
+                if !marshal.proposed(round, coded_block).await {
                     debug!(?round, ?commitment, "marshal rejected proposed block");
                     return;
                 }

@@ -235,6 +235,8 @@ where
     strategy: T,
 
     // ---------- State ----------
+    // Last proposed block
+    last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Last view processed
     last_processed_round: Round,
     // Last height processed by the application
@@ -343,6 +345,7 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
+                last_proposed_block: None,
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -537,12 +540,33 @@ where
                         if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                             continue;
                         }
-                        let Some(block) = self.find_block_by_commitment(&buffer, commitment).await
-                        else {
-                            debug!(?commitment, "block not found for forwarding");
-                            continue;
+                        let block = match self.take_proposed(round, commitment) {
+                            Some(block) => block,
+                            None => {
+                                let Some(block) =
+                                    self.find_block_by_commitment(&buffer, commitment).await
+                                else {
+                                    debug!(?commitment, "block not found for forwarding");
+                                    continue;
+                                };
+                                block
+                            }
                         };
                         buffer.send(round, block, recipients).await;
+                    }
+                    Message::Proposed { round, block, ack } => {
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_verified` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
+                        self.cache_verified(round, block.digest(), block.clone()).await;
+                        // Retain the block in memory so the subsequent
+                        // `Forward` can broadcast it without reloading from
+                        // storage. An older retained proposal (if any) is
+                        // overwritten.
+                        let commitment = V::commitment(&block);
+                        self.last_proposed_block = Some((round, commitment, block));
+                        ack.send_lossy(());
                     }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -1339,6 +1363,16 @@ where
     ) {
         self.notify_subscribers(&block);
         self.cache.put_verified(round, digest, block.into()).await;
+    }
+
+    /// If a block previously accepted via [`Message::Proposed`] matches the
+    /// supplied `(round, commitment)`, remove and return it.
+    fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<V::Block> {
+        let (cached_round, cached_commitment, _) = self.last_proposed_block.as_ref()?;
+        if *cached_round != round || *cached_commitment != commitment {
+            return None;
+        }
+        self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
     /// Add a notarized block to the prunable archive.
