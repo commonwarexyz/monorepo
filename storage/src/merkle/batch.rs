@@ -252,7 +252,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     ///
     /// Returns [`Error::LeafOutOfBounds`] if `loc` is beyond the current leaf count, or
     /// [`Error::ElementPruned`] if the leaf has been pruned.
-    fn validate_leaf_loc(&self, loc: Location<F>) -> Result<Position<F>, Error<F>> {
+    fn validate_loc(&self, loc: Location<F>) -> Result<Position<F>, Error<F>> {
         if loc >= self.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
@@ -274,7 +274,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         loc: Location<F>,
         element: &[u8],
     ) -> Result<Self, Error<F>> {
-        let pos = self.validate_leaf_loc(loc)?;
+        let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
@@ -284,7 +284,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Overwrite the digest of an existing leaf and mark ancestors dirty.
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
-        let pos = self.validate_leaf_loc(loc)?;
+        let pos = self.validate_loc(loc)?;
         self.store_node(pos, digest);
         self.mark_dirty(loc);
         Ok(self)
@@ -295,7 +295,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     pub fn update_leaf_batched(mut self, updates: &[(Location<F>, D)]) -> Result<Self, Error<F>> {
         // Validate all first so a later failure can't leave a partially-applied batch.
         for (loc, _) in updates {
-            self.validate_leaf_loc(*loc)?;
+            self.validate_loc(*loc)?;
         }
         for (loc, digest) in updates {
             let pos = Position::try_from(*loc).expect("validated above");
