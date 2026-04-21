@@ -213,12 +213,7 @@ where
 ///
 /// Panics if `possible_next` is empty.
 pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
-    // Find the first index with entry > key. `binary_search` returns Ok on exact hit (jump past)
-    // or Err on no hit (insertion point).
-    let idx = match possible_next.binary_search(key) {
-        Ok(i) => i + 1,
-        Err(i) => i,
-    };
+    let idx = possible_next.partition_point(|k| k <= key);
     if idx < possible_next.len() {
         return possible_next[idx].clone();
     }
@@ -238,17 +233,14 @@ pub(crate) fn find_prev_key<'a, K: Ord, V>(
     key: &K,
     possible_previous: &'a [(K, V)],
 ) -> (&'a K, &'a V) {
-    let idx = match possible_previous.binary_search_by(|(k, _)| k.cmp(key)) {
-        Ok(i) => i,
-        Err(i) => i,
+    let idx = possible_previous.partition_point(|(k, _)| k < key);
+    let (k, v) = if idx > 0 {
+        &possible_previous[idx - 1]
+    } else {
+        possible_previous
+            .last()
+            .expect("possible_previous should not be empty")
     };
-    if idx > 0 {
-        let (k, v) = &possible_previous[idx - 1];
-        return (k, v);
-    }
-    let (k, v) = possible_previous
-        .last()
-        .expect("possible_previous should not be empty");
     (k, v)
 }
 
