@@ -177,6 +177,9 @@ mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
 use waker::{Waker, HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
+mod spinner;
+pub use spinner::Config as SpinnerConfig;
+use spinner::Spinner;
 
 /// Maximum rounded ring size accepted by [`Config::size`].
 ///
@@ -249,6 +252,8 @@ pub struct Config {
     /// Smaller values increase timing precision but increase wakeup and wheel
     /// processing frequency.
     pub timeout_wheel_tick: Duration,
+    /// Adaptive idle spinner configuration.
+    pub idle_spinner: SpinnerConfig,
 }
 
 impl Default for Config {
@@ -260,6 +265,7 @@ impl Default for Config {
             max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
             timeout_wheel_tick: Duration::from_millis(5),
+            idle_spinner: SpinnerConfig::default(),
         }
     }
 }
@@ -447,6 +453,7 @@ pub(crate) struct IoUringLoop {
     ready_queue: VecDeque<WaiterId>,
     pending_cancels: VecDeque<WaiterId>,
     timeout_wheel: TimeoutWheel,
+    idle_spinner: Spinner,
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u32,
@@ -536,8 +543,8 @@ impl IoUringLoop {
             cfg.timeout_wheel_tick,
             Instant::now(),
         );
+        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.pending(0));
         let waiters = Waiters::new(size);
-
         let handle = Handle {
             inner: Arc::new(HandleInner {
                 sender: Some(sender),
@@ -555,6 +562,7 @@ impl IoUringLoop {
                 ready_queue: VecDeque::with_capacity(size),
                 pending_cancels: VecDeque::with_capacity(size),
                 timeout_wheel,
+                idle_spinner,
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
@@ -625,9 +633,18 @@ impl IoUringLoop {
             // If the ring is truly idle, avoid `io_uring_enter` entirely and
             // wait on the shared wake state via futex until a producer changes
             // it. This bypasses the eventfd wake path when there are no active
-            // waiters.
+            // waiters. Before parking, spin briefly to avoid the futex
+            // round-trip when work is imminent.
             if self.waiters.is_empty() {
-                self.waker.park_idle(self.processed_seq);
+                if self
+                    .idle_spinner
+                    .spin(|| self.waker.pending(self.processed_seq))
+                {
+                    continue;
+                }
+                if let Some(park_duration) = self.waker.park_idle(self.processed_seq) {
+                    self.idle_spinner.on_wake(park_duration);
+                }
                 continue;
             }
 
@@ -1798,7 +1815,8 @@ mod tests {
     fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
         // Verify timeout-wheel advancement ignores stale entries from a reused waiter slot.
         let cfg = Config {
-            max_request_timeout: Duration::from_millis(100),
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(100),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1851,12 +1869,12 @@ mod tests {
 
         // At tick 1, only the stale old entry should expire. The new waiter must
         // stay active and no cancel should be queued.
-        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert!(iouring.pending_cancels.is_empty());
 
         // At tick 3, the real timeout should queue cancellation.
-        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
+        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(10));
         iouring.advance_timeouts();
         assert_eq!(iouring.pending_cancels.len(), 1);
     }
