@@ -82,9 +82,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
-            },
+            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             verification_tasks::VerificationTasks,
         },
         coding::{
@@ -106,6 +104,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
+use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
@@ -116,7 +115,6 @@ use commonware_utils::{
         fallible::OneshotExt,
         oneshot::{self, error::RecvError},
     },
-    sync::Mutex,
     NZU16,
 };
 use futures::future::{ready, try_join, Either, Ready};
@@ -183,7 +181,6 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    last_built: LastBuilt<CodedBlock<B, C, H>>,
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
@@ -266,7 +263,6 @@ where
             scheme_provider,
             strategy,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
             verification_tasks: VerificationTasks::new(),
             cached_genesis: Arc::new(OnceLock::new()),
 
@@ -299,6 +295,7 @@ where
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
+        stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -424,9 +421,9 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 timer.observe();
-                if application_valid {
-                    // The block is only persisted at this point.
-                    marshal.verified(round, block).await;
+                if application_valid && !stage.store(&mut marshal, round, block).await {
+                    debug!(?round, "marshal unable to accept block");
+                    return;
                 }
                 tx.send_lossy(application_valid);
             });
@@ -490,15 +487,15 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's digest when ready. The built block is cached for later
-    /// broadcasting.
+    /// contain the proposed block's commitment when ready. The built block is persisted via
+    /// [`core::Mailbox::verified`] before the commitment is delivered, so consensus can rely
+    /// on the block surviving restart.
     async fn propose(
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
         let cached_genesis = self.cached_genesis.clone();
@@ -528,6 +525,42 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
+                // On leader recovery, marshal may already hold a verified block
+                // for this round (persisted before voting in consensus).
+                //
+                // Building a fresh block would land on the same prunable
+                // archive index and be silently dropped, so the stored block
+                // is the only proposal we can broadcast for this round.
+                //
+                // The recovered block is safe to reuse only if its embedded
+                // context matches the context simplex just recovered.
+                // Otherwise the cached block was built against a different
+                // parent and cannot be broadcast under the current header, so
+                // drop the receiver and let the voter nullify the view via
+                // timeout.
+                if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let block_context = block.context();
+                    if block_context != consensus_context {
+                        debug!(
+                            round = ?consensus_context.round,
+                            ?consensus_context,
+                            ?block_context,
+                            "skipping proposal: cached verified block context no longer matches"
+                        );
+                        return;
+                    }
+                    let commitment = block.commitment();
+                    let round = consensus_context.round;
+                    let success = tx.send_lossy(commitment);
+                    debug!(
+                        ?round,
+                        ?commitment,
+                        success,
+                        "reused verified block from marshal on leader recovery"
+                    );
+                    return;
+                }
+
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
@@ -569,14 +602,18 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
-                    {
-                        let mut lock = last_built.lock();
-                        *lock = Some((consensus_context.round, parent));
+                    let round = consensus_context.round;
+                    if !marshal.verified(round, parent).await {
+                        debug!(
+                            ?round,
+                            ?commitment,
+                            "marshal rejected re-proposed boundary block"
+                        );
+                        return;
                     }
-
                     let success = tx.send_lossy(commitment);
                     debug!(
-                        round = ?consensus_context.round,
+                        ?round,
                         ?commitment,
                         success,
                         "re-proposed parent block at epoch boundary"
@@ -618,18 +655,13 @@ where
                 erasure_timer.observe();
 
                 let commitment = coded_block.commitment();
-                {
-                    let mut lock = last_built.lock();
-                    *lock = Some((consensus_context.round, coded_block));
+                let round = consensus_context.round;
+                if !marshal.proposed(round, coded_block).await {
+                    debug!(?round, ?commitment, "marshal rejected proposed block");
+                    return;
                 }
-
                 let success = tx.send_lossy(commitment);
-                debug!(
-                    round = ?consensus_context.round,
-                    ?commitment,
-                    success,
-                    "proposed new block"
-                );
+                debug!(?round, ?commitment, success, "proposed new block");
             });
         rx
     }
@@ -758,9 +790,12 @@ where
                         return;
                     }
 
-                    // Valid re-proposal. Notify the marshal and complete the
+                    // Valid re-proposal: notify the marshal and complete the
                     // verification task for `certify`.
-                    marshal.verified(round, block).await;
+                    if !marshal.verified(round, block).await {
+                        debug!(?round, "marshal unable to accept block");
+                        return;
+                    }
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
                 });
@@ -779,7 +814,7 @@ where
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None);
+        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -895,10 +930,13 @@ where
                     round,
                 );
                 if is_reproposal {
-                    // NOTE: It is possible that, during crash recovery, we call
-                    // `marshal.verified` twice for the same block. That function is
-                    // idempotent, so this is safe.
-                    marshaled.marshal.verified(round, block).await;
+                    // Certifier holds a notarization for this block, so route
+                    // the write to the notarized cache. `certified` is
+                    // idempotent, so crash-recovery double-invocation is safe.
+                    if !marshaled.marshal.certified(round, block).await {
+                        debug!(?round, "marshal unable to accept block");
+                        return;
+                    }
                     tx.send_lossy(true);
                     return;
                 }
@@ -914,7 +952,12 @@ where
 
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
-                let verify_rx = marshaled.deferred_verify(embedded_context, payload, Some(block));
+                let verify_rx = marshaled.deferred_verify(
+                    embedded_context,
+                    payload,
+                    Some(block),
+                    Stage::Certified,
+                );
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
@@ -943,36 +986,16 @@ where
     type Plan = Plan<Self::PublicKey>;
 
     async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
-        match plan {
-            Plan::Propose => {
-                let Some((round, block)) = self.last_built.lock().take() else {
-                    warn!("missing block to broadcast");
-                    return;
-                };
-                if block.commitment() != commitment {
-                    warn!(
-                        round = %round,
-                        commitment = %block.commitment(),
-                        height = %block.height(),
-                        "skipping requested broadcast of block with mismatched commitment"
-                    );
-                    return;
-                }
-                debug!(
-                    round = %round,
-                    commitment = %block.commitment(),
-                    height = %block.height(),
-                    "requested broadcast of built block"
-                );
-                self.shards.proposed(round, block).await;
-            }
-            Plan::Forward { .. } => {
-                // Coding variant does not support targeted forwarding;
-                // peers reconstruct blocks from erasure-coded shards.
-                //
-                // TODO(#3389): Support checked data forwarding for PhasedScheme.
-            }
-        }
+        // Coding variant does not support targeted forwarding;
+        // peers reconstruct blocks from erasure-coded shards.
+        //
+        // TODO(#3389): Support checked data forwarding for PhasedScheme.
+        let Plan::Propose { round } = plan else {
+            return;
+        };
+        self.marshal
+            .forward(round, commitment, Recipients::All)
+            .await;
     }
 }
 
@@ -1052,7 +1075,7 @@ where
 }
 
 /// Constructs the [`Commitment`] for the genesis block.
-fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
+pub(super) fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),
         block.digest(),
