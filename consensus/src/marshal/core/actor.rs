@@ -567,11 +567,7 @@ where
                         // erasure-coded shards) just to drop them on the
                         // `V::Block -> V::StoredBlock` conversion.
                         let commitment = V::commitment(&block);
-                        let digest = block.digest();
-                        self.notify_subscribers(&block);
-                        self.cache
-                            .put_verified(round, digest, V::stored_from_ref(&block))
-                            .await;
+                        self.cache_verified(round, block.digest(), block).await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
