@@ -371,6 +371,16 @@ where
             .expect("failed to get notarization")
     }
 
+    /// Get the block previously persisted in the verified archive for `round`.
+    pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
+        let cache = self.caches.get(&round.epoch())?;
+        cache
+            .verified_blocks
+            .get(Identifier::Index(round.view().get()))
+            .await
+            .expect("failed to get verified block")
+    }
+
     /// Get a finalization from the prunable archive by block digest.
     ///
     /// SAFETY: For blocks/certificates admitted by marshal verification, a block digest

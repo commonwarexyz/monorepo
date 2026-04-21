@@ -139,11 +139,8 @@ type VerifyObserver<H, P> =
 pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
-    /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
-    /// (but deterministically) 82% of the time, depending on the last byte of the payload.
-    Sometimes,
-    /// A custom predicate function.
-    Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
+    /// A custom predicate function that receives the round and payload digest.
+    Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
@@ -170,7 +167,6 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub certify_latency: Latency,
 
     /// Predicate to determine whether a payload should be certified.
-    /// Returning true means certify, false means reject.
     pub should_certify: Certifier<H::Digest>,
 }
 
@@ -190,6 +186,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     fail_verification: bool,
     drop_proposals: bool,
+    stall_proposals: bool,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -205,6 +202,10 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
     verify_observer: Option<VerifyObserver<H, P>>,
+
+    /// Senders held alive to simulate proposals that hang indefinitely
+    /// (used when `stall_proposals` is set).
+    pending_proposes: Vec<oneshot::Sender<H::Digest>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -240,6 +241,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 fail_verification: false,
                 drop_proposals: false,
+                stall_proposals: false,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -247,6 +249,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 verified: HashSet::new(),
                 propose_observer: None,
                 verify_observer: None,
+                pending_proposes: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -259,6 +262,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub const fn set_drop_proposals(&mut self, drop: bool) {
         self.drop_proposals = drop;
+    }
+
+    /// When set, `Message::Propose` requests are held open indefinitely: the
+    /// response sender is parked in `pending_proposes`, keeping the oneshot
+    /// alive so the caller's `receiver` never resolves. This simulates a
+    /// propose that is still in flight at the moment the voter crashes.
+    pub const fn set_stall_proposals(&mut self, stall: bool) {
+        self.stall_proposals = stall;
     }
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
@@ -366,7 +377,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
-    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        payload: H::Digest,
+        _contents: Bytes,
+    ) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(self.context.as_mut());
         self.context
@@ -376,8 +392,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Use configured predicate to determine certification
         match &self.should_certify {
             Certifier::Always => Some(true),
-            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
-            Certifier::Custom(func) => Some(func(payload)),
+            Certifier::Custom(func) => Some(func(round, payload)),
             Certifier::Cancel | Certifier::Pending => None,
         }
     }
@@ -416,6 +431,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
+                        if self.stall_proposals {
+                            self.pending_proposes.push(response);
+                            continue;
+                        }
                         if self.drop_proposals {
                             continue;
                         }
@@ -444,12 +463,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         }
                     }
                     Message::Certify {
-                        round: _,
+                        round,
                         payload,
                         response,
                     } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        if let Some(certified) = self.certify(payload, contents).await {
+                        if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
                         } else if matches!(self.should_certify, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.

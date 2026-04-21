@@ -343,6 +343,16 @@ mod tests {
     }
 
     #[test]
+    fn test_subject_decode_rejects_invalid_enum_tag() {
+        let bad = [3u8];
+        let mut buf = bad.as_ref();
+        assert!(matches!(
+            Request::<D>::read(&mut buf),
+            Err(CodecError::InvalidEnum(3))
+        ));
+    }
+
+    #[test]
     fn test_subject_hash() {
         use std::collections::HashSet;
 

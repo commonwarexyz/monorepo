@@ -21,7 +21,7 @@ use crate::{
         current::{
             batch::BitmapBatch,
             grafting,
-            proof::{OperationProof, RangeProof},
+            proof::{OperationProof, OpsRootWitness, RangeProof},
         },
         operation::Operation as _,
         Error,
@@ -174,6 +174,24 @@ where
     /// See the [Root structure](super) section in the module documentation.
     pub fn ops_root(&self) -> H::Digest {
         self.any.log.root()
+    }
+
+    /// Returns a witness that this database's canonical root commits to its ops root.
+    ///
+    /// This can be used to authenticate an ops root against a trusted canonical `current` root.
+    pub async fn ops_root_witness(
+        &self,
+        hasher: &mut StandardHasher<H>,
+    ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
+        let storage = self.grafted_storage();
+        let grafted_root =
+            compute_grafted_root::<F, H, _, _, N>(hasher, &self.status, &storage).await?;
+        let partial_chunk = partial_chunk::<_, N>(&self.status)
+            .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+        Ok(OpsRootWitness {
+            grafted_root,
+            partial_chunk,
+        })
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
@@ -1032,8 +1050,21 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        merkle::{mmb, mmr},
+        qmdb::{
+            any::traits::{DbAny, UnmerkleizedBatch as _},
+            current::{
+                tests::{fixed_config, PAGE_CACHE_SIZE, PAGE_SIZE},
+                unordered::fixed,
+            },
+        },
+        translator::OneCap,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1106,5 +1137,179 @@ mod tests {
         let r1 = combine_roots(&h1, &ops_a, &grafted, None);
         let r2 = combine_roots(&h2, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
+    }
+
+    type MmrDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+    >;
+    type MmbDb = fixed::Db<
+        mmb::Family,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+    >;
+
+    async fn populate_fixed_db<F, DB>(db: &mut DB, start: u64, count: u64)
+    where
+        F: merkle::Graftable,
+        DB: DbAny<F, Key = sha256::Digest, Value = sha256::Digest>,
+    {
+        let mut batch = db.new_batch();
+        for idx in start..start + count {
+            let key = Sha256::hash(&idx.to_be_bytes());
+            let value = Sha256::hash(&(idx + count).to_be_bytes());
+            batch = batch.write(key, Some(value));
+        }
+        let merkleized = batch.merkleize(db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_ops_root_witness_verifies_without_partial_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut db = MmrDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-full", page_cache),
+            )
+            .await
+            .unwrap();
+            let mut next_idx = 0;
+            populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 256).await;
+            next_idx += 256;
+            while partial_chunk::<_, 32>(&db.status).is_some() {
+                populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 1).await;
+                next_idx += 1;
+            }
+
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let ops_root = db.ops_root();
+            let canonical_root = db.root();
+
+            assert!(witness.partial_chunk.is_none());
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+
+            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+
+            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+
+            let mut tampered = witness;
+            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+        });
+    }
+
+    #[test_traced]
+    fn test_ops_root_witness_verifies_with_partial_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut db = MmbDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-partial", page_cache),
+            )
+            .await
+            .unwrap();
+            populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
+
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let ops_root = db.ops_root();
+            let canonical_root = db.root();
+
+            assert!(witness.partial_chunk.is_some());
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+
+            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+
+            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+
+            let mut tampered = witness.clone();
+            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+
+            let mut tampered = witness.clone();
+            tampered.partial_chunk.as_mut().unwrap().0 += 1;
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+
+            let mut tampered = witness;
+            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+        });
+    }
+
+    #[test_traced]
+    fn test_ops_root_witness_verifies_with_pruned_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let mut db = MmrDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-pruned", page_cache),
+            )
+            .await
+            .unwrap();
+
+            // Churn the same keys repeatedly to drive the inactivity floor past chunk boundaries.
+            for _ in 0..5 {
+                populate_fixed_db::<mmr::Family, _>(&mut db, 0, 512).await;
+            }
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            assert!(
+                db.status.pruned_chunks() > 0,
+                "test requires at least one pruned chunk to exercise the zero-chunk path"
+            );
+
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let ops_root = db.ops_root();
+            let canonical_root = db.root();
+
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+
+            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+
+            let mut tampered = witness;
+            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+        });
+    }
+
+    #[test_traced]
+    fn test_ops_root_witness_verifies_on_fresh_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(ctx.child("cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
+            let db = MmrDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("ops-root-witness-fresh", page_cache),
+            )
+            .await
+            .unwrap();
+
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let ops_root = db.ops_root();
+            let canonical_root = db.root();
+
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+        });
     }
 }

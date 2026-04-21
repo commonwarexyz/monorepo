@@ -98,7 +98,11 @@ mod tests {
         type Plan = Plan<PublicKey>;
 
         async fn broadcast(&mut self, payload: Sha256Digest, plan: Self::Plan) {
-            if let Plan::Forward { round, peers } = plan {
+            if let Plan::Forward {
+                round,
+                recipients: Recipients::Some(peers),
+            } = plan
+            {
                 self.broadcasts.lock().push((payload, round, peers));
             }
         }

@@ -32,7 +32,10 @@ use commonware_utils::{
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
-use futures::{pin_mut, StreamExt};
+use futures::{
+    future::{ready, Either},
+    pin_mut, StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
@@ -789,6 +792,14 @@ impl<
                             .await;
                     }
                 }
+
+                // We deliberately avoid re-seeding the batcher with our
+                // own votes (or the votes of other peers) on replay. We assume that
+                // whatever view we were in during shutdown is no longer the latest
+                // and we'll quickly jump ahead to a new view.
+                //
+                // If this is not the case (cluster-wide shutdown), we will recover
+                // when timing out.
             }
         }
         self.journal = Some(journal);
@@ -847,12 +858,17 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for proposal in self.state.certify_candidates() {
+                for (proposal, is_local) in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let receiver = self.automaton.certify(round, proposal.payload).await;
-                    let handle = certify_pool.push(async move { (round, receiver.await) });
+                    let result = if is_local {
+                        Either::Left(ready(Ok(true)))
+                    } else {
+                        let receiver = self.automaton.certify(round, proposal.payload).await;
+                        Either::Right(receiver)
+                    };
+                    let handle = certify_pool.push(async move { (round, result.await) });
                     self.state.set_certify_handle(view, handle);
                 }
 
@@ -869,14 +885,6 @@ impl<
             },
             on_stopped => {
                 debug!("context shutdown, stopping voter");
-
-                // Sync and drop journal
-                self.journal
-                    .take()
-                    .unwrap()
-                    .sync_all()
-                    .await
-                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
@@ -915,8 +923,15 @@ impl<
                 }
                 view = self.state.current_view();
 
-                // Notify application of proposal
-                self.relay.broadcast(proposed, Plan::Propose).await;
+                // Notify application of proposal.
+                self.relay
+                    .broadcast(
+                        proposed,
+                        Plan::Propose {
+                            round: context.round,
+                        },
+                    )
+                    .await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter
@@ -1088,5 +1103,13 @@ impl<
                 }
             },
         }
+
+        // Sync and drop the journal
+        self.journal
+            .take()
+            .expect("journal missing on voter exit")
+            .sync_all()
+            .await
+            .expect("unable to sync journal");
     }
 }

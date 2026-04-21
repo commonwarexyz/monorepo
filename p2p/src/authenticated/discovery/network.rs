@@ -197,26 +197,26 @@ impl<
 
         let mut shutdown = self.context.stopped();
 
-        // Wait for first actor to exit
+        // If any task completes, the network should stop
         info!("network started");
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping network");
             },
             tracker = &mut tracker_task => {
-                panic!("tracker exited unexpectedly: {tracker:?}");
+                debug!(?tracker, "tracker stopped, shutting down network");
             },
             router = &mut router_task => {
-                panic!("router exited unexpectedly: {router:?}");
+                debug!(?router, "router stopped, shutting down network");
             },
             spawner = &mut spawner_task => {
-                panic!("spawner exited unexpectedly: {spawner:?}");
+                debug!(?spawner, "spawner stopped, shutting down network");
             },
             listener = &mut listener_task => {
-                panic!("listener exited unexpectedly: {listener:?}");
+                debug!(?listener, "listener stopped, shutting down network");
             },
             dialer = &mut dialer_task => {
-                panic!("dialer exited unexpectedly: {dialer:?}");
+                debug!(?dialer, "dialer stopped, shutting down network");
             },
         }
     }

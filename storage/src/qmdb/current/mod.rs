@@ -209,8 +209,9 @@
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted tree are reconstructed deterministically from the
-//! operations, and the canonical root is computed. Validating that the ops root is part of the
-//! canonical root is the caller's responsibility; the sync engine does not perform this check.
+//! operations, and the canonical root is computed. [proof::OpsRootWitness] can be used to validate
+//! that a particular ops root is committed by a trusted canonical root; the sync engine does not
+//! perform this check itself.
 
 use crate::{
     index::Factory as IndexFactory,
