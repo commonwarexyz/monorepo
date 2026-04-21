@@ -235,6 +235,8 @@ where
     strategy: T,
 
     // ---------- State ----------
+    // Last proposed block
+    last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Last view processed
     last_processed_round: Round,
     // Last height processed by the application
@@ -245,13 +247,6 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<BlockSubscriptionKeyFor<V>, BlockSubscription<V>>,
-    // The most recently locally-proposed block, keyed by (round, commitment)
-    // and retained until a matching `Forward` consumes it (or a newer
-    // proposal overwrites it). Lets broadcast avoid reloading the block from
-    // storage, and for the coding variant avoids recomputing erasure-coded
-    // shards. The commitment is cached alongside the block to avoid
-    // recomputing V::commitment() (which hashes the block) on every lookup.
-    proposed_block: Option<(Round, V::Commitment, V::Block)>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -350,12 +345,12 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
+                last_proposed_block: None,
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
-                proposed_block: None,
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -560,19 +555,17 @@ where
                         buffer.send(round, block, recipients).await;
                     }
                     Message::Proposed { round, block, ack } => {
-                        // Mirror `Verified`: persist durably before acking so
-                        // the proposer can rely on the block surviving a
-                        // restart. Uses the reference-taking store path so
-                        // we do not clone the block's transient data (e.g.
-                        // erasure-coded shards) just to drop them on the
-                        // `V::Block -> V::StoredBlock` conversion.
+                        // If the round has already been pruned by tip advancement,
+                        // `cache_verified` is a no-op because the round is below
+                        // the retention floor (and no longer is required by consensus
+                        // to make progress).
                         let commitment = V::commitment(&block);
-                        self.cache_verified(round, block.digest(), block).await;
+                        self.cache_verified(round, block.digest(), block.clone()).await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
                         // overwritten.
-                        self.proposed_block = Some((round, commitment, block));
+                        self.last_proposed_block = Some((round, commitment, block));
                         ack.send_lossy(());
                     }
                     Message::Verified { round, block, ack } => {
@@ -1373,15 +1366,13 @@ where
     }
 
     /// If a block previously accepted via [`Message::Proposed`] matches the
-    /// supplied `(round, commitment)`, remove and return it. Called from the
-    /// `Forward` handler so a proposer broadcasts its just-built block
-    /// straight from memory.
+    /// supplied `(round, commitment)`, remove and return it.
     fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<V::Block> {
-        let (cached_round, cached_commitment, _) = self.proposed_block.as_ref()?;
+        let (cached_round, cached_commitment, _) = self.last_proposed_block.as_ref()?;
         if *cached_round != round || *cached_commitment != commitment {
             return None;
         }
-        self.proposed_block.take().map(|(_, _, block)| block)
+        self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
     /// Add a notarized block to the prunable archive.
