@@ -194,8 +194,6 @@ stability_scope!(BETA {
         /// Panics if `core` is greater than or equal to the number of available CPUs.
         fn pinned(self, core: usize) -> Self;
 
-        /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
-        fn instrumented(self) -> Self;
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
