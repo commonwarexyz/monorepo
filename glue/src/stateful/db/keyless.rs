@@ -218,7 +218,7 @@ where
         KeylessMerkleized<E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<V>>, H>;
     type Error = Error<mmr::Family>;
     type Config = fixed::Config;
-    type SyncTarget = sync::Target<H::Digest>;
+    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
@@ -275,7 +275,7 @@ where
         KeylessMerkleized<E, VariableEncoding<V>, VariableJournal<E, variable::Operation<V>>, H>;
     type Error = Error<mmr::Family>;
     type Config = variable::Config<<variable::Operation<V> as CodecRead>::Cfg>;
-    type SyncTarget = sync::Target<H::Digest>;
+    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
@@ -325,9 +325,9 @@ where
     E: Storage + Clock + Metrics,
     V: FixedValue + 'static,
     H: Hasher + 'static,
-    R: Resolver<Op = fixed::Operation<V>, Digest = H::Digest>,
+    R: Resolver<Family = mmr::Family, Op = fixed::Operation<V>, Digest = H::Digest>,
 {
-    type SyncError = sync::Error<R::Error, H::Digest>;
+    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
@@ -363,9 +363,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue + 'static,
     H: Hasher + 'static,
-    R: Resolver<Op = variable::Operation<V>, Digest = H::Digest>,
+    R: Resolver<Family = mmr::Family, Op = variable::Operation<V>, Digest = H::Digest>,
 {
-    type SyncError = sync::Error<R::Error, H::Digest>;
+    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,

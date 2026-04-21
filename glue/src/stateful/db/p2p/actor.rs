@@ -11,6 +11,7 @@ use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
+use commonware_storage::mmr;
 use commonware_storage::qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
@@ -24,7 +25,7 @@ use tracing::{debug, info};
 type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
 type SyncMailbox<DB> = Mailbox<DB, Op<DB>, DatabaseRoot<DB>>;
-type Pending<Op, D> = oneshot::Sender<Result<FetchResult<Op, D>, mailbox::ResponseDropped>>;
+type Pending<Op, D> = oneshot::Sender<Result<FetchResult<mmr::Family, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<DB> = BTreeMap<handler::Request, Vec<Pending<Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
@@ -90,7 +91,7 @@ where
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Arc<AsyncRwLock<DB>>: SyncResolver,
+    Arc<AsyncRwLock<DB>>: SyncResolver<Family = mmr::Family>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
@@ -107,7 +108,7 @@ where
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Arc<AsyncRwLock<DB>>: SyncResolver,
+    Arc<AsyncRwLock<DB>>: SyncResolver<Family = mmr::Family>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -453,7 +454,7 @@ mod tests {
 
     type TestPending = Pending<TestOp, sha256::Digest>;
     type TestPendingResult =
-        oneshot::Receiver<Result<FetchResult<TestOp, sha256::Digest>, mailbox::ResponseDropped>>;
+        oneshot::Receiver<Result<FetchResult<mmr::Family, TestOp, sha256::Digest>, mailbox::ResponseDropped>>;
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
         oneshot::channel()

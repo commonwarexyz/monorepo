@@ -313,7 +313,7 @@ where
     >;
     type Error = Error<mmr::Family>;
     type Config = FixedConfig<T>;
-    type SyncTarget = sync::Target<H::Digest>;
+    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
@@ -338,7 +338,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 
@@ -395,7 +395,7 @@ where
         T,
         <Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
     >;
-    type SyncTarget = sync::Target<H::Digest>;
+    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
@@ -420,7 +420,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 
@@ -456,11 +456,12 @@ where
     H: Hasher,
     T: Translator,
     R: Resolver<
+        Family = mmr::Family,
         Op = Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>,
         Digest = H::Digest,
     >,
 {
-    type SyncError = sync::Error<R::Error, H::Digest>;
+    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
@@ -508,11 +509,12 @@ where
     T: Translator,
     Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: Resolver<
+        Family = mmr::Family,
         Op = Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>,
         Digest = H::Digest,
     >,
 {
-    type SyncError = sync::Error<R::Error, H::Digest>;
+    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,

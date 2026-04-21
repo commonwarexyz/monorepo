@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_storage::{
-    mmr::Location,
+    mmr::{self, Location},
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
 use commonware_utils::{
@@ -28,7 +28,7 @@ pub(super) enum Message<DB, Op, D: Digest> {
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: handler::Request,
-        response: oneshot::Sender<Result<FetchResult<Op, D>, ResponseDropped>>,
+        response: oneshot::Sender<Result<FetchResult<mmr::Family, Op, D>, ResponseDropped>>,
     },
     /// Cancel a previously requested operation fetch.
     CancelOperations { request: handler::Request },
@@ -65,6 +65,7 @@ where
     D: Digest,
     DB: Send + Sync + 'static,
 {
+    type Family = mmr::Family;
     type Digest = D;
     type Op = Op;
     type Error = ResponseDropped;
@@ -76,7 +77,7 @@ where
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let request = handler::Request {
             op_count,
             start_loc,

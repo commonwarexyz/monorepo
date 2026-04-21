@@ -583,9 +583,11 @@ where
         Ok(())
     }
 
-    /// Check if sync is complete based on the current journal size and target
-    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
-        let journal_size = self.journal.size().await;
+    /// Check if sync is complete based on the current journal size and target.
+    ///
+    /// `journal_size` must be obtained from `self.journal.size().await`
+    /// before calling this method.
+    pub fn is_at_target(&self, journal_size: u64) -> Result<bool, Error<DB, R>> {
         let target_journal_size = self.target.range.end();
 
         // Check if we've completed sync
@@ -613,8 +615,11 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
-        Ok(self.is_at_target().await? && self.has_boundary_state())
+    fn is_ready_to_complete(
+        &self,
+        journal_size: u64,
+    ) -> Result<bool, Error<DB, R>> {
+        Ok(self.is_at_target(journal_size)? && self.has_boundary_state())
     }
 
     /// Handle the result of a fetch operation.
@@ -767,8 +772,12 @@ where
     pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
+        // Obtain journal size before the synchronous readiness check so we
+        // don't hold `&self` across an `.await` (Engine is !Sync).
+        let journal_size = self.journal.size().await;
+
         // Check if sync is complete
-        if self.is_ready_to_complete().await? {
+        if self.is_ready_to_complete(journal_size)? {
             self.report_reached_target().await;
 
             if self.finish_rx.is_some() && !self.finish_requested {
