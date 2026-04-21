@@ -499,10 +499,10 @@ impl<
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
-    ) {
+    ) -> Vec<View> {
         // Construct a notarization certificate
         let Some(notarization) = self.state.broadcast_notarization(view) else {
-            return;
+            return Vec::new();
         };
 
         // Only the leader sees an unbiased latency sample, so record it now.
@@ -520,7 +520,7 @@ impl<
         self.handle_notarization(notarization.clone()).await;
         // The notarization must be durable before we derive ancestor certifications from it.
         self.sync_journal(view).await;
-        self.apply_inferred_certifications(resolver, view).await;
+        let inferred = self.apply_inferred_certifications(resolver, view).await;
 
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
@@ -533,19 +533,20 @@ impl<
         self.reporter
             .report(Activity::Notarization(notarization))
             .await;
+        inferred
     }
 
     /// Journals the certification decision and signals the resolver and reporter.
     ///
-    /// Idempotent: silently no-ops if the view was already concluded.
-    async fn finalize_certification(
+    /// Idempotent: returns `false` if the view was already concluded.
+    async fn conclude_certification(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         success: bool,
-    ) {
+    ) -> bool {
         let Some(notarization) = self.handle_certification(view, success).await else {
-            return;
+            return false;
         };
         resolver.certified(view, success).await;
         if success {
@@ -553,19 +554,31 @@ impl<
                 .report(Activity::Certification(notarization))
                 .await;
         }
+        true
     }
 
     /// Derives certifications for rounds whose notarizations prove certification without
     /// waiting on the automaton, then journals and signals each one.
+    ///
+    /// Important nuance: inferred certification establishes the protocol fact that the
+    /// round is certified, but it does not retroactively mean this replica locally verified
+    /// the proposal. Callers should therefore revisit the normal notify path for the inferred
+    /// view and rely on each vote/certificate constructor to enforce its own local gates.
     async fn apply_inferred_certifications(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
-    ) {
+    ) -> Vec<View> {
+        let mut inferred = Vec::new();
         for inferred_view in self.state.infer_certifications(view) {
-            self.finalize_certification(resolver, inferred_view, true)
-                .await;
+            if self
+                .conclude_certification(resolver, inferred_view, true)
+                .await
+            {
+                inferred.push(inferred_view);
+            }
         }
+        inferred
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
@@ -704,17 +717,24 @@ impl<
         view: View,
         resolved: Resolved,
     ) {
-        self.try_broadcast_notarize(batcher, vote_sender, view)
-            .await;
-        self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
-            .await;
-        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
-            .await;
-        self.try_broadcast_finalize(batcher, vote_sender, view)
-            .await;
-        self.try_broadcast_finalization(resolver, certificate_sender, view, resolved)
-            .await;
+        // Use an explicit worklist so inferred certification can revisit the same notify flow
+        // without building a recursive async future.
+        let mut pending = vec![(view, resolved)];
+        while let Some((view, resolved)) = pending.pop() {
+            self.try_broadcast_notarize(batcher, vote_sender, view)
+                .await;
+            let inferred = self
+                .try_broadcast_notarization(resolver, certificate_sender, view, resolved)
+                .await;
+            // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
+            self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
+                .await;
+            self.try_broadcast_finalize(batcher, vote_sender, view)
+                .await;
+            self.try_broadcast_finalization(resolver, certificate_sender, view, resolved)
+                .await;
+            pending.extend(inferred.into_iter().rev().map(|view| (view, Resolved::None)));
+        }
     }
 
     /// Spawns the actor event loop with the provided channels.
@@ -790,7 +810,7 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        self.finalize_certification(&mut resolver, round.view(), success)
+                        self.conclude_certification(&mut resolver, round.view(), success)
                             .await;
                     }
                     Artifact::Nullify(nullify) => {
@@ -834,9 +854,9 @@ impl<
 
         // Recover inferred certifications that were not journaled before a crash.
         let recovery_views: Vec<View> = self.state.notarized_views_desc().collect();
+        let mut recovered_inferred = Vec::new();
         for view in recovery_views {
-            self.apply_inferred_certifications(&mut resolver, view)
-                .await;
+            recovered_inferred.extend(self.apply_inferred_certifications(&mut resolver, view).await);
         }
 
         // Log current view after recovery
@@ -860,6 +880,17 @@ impl<
         {
             debug!(%observed_view, %leader, ?reason, "nullifying round");
             self.state.trigger_timeout(observed_view, reason);
+        }
+        for view in recovered_inferred {
+            self.notify(
+                &mut batcher,
+                &mut resolver,
+                &mut vote_sender,
+                &mut certificate_sender,
+                view,
+                Resolved::None,
+            )
+            .await;
         }
 
         // Process messages
@@ -1004,7 +1035,7 @@ impl<
                         // after a nullification for the same view because certification is
                         // asynchronous; finalization is the boundary that cancels in-flight
                         // certification and suppresses late reporting.
-                        self.finalize_certification(&mut resolver, view, certified)
+                        self.conclude_certification(&mut resolver, view, certified)
                             .await;
                     }
                     Err(err) => {

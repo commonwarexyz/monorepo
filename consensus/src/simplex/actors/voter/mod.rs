@@ -8745,8 +8745,9 @@ mod tests {
     }
 
     /// A notarization for view v+1 proves f+1 honest voters already certified v. Even when
-    /// the local automaton will never respond (Certifier::Pending), receiving the next
-    /// notarization must certify v through inference and signal the resolver/reporter.
+    /// the local automaton never resolves `certify(v)` (Certifier::Pending), receiving the
+    /// next notarization must certify v through inference, unlock `Finalize(v)`, and signal
+    /// the resolver/reporter.
     fn notarization_infers_parent_certification<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -8818,27 +8819,47 @@ mod tests {
                 .resolved(Certificate::Notarization(notarization_4))
                 .await;
 
-            // Expect MailboxMessage::Certified{ view=3, success=true } to arrive at the
-            // resolver for the inferred view.
+            // Expect MailboxMessage::Certified{ view=3, success=true } and a local
+            // Finalize(v) vote for the inferred view. Inference proves certification and
+            // therefore should unlock finalization, but it must not be confused with
+            // retroactively satisfying the local precondition for notarization.
+            let mut certified = false;
+            let mut finalized = false;
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
                         MailboxMessage::Certified { view, success } if view == target_view => {
                             assert!(success, "inferred certification must be a success");
-                            break;
+                            certified = true;
                         }
                         _ => {}
                     },
-                    msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Finalize(finalize))
+                            if finalize.view() == target_view =>
+                        {
+                            finalized = true;
+                        }
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == target_view =>
+                        {
+                            panic!(
+                                "inference must not retroactively justify notarize for view {target_view}"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => {
                             response.send(None).unwrap();
                         }
+                        _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
                         panic!(
-                            "inferred certification for view {target_view} never reached resolver"
+                            "inferred certification/finalize for view {target_view} never completed"
                         );
                     },
+                }
+                if certified && finalized {
+                    break;
                 }
             }
 
@@ -8987,7 +9008,11 @@ mod tests {
                 )
                 .await;
 
-            // Observe Certified{view=3, success=true} arriving from the post-replay pass.
+            // Observe Certified{view=3, success=true} and the replay-triggered Finalize(v)
+            // vote. Replay inference should unlock finalization just like the live path,
+            // but only after batcher initialization makes the historical view interesting.
+            let mut certified = false;
+            let mut finalized = false;
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
@@ -8996,20 +9021,29 @@ mod tests {
                                 success,
                                 "post-replay inference must certify view {view_3} as success"
                             );
-                            break;
+                            certified = true;
                         }
                         _ => {}
                     },
-                    msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Finalize(finalize))
+                            if finalize.view() == view_3 =>
+                        {
+                            finalized = true;
+                        }
+                        batcher::Message::Update { response, .. } => {
                             response.send(None).unwrap();
                         }
+                        _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
                         panic!(
-                            "post-replay pass never certified view {view_3}"
+                            "post-replay pass never completed certification/finalize for view {view_3}"
                         );
                     },
+                }
+                if certified && finalized {
+                    break;
                 }
             }
 
