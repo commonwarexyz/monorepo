@@ -21,7 +21,7 @@ pub mod fuzz {
     }
 
     impl Plan {
-        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        pub(in crate::zk) fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::Ipa(plan) => plan.run(u),
                 Self::Circuit(plan) => plan.run(u),
