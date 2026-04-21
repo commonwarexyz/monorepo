@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{Certify, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -418,7 +418,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the proposal for `view` if it is eligible for forwarding.
     pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
+        if round.finalization().is_some() || matches!(round.certify(), Certify::Decided(true)) {
             return round.proposal().cloned();
         }
         None
@@ -612,15 +612,16 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// not re-journal or re-emit). Panics on a conflicting outcome.
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
-        if let Some(previous) = round.certify_result() {
-            assert_eq!(
-                previous, is_success,
-                "certification should not conflict: view {view}"
-            );
-            return None;
-        }
-        if !round.is_certify_inferable() {
-            return None;
+        match round.certify() {
+            Certify::Open => {}
+            Certify::Decided(previous) => {
+                assert_eq!(
+                    previous, is_success,
+                    "certification should not conflict: view {view}"
+                );
+                return None;
+            }
+            Certify::Aborted => return None,
         }
 
         round.certified(is_success);
@@ -659,11 +660,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let mut inferred = Vec::new();
 
         // Infer `view` itself when a notarized descendant already points at it as parent.
-        if self
-            .views
-            .get(&view)
-            .is_some_and(|round| round.is_certify_inferable() && round.notarization().is_some())
-            && self.has_notarized_child_with_parent(view)
+        if self.views.get(&view).is_some_and(|round| {
+            matches!(round.certify(), Certify::Open) && round.notarization().is_some()
+        }) && self.has_notarized_child_with_parent(view)
         {
             inferred.push(view);
         }
@@ -682,7 +681,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let Some(notarization) = round.notarization() else {
                 break;
             };
-            if !round.is_certify_inferable() {
+            if !matches!(round.certify(), Certify::Open) {
                 break;
             }
             inferred.push(cursor);
@@ -730,7 +729,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // Check for explicit certification
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
+        if round.finalization().is_some() || matches!(round.certify(), Certify::Decided(true)) {
             return Some(&round.proposal().expect("proposal must exist").payload);
         }
         None
@@ -755,7 +754,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn is_certify_aborted(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .is_some_and(|round| round.is_certify_aborted())
+            .is_some_and(|round| matches!(round.certify(), Certify::Aborted))
     }
 
     /// Finds the parent payload for a given view by walking backwards through
@@ -2723,7 +2722,7 @@ mod tests {
 
             let inferred = apply_inferred_certifications(&mut state, child_view);
             assert_eq!(inferred, vec![parent_view]);
-            assert!(state.views.get(&parent_view).unwrap().is_certified());
+            assert!(matches!(state.views.get(&parent_view).unwrap().certify(), Certify::Decided(true)));
         });
     }
 
@@ -2749,9 +2748,9 @@ mod tests {
             let inferred = apply_inferred_certifications(&mut state, View::new(4));
             assert_eq!(inferred, vec![View::new(3), View::new(2), View::new(1)]);
             for raw in 1u64..=3 {
-                assert!(state.views.get(&View::new(raw)).unwrap().is_certified());
+                assert!(matches!(state.views.get(&View::new(raw)).unwrap().certify(), Certify::Decided(true)));
             }
-            assert!(!state.views.get(&View::new(4)).unwrap().is_certified());
+            assert!(!matches!(state.views.get(&View::new(4)).unwrap().certify(), Certify::Decided(true)));
         });
     }
 
@@ -2812,7 +2811,7 @@ mod tests {
 
             let inferred = state.infer_certifications(View::new(3));
             assert!(inferred.is_empty());
-            assert!(!state.views.get(&View::new(1)).unwrap().is_certified());
+            assert!(!matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
         });
     }
 
@@ -2839,7 +2838,7 @@ mod tests {
 
             let inferred = state.infer_certifications(View::new(3));
             assert!(inferred.is_empty());
-            assert!(!state.views.get(&View::new(1)).unwrap().is_certified());
+            assert!(!matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
         });
     }
 
@@ -2872,7 +2871,7 @@ mod tests {
             // Inference triggered by v1's arrival should certify v1 via v2's evidence.
             let inferred = apply_inferred_certifications(&mut state, View::new(1));
             assert_eq!(inferred, vec![View::new(1)]);
-            assert!(state.views.get(&View::new(1)).unwrap().is_certified());
+            assert!(matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
         });
     }
 

@@ -33,6 +33,17 @@ enum CertifyState {
     Aborted,
 }
 
+/// Public view of a round's certification state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Certify {
+    /// No decision yet; inference or an automaton response can still resolve the round.
+    Open,
+    /// Certification concluded with the given outcome (`true` = certified, `false` = declined).
+    Decided(bool),
+    /// Certification was abandoned because a finalization superseded the view.
+    Aborted,
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -218,31 +229,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.finalization.as_ref()
     }
 
-    /// Returns true if we have explicitly certified the proposal.
-    pub const fn is_certified(&self) -> bool {
-        matches!(self.certify, CertifyState::Certified(true))
-    }
-
-    /// Returns true if certification was aborted due to finalization.
-    #[cfg(test)]
-    pub const fn is_certify_aborted(&self) -> bool {
-        matches!(self.certify, CertifyState::Aborted)
-    }
-
-    /// Returns true when certification has not yet been concluded and therefore can
-    /// still be inferred from other evidence.
-    pub const fn is_certify_inferable(&self) -> bool {
-        matches!(
-            self.certify,
-            CertifyState::Ready | CertifyState::Outstanding(_)
-        )
-    }
-
-    /// Returns the terminal certification result, if any.
-    pub const fn certify_result(&self) -> Option<bool> {
+    /// Returns a snapshot of the round's certification state.
+    pub const fn certify(&self) -> Certify {
         match self.certify {
-            CertifyState::Certified(result) => Some(result),
-            CertifyState::Ready | CertifyState::Outstanding(_) | CertifyState::Aborted => None,
+            CertifyState::Ready | CertifyState::Outstanding(_) => Certify::Open,
+            CertifyState::Certified(result) => Certify::Decided(result),
+            CertifyState::Aborted => Certify::Aborted,
         }
     }
 
@@ -538,7 +530,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we haven't certified the proposal, return None.
         //
         // Note, this does not require verification.
-        if !self.is_certified() {
+        if !matches!(self.certify(), Certify::Decided(true)) {
             return None;
         }
 
