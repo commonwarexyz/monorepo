@@ -54,6 +54,8 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+#[cfg(test)]
+mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;

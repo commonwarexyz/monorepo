@@ -12,9 +12,9 @@ katex: true
 ---
 
 A threshold encryption scheme is a cryptographic primitive that allows users to encrypt messages to a committee of $n$ parties such that *any* $t$ out of $n$
- members can *non-interactively* decrypt the message.
+members can *non-interactively* decrypt the message.
 
-A popular application of threshold encryption are encrypted mempools, to protect the privacy of pending transactions. Users encrypt transactions to a validator set, who wait to finalize them before decryption. However, decrypting $B$ ciphertexts requires $O(nB)$ communication to broadcast the decryption shares to the network. This can be orders of magnitude larger than the block itself!
+A popular application of threshold encryption is encrypted mempools, to protect the privacy of pending transactions. Users encrypt transactions to a validator set, who wait to finalize them before decryption. However, decrypting $B$ ciphertexts requires $O(nB)$ communication to broadcast the decryption shares to the network. This can be orders of magnitude larger than the block itself!
 
 [*Batched* Threshold Encryption (BTE)](https://eprint.iacr.org/2024/669) addresses this communication bottleneck.
 It enables the committee to decrypt a *batch* of $B$ ciphertexts using sub-linear communication $o(nB)$. A long line of work has shown that it's in fact possible to design BTE schemes with communication complexity $O(n)$ which is *independent* of the batch size.
@@ -170,13 +170,25 @@ decryption on an M5 MacBook Pro in single-threaded mode (available [here](https:
 
 | Batch size $B$ | Ours | [FPTX25](https://eprint.iacr.org/2025/2032) | [ABD+25](https://eprint.iacr.org/2025/2115) |
 |:--------------:|:----:|:------------:|:---------:|
-| 32 | 121.81 ms | 100.7 ms | 301 ms |
-| 128 | 593.62 ms | 638.4 ms | 1.4 s |
-| 512 | 2.79 s | 5.39 s | 6.6 s |
-| 2048 | 12.82 s | 46.2 s | 28.4 s |
+| 32 | 121.50 ms | 100.7 ms | 301 ms |
+| 128 | 593.63 ms | 638.4 ms | 1.4 s |
+| 512 | 2.80 s | 5.39 s | 6.6 s |
+| 2048 | 12.91 s | 46.2 s | 28.4 s |
 
 </div>
 
 _[BNRT26](https://eprint.iacr.org/2026/674) does not yet have a public implementation to compare against. We expect decryption to scale well with parallelization but have not yet implemented or benchmarked such an implementation._
+
+**Pipelined decryption.** Observe that the cross-term $C_i$ depends only on the ciphertexts and public parameters -- it does *not* depend on the combined partial decryption $\mathsf{pd}$. This means the bulk of the FFT work (the three FFTs and $2B$ pairings) can be *pipelined* as soon as the batch of ciphertexts is known, without waiting for any partial decryptions. 
+All that remains is a lightweight finalization phase ($B$ pairings + $B$ group operations). We benchmarked the split and found that at $B = 2048$, the finalization phase only takes 1.05 s out of 12.91 s total.
+
+<div align="center">
+
+| Phase | $B = 32$ | $B = 128$ | $B = 512$ | $B = 2048$ |
+|:------|:--------:|:---------:|:---------:|:----------:|
+| Pre-decrypt (ms) | 105.31 | 528.25 | 2542.16 | 11864.87 |
+| Finalize (ms) | 16.19 | 65.38 | 262.41 | 1048.68 |
+
+</div>
 
 Chop down the [Dark Forest](https://www.paradigm.xyz/2020/08/ethereum-is-a-dark-forest).

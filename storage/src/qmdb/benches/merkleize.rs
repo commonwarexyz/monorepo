@@ -6,8 +6,8 @@
 //! initialization time is not included in the benchmark. The page cache is large enough to hold the
 //! entire active key set to eliminate disk access delays from affecting the results.
 
-use crate::common::{make_fixed_value, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
-use commonware_cryptography::{Hasher, Sha256};
+use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
@@ -22,7 +22,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -339,41 +339,6 @@ fn cur_var_cfg(
 }
 
 // -- Benchmark helpers --
-
-/// Pre-populate the database with `num_keys` unique keys, commit, and sync.
-async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut C,
-    num_keys: u64,
-) {
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut batch = db.new_batch();
-    for i in 0u64..num_keys {
-        let k = Sha256::hash(&i.to_be_bytes());
-        batch = batch.write(k, Some(make_fixed_value(&mut rng)));
-    }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized).await.unwrap();
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
-}
-
-/// Write `num_updates` random key updates into a batch.
-fn write_random_updates<
-    B: commonware_storage::qmdb::any::traits::UnmerkleizedBatch<Db, K = Digest, V = Digest>,
-    Db: ?Sized,
->(
-    mut batch: B,
-    num_updates: u64,
-    num_keys: u64,
-    rng: &mut StdRng,
-) -> B {
-    for _ in 0..num_updates {
-        let idx = rng.next_u64() % num_keys;
-        let k = Sha256::hash(&idx.to_be_bytes());
-        batch = batch.write(k, Some(make_fixed_value(rng)));
-    }
-    batch
-}
 
 /// Single-batch benchmark: create batch, write updates, merkleize, read root.
 async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(

@@ -496,7 +496,7 @@ mod tests {
                 event = cons_out1.recv() => {
                     panic!("fetch should wait for the initial peer set, got {event:?}");
                 },
-                _ = context.sleep(Duration::from_millis(200)) => {}
+                _ = context.sleep(Duration::from_millis(200)) => {},
             };
 
             oracle
