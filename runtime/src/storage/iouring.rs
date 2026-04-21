@@ -912,7 +912,7 @@ mod tests {
 
         let result = blob
             .write_at(
-                u64::MAX - Header::SIZE_U64,
+                u64::MAX - Header::SIZE_U64 - 1,
                 vec![IoBuf::from(b"a"), IoBuf::from(b"b")],
             )
             .await;
