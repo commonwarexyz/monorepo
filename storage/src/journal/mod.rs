@@ -63,4 +63,6 @@ pub enum Error {
     InvalidConfiguration(String),
     #[error("checksum mismatch: expected={0}, found={1}")]
     ChecksumMismatch(u32, u32),
+    #[error("empty append")]
+    EmptyAppend,
 }

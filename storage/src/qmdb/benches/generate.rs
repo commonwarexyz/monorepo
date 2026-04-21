@@ -38,7 +38,7 @@ async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest
         make_value,
     )
     .await;
-    db.prune(db.inactivity_floor_loc().await).await.unwrap();
+    db.prune(db.sync_boundary().await).await.unwrap();
     db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();
@@ -120,7 +120,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
         c.bench_function(
-            &format!("{}/operations={operations}", module_path!()),
+            &format!("{}/variant=keyless operations={operations}", module_path!()),
             |b| {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     let ctx = context::get::<Context>();
@@ -135,13 +135,13 @@ fn bench_keyless_generate(c: &mut Criterion) {
                             let v = make_var_value(&mut rng);
                             batch = batch.append(v);
                             if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                                let finalized = batch.merkleize(None).finalize();
-                                db.apply_batch(finalized).await.unwrap();
+                                let merkleized = batch.merkleize(&db, None);
+                                db.apply_batch(merkleized).await.unwrap();
                                 batch = db.new_batch();
                             }
                         }
-                        let finalized = batch.merkleize(None).finalize();
-                        db.apply_batch(finalized).await.unwrap();
+                        let merkleized = batch.merkleize(&db, None);
+                        db.apply_batch(merkleized).await.unwrap();
                         db.sync().await.unwrap();
 
                         total += start.elapsed();

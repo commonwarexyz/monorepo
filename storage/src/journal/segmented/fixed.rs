@@ -136,16 +136,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Append pre-encoded bytes to the given section.
     ///
-    /// The buffer must contain exactly one encoded item of [Self::CHUNK_SIZE] bytes.
+    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
     ///
     /// # Panics
     ///
-    /// Panics if `buf.len() != Self::CHUNK_SIZE`.
+    /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
     pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
-        assert_eq!(buf.len(), Self::CHUNK_SIZE);
+        assert!(!buf.is_empty());
+        assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
         let blob = self.manager.get_or_create(section).await?;
         blob.append(buf).await?;
-        trace!(section, "appended item");
+        trace!(
+            section,
+            count = buf.len() / Self::CHUNK_SIZE,
+            "appended items"
+        );
         Ok(())
     }
 
@@ -174,6 +179,57 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
+    }
+
+    /// Read multiple items from the same section into a caller buffer.
+    ///
+    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
+    /// sorted in ascending order, non-overlapping, and within the section's bounds.
+    pub async fn get_many(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let offsets: Vec<u64> = positions
+            .iter()
+            .map(|&p| {
+                p.checked_mul(Self::CHUNK_SIZE_U64)
+                    .ok_or(Error::ItemOutOfRange(p))
+            })
+            .collect::<Result<_, _>>()?;
+
+        blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
+
+        let mut items = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
+            items.push(A::decode(slice).map_err(Error::Codec)?);
+        }
+        Ok(items)
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
+        let remaining = blob.try_size()?.checked_sub(offset)?;
+        if remaining < Self::CHUNK_SIZE_U64 {
+            return None;
+        }
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync(offset, &mut buf) {
+            return None;
+        }
+        A::decode(&buf[..]).ok()
     }
 
     /// Read the last item in a section, if any.
@@ -1308,6 +1364,122 @@ mod tests {
                 Err(Error::AlreadyPrunedToSection(1))
             ));
             assert!(journal.last(1).await.unwrap().is_some());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+            journal.append(0, &test_digest(0)).await.unwrap();
+            assert_eq!(journal.section_len(0).await.unwrap(), 1);
+
+            let mut buf = [];
+            let items = journal.get_many(0, &[], &mut buf).await.unwrap();
+            assert!(items.is_empty());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_single_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..5 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 5);
+
+            // Read all 5 items in one call.
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let mut buf = vec![0u8; 5 * chunk];
+            let items = journal
+                .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
+                .await
+                .unwrap();
+
+            for (i, item) in items.iter().enumerate() {
+                assert_eq!(*item, test_digest(i as u64));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_subset() {
+        // Read a sparse subset of positions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..10 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 10);
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions = [1, 4, 7, 9];
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let items = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(items[i], test_digest(pos));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_bad_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 64];
+            let err = journal.get_many(99, &[0], &mut buf).await.unwrap_err();
+            assert!(matches!(err, Error::SectionOutOfRange(99)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_matches_get() {
+        // Verify batch read matches individual reads.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+
+            for i in 0..8 {
+                journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).await.unwrap(), 8);
+            journal.sync_all().await.unwrap();
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions: Vec<u64> = (0..8).collect();
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let batch = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for pos in &positions {
+                let single = journal.get(0, *pos).await.unwrap();
+                assert_eq!(batch[*pos as usize], single);
+            }
 
             journal.destroy().await.unwrap();
         });

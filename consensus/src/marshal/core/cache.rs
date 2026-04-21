@@ -143,6 +143,18 @@ where
         }
     }
 
+    /// Load all persisted epoch caches so that `find_block` can discover
+    /// blocks written before the last shutdown.
+    pub(crate) async fn load_persisted_epochs(&mut self) {
+        let (floor, ceiling) = self.get_metadata();
+        for e in floor.get()..=ceiling.get() {
+            let epoch = Epoch::new(e);
+            if !self.caches.contains_key(&epoch) {
+                self.init_epoch(epoch).await;
+            }
+        }
+    }
+
     /// Retrieve the epoch range that may have data.
     fn get_metadata(&self) -> (Epoch, Epoch) {
         self.metadata
@@ -357,6 +369,16 @@ where
             .get(Identifier::Index(round.view().get()))
             .await
             .expect("failed to get notarization")
+    }
+
+    /// Get the block previously persisted in the verified archive for `round`.
+    pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
+        let cache = self.caches.get(&round.epoch())?;
+        cache
+            .verified_blocks
+            .get(Identifier::Index(round.view().get()))
+            .await
+            .expect("failed to get verified block")
     }
 
     /// Get a finalization from the prunable archive by block digest.

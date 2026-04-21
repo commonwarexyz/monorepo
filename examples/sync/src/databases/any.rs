@@ -54,6 +54,7 @@ impl<E> crate::databases::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
@@ -104,8 +105,8 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let finalized = batch.merkleize(metadata, self).await?.finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(self, metadata).await?;
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -122,8 +123,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        self.inactivity_floor_loc()
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     fn historical_proof(

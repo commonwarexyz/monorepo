@@ -191,18 +191,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(metadata_bytes.clone(), &db)
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -210,7 +204,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    db.prune(db.sync_boundary())
                         .await
                         .expect("Prune should not fail");
                 }
@@ -225,20 +219,18 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Proof { start_loc, max_ops } => {
                     // proof requires commit
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch.merkleize(None, &db).await.unwrap().finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = db.bounds().await.end;
-                    let oldest_retained_loc = db.inactivity_floor_loc();
+                    let oldest_retained_loc = db.sync_boundary();
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root();
@@ -253,14 +245,12 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     // historical proof verification requires a root captured at a commit point.
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch.merkleize(None, &db).await.unwrap().finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -288,14 +278,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch.merkleize(None, &db).await.unwrap().finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
@@ -303,7 +291,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    let _ = db.sync_boundary();
                 }
 
                 Operation::OpCount => {
@@ -312,14 +300,12 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     // root requires commit
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch.merkleize(None, &db).await.unwrap().finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
@@ -347,14 +333,12 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let finalized = {
-            let mut batch = db.new_batch();
-            for (k, v) in pending_writes.drain(..) {
-                batch = batch.write(k, v);
-            }
-            batch.merkleize(None, &db).await.unwrap().finalize()
-        };
-        db.apply_batch(finalized)
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");

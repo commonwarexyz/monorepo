@@ -21,16 +21,16 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
-            let changeset = {
+            let batch = {
                 let mut batch = mem.new_batch();
                 for i in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
                     batch = batch.add(&hasher, &element);
                     elements.push((i, element));
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mem, &hasher)
             };
-            mem.apply(changeset).unwrap();
+            mem.apply_batch(&batch).unwrap();
         });
         let root = *mem.root();
 

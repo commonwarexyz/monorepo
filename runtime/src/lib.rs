@@ -196,7 +196,6 @@ stability_scope!(BETA {
 
         /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
         fn instrumented(self) -> Self;
-
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -303,6 +302,38 @@ stability_scope!(BETA {
     }
 
     /// Interface to register and encode metrics.
+    ///
+    /// # Mental Model: Metrics vs Tracing
+    ///
+    /// A context carries multiple pieces of observability state, each
+    /// applied via a different builder. They compose freely, but they do
+    /// not all feed into the same sinks:
+    ///
+    /// - `name` (set by [`Metrics::with_label`]): prefix applied to metrics
+    ///   you [`register`](Metrics::register) on this context; also populates
+    ///   the `name` field of runtime-internal task metrics
+    ///   (`runtime_tasks_spawned`, `runtime_tasks_running`).
+    /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
+    ///   dimensions on metrics you `register` on this context; also emitted
+    ///   as OpenTelemetry attributes on the per-task tracing span when, and
+    ///   only when, [`Metrics::with_span`] is set on the spawn. Runtime
+    ///   task metrics intentionally ignore attributes to keep their
+    ///   cardinality bounded.
+    /// - `scope` (set by [`Metrics::with_scope`]): routes metrics you
+    ///   `register` on this context into a sub-registry whose entries are
+    ///   removed when the last clone of the scoped context is dropped. It
+    ///   does not affect runtime task metrics and has no effect on tracing.
+    /// - `span` (set by [`Metrics::with_span`]): wraps the next spawned task
+    ///   in a `tracing` span populated from the current `name` and `attributes`.
+    ///   It never touches metrics. The flag is consumed by the next `spawn` and
+    ///   is not inherited by child contexts.
+    ///
+    /// | Builder                 | Registered metric name | Registered metric labels | Registry isolation | Runtime task metrics | Tracing span                     |
+    /// | ----------------------- | :--------------------: | :----------------------: | :----------------: | :------------------: | :------------------------------: |
+    /// | `with_label`            | prefix                 | -                        | -                  | `name`               | `name` field when `with_span`    |
+    /// | `with_attribute`        | -                      | label dimension          | -                  | -                    | OTel attribute when `with_span`  |
+    /// | `with_scope`            | -                      | -                        | sub-registry       | -                    | -                                |
+    /// | `with_span`             | -                      | -                        | -                  | -                    | enables span creation            |
     pub trait Metrics: Clone + Send + Sync + 'static {
         /// Get the current label of the context.
         fn label(&self) -> String;
@@ -404,21 +435,6 @@ stability_scope!(BETA {
         /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
         fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
-        /// Register a metric with the runtime.
-        ///
-        /// Any registered metric will include (as a prefix) the label of the current context.
-        ///
-        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
-
-        /// Encode all metrics into a buffer.
-        ///
-        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be
-        /// avoided by using `with_label` and `with_attribute` to create new context instances
-        /// (ensures all context instances are namespaced).
-        fn encode(&self) -> String;
-
         /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
         /// consensus engines). All metrics registered through the returned context (and
         /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
@@ -450,6 +466,35 @@ stability_scope!(BETA {
         /// // Metrics are removed when all clones of `scoped` are dropped.
         /// ```
         fn with_scope(&self) -> Self;
+
+        /// Return a new context that wraps the next task spawned from it in a `tracing`
+        /// span whose `name` field and OpenTelemetry attributes are derived from the
+        /// context's label and attributes.
+        ///
+        /// The flag is consumed by the next [`Spawner::spawn`] call on the returned
+        /// context (and on any clone of it). It is not inherited by child contexts
+        /// produced via [`Metrics::with_label`], [`Metrics::with_attribute`],
+        /// [`Metrics::with_scope`], or any of the `Spawner` builders: each such builder
+        /// resets the flag so the caller must opt in again for the next spawn.
+        ///
+        /// Enabling the span only affects tracing; it does not change which metrics
+        /// are registered, nor does it widen the cardinality of runtime task metrics.
+        fn with_span(&self) -> Self;
+
+        /// Register a metric with the runtime.
+        ///
+        /// Any registered metric will include (as a prefix) the label of the current context.
+        ///
+        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+        /// Encode all metrics into a buffer.
+        ///
+        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+        /// (via the concatenation of nested `with_label` and `register` calls). This can be
+        /// avoided by using `with_label` and `with_attribute` to create new context instances
+        /// (ensures all context instances are namespaced).
+        fn encode(&self) -> String;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -2458,6 +2503,190 @@ mod tests {
         test_metrics_attributes_isolated_between_contexts(runner);
     }
 
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
+    ///
+    /// Verifies the documented guarantee that runtime task metrics ignore context
+    /// attributes: spawning with a varying `with_attribute` (as the marshaled
+    /// consensus code does for each round) must not create per-value entries in
+    /// `runtime_tasks_spawned` / `runtime_tasks_running`.
+    fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        runner.start(|context| async move {
+            const ROUNDS: u64 = 128;
+
+            let mut handles = Vec::with_capacity(ROUNDS as usize);
+            for round in 0..ROUNDS {
+                let handle = context
+                    .with_label("deferred_verify")
+                    .with_attribute("round", round)
+                    .spawn(move |_| async move { round });
+                handles.push(handle);
+            }
+            for (expected, handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.await.expect("task failed"), expected as u64);
+            }
+
+            // handle.await resolves when the task's output is ready, but
+            // the running-gauge decrement fires on task-struct drop which
+            // may lag slightly. Yield to the executor so it can run cleanup.
+            while count_running_tasks(&context, "deferred_verify") > 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let buffer = context.encode();
+
+            // Count occurrences of each runtime task metric for our label. If
+            // attributes were incorrectly folded into the task family key, we
+            // would see ROUNDS distinct time series instead of one.
+            let spawned_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            let running_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            assert_eq!(
+                spawned_lines, 1,
+                "expected exactly 1 runtime_tasks_spawned entry for deferred_verify, got {spawned_lines}: {buffer}",
+            );
+            assert_eq!(
+                running_lines, 1,
+                "expected exactly 1 runtime_tasks_running entry for deferred_verify, got {running_lines}: {buffer}",
+            );
+
+            // The single spawned-counter entry should reflect every round.
+            let spawned_value = format!(
+                "runtime_tasks_spawned_total{{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}} {ROUNDS}"
+            );
+            assert!(
+                buffer.contains(&spawned_value),
+                "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
+
+            // The per-round attribute must not surface on task metrics (the
+            // task `Label` does not include context attributes).
+            assert!(
+                !buffer
+                    .lines()
+                    .any(|line| line.starts_with("runtime_tasks_")
+                        && line.contains("round=")),
+                "task metrics must not carry `round` attribute: {buffer}",
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_spawn_attribute_cardinality() {
+        let executor = deterministic::Runner::default();
+        test_metrics_spawn_attribute_cardinality(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_spawn_attribute_cardinality() {
+        let runner = tokio::Runner::default();
+        test_metrics_spawn_attribute_cardinality(runner);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
+    ///
+    /// Verifies the documented guarantee that runtime task metrics ignore the
+    /// scope of the spawning context: tasks spawned from a [`Metrics::with_scope`]
+    /// context must still appear exactly once in the root-registry
+    /// `runtime_tasks_spawned` / `runtime_tasks_running` families keyed only by
+    /// `name` / `kind` / `execution`, and dropping the scope must neither remove
+    /// those entries nor create additional ones.
+    fn test_metrics_spawn_scope_cardinality<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        runner.start(|context| async move {
+            const ROUNDS: u64 = 128;
+
+            let mut handles = Vec::with_capacity(ROUNDS as usize);
+            for round in 0..ROUNDS {
+                let scoped = context
+                    .with_label("deferred_verify")
+                    .with_attribute("round", round)
+                    .with_scope();
+                let handle = scoped.spawn(move |_| async move { round });
+                handles.push(handle);
+                // `scoped` is dropped here; task metrics must persist regardless.
+            }
+            for (expected, handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.await.expect("task failed"), expected as u64);
+            }
+
+            // handle.await resolves when the task's output is ready, but
+            // the running-gauge decrement fires on task-struct drop which
+            // may lag slightly. Yield to the executor so it can run cleanup.
+            while count_running_tasks(&context, "deferred_verify") > 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let buffer = context.encode();
+
+            let spawned_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            let running_lines = buffer
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains("name=\"deferred_verify\"")
+                })
+                .count();
+            assert_eq!(
+                spawned_lines, 1,
+                "expected exactly 1 runtime_tasks_spawned entry for deferred_verify, got {spawned_lines}: {buffer}",
+            );
+            assert_eq!(
+                running_lines, 1,
+                "expected exactly 1 runtime_tasks_running entry for deferred_verify, got {running_lines}: {buffer}",
+            );
+
+            let spawned_value = format!(
+                "runtime_tasks_spawned_total{{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}} {ROUNDS}"
+            );
+            assert!(
+                buffer.contains(&spawned_value),
+                "expected accumulated spawned counter `{spawned_value}`, got: {buffer}",
+            );
+            let running_value = "runtime_tasks_running{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"} 0";
+            assert!(
+                buffer.contains(running_value),
+                "expected running gauge to return to 0, got: {buffer}",
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_spawn_scope_cardinality() {
+        let executor = deterministic::Runner::default();
+        test_metrics_spawn_scope_cardinality(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_spawn_scope_cardinality() {
+        let runner = tokio::Runner::default();
+        test_metrics_spawn_scope_cardinality(runner);
+    }
+
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -3448,13 +3677,13 @@ mod tests {
         executor.start(|context| async move {
             context
                 .with_label("test")
-                .instrumented()
+                .with_span()
                 .spawn(|context| async move {
                     tracing::info!(field = "test field", "test log");
 
                     context
                         .with_label("inner")
-                        .instrumented()
+                        .with_span()
                         .spawn(|_| async move {
                             tracing::info!("inner log");
                         })

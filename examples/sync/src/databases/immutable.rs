@@ -87,6 +87,7 @@ impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
@@ -110,8 +111,8 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    let finalized = batch.merkleize(metadata).finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(self, metadata);
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -128,10 +129,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // For Immutable databases, all retained operations are active,
-        // so the inactivity floor equals the pruning boundary.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary().await
     }
 
     fn historical_proof(

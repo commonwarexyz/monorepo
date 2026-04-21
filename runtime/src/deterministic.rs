@@ -899,7 +899,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -917,7 +917,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -998,7 +998,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1070,7 +1070,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1148,11 +1148,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1164,9 +1159,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1175,7 +1170,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if is_instrumented {
+        let future = if traced {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
@@ -1256,6 +1251,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
@@ -1295,8 +1294,34 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn label(&self) -> String {
-        self.name.clone()
+    fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        let weak = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            if let Some(exec) = weak.upgrade() {
+                exec.registry.lock().remove_scope(id);
+            }
+        }));
+        Self {
+            scope: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
@@ -1349,29 +1374,6 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"encode", |_| {});
         let encoded = executor.registry.lock().encode();
         encoded
-    }
-
-    fn with_scope(&self) -> Self {
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
-
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        let weak = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Some(exec) = weak.upgrade() {
-                exec.registry.lock().remove_scope(id);
-            }
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
     }
 }
 

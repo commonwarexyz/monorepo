@@ -118,6 +118,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "current_mmb_prune_grow"
+path = "fuzz_targets/current_mmb_prune_grow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "current_unordered_batch_root"
 path = "fuzz_targets/current_unordered_batch_root.rs"
 test = false

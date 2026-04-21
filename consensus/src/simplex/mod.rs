@@ -314,72 +314,71 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
-use crate::types::Round;
-use commonware_cryptography::PublicKey;
-
 pub mod elector;
 pub mod scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
+        use crate::types::{Round, View, ViewDelta};
+        use commonware_cryptography::PublicKey;
+        use commonware_p2p::Recipients;
+
         mod actors;
         pub mod config;
         pub use config::{Config, ForwardingPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
+
+        /// The minimum view we are tracking both in-memory and on-disk.
+        pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+            last_finalized.saturating_sub(activity_timeout)
+        }
+
+        /// Whether or not a view is interesting to us. This is a function
+        /// of both `min_active` and whether or not the view is too far
+        /// in the future (based on the view we are currently in).
+        pub(crate) fn interesting(
+            activity_timeout: ViewDelta,
+            last_finalized: View,
+            current: View,
+            pending: View,
+            allow_future: bool,
+        ) -> bool {
+            // If the view is genesis, skip it, genesis doesn't have votes
+            if pending.is_zero() {
+                return false;
+            }
+            if pending < min_active(activity_timeout, last_finalized) {
+                return false;
+            }
+            if !allow_future && pending > current.next() {
+                return false;
+            }
+            true
+        }
+
+        /// Describes how a payload should be broadcast to the network.
+        pub enum Plan<P: PublicKey> {
+            /// Initial broadcast of a newly proposed block to all participants.
+            Propose {
+                /// The round in which the block was proposed.
+                round: Round,
+            },
+            /// Forward a block to a specific set of peers.
+            Forward {
+                /// The round in which the forwarded block was proposed.
+                round: Round,
+                /// The recipients to forward the block to.
+                recipients: Recipients<P>,
+            },
+        }
     }
 }
 
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
-
-#[cfg(not(target_arch = "wasm32"))]
-use crate::types::{View, ViewDelta};
-
-/// The minimum view we are tracking both in-memory and on-disk.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-    last_finalized.saturating_sub(activity_timeout)
-}
-
-/// Whether or not a view is interesting to us. This is a function
-/// of both `min_active` and whether or not the view is too far
-/// in the future (based on the view we are currently in).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn interesting(
-    activity_timeout: ViewDelta,
-    last_finalized: View,
-    current: View,
-    pending: View,
-    allow_future: bool,
-) -> bool {
-    // If the view is genesis, skip it, genesis doesn't have votes
-    if pending.is_zero() {
-        return false;
-    }
-    if pending < min_active(activity_timeout, last_finalized) {
-        return false;
-    }
-    if !allow_future && pending > current.next() {
-        return false;
-    }
-    true
-}
-
-/// Describes how a payload should be broadcast to the network.
-pub enum Plan<P: PublicKey> {
-    /// Initial broadcast of a newly proposed block to all participants.
-    Propose,
-    /// Forward a block to a specific set of peers.
-    Forward {
-        /// The round in which the forwarded block was proposed.
-        round: Round,
-        /// The peers to forward the block to.
-        peers: Vec<P>,
-    },
-}
 
 /// Convenience alias for [`N3f1::quorum`].
 #[cfg(test)]
@@ -394,7 +393,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as Elector, Random, RoundRobin},
+            elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -414,7 +413,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Round},
+        types::{Epoch, Participant, Round},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -429,14 +428,14 @@ mod tests {
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -597,6 +596,53 @@ mod tests {
         registrations
     }
 
+    async fn start_test_network_with_peers<I>(
+        context: deterministic::Context,
+        peers: I,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_peers(
+            context.with_label("network"),
+            Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            peers,
+        )
+        .await;
+        network.start();
+        oracle
+    }
+
+    async fn start_test_network_with_split_peers<I, J>(
+        context: deterministic::Context,
+        primary: I,
+        secondary: J,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+        J: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_split_peers(
+            context.with_label("network"),
+            Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            primary,
+            secondary,
+        )
+        .await;
+        network.start();
+        oracle
+    }
+
     /// Enum to describe the action to take when linking validators.
     enum Action {
         Link(Link),
@@ -680,25 +726,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -734,7 +769,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -915,6 +950,155 @@ mod tests {
         all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// A dishonest leader (validator 0) proposes payloads that all honest peers
+    /// refuse to certify.
+    ///
+    /// All n validators use the honest Application, but every peer's certifier
+    /// rejects proposals from views where validator 0 is the elected leader.
+    /// When validator 0 IS the leader, it short-circuits certification locally
+    /// (it built the proposal) and votes finalize, but every other peer
+    /// rejects via the Custom predicate and nullifies. The lone finalize vote
+    /// cannot form a certificate (quorum=4). The nullification cert (4 honest
+    /// peers) advances everyone.
+    ///
+    /// When an honest validator leads, all peers (including validator 0)
+    /// certify normally and finalize. The cluster makes progress on honest
+    /// leader views and nullifies dishonest leader views.
+    fn dishonest_leader_certification_rejected<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        RoundRobin: Elector<S>,
+    {
+        let n = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            let elector = RoundRobin::default();
+            let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
+            let built_elector = elector.clone().build(&participants_set);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            let dishonest = Participant::new(0);
+            for (idx, validator) in participants.iter().enumerate() {
+                let context = context.with_label(&format!("validator_{}", *validator));
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Custom(Box::new({
+                        let built_elector_clone = built_elector.clone();
+                        move |round, _| built_elector_clone.elect(round, None) != dishonest
+                    })),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_dishonest_leader_certification_rejected() {
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        dishonest_leader_certification_rejected::<_, _>(ed25519::fixture);
+        dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
+    }
+
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -929,19 +1113,6 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants (active)
             let Fixture {
                 participants,
@@ -953,6 +1124,14 @@ mod tests {
             // Add observer (no share)
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
+
+            let mut oracle = start_test_network_with_split_peers(
+                context.clone(),
+                participants.clone(),
+                [public_key_observer.clone()],
+                true,
+            )
+            .await;
 
             // Register all (including observer) with the network
             let mut all_validators = participants.clone();
@@ -1000,7 +1179,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1052,7 +1231,8 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Sanity check
+            // Sanity check. The standalone secondary observer should still
+            // process the chain to the same progress threshold as validators.
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 reporter.assert_no_faults();
@@ -1117,20 +1297,10 @@ mod tests {
             relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
-                // Create simulated network
-                let (network, mut oracle) = Network::new(
-                    context.with_label("network"),
-                    Config {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: true,
-                        tracked_peer_sets: None,
-                    },
-                );
-
-                // Start network
-                network.start();
-
                 // Register participants
+                let mut oracle =
+                    start_test_network_with_peers(context.clone(), participants.clone(), true)
+                        .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
 
                 // Link all validators
@@ -1165,7 +1335,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -1292,25 +1462,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1357,7 +1516,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1478,7 +1637,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1558,25 +1717,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1623,7 +1771,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1800,25 +1948,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1855,7 +1992,7 @@ mod tests {
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
                         certify_latency: (10_000.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     }
                 } else {
                     mocks::application::Config {
@@ -1865,7 +2002,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1988,25 +2125,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2042,7 +2168,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2200,25 +2326,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2254,7 +2369,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2402,25 +2517,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(5_000)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2462,7 +2566,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2657,25 +2761,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2725,7 +2818,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2844,19 +2937,6 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
@@ -2878,6 +2958,8 @@ mod tests {
                 })
                 .collect();
 
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2912,7 +2994,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3026,22 +3108,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
@@ -3088,7 +3162,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3223,25 +3297,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3291,7 +3354,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3391,25 +3454,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3463,7 +3515,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3554,7 +3606,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3722,25 +3774,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3789,7 +3830,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3889,25 +3930,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3953,7 +3983,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -4069,25 +4099,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4134,7 +4153,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -4227,25 +4246,14 @@ mod tests {
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4281,7 +4289,7 @@ mod tests {
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
                     certify_latency: (50.0, 40.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4409,25 +4417,14 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(10)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register a single participant
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4455,7 +4452,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -4622,23 +4619,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4683,7 +4671,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4858,23 +4846,14 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
@@ -4950,6 +4929,17 @@ mod tests {
                     .await
                     .unwrap();
             }
+            oracle
+                .manager()
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(participants.iter().cloned()),
+                        Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                    ),
+                )
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
@@ -5034,7 +5024,7 @@ mod tests {
                         propose_latency: (250.0, 50.0), // ensure we process certificates first
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label(&format!("application_{}", *validator)),
@@ -5190,25 +5180,14 @@ mod tests {
         let skip_timeout = ViewDelta::new(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5250,7 +5229,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -5347,25 +5326,14 @@ mod tests {
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5401,7 +5369,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -5497,7 +5465,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
+                    should_certify: mocks::application::Certifier::Always,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -5864,22 +5832,18 @@ mod tests {
                 .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
-                let (network, mut oracle) = Network::new(
-                    context.with_label("network"),
-                    Config {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: false,
-                        tracked_peer_sets: None,
-                    },
-                );
-                network.start();
-
                 let Fixture {
                     participants,
                     schemes,
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
+                let mut oracle = start_test_network_with_peers(
+                    context.clone(),
+                    participants.iter().cloned(),
+                    false,
+                )
+                .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5994,7 +5958,7 @@ mod tests {
                             propose_latency: (10.0, 5.0),
                             verify_latency: (10.0, 5.0),
                             certify_latency: (10.0, 5.0),
-                            should_certify: mocks::application::Certifier::Sometimes,
+                            should_certify: mocks::application::Certifier::Always,
                         };
                         let (actor, application) = mocks::application::Application::new(
                             context.with_label("application"),
@@ -6063,7 +6027,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
+                        should_certify: mocks::application::Certifier::Always,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),

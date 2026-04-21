@@ -183,7 +183,6 @@ impl<
         spawn_cell!(
             self.context,
             self.run(vote_network, certificate_network, resolver_network)
-                .await
         )
     }
 
@@ -226,20 +225,20 @@ impl<
             certificate_sender,
         );
 
-        // Wait for the resolver or voter to finish
+        // If any task completes, the engine should stop
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping engine");
             },
-            _ = &mut voter_task => {
-                panic!("voter should not finish");
+            voter = &mut voter_task => {
+                debug!(?voter, "voter stopped, shutting down engine");
             },
-            _ = &mut batcher_task => {
-                panic!("batcher should not finish");
+            batcher = &mut batcher_task => {
+                debug!(?batcher, "batcher stopped, shutting down engine");
             },
-            _ = &mut resolver_task => {
-                panic!("resolver should not finish");
+            resolver = &mut resolver_task => {
+                debug!(?resolver, "resolver stopped, shutting down engine");
             },
         }
     }

@@ -584,8 +584,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for certification.
-    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+    /// Takes all certification candidates and returns proposals ready for
+    /// certification, along with whether the proposal was built locally.
+    ///
+    /// Certification may be inferred only when we have explicit evidence that we
+    /// proposed this exact payload for the round, either in the current process
+    /// or via replay of our durable local vote. In certain cases for Byzantine nodes,
+    /// it is possible that a certificate is received for a proposal that we did not propose (although
+    /// we are the leader).
+    pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
         let candidates = take(&mut self.certification_candidates);
         candidates
             .into_iter()
@@ -593,7 +600,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 if view <= self.last_finalized {
                     return None;
                 }
-                self.views.get_mut(&view)?.try_certify()
+                let candidate = self.views.get_mut(&view)?.try_certify()?;
+                Some(candidate)
             })
             .collect()
     }
@@ -1758,6 +1766,134 @@ mod tests {
         });
     }
 
+    /// Replaying a local notarize vote for a leader-owned proposal should
+    /// restore the proposal as verified and suppress duplicate vote construction.
+    #[test]
+    fn replayed_local_notarize_restores_verified_leader_proposal() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let epoch = Epoch::new(2);
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, view),
+                View::new(1),
+                Sha256Digest::from([42u8; 32]),
+            );
+            let local_vote = Notarize::sign(&schemes[0], proposal.clone()).expect("notarize");
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Enter the view where we are the leader.
+            assert!(state.enter_view(view));
+            state.set_leader(view, None);
+            assert_eq!(state.leader_index(view), Some(Participant::new(0)));
+
+            // Replay our own notarize vote.
+            state.replay(&Artifact::Notarize(local_vote));
+
+            // Proposal should be restored in the round.
+            let round = state.views.get(&view).expect("replayed round must exist");
+            assert_eq!(round.proposal(), Some(&proposal));
+
+            // No duplicate notarize vote should be constructed.
+            assert!(
+                state.construct_notarize(view).is_none(),
+                "replay should restore that we already emitted the local notarize vote"
+            );
+
+            // No verification request should be emitted (leader-owned).
+            assert!(state.try_verify().is_none());
+
+            let notarization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), view);
+            assert!(candidates[0].1);
+        });
+    }
+
+    #[test]
+    fn certify_external_candidates_for_leader_controlled_views() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let epoch = Epoch::new(2);
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, view),
+                View::new(1),
+                Sha256Digest::from([43u8; 32]),
+            );
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+            assert!(state.enter_view(view));
+            state.set_leader(view, None);
+            assert_eq!(state.leader_index(view), Some(Participant::new(0)));
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_none());
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            let (candidate, is_local) = &candidates[0];
+            assert_eq!(*candidate, proposal);
+            assert!(
+                !*is_local,
+                "leader-owned recovered proposal must not inherit local certification"
+            );
+        });
+    }
+
     #[test]
     fn replay_restores_conflict_state() {
         let runtime = deterministic::Runner::default();
@@ -1887,6 +2023,7 @@ mod tests {
             // All 6 views should be candidates
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 6);
+            assert!(candidates.iter().all(|(_, is_local)| !is_local));
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
             for i in [3u64, 4, 5, 7] {
@@ -1926,7 +2063,8 @@ mod tests {
             state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(9));
+            assert_eq!(candidates[0].0.round.view(), View::new(9));
+            assert!(!candidates[0].1);
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
@@ -1936,7 +2074,8 @@ mod tests {
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(10));
+            assert_eq!(candidates[0].0.round.view(), View::new(10));
+            assert!(!candidates[0].1);
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -1946,7 +2085,81 @@ mod tests {
             state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(11));
+            assert_eq!(candidates[0].0.round.view(), View::new(11));
+            assert!(!candidates[0].1);
+        });
+    }
+
+    #[test]
+    fn certify_candidates_skips_views_at_or_below_last_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let make_notarization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
+            };
+
+            let make_finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
+            };
+
+            let stale_view = View::new(2);
+            let live_view = View::new(3);
+
+            state.add_notarization(make_notarization(stale_view));
+            state.add_notarization(make_notarization(live_view));
+            state.add_finalization(make_finalization(stale_view));
+
+            // Reinsert a stale candidate to exercise the defensive finalized-view guard.
+            state.certification_candidates.insert(stale_view);
+            assert_eq!(state.last_finalized(), stale_view);
+
+            // The stale round still looks certifiable without the finalized-view filter.
+            assert!(state
+                .views
+                .get_mut(&stale_view)
+                .expect("stale round must exist")
+                .try_certify()
+                .is_some());
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), live_view);
+            assert!(!candidates[0].1);
         });
     }
 
@@ -2001,7 +2214,8 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].0.round.view(), view);
+            assert!(!candidates[0].1);
         });
     }
 
@@ -2045,7 +2259,8 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].0.round.view(), view);
+            assert!(!candidates[0].1);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());

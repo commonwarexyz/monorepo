@@ -114,13 +114,14 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
 
 async fn test_sync<
     R: sync::resolver::Resolver<
+        Family = Family,
         Digest = commonware_cryptography::sha256::Digest,
         Op = FixedOperation<Family, Key, Value>,
     >,
 >(
     context: deterministic::Context,
     resolver: R,
-    target: sync::Target<commonware_cryptography::sha256::Digest>,
+    target: sync::Target<Family, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
@@ -194,25 +195,22 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)), &db)
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    db.prune(db.sync_boundary())
                         .await
                         .expect("Prune should not fail");
                 }
@@ -224,24 +222,21 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let finalized = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch = batch.write(k, v);
-                        }
-                        batch
-                            .merkleize(Some(FixedBytes::new(commit_id)), &db)
-                            .await
-                            .unwrap()
-                            .finalize()
-                    };
-                    db.apply_batch(finalized)
+                    let mut batch = db.new_batch();
+                    for (k, v) in pending_writes.drain(..) {
+                        batch = batch.write(k, v);
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .await
+                        .unwrap();
+                    db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
-                        range: non_empty_range!(db.inactivity_floor_loc(), db.bounds().await.end),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     };
 
                     let wrapped_src = Arc::new(db);
@@ -278,14 +273,12 @@ fn fuzz(mut input: FuzzInput) {
             }
         }
 
-        let finalized = {
-            let mut batch = db.new_batch();
-            for (k, v) in pending_writes.drain(..) {
-                batch = batch.write(k, v);
-            }
-            batch.merkleize(None, &db).await.unwrap().finalize()
-        };
-        db.apply_batch(finalized)
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");

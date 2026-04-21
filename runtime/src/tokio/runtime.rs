@@ -133,6 +133,14 @@ pub struct Config {
     /// Tokio sets the default value to the number of logical CPUs.
     worker_threads: usize,
 
+    /// Number of scheduler ticks between global queue polls.
+    ///
+    /// When unset, Tokio uses its default behavior for the multi-thread
+    /// scheduler. Smaller values reduce the delay before tasks woken from
+    /// outside a worker, such as io_uring completion notifications, are polled
+    /// from the global queue again.
+    global_queue_interval: Option<u32>,
+
     /// Maximum number of threads to use for blocking tasks.
     ///
     /// Unlike worker threads, blocking threads are created as needed and
@@ -178,6 +186,7 @@ impl Config {
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
+            global_queue_interval: None,
             max_blocking_threads: 512,
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
@@ -193,6 +202,11 @@ impl Config {
     /// See [Config]
     pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_global_queue_interval(mut self, n: u32) -> Self {
+        self.global_queue_interval = Some(n);
         self
     }
     /// See [Config]
@@ -250,6 +264,10 @@ impl Config {
     /// See [Config]
     pub const fn worker_threads(&self) -> usize {
         self.worker_threads
+    }
+    /// See [Config]
+    pub const fn global_queue_interval(&self) -> Option<u32> {
+        self.global_queue_interval
     }
     /// See [Config]
     pub const fn max_blocking_threads(&self) -> usize {
@@ -351,13 +369,16 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
+        let mut builder = Builder::new_multi_thread();
+        builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
             .thread_stack_size(self.cfg.thread_stack_size)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
+            .enable_all();
+        if let Some(global_queue_interval) = self.cfg.global_queue_interval {
+            builder.global_queue_interval(global_queue_interval);
+        }
+        let runtime = builder.build().expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
@@ -422,7 +443,7 @@ impl crate::Runner for Runner {
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
-                        max_op_timeout: self.cfg.network_cfg.read_write_timeout,
+                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
@@ -478,7 +499,7 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -517,7 +538,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -534,7 +555,7 @@ impl Clone for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -568,11 +589,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -585,9 +601,9 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -596,7 +612,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = if is_instrumented {
+        let future = if traced {
             let span = info_span!("task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
@@ -691,6 +707,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Construct the full label name
         let name = {
@@ -705,37 +725,6 @@ impl crate::Metrics for Context {
             name,
             ..self.clone()
         }
-    }
-
-    fn label(&self) -> String {
-        self.name.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
-    }
-
-    fn encode(&self) -> String {
-        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -764,6 +753,40 @@ impl crate::Metrics for Context {
             scope: Some(guard),
             ..self.clone()
         }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = self.executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
+        sub_registry.register(prefixed_name, help, metric);
+    }
+
+    fn encode(&self) -> String {
+        self.executor.registry.lock().encode()
     }
 }
 

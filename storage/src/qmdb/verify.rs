@@ -24,8 +24,11 @@ where
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
 ///
-/// The `pinned_nodes` are the individual peak digests before the proven range (as returned by
-/// `nodes_to_pin`). When `start_loc` is 0, `pinned_nodes` must be empty.
+/// The `pinned_nodes` are the pruning-boundary peaks at `start_loc` (as returned by
+/// `nodes_to_pin`). When the larger tree has merged smaller subtrees into a bigger parent, the
+/// pins sit below the prefix subtrees authenticated by the proof; the verifier hashes pairs of
+/// pins up to each authenticated subtree's root and compares. When `start_loc` is 0,
+/// `pinned_nodes` must be empty.
 pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     hasher: &Standard<H>,
     proof: &Proof<F, D>,
@@ -151,7 +154,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
 
@@ -219,7 +223,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let start_loc = Location::<F>::new(5u64);
         let root = merkle.root();
@@ -264,7 +269,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
         let range = Location::<F>::new(1)..Location::<F>::new(4);
@@ -319,7 +325,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
         let range = Location::<F>::new(0)..Location::<F>::new(3);
@@ -374,7 +381,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let range = Location::<F>::new(0)..Location::<F>::new(2);
         let proof = merkle.range_proof(&hasher, range).unwrap();
@@ -415,7 +423,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
 
@@ -476,7 +485,8 @@ mod tests {
             for op in &operations {
                 batch = batch.add(&hasher, &op.encode());
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
 
@@ -559,7 +569,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
 
@@ -645,7 +656,8 @@ mod tests {
             for op in &operations {
                 batch = batch.add(&hasher, &op.encode());
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
         let proof = merkle
@@ -683,7 +695,8 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            merkle.apply(batch.merkleize(&hasher).finalize()).unwrap();
+            let batch = batch.merkleize(&merkle, &hasher);
+            merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
 

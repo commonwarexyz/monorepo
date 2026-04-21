@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig, Location},
     qmdb::current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -20,7 +20,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
-type Db = CurrentDb<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db = CurrentDb<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -89,14 +89,12 @@ async fn commit_pending(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) {
-    let finalized = {
-        let mut batch = db.new_batch();
-        for (k, v) in pending_writes.drain(..) {
-            batch = batch.write(k, v);
-        }
-        batch.merkleize(None, db).await.unwrap().finalize()
-    };
-    db.apply_batch(finalized)
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = batch.merkleize(db, None).await.unwrap();
+    db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
     db.commit().await.expect("commit fsync should not fail");
@@ -117,7 +115,7 @@ fn fuzz(data: FuzzInput) {
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = Config {
-            mmr_config: MmrConfig {
+            merkle_config: MmrConfig {
                 journal_partition: "fuzz-current-mmr-journal".into(),
                 metadata_partition: "fuzz-current-mmr-metadata".into(),
                 items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
@@ -131,7 +129,7 @@ fn fuzz(data: FuzzInput) {
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 page_cache,
             },
-            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
+            grafted_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
         };
 
@@ -217,7 +215,7 @@ fn fuzz(data: FuzzInput) {
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().await.end;
-                    db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
+                    db.prune(db.sync_boundary()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
@@ -245,7 +243,7 @@ fn fuzz(data: FuzzInput) {
                     let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % *current_op_count);
 
-                    let oldest_loc = db.inactivity_floor_loc();
+                    let oldest_loc = db.sync_boundary();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = db
                             .range_proof(&mut hasher, start_loc, *max_ops)

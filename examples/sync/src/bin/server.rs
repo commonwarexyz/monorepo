@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync an
-//! `any`, `current`, or `immutable` database.
+//! `any`, `current`, `immutable`, or `keyless` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -8,12 +8,12 @@ use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
     Spawner, Storage, StreamOf,
 };
-use commonware_storage::qmdb::sync::Target;
+use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable,
+    immutable, keyless,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
@@ -106,7 +106,7 @@ async fn maybe_add_operations<DB, E>(
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: Storage + Clock + Metrics + RngCore,
 {
     let now = context.current();
@@ -155,16 +155,16 @@ async fn handle_get_sync_target<DB>(
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, inactivity_floor, size) = {
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
-            database.inactivity_floor().await,
+            database.sync_boundary().await,
             database.size().await,
         )
     };
@@ -172,7 +172,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: non_empty_range!(inactivity_floor, size),
+            range: non_empty_range!(sync_boundary, size),
         },
     };
 
@@ -186,7 +186,7 @@ async fn handle_get_operations<DB>(
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -263,7 +263,7 @@ async fn handle_message<DB>(
     message: wire::Message<DB::Operation, Key>,
 ) -> wire::Message<DB::Operation, Key>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
 {
     let request_id = message.request_id();
     match message {
@@ -317,7 +317,7 @@ async fn recv_loop<DB, E>(
     response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
     client_addr: SocketAddr,
 ) where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Metrics + Network + Spawner,
@@ -367,7 +367,7 @@ async fn handle_client<DB, E>(
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner,
@@ -408,7 +408,7 @@ async fn initialize_database<DB, E>(
     context: &mut E,
 ) -> Result<DB, Box<dyn std::error::Error>>
 where
-    DB: Syncable,
+    DB: Syncable<Family = mmr::Family>,
     E: RngCore,
 {
     info!("starting {} database", DB::name());
@@ -430,7 +430,7 @@ where
         .collect::<String>();
     info!(
         size = ?database.size().await,
-        inactivity_floor = ?database.inactivity_floor().await,
+        sync_boundary = ?database.sync_boundary().await,
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -446,7 +446,7 @@ async fn run_helper<DB, E>(
     database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    DB: Syncable + Send + Sync + 'static,
+    DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
@@ -537,6 +537,17 @@ where
     run_helper(context, config, database).await
 }
 
+/// Run the Keyless database server.
+async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = keyless::create_config(&context);
+    let database = keyless::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
 /// Parse command line arguments and return configuration.
 fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
@@ -546,8 +557,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|current|immutable")
-                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
+                .value_name("any|current|immutable|keyless")
+                .help("Database type to use. Must be `any`, `current`, `immutable`, or `keyless`.")
                 .default_value("any"),
         )
         .arg(
@@ -680,6 +691,7 @@ fn main() {
             DatabaseType::Any => run_any(context, config).await,
             DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
+            DatabaseType::Keyless => run_keyless(context, config).await,
         };
 
         if let Err(err) = result {

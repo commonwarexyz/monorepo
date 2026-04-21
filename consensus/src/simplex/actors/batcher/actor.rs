@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
+use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
@@ -229,8 +229,8 @@ where
     ) -> Vec<Participant> {
         match self.forwarding {
             ForwardingPolicy::Disabled => Vec::new(),
-            ForwardingPolicy::Silent => round.missing_voters(proposal),
-            ForwardingPolicy::NextLeader => round
+            ForwardingPolicy::SilentVoters => round.missing_voters(proposal),
+            ForwardingPolicy::SilentLeader => round
                 .is_missing_voter(proposal, next_leader)
                 .then_some(next_leader)
                 .into_iter()
@@ -249,7 +249,7 @@ where
                 proposal.payload,
                 Plan::Forward {
                     round: proposal.round,
-                    peers,
+                    recipients: Recipients::Some(peers),
                 },
             )
             .await;
@@ -276,7 +276,7 @@ where
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter, vote_receiver, certificate_receiver).await
+            self.run(voter, vote_receiver, certificate_receiver)
         )
     }
 

@@ -36,21 +36,17 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Resolve mutations, compute the new root, and return a merkleized batch.
     fn merkleize(
         self,
-        metadata: Option<Self::Metadata>,
         db: &Db,
+        metadata: Option<Self::Metadata>,
     ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
 }
 
 /// Merkleized batch of operations.
 pub trait MerkleizedBatch: Sized {
     type Digest: Digest;
-    type Changeset: Send;
 
     /// Return the committed root.
     fn root(&self) -> Self::Digest;
-
-    /// Consume this batch, producing an owned changeset.
-    fn finalize(self) -> Self::Changeset;
 }
 
 /// Db that supports updates through a batch API.
@@ -58,23 +54,23 @@ pub trait BatchableDb {
     type Family: Family;
     type K;
     type V;
-    type Changeset: Send;
+    type Merkleized: MerkleizedBatch;
     type Batch: UnmerkleizedBatch<
         Self,
         Family = Self::Family,
         K = Self::K,
         V = Self::V,
         Metadata = Self::V,
-        Merkleized: MerkleizedBatch<Changeset = Self::Changeset>,
+        Merkleized = Self::Merkleized,
     >;
 
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
-    /// Apply a changeset.
+    /// Apply a merkleized batch.
     fn apply_batch(
         &mut self,
-        batch: Self::Changeset,
+        batch: Self::Merkleized,
     ) -> impl Future<Output = Result<Range<Location<Self::Family>>, Error<Self::Family>>>;
 }
 
@@ -125,6 +121,10 @@ pub trait DbAny<F: Family>:
 
     /// The location before which all operations can be pruned.
     fn inactivity_floor_loc(&self) -> impl Future<Output = Location<F>> + Send;
+
+    /// The maximum location that [`Self::prune`] accepts and the most recent location from which
+    /// this database can be safely synced.
+    fn sync_boundary(&self) -> impl Future<Output = Location<F>> + Send;
 }
 
 /// Proof generation for Any database variants.
@@ -211,6 +211,10 @@ macro_rules! impl_db_any {
 
             async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
                 self.inactivity_floor_loc()
+            }
+
+            async fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
+                self.sync_boundary()
             }
         }
     };

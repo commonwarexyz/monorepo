@@ -1,11 +1,16 @@
 //! Benchmark entry point for all QMDB benchmarks.
-//!
-//! Run with: `cargo bench --bench qmdb`
 
 use criterion::criterion_main;
 
+mod chained_growth;
 mod common;
 mod generate;
 mod init;
+mod merkleize;
 
-criterion_main!(generate::benches, init::benches);
+criterion_main!(
+    chained_growth::benches,
+    generate::benches,
+    init::benches,
+    merkleize::benches
+);
