@@ -38,7 +38,7 @@ async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest
         make_value,
     )
     .await;
-    db.prune(db.inactivity_floor_loc().await).await.unwrap();
+    db.prune(db.sync_boundary().await).await.unwrap();
     db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();

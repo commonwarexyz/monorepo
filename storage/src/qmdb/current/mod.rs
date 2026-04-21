@@ -649,8 +649,7 @@ pub mod tests {
                 commit_writes(&mut db, []).await.unwrap();
                 let committed_root = db.root();
                 let committed_op_count = db.bounds().await.end;
-                let committed_inactivity_floor = db.inactivity_floor_loc().await;
-                db.prune(committed_inactivity_floor).await.unwrap();
+                db.prune(db.sync_boundary().await).await.unwrap();
 
                 // Perform more random operations without committing any of them.
                 let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
@@ -691,7 +690,7 @@ pub mod tests {
                 db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
                     .await
                     .unwrap();
-                db.prune(db.inactivity_floor_loc().await).await.unwrap();
+                db.prune(db.sync_boundary().await).await.unwrap();
                 // State from scenario #2 should match that of a successful commit.
                 assert_eq!(db.bounds().await.end, committed_op_count);
                 assert_eq!(db.root(), scenario_2_root);
@@ -745,7 +744,7 @@ pub mod tests {
                         .await
                         .unwrap();
                     db_pruning
-                        .prune(db_no_pruning.inactivity_floor_loc().await)
+                        .prune(db_no_pruning.sync_boundary().await)
                         .await
                         .unwrap();
                 }
@@ -804,8 +803,7 @@ pub mod tests {
             db.apply_batch(merkleized).await.unwrap();
 
             // Prune to flatten bitmap layers and advance pruned_chunks.
-            let floor = db.inactivity_floor_loc().await;
-            db.prune(floor).await.unwrap();
+            db.prune(db.sync_boundary().await).await.unwrap();
 
             let pruned_bits_before = db.pruned_bits();
             warn!(
@@ -908,7 +906,7 @@ pub mod tests {
 
             // Sync and prune.
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc().await).await.unwrap();
+            db.prune(db.sync_boundary().await).await.unwrap();
 
             // Record root before dropping.
             let root = db.root();
@@ -1639,8 +1637,8 @@ pub mod tests {
         });
     }
 
-    /// Verify that the delayed-merge settlement guard defers bitmap pruning while reopen/proof
-    /// paths remain stable.
+    /// Verify that the delayed-merge settlement guard holds `sync_boundary` at 0 during the
+    /// unsettled window, so `prune` rejects any non-zero `prune_loc`.
     #[test_traced("INFO")]
     fn test_current_mmb_settlement_guard_defers_pruning() {
         let executor = deterministic::Runner::default();
@@ -1672,13 +1670,23 @@ pub mod tests {
                 *db.inactivity_floor_loc() >= 256,
                 "expected inactivity floor past chunk 0"
             );
+            assert_eq!(
+                *db.sync_boundary(),
+                0,
+                "settlement guard should hold boundary at 0 during unsettled window"
+            );
 
-            db.prune(Location::<mmb::Family>::new(1)).await.unwrap();
+            // `prune` must reject any non-zero loc because sync_boundary is still 0.
+            let result = db.prune(Location::<mmb::Family>::new(1)).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondMinRequired(_, _))),
+                "expected PruneBeyondMinRequired, got {result:?}"
+            );
             assert_eq!(db.pruned_bits(), 0);
             db.sync().await.unwrap();
             drop(db);
 
-            // Reopen: settlement guard deferred pruning, so state is unchanged.
+            // Reopen: no pruning occurred, state is unchanged.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.with_label("reopen"),
                 variable_config::<OneCap>(partition, &context),
@@ -1724,7 +1732,7 @@ pub mod tests {
                 history.push((db.bounds().await.end, db.inactivity_floor_loc()));
             }
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0, "expected MMB bitmap pruning to be active");
             db.sync().await.unwrap();
@@ -1779,6 +1787,130 @@ pub mod tests {
         });
     }
 
+    /// Verify that `Db::prune` never advances the ops journal past the settled bitmap
+    /// pruning boundary on a delayed-merge (MMB) family. The journal's lower bound must be
+    /// less than or equal to `sync_boundary()`, and the test setup must force the lag to
+    /// be strictly active so the assertion is not vacuous.
+    #[test_traced]
+    fn test_current_mmb_prune_respects_sync_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmb", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let k = key(0);
+            for round in 0..COMMITS {
+                mmb_commit(&mut db, [(k, Some(val(70_000 + round)))]).await;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            let boundary = db.sync_boundary();
+            let floor = db.inactivity_floor_loc();
+            assert!(
+                boundary < floor,
+                "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal was pruned past the settled bitmap boundary: \
+                 bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that on a non-delayed-merge (MMR) family `sync_boundary()` lags the inactivity
+    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// window. Guards against an accidental regression that would introduce a larger lag on
+    /// families that don't need it.
+    #[test_traced]
+    fn test_current_mmr_prune_boundary_lag_is_only_chunk_alignment() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 320;
+            const N: usize = 32;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-clip-mmr", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key(0), Some(val(80_000 + round)))],
+                    None,
+                )
+                .await;
+            }
+
+            db.prune(db.sync_boundary()).await.unwrap();
+
+            let boundary = db.sync_boundary();
+            let floor = db.inactivity_floor_loc();
+            let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+            assert!(
+                boundary <= floor && *floor - *boundary < chunk_bits,
+                "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
+            );
+            assert!(
+                db.bounds().await.start <= boundary,
+                "ops journal bounds must be <= sync_boundary: bounds.start={}, boundary={boundary}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that `prune(loc)` with `loc < sync_boundary()` prunes the ops journal only as far
+    /// as the caller requested.
+    #[test_traced]
+    fn test_current_prune_below_settled_boundary_is_honored() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 100;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("prune-below-boundary", &ctx),
+            )
+            .await
+            .unwrap();
+
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(&mut db, [(key(0), Some(val(90_000 + round)))], None)
+                    .await;
+            }
+
+            assert!(*db.inactivity_floor_loc() > 1);
+            let small = Location::new(1);
+            db.prune(small).await.unwrap();
+
+            assert!(
+                db.bounds().await.start <= small,
+                "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
+                db.bounds().await.start
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Prune, then grow without pruning again so delayed MMB merges occur inside the
     /// already-pruned region. Verify proof + reopen correctness.
     #[test_traced]
@@ -1799,7 +1931,7 @@ pub mod tests {
                 mmb_commit(&mut db, [(k, Some(val(60_000 + round)))]).await;
             }
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             db.sync().await.unwrap();
 
             // Keep growing without pruning: delayed merges now occur in the pruned region.
@@ -1868,7 +2000,7 @@ pub mod tests {
                 expected = Some(val(60_000 + round));
                 mmb_commit(&mut db, [(k, expected)]).await;
                 round += 1;
-                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.prune(db.sync_boundary()).await.unwrap();
                 if db.pruned_bits() >= 512 {
                     break;
                 }
@@ -1917,7 +2049,7 @@ pub mod tests {
                     mmb_commit(&mut db, [(k, expected)]).await;
                 }
 
-                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.prune(db.sync_boundary()).await.unwrap();
                 db.sync().await.unwrap();
 
                 let root_before = db.root();
@@ -1972,7 +2104,7 @@ pub mod tests {
                 commit_idx += 1;
             }
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             db.sync().await.unwrap();
             assert_eq!(
                 db.root(),
@@ -2048,7 +2180,7 @@ pub mod tests {
                     "root mismatch before prune at round {round}"
                 );
 
-                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                db.prune(db.sync_boundary()).await.unwrap();
                 db.sync().await.unwrap();
 
                 assert_eq!(
@@ -2111,14 +2243,14 @@ pub mod tests {
         });
     }
 
-    /// Verify that prune beyond the inactivity floor is rejected without mutating state.
+    /// Verify that prune beyond the sync boundary is rejected without mutating state.
     #[test_traced]
-    fn test_current_prune_rejects_beyond_inactivity_floor_without_mutation() {
+    fn test_current_prune_rejects_beyond_sync_boundary_without_mutation() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const COMMITS: u64 = 160;
 
-            let partition = "current-prune-beyond-floor";
+            let partition = "current-prune-beyond-boundary";
             let ctx = context.with_label("db");
             let mut db: UnorderedVariableDb =
                 UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
@@ -2133,17 +2265,17 @@ pub mod tests {
 
             let expected_root = db.root();
             let expected_ops_root = db.ops_root();
-            let expected_floor = db.inactivity_floor_loc();
+            let expected_boundary = db.sync_boundary();
             let expected_pruned_bits = db.pruned_bits();
             let expected_value = db.get(&key0).await.unwrap();
 
             // 32 * 8 = 256 bits per chunk for N=32.
-            let invalid_prune_loc = Location::new(*expected_floor + 256);
+            let invalid_prune_loc = Location::new(*expected_boundary + 256);
             let result = db.prune(invalid_prune_loc).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
-                    if loc == invalid_prune_loc && floor == expected_floor),
-                "expected prune rejection above inactivity floor, got {result:?}"
+                matches!(result, Err(Error::PruneBeyondMinRequired(loc, boundary))
+                    if loc == invalid_prune_loc && boundary == expected_boundary),
+                "expected prune rejection above sync boundary, got {result:?}"
             );
 
             assert_eq!(db.root(), expected_root);
@@ -2266,7 +2398,7 @@ pub mod tests {
             )
             .await;
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
                 pruned_bits > *first_range.start,
@@ -3181,7 +3313,7 @@ pub mod tests {
             let floor = *db.inactivity_floor_loc();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
 
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.sync_boundary()).await.unwrap();
             db.apply_batch(c_m).await.unwrap();
             db.flatten();
 

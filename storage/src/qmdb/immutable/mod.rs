@@ -194,6 +194,15 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
+    /// Return the most recent location from which this database can safely be synced.
+    ///
+    /// Immutable databases have no inactivity concept; this returns the oldest retained
+    /// operation. Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this
+    /// value or any later location as `range.start`.
+    pub async fn sync_boundary(&self) -> Location<F> {
+        self.bounds().await.start
+    }
+
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {

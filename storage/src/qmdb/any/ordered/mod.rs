@@ -16,10 +16,6 @@ use futures::{
     future::try_join_all,
     stream::{self, Stream},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Bound,
-};
 
 pub mod fixed;
 pub mod variable;
@@ -210,18 +206,16 @@ where
     }
 }
 
-/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
-/// first key if `key` is the last key.
+/// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
+/// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
-    let next = possible_next
-        .range((Bound::Excluded(key), Bound::Unbounded))
-        .next();
-    if let Some(next) = next {
-        return next.clone();
+pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+    let idx = possible_next.partition_point(|k| k <= key);
+    if idx < possible_next.len() {
+        return possible_next[idx].clone();
     }
     possible_next
         .first()
@@ -229,26 +223,25 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
-/// to the last key if `key` is the first key.
+/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
 pub(crate) fn find_prev_key<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a BTreeMap<K, V>,
+    possible_previous: &'a [(K, V)],
 ) -> (&'a K, &'a V) {
-    let prev = possible_previous
-        .range((Bound::Unbounded, Bound::Excluded(key)))
-        .next_back();
-    if let Some(prev) = prev {
-        return prev;
-    }
-    possible_previous
-        .iter()
-        .next_back()
-        .expect("possible_previous should not be empty")
+    let idx = possible_previous.partition_point(|(k, _)| k < key);
+    let (k, v) = if idx > 0 {
+        &possible_previous[idx - 1]
+    } else {
+        possible_previous
+            .last()
+            .expect("possible_previous should not be empty")
+    };
+    (k, v)
 }
 
 #[cfg(any(test, feature = "test-traits"))]
@@ -335,10 +328,7 @@ mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
+        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
@@ -361,10 +351,7 @@ mod test {
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
+        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.with_label("reopen2")).await;
@@ -577,7 +564,7 @@ mod test {
 
         // Pruning inactive ops should not affect current state or root.
         let root = db.root();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();

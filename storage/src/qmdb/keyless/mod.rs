@@ -170,6 +170,13 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
+    /// Return the most recent location from which this database can safely be synced, and the
+    /// upper bound on [`Self::prune`]'s `loc`. For keyless databases, this equals the
+    /// inactivity floor declared by the last committed batch.
+    pub const fn sync_boundary(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
         let op = self

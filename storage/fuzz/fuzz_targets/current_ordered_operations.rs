@@ -215,7 +215,7 @@ fn fuzz(data: FuzzInput) {
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().await.end;
-                    db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
+                    db.prune(db.sync_boundary()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
@@ -243,7 +243,7 @@ fn fuzz(data: FuzzInput) {
                     let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % *current_op_count);
 
-                    let oldest_loc = db.inactivity_floor_loc();
+                    let oldest_loc = db.sync_boundary();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = db
                             .range_proof(&mut hasher, start_loc, *max_ops)

@@ -29,6 +29,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 use tracing::warn;
 
@@ -248,7 +249,12 @@ impl Waker {
     ///
     /// This method hides the arm-and-recheck futex sequence used when the ring
     /// is fully idle. It always clears the current wait state before returning.
-    pub fn park_idle(&self, processed_seq: u32) {
+    ///
+    /// Returns `Some(duration)` only if `futex_wait` actually blocked in the
+    /// kernel and later resumed. Returns `None` if the armed snapshot already
+    /// showed published work or a latched wake, or if a concurrent state
+    /// change rejected the snapshot before the thread could sleep.
+    pub fn park_idle(&self, processed_seq: u32) -> Option<Duration> {
         // Arming only updates the packed wake state machine. It does not
         // publish queue memory or consume any out-of-band wake publication, so
         // `Relaxed` is sufficient on this RMW.
@@ -270,9 +276,14 @@ impl Waker {
         if (snapshot & WAKE_SIGNALLED_BIT) == 0
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
         {
-            self.futex_wait(snapshot);
+            let before = Instant::now();
+            let slept = self.futex_wait(snapshot);
+            self.clear_wait();
+            slept.then(|| before.elapsed())
+        } else {
+            self.clear_wait();
+            None
         }
-        self.clear_wait();
     }
 
     /// Arm the blocking wake path used around `submit_and_wait`.
@@ -482,13 +493,17 @@ impl Waker {
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed before
     /// the kernel slept".
-    fn futex_wait(&self, snapshot: u32) {
+    ///
+    /// Returns `true` only if the kernel actually blocked the thread and later
+    /// resumed it. Returns `false` for stale-snapshot races, userspace
+    /// equality mismatches, and unexpected futex wait failures.
+    fn futex_wait(&self, snapshot: u32) -> bool {
         loop {
             // This is only a same-word equality check before entering the
             // syscall. It relies only on modification order of this atomic, so
             // `Relaxed` is sufficient.
             if self.inner.state.load(Ordering::Relaxed) != snapshot {
-                return;
+                return false;
             }
 
             // SAFETY: `state` is a valid aligned futex word for the duration of
@@ -503,19 +518,19 @@ impl Waker {
                 )
             };
             if ret == 0 {
-                return;
+                return true;
             }
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => return,
+                Some(libc::EAGAIN) => return false,
                 _ => {
                     // With a null timeout, documented timeout-specific errors do not
                     // apply here. An unexpected futex wait error means the kernel
                     // refused to block, so the safe fallback is to return to
                     // userspace and re-check the packed state rather than panic.
                     warn!("futex wait failed: {err}");
-                    return;
+                    return false;
                 }
             }
         }
@@ -659,7 +674,7 @@ pub mod tests {
                     }
                 });
 
-                waker.park_idle(before);
+                let _ = waker.park_idle(before);
                 handle.join().expect("idle notifier thread panicked");
 
                 let expected = match notifier {
@@ -691,8 +706,9 @@ pub mod tests {
         let before = submitted_seq(&waker);
 
         waker.wake();
-        waker.park_idle(before);
+        let duration = waker.park_idle(before);
 
+        assert!(duration.is_none(), "should not have slept");
         assert_eq!(submitted_seq(&waker), before);
         assert_eq!(state_bits(&waker), 0);
     }
@@ -729,8 +745,9 @@ pub mod tests {
 
         // If the stale snapshot were incorrectly accepted, this call could
         // block indefinitely. Returning here proves the userspace equality
-        // check / futex EAGAIN path rejected the outdated snapshot.
-        waker.futex_wait(snapshot);
+        // check / futex EAGAIN path rejected the outdated snapshot without
+        // ever committing to a real futex sleep.
+        assert!(!waker.futex_wait(snapshot));
         waker.clear_wait();
 
         // The publish should remain visible and the wait bits should be fully

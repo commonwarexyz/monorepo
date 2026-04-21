@@ -114,13 +114,14 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
 
 async fn test_sync<
     R: sync::resolver::Resolver<
+        Family = Family,
         Digest = commonware_cryptography::sha256::Digest,
         Op = FixedOperation<Family, Key, Value>,
     >,
 >(
     context: deterministic::Context,
     resolver: R,
-    target: sync::Target<commonware_cryptography::sha256::Digest>,
+    target: sync::Target<Family, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
@@ -209,7 +210,7 @@ fn fuzz(mut input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    db.prune(db.sync_boundary())
                         .await
                         .expect("Prune should not fail");
                 }
@@ -235,7 +236,7 @@ fn fuzz(mut input: FuzzInput) {
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
-                        range: non_empty_range!(db.inactivity_floor_loc(), db.bounds().await.end),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     };
 
                     let wrapped_src = Arc::new(db);

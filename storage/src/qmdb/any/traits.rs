@@ -121,6 +121,10 @@ pub trait DbAny<F: Family>:
 
     /// The location before which all operations can be pruned.
     fn inactivity_floor_loc(&self) -> impl Future<Output = Location<F>> + Send;
+
+    /// The maximum location that [`Self::prune`] accepts and the most recent location from which
+    /// this database can be safely synced.
+    fn sync_boundary(&self) -> impl Future<Output = Location<F>> + Send;
 }
 
 /// Proof generation for Any database variants.
@@ -207,6 +211,10 @@ macro_rules! impl_db_any {
 
             async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
                 self.inactivity_floor_loc()
+            }
+
+            async fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
+                self.sync_boundary()
             }
         }
     };

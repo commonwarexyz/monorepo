@@ -75,8 +75,11 @@ pub trait Syncable: Sized {
     /// Get the total number of operations in the database (including pruned operations).
     fn size(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
-    /// Get the inactivity floor, the location below which all operations are inactive.
-    fn inactivity_floor(&self) -> impl Future<Output = Location<Self::Family>> + Send;
+    /// Get the most recent location from which this database can safely be synced.
+    ///
+    /// Callers constructing a sync target should use this value (or any earlier retained
+    /// location) as the `range.start`.
+    fn sync_boundary(&self) -> impl Future<Output = Location<Self::Family>> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(
