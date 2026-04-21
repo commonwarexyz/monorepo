@@ -8717,9 +8717,7 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update {
-                            current,
-                            response,
-                            ..
+                            current, response, ..
                         } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
                             response.send(Some(TimeoutReason::Inactivity)).unwrap();

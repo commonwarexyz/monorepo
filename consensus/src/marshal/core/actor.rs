@@ -525,11 +525,7 @@ where
                         response.send_lossy(info);
                     }
                     Message::GetVerified { round, response } => {
-                        let block = self
-                            .cache
-                            .get_verified(round)
-                            .await
-                            .map(Into::into);
+                        let block = self.cache.get_verified(round).await.map(Into::into);
                         response.send_lossy(block);
                     }
                     Message::Forward {
@@ -559,7 +555,8 @@ where
                         // `cache_verified` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        self.cache_verified(round, block.digest(), block.clone()).await;
+                        self.cache_verified(round, block.digest(), block.clone())
+                            .await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
@@ -805,9 +802,7 @@ where
                 }
 
                 // Batch verify and process all delivers.
-                needs_sync |= self
-                    .verify_delivered(delivers, &mut application)
-                    .await;
+                needs_sync |= self.verify_delivered(delivers, &mut application).await;
 
                 // Attempt to fill gaps before handling produce requests (so we
                 // can serve data we just received).
