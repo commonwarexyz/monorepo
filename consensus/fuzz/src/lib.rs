@@ -375,7 +375,7 @@ where
         propose_latency: (10.0, 5.0),
         verify_latency: (10.0, 5.0),
         certify_latency: (10.0, 5.0),
-        should_certify: application::Certifier::Sometimes,
+        should_certify: application::Certifier::Always,
     };
     let (actor, application) =
         application::Application::new(context.with_label("application"), app_cfg);
@@ -609,7 +609,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: application::Certifier::Always,
             };
             let (actor, application) =
                 application::Application::new(primary_context.with_label("application"), app_cfg);

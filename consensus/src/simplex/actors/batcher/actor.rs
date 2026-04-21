@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
+use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
@@ -249,7 +249,7 @@ where
                 proposal.payload,
                 Plan::Forward {
                     round: proposal.round,
-                    peers,
+                    recipients: Recipients::Some(peers),
                 },
             )
             .await;

@@ -680,6 +680,15 @@ where
 /// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) can mutate
 /// the bitmap in place while live batches concurrently read through it.
 ///
+/// # Why in-place mutation under a lock
+///
+/// Snapshot-based alternatives (per-apply clone, page-level copy-on-write, etc.) all require
+/// cloning at least the bitmap's top-level pointer structure on every apply. For large DBs that
+/// cost grows linearly with the total bit count and every live batch retains its snapshot's
+/// memory until dropped, so memory use would grow with both bitmap size and batch lifetime.
+/// Mutating in place keeps memory bounded by the actual bitmap size regardless of how many
+/// batches are alive or how long they live. The per-call read lock is the cost we pay for that.
+///
 /// # Reading through invalid batches
 ///
 /// The bitmap behind this lock represents *committed* state. If a caller holds a

@@ -6,8 +6,8 @@
 //! Timed: do `batches` more merkleize + apply iterations on top of the pre-built chain, with a
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
-use crate::common::{make_fixed_value, Digest, WRITE_BUFFER_SIZE};
-use commonware_cryptography::{Hasher, Sha256};
+use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
@@ -25,7 +25,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -143,42 +143,6 @@ macro_rules! with_current_db {
             CurrentVariant::OrderedFixed256 => init_db!(CurOFix256Mmb),
         }
     }};
-}
-
-/// Pre-populate the database with `num_keys` unique keys, then commit and sync so that
-/// seed-phase buffered writes are flushed before the timer starts.
-async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
-    db: &mut C,
-    num_keys: u64,
-) {
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut batch = db.new_batch();
-    for i in 0u64..num_keys {
-        let k = Sha256::hash(&i.to_be_bytes());
-        batch = batch.write(k, Some(make_fixed_value(&mut rng)));
-    }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized).await.unwrap();
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
-}
-
-/// Write `num_updates` random key updates into a batch.
-fn write_random_updates<
-    B: commonware_storage::qmdb::any::traits::UnmerkleizedBatch<Db, K = Digest, V = Digest>,
-    Db: ?Sized,
->(
-    mut batch: B,
-    num_updates: u64,
-    num_keys: u64,
-    rng: &mut StdRng,
-) -> B {
-    for _ in 0..num_updates {
-        let idx = rng.next_u64() % num_keys;
-        let k = Sha256::hash(&idx.to_be_bytes());
-        batch = batch.write(k, Some(make_fixed_value(rng)));
-    }
-    batch
 }
 
 /// Run a chained-growth sequence with a pre-built deep chain.

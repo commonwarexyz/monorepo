@@ -1,23 +1,97 @@
 //! Proof types for [crate::qmdb::current] authenticated databases.
 //!
 //! This module provides:
+//! - [OpsRootWitness]: Authenticates an ops root against a canonical `current` root.
 //! - [RangeProof]: Proves a range of operations exist in the database.
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
-        self, hasher::Hasher, storage::Storage, Family, Graftable, Location, Position, Proof,
+        self,
+        hasher::{Hasher, Standard as StandardHasher},
+        storage::Storage,
+        Family, Graftable, Location, Position, Proof,
     },
-    qmdb::{current::grafting, Error},
+    qmdb::{
+        current::{db::combine_roots, grafting},
+        Error,
+    },
 };
-use commonware_codec::Codec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroU64};
 use tracing::debug;
+
+/// Witness that a particular `ops_root` is committed by a `current` canonical root.
+///
+/// `canonical_root = hash(ops_root || grafted_root [|| next_bit || partial_chunk_digest])`
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct OpsRootWitness<D: Digest> {
+    /// The grafted-tree root committed by the canonical root.
+    pub grafted_root: D,
+
+    /// The trailing partial chunk contribution, if the bitmap length is not chunk-aligned:
+    /// `(next_bit, partial_chunk_digest)`.
+    pub partial_chunk: Option<(u64, D)>,
+}
+
+impl<D: Digest> OpsRootWitness<D> {
+    /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
+    pub fn verify<H: CHasher<Digest = D>>(
+        &self,
+        hasher: &mut StandardHasher<H>,
+        ops_root: &D,
+        canonical_root: &D,
+    ) -> bool {
+        let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
+        combine_roots(hasher, ops_root, &self.grafted_root, partial) == *canonical_root
+    }
+}
+
+impl<D: Digest> Write for OpsRootWitness<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.grafted_root.write(buf);
+        self.partial_chunk.is_some().write(buf);
+        if let Some((next_bit, digest)) = &self.partial_chunk {
+            UInt(*next_bit).write(buf);
+            digest.write(buf);
+        }
+    }
+}
+
+impl<D: Digest> EncodeSize for OpsRootWitness<D> {
+    fn encode_size(&self) -> usize {
+        self.grafted_root.encode_size()
+            + self
+                .partial_chunk
+                .as_ref()
+                .map_or(1, |(nb, d)| 1 + UInt(*nb).encode_size() + d.encode_size())
+    }
+}
+
+impl<D: Digest> Read for OpsRootWitness<D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let grafted_root = D::read(buf)?;
+        let partial_chunk = if bool::read(buf)? {
+            let next_bit = UInt::<u64>::read(buf)?.into();
+            let digest = D::read(buf)?;
+            Some((next_bit, digest))
+        } else {
+            None
+        };
+        Ok(Self {
+            grafted_root,
+            partial_chunk,
+        })
+    }
+}
 
 /// An inventory of all structural peaks for a Merkle-family tree, mapped linearly top-to-bottom
 /// relative to the bounds of a verified range proof.
@@ -611,10 +685,29 @@ mod tests {
         mmr::StandardHasher,
         qmdb::current::{db, grafting},
     };
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+
+    #[test]
+    fn test_ops_root_witness_codec_roundtrip() {
+        for partial_chunk in [
+            None,
+            Some((0u64, Sha256::hash(b"partial-zero"))),
+            Some((123u64, Sha256::hash(b"partial-nonzero"))),
+        ] {
+            let witness = OpsRootWitness {
+                grafted_root: Sha256::hash(b"grafted"),
+                partial_chunk,
+            };
+            let encoded = witness.encode();
+            assert_eq!(encoded.len(), witness.encode_size());
+            let decoded = OpsRootWitness::<sha256::Digest>::decode(encoded).unwrap();
+            assert_eq!(decoded, witness);
+        }
+    }
 
     #[test_traced]
     fn test_range_proof_verifies_for_mmb_multi_peak_chunk() {
