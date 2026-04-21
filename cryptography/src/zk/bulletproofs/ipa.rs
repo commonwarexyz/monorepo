@@ -262,10 +262,7 @@ impl<G> Setup<G> {
                     .enumerate()
                     .map(|(i, g_i)| {
                         (
-                            (
-                                0,
-                                i.try_into().expect("generator index should fit in u32"),
-                            ),
+                            (0, i.try_into().expect("generator index should fit in u32")),
                             g_i,
                         )
                     }),
@@ -278,10 +275,7 @@ impl<G> Setup<G> {
                     .enumerate()
                     .map(|(i, h_i)| {
                         (
-                            (
-                                1,
-                                i.try_into().expect("generator index should fit in u32"),
-                            ),
+                            (1, i.try_into().expect("generator index should fit in u32")),
                             h_i,
                         )
                     }),
