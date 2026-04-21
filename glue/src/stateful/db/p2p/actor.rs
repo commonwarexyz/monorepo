@@ -11,7 +11,7 @@ use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_storage::mmr;
+use commonware_storage::merkle::Family;
 use commonware_storage::qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
@@ -24,9 +24,10 @@ use tracing::{debug, info};
 
 type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
-type SyncMailbox<DB> = Mailbox<DB, Op<DB>, DatabaseRoot<DB>>;
-type Pending<Op, D> = oneshot::Sender<Result<FetchResult<mmr::Family, Op, D>, mailbox::ResponseDropped>>;
-type PendingSubs<DB> = BTreeMap<handler::Request, Vec<Pending<Op<DB>, DatabaseRoot<DB>>>>;
+type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
+type PendingSubs<F, DB> =
+    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -78,41 +79,43 @@ enum State<DB> {
 }
 
 /// An action dispatched by incoming mailbox messages.
-enum MailboxAction {
+enum MailboxAction<F: Family> {
     None,
-    Fetch(handler::Request),
-    Cancel(handler::Request),
+    Fetch(handler::Request<F>),
+    Cancel(handler::Request<F>),
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
-pub struct Actor<E, P, D, B, DB>
+pub struct Actor<E, P, D, B, F, DB>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Arc<AsyncRwLock<DB>>: SyncResolver<Family = mmr::Family>,
+    F: Family,
+    Arc<AsyncRwLock<DB>>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: mpsc::Receiver<mailbox::Message<DB, Op<DB>, DatabaseRoot<DB>>>,
+    mailbox_rx: mpsc::Receiver<mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>>,
     state: State<DB>,
     metrics: ResolverMetrics,
-    pending: PendingSubs<DB>,
+    pending: PendingSubs<F, DB>,
 }
 
-impl<E, P, D, B, DB> Actor<E, P, D, B, DB>
+impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Arc<AsyncRwLock<DB>>: SyncResolver<Family = mmr::Family>,
+    F: Family,
+    Arc<AsyncRwLock<DB>>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<DB>) {
+    pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
         let metrics = ResolverMetrics::new(&context);
         let state = cfg.database.take().map_or(State::NoDb, |db| {
             let _ = metrics.has_database.try_set(1i64);
@@ -212,8 +215,8 @@ where
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, Op<DB>, DatabaseRoot<DB>>,
-    ) -> MailboxAction {
+        message: mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>,
+    ) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
@@ -248,7 +251,7 @@ where
     }
 
     /// Returns `true` if a request should be cancelled.
-    fn should_cancel_request(&mut self, request: &handler::Request) -> bool {
+    fn should_cancel_request(&mut self, request: &handler::Request<F>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return false;
         };
@@ -263,7 +266,7 @@ where
     /// Decode a peer's response, fan it out to pending subscribers, and aggregate approvals.
     async fn handle_deliver(
         &mut self,
-        key: handler::Request,
+        key: handler::Request<F>,
         value: bytes::Bytes,
         response: oneshot::Sender<bool>,
     ) {
@@ -279,7 +282,7 @@ where
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
         let decoded =
-            match handler::Response::<Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
+            match handler::Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
                 Ok(decoded) => decoded,
                 Err(_) => {
                     self.pending.insert(key, subscribers);
@@ -332,7 +335,7 @@ where
     /// Serve a peer's request by querying the local database.
     async fn handle_produce(
         &mut self,
-        key: handler::Request,
+        key: handler::Request<F>,
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
@@ -422,8 +425,14 @@ mod tests {
     >;
     type TestOp = <Arc<AsyncRwLock<TestDb>> as SyncResolver>::Op;
 
-    type TestActor =
-        Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb>;
+    type TestActor = Actor<
+        deterministic::Context,
+        ed25519::PublicKey,
+        DummyProvider,
+        DummyBlocker,
+        mmr::Family,
+        TestDb,
+    >;
 
     fn test_config(
         database: Option<Arc<AsyncRwLock<TestDb>>>,
@@ -443,7 +452,7 @@ mod tests {
         }
     }
 
-    fn test_request_at(op_count: Location) -> handler::Request {
+    fn test_request_at(op_count: Location) -> handler::Request<mmr::Family> {
         handler::Request {
             op_count,
             start_loc: Location::new(0),
@@ -452,9 +461,10 @@ mod tests {
         }
     }
 
-    type TestPending = Pending<TestOp, sha256::Digest>;
-    type TestPendingResult =
-        oneshot::Receiver<Result<FetchResult<mmr::Family, TestOp, sha256::Digest>, mailbox::ResponseDropped>>;
+    type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
+    type TestPendingResult = oneshot::Receiver<
+        Result<FetchResult<mmr::Family, TestOp, sha256::Digest>, mailbox::ResponseDropped>,
+    >;
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
         oneshot::channel()
@@ -489,7 +499,7 @@ mod tests {
     }
 
     fn encoded_fetch_payload() -> Bytes {
-        handler::Response::<TestOp, sha256::Digest> {
+        handler::Response::<mmr::Family, TestOp, sha256::Digest> {
             proof: Proof {
                 leaves: Location::new(0),
                 digests: Vec::new(),

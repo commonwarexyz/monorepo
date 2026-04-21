@@ -19,7 +19,7 @@ use commonware_storage::{
         },
         Error as JournalError,
     },
-    mmr,
+    merkle::Family,
     qmdb::{
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
@@ -36,13 +36,14 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableDbHandle<E, K, V, C, H, T> =
-    Arc<AsyncRwLock<Immutable<mmr::Family, E, K, V, C, H, T>>>;
+type ImmutableDbHandle<F, E, K, V, C, H, T> =
+    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
-pub struct ImmutableUnmerkleized<E, K, V, C, H, T>
+pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -51,13 +52,14 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    batch: UnmerkleizedBatch<mmr::Family, H, K, V>,
-    db: ImmutableDbHandle<E, K, V, C, H, T>,
+    batch: UnmerkleizedBatch<F, H, K, V>,
+    db: ImmutableDbHandle<F, E, K, V, C, H, T>,
     metadata: Option<V::Value>,
 }
 
-impl<E, K, V, C, H, T> Deref for ImmutableUnmerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -66,15 +68,16 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    type Target = UnmerkleizedBatch<mmr::Family, H, K, V>;
+    type Target = UnmerkleizedBatch<F, H, K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
     }
 }
 
-impl<E, K, V, C, H, T> ImmutableUnmerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> ImmutableUnmerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -91,7 +94,7 @@ where
     }
 
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -99,7 +102,7 @@ where
     /// Read multiple values by key, amortizing lock acquisition and journal I/O.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
     }
@@ -113,8 +116,9 @@ where
 
 /// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Merkleized`](super::Merkleized) trait.
-pub struct ImmutableMerkleized<E, K, V, C, H, T>
+pub struct ImmutableMerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -123,12 +127,13 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    inner: Arc<MerkleizedBatch<mmr::Family, H::Digest, K, V>>,
-    db: ImmutableDbHandle<E, K, V, C, H, T>,
+    inner: Arc<MerkleizedBatch<F, H::Digest, K, V>>,
+    db: ImmutableDbHandle<F, E, K, V, C, H, T>,
 }
 
-impl<E, K, V, C, H, T> Deref for ImmutableMerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> Deref for ImmutableMerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -137,15 +142,16 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    type Target = MerkleizedBatch<mmr::Family, H::Digest, K, V>;
+    type Target = MerkleizedBatch<F, H::Digest, K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl<E, K, V, C, H, T> ImmutableMerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> ImmutableMerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -155,7 +161,7 @@ where
     Operation<K, V>: EncodeShared,
 {
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &*db).await
     }
@@ -163,14 +169,15 @@ where
     /// Read multiple values by key, amortizing lock acquisition and journal I/O.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<mmr::Family>> {
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &*db).await
     }
 }
 
-impl<E, K, V, C, H, T> UnmerkleizedTrait for ImmutableUnmerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -179,10 +186,10 @@ where
     T: Translator,
     Operation<K, V>: EncodeShared,
 {
-    type Merkleized = ImmutableMerkleized<E, K, V, C, H, T>;
-    type Error = Error<mmr::Family>;
+    type Merkleized = ImmutableMerkleized<F, E, K, V, C, H, T>;
+    type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
         let merkleized = self.batch.merkleize(&*db, self.metadata);
         Ok(ImmutableMerkleized {
@@ -192,8 +199,9 @@ where
     }
 }
 
-impl<E, K, V, C, H, T> MerkleizedTrait for ImmutableMerkleized<E, K, V, C, H, T>
+impl<F, E, K, V, C, H, T> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
@@ -203,7 +211,7 @@ where
     Operation<K, V>: EncodeShared,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnmerkleized<E, K, V, C, H, T>;
+    type Unmerkleized = ImmutableUnmerkleized<F, E, K, V, C, H, T>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
@@ -218,8 +226,9 @@ where
     }
 }
 
-impl<E, K, V, H, T> ManagedDb<E> for fixed::Db<mmr::Family, E, K, V, H, T>
+impl<F, E, K, V, H, T> ManagedDb<E> for fixed::Db<F, E, K, V, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
@@ -227,6 +236,7 @@ where
     T: Translator,
 {
     type Unmerkleized = ImmutableUnmerkleized<
+        F,
         E,
         K,
         FixedEncoding<V>,
@@ -234,13 +244,20 @@ where
         H,
         T,
     >;
-    type Merkleized =
-        ImmutableMerkleized<E, K, FixedEncoding<V>, FixedJournal<E, fixed::Operation<K, V>>, H, T>;
-    type Error = Error<mmr::Family>;
+    type Merkleized = ImmutableMerkleized<
+        F,
+        E,
+        K,
+        FixedEncoding<V>,
+        FixedJournal<E, fixed::Operation<K, V>>,
+        H,
+        T,
+    >;
+    type Error = Error<F>;
     type Config = fixed::Config<T>;
-    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
+    type SyncTarget = sync::Target<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
@@ -253,7 +270,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
         Ok(())
@@ -270,7 +287,7 @@ where
     async fn rewind_to_target(
         &mut self,
         target: Self::SyncTarget,
-    ) -> Result<(), Error<mmr::Family>> {
+    ) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
@@ -283,8 +300,9 @@ where
     }
 }
 
-impl<E, K, V, H, T> ManagedDb<E> for variable::Db<mmr::Family, E, K, V, H, T>
+impl<F, E, K, V, H, T> ManagedDb<E> for variable::Db<F, E, K, V, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: VariableValue + 'static,
@@ -293,6 +311,7 @@ where
     variable::Operation<K, V>: Codec,
 {
     type Unmerkleized = ImmutableUnmerkleized<
+        F,
         E,
         K,
         VariableEncoding<V>,
@@ -301,6 +320,7 @@ where
         T,
     >;
     type Merkleized = ImmutableMerkleized<
+        F,
         E,
         K,
         VariableEncoding<V>,
@@ -308,11 +328,11 @@ where
         H,
         T,
     >;
-    type Error = Error<mmr::Family>;
+    type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<K, V> as CodecRead>::Cfg>;
-    type SyncTarget = sync::Target<mmr::Family, H::Digest>;
+    type SyncTarget = sync::Target<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
@@ -325,7 +345,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
         Ok(())
@@ -342,7 +362,7 @@ where
     async fn rewind_to_target(
         &mut self,
         target: Self::SyncTarget,
-    ) -> Result<(), Error<mmr::Family>> {
+    ) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
@@ -355,16 +375,17 @@ where
     }
 }
 
-impl<E, K, V, H, T, R> StateSyncDb<E, R> for fixed::Db<mmr::Family, E, K, V, H, T>
+impl<F, E, K, V, H, T, R> StateSyncDb<E, R> for fixed::Db<F, E, K, V, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     T: Translator,
-    R: Resolver<Family = mmr::Family, Op = fixed::Operation<K, V>, Digest = H::Digest>,
+    R: Resolver<Family = F, Op = fixed::Operation<K, V>, Digest = H::Digest>,
 {
-    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
+    type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
@@ -395,17 +416,18 @@ where
     }
 }
 
-impl<E, K, V, H, T, R> StateSyncDb<E, R> for variable::Db<mmr::Family, E, K, V, H, T>
+impl<F, E, K, V, H, T, R> StateSyncDb<E, R> for variable::Db<F, E, K, V, H, T>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     T: Translator,
     variable::Operation<K, V>: Codec,
-    R: Resolver<Family = mmr::Family, Op = variable::Operation<K, V>, Digest = H::Digest>,
+    R: Resolver<Family = F, Op = variable::Operation<K, V>, Digest = H::Digest>,
 {
-    type SyncError = sync::Error<mmr::Family, R::Error, H::Digest>;
+    type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,

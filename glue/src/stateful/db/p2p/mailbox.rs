@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_storage::{
-    mmr::{self, Location},
+    merkle::{Family, Location},
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
 use commonware_utils::{
@@ -22,24 +22,24 @@ use std::{num::NonZeroU64, sync::Arc};
 pub struct ResponseDropped;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
-pub(super) enum Message<DB, Op, D: Digest> {
+pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     /// Provide a database handle so the actor can serve incoming requests.
     AttachDatabase(Arc<AsyncRwLock<DB>>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
-        request: handler::Request,
-        response: oneshot::Sender<Result<FetchResult<mmr::Family, Op, D>, ResponseDropped>>,
+        request: handler::Request<F>,
+        response: oneshot::Sender<Result<FetchResult<F, Op, D>, ResponseDropped>>,
     },
     /// Cancel a previously requested operation fetch.
-    CancelOperations { request: handler::Request },
+    CancelOperations { request: handler::Request<F> },
 }
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<DB, Op, D: Digest> {
-    sender: mpsc::Sender<Message<DB, Op, D>>,
+pub struct Mailbox<DB, F: Family, Op, D: Digest> {
+    sender: mpsc::Sender<Message<DB, F, Op, D>>,
 }
 
-impl<DB, Op, D: Digest> Clone for Mailbox<DB, Op, D> {
+impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -47,33 +47,34 @@ impl<DB, Op, D: Digest> Clone for Mailbox<DB, Op, D> {
     }
 }
 
-impl<DB, Op, D: Digest> Mailbox<DB, Op, D> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<DB, Op, D>>) -> Self {
+impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
+    pub(super) const fn new(sender: mpsc::Sender<Message<DB, F, Op, D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, Op: Send, D: Digest> Mailbox<DB, Op, D> {
+impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     pub async fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) {
         self.sender.send_lossy(Message::AttachDatabase(db)).await;
     }
 }
 
-impl<DB, Op, D> SyncResolver for Mailbox<DB, Op, D>
+impl<DB, F, Op, D> SyncResolver for Mailbox<DB, F, Op, D>
 where
+    F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
     DB: Send + Sync + 'static,
 {
-    type Family = mmr::Family;
+    type Family = F;
     type Digest = D;
     type Op = Op;
     type Error = ResponseDropped;
 
     async fn get_operations(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
@@ -110,8 +111,9 @@ where
     }
 }
 
-impl<DB, Op, D> AttachableResolver<DB> for Mailbox<DB, Op, D>
+impl<DB, F, Op, D> AttachableResolver<DB> for Mailbox<DB, F, Op, D>
 where
+    F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
     DB: Send + Sync + 'static,
@@ -126,15 +128,16 @@ mod tests {
     use super::*;
     use commonware_cryptography::sha256;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_storage::mmr;
     use commonware_utils::NZU64;
 
     #[test]
     fn get_operations_cancellation_sends_cancel_message() {
         deterministic::Runner::default().start(|_| async move {
             let (sender, mut receiver) = mpsc::channel(4);
-            let mailbox = Mailbox::<(), u64, sha256::Digest>::new(sender);
-            let op_count = Location::new(10);
-            let start_loc = Location::new(3);
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let op_count = mmr::Location::new(10);
+            let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
 
             let (cancel_tx, cancel_rx) = oneshot::channel();
