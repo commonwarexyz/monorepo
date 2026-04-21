@@ -572,4 +572,72 @@ mod test {
             tests::test_keyless_db_rewind_pruned_target_errors(db).await;
         });
     }
+
+    /// Smoke test: verify the sync engine works end-to-end with a fixed-size keyless database.
+    /// The full sync test suite runs against the variable variant via the harness in
+    /// [`super::super::sync::tests`]; this test covers the fixed-size code path.
+    #[test_traced("WARN")]
+    fn test_keyless_fixed_sync() {
+        use crate::{
+            merkle::Location,
+            qmdb::sync::{self, engine::Config, Target},
+        };
+        use commonware_utils::{non_empty_range, sequence::U64};
+        use std::sync::Arc;
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let target_config = db_config("sync-target", &ctx);
+            let mut target_db: TestDb<mmr::Family> =
+                TestDb::init(ctx.with_label("target"), target_config)
+                    .await
+                    .unwrap();
+
+            let mut batch = target_db.new_batch();
+            for i in 0..20u64 {
+                batch = batch.append(U64::new(i * 10 + 1));
+            }
+            let merkleized = batch.merkleize(&target_db, None);
+            target_db.apply_batch(merkleized).await.unwrap();
+
+            let target_root = target_db.root();
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let upper_bound = bounds.end;
+
+            let client_config = db_config("sync-client", &ctx);
+            let target_db = Arc::new(target_db);
+            let config = Config {
+                db_config: client_config,
+                fetch_batch_size: NZU64!(5),
+                target: Target {
+                    root: target_root,
+                    range: non_empty_range!(lower_bound, upper_bound),
+                },
+                context: ctx.with_label("client"),
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            };
+            let synced_db: TestDb<mmr::Family> = sync::sync(config).await.unwrap();
+
+            assert_eq!(synced_db.root(), target_root);
+            let bounds = synced_db.bounds().await;
+            assert_eq!(bounds.end, upper_bound);
+            assert_eq!(bounds.start, lower_bound);
+
+            for i in 0..20u64 {
+                let got = synced_db.get(Location::new(i + 1)).await.unwrap();
+                assert_eq!(got, Some(U64::new(i * 10 + 1)));
+            }
+
+            synced_db.destroy().await.unwrap();
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            target_db.destroy().await.unwrap();
+        });
+    }
 }

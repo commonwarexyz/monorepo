@@ -27,6 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
+    range::NonEmptyRange,
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
 };
@@ -135,7 +136,7 @@ pub struct SyncConfig<F: Family, D: Digest> {
     pub config: Config,
 
     /// Sync range expressed as leaf-aligned bounds.
-    pub range: std::ops::Range<Location<F>>,
+    pub range: NonEmptyRange<Location<F>>,
 
     /// The pinned nodes the structure needs at the pruning boundary (range start), in the order
     /// specified by `Family::nodes_to_pin`. If `None`, the pinned nodes are expected to already be
@@ -521,8 +522,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         cfg: SyncConfig<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
-        let prune_pos = Position::try_from(cfg.range.start)?;
-        let end_pos = Position::try_from(cfg.range.end)?;
+        let prune_pos = Position::try_from(cfg.range.start())?;
+        let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
@@ -549,7 +550,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         }
 
         // Handle existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
         if journal_size > *end_pos {
             return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
         }
@@ -570,7 +570,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.range.start.as_u64().to_be_bytes().into(),
+            cfg.range.start().as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
@@ -1149,7 +1149,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
-    use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -2066,7 +2066,7 @@ mod tests {
         // Test fresh start scenario with completely new structure (no existing data)
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(52),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
             pinned_nodes: None,
         };
 
@@ -2143,7 +2143,7 @@ mod tests {
         }
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2225,7 +2225,7 @@ mod tests {
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: lower_bound_loc..upper_bound_loc,
+            range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
 
@@ -2275,7 +2275,7 @@ mod tests {
 
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(6)..Location::<F>::new(20),
+            range: non_empty_range!(Location::<F>::new(6), Location::<F>::new(20)),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
 
@@ -2479,7 +2479,7 @@ mod tests {
         let prune_loc = Location::<F>::new(32);
         let sync_cfg = SyncConfig::<F, sha256::Digest> {
             config: cfg,
-            range: prune_loc..Location::<F>::new(128),
+            range: non_empty_range!(prune_loc, Location::<F>::new(128)),
             pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
         };
 
@@ -3074,7 +3074,7 @@ mod tests {
         // init_sync should recover by rewinding to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest> {
             config: test_config(&context),
-            range: Location::<F>::new(0)..Location::<F>::new(100),
+            range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
             pinned_nodes: None,
         };
         let sync_mmr =

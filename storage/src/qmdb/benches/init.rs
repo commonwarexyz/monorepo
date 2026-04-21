@@ -40,7 +40,7 @@ async fn populate_and_sync<C: DbAny<commonware_storage::merkle::mmr::Family, Key
     make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
 ) {
     gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY), make_value).await;
-    db.prune(db.inactivity_floor_loc().await).await.unwrap();
+    db.prune(db.sync_boundary().await).await.unwrap();
     db.sync().await.unwrap();
 }
 

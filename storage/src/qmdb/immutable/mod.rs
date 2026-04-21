@@ -238,6 +238,13 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
+    /// Return the most recent location from which this database can safely be synced, and the
+    /// upper bound on [`Self::prune`]'s `loc`. For immutable databases, this equals the
+    /// inactivity floor declared by the last committed batch.
+    pub const fn sync_boundary(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {

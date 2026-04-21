@@ -123,8 +123,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        self.inactivity_floor_loc()
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     fn historical_proof(
