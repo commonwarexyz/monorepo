@@ -28,7 +28,10 @@ use crate::{
 use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::{
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::BuildHasherDefault,
@@ -86,11 +89,12 @@ impl<const N: usize> ChunkOverlay<N> {
         chunk[rel / 8] |= 1 << (rel % 8);
     }
 
-    /// Clear a single bit (used for superseded locations).
-    /// Skips locations in pruned chunks — those bits are already inactive.
-    fn clear_bit<B: BitmapReadable<N>>(&mut self, base: &B, loc: u64) {
+    /// Clear a single bit (used for superseded locations). `pruned_chunks` is passed in by the
+    /// caller so the hot loop in `build_chunk_overlay` reads it once rather than per call.
+    /// Skips locations in pruned chunks since those bits are already inactive.
+    fn clear_bit<B: BitmapReadable<N>>(&mut self, base: &B, pruned_chunks: usize, loc: u64) {
         let idx = BitMap::<N>::to_chunk_index(loc);
-        if idx < base.pruned_chunks() {
+        if idx < pruned_chunks {
             return;
         }
         let rel = (loc % Self::CHUNK_BITS) as usize;
@@ -279,11 +283,43 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
-/// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [`UnmerkleizedBatch`].
+/// A speculative batch of operations whose root digest has been computed, in contrast to
+/// [`UnmerkleizedBatch`].
 ///
-/// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed
-/// to compute the canonical root.
+/// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed to
+/// compute the canonical root.
+///
+/// # Branch validity
+///
+/// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB. It
+/// is not an immutable snapshot.
+///
+/// Internally, the batch chain terminates in the DB's committed bitmap via `BitmapBatch::Base`.
+/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch),
+/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) update the DB.
+///
+/// Reads through this batch's chain, constructing child batches from it, and applying it later are
+/// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
+/// other words, every successful [`apply_batch`](super::db::Db::apply_batch) since this batch was
+/// merkleized must have applied an ancestor of this batch.
+///
+/// Once a non-ancestor batch is applied, this batch and all of its descendants become invalid
+/// objects. The library does not guard against continued use after that point.
+///
+/// Applying an invalid batch is caught by the any-layer staleness check and returns
+/// [`Error::StaleBatch`] without mutating committed state, so `apply_batch` itself cannot corrupt
+/// the DB. The one exception is equal-size sibling branches (where both branches have the same
+/// total operation count): the staleness check is size-based and cannot distinguish them, so
+/// applying a descendant of one sibling after the other was already applied can silently corrupt
+/// snapshot/log state. Callers must not apply batches from an orphaned branch.
+///
+/// Rules of thumb:
+/// - Drop any `Arc<MerkleizedBatch>` you no longer intend to apply.
+/// - Extending a batch after `apply_batch` has consumed it (building a child off the just-applied
+///   parent) is safe. The committed bitmap now equals the parent's post-apply state, so child reads
+///   are consistent.
+/// - Extending a batch after a different branch has been applied is not safe. Do not call `get`,
+///   `new_batch`, or `apply_batch` on that branch again.
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize>
 where
     Operation<F, U>: Send + Sync,
@@ -446,13 +482,14 @@ where
 {
     let total_bits = base.len() + batch_len as u64;
     let mut overlay = ChunkOverlay::new(total_bits);
+    let pruned_chunks = base.pruned_chunks();
 
     // 1. CommitFloor (last op) is always active.
     let commit_loc = batch_base + batch_len as u64 - 1;
     overlay.set_bit(base, commit_loc);
 
     // 2. Inactivate previous CommitFloor.
-    overlay.clear_bit(base, batch_base - 1);
+    overlay.clear_bit(base, pruned_chunks, batch_base - 1);
 
     // 3. Set active bits + clear superseded locations from the diff.
     for (key, entry) in diff {
@@ -473,7 +510,7 @@ where
             }
         }
         if let Some(old) = prev_loc {
-            overlay.clear_bit(base, *old);
+            overlay.clear_bit(base, pruned_chunks, *old);
         }
     }
 
@@ -595,9 +632,9 @@ where
     // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
-        pruned_chunks: bitmap_parent.pruned_chunks(),
         parent: bitmap_parent.clone(),
         overlay: Arc::new(overlay),
+        shared: Arc::clone(bitmap_parent.shared()),
     }));
 
     // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
@@ -637,13 +674,95 @@ where
     }))
 }
 
-/// Immutable bitmap state at any point in a batch chain.
+/// The committed bitmap shared between the [`Db`](super::db::Db) and live batches.
 ///
-/// Mirrors the [`crate::merkle::batch::MerkleizedBatch`] pattern.
+/// Wrapped in a [`RwLock`] so that [`Db::apply_batch`](super::db::Db::apply_batch),
+/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) can mutate
+/// the bitmap in place while live batches concurrently read through it.
+///
+/// # Why in-place mutation under a lock
+///
+/// Snapshot-based alternatives (per-apply clone, page-level copy-on-write, etc.) all require
+/// cloning at least the bitmap's top-level pointer structure on every apply. For large DBs that
+/// cost grows linearly with the total bit count and every live batch retains its snapshot's
+/// memory until dropped, so memory use would grow with both bitmap size and batch lifetime.
+/// Mutating in place keeps memory bounded by the actual bitmap size regardless of how many
+/// batches are alive or how long they live. The per-call read lock is the cost we pay for that.
+///
+/// # Reading through invalid batches
+///
+/// The bitmap behind this lock represents *committed* state. If a caller holds a
+/// [`MerkleizedBatch`] that has become invalid (see its "Branch validity" docs for the
+/// conditions), reads through that batch's chain will silently return inconsistent data (the
+/// chain's overlays mixed with post-divergence committed chunks). The library does not guard
+/// against this; callers must avoid reading through invalid batches.
+pub(crate) struct SharedBitmap<const N: usize> {
+    inner: RwLock<BitMap<N>>,
+}
+
+impl<const N: usize> SharedBitmap<N> {
+    pub(crate) const fn new(bitmap: BitMap<N>) -> Self {
+        Self {
+            inner: RwLock::new(bitmap),
+        }
+    }
+
+    /// Acquire a shared read guard over the committed bitmap. Kept private so external callers
+    /// go through [`BitmapReadable`] (which doesn't expose a guard across `.await`).
+    fn read(&self) -> RwLockReadGuard<'_, BitMap<N>> {
+        self.inner.read()
+    }
+
+    /// Acquire an exclusive write guard. By convention only
+    /// [`Db::apply_batch`](super::db::Db::apply_batch), [`Db::prune`](super::db::Db::prune), and
+    /// [`Db::rewind`](super::db::Db::rewind) mutate the shared bitmap.
+    pub(super) fn write(&self) -> RwLockWriteGuard<'_, BitMap<N>> {
+        self.inner.write()
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for SharedBitmap<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedBitmap")
+            .field("bitmap_len", &BitmapReadable::<N>::len(&*self.read()))
+            .finish()
+    }
+}
+
+/// [`BitmapReadable`] over the DB's committed bitmap. Each call acquires the read lock briefly.
+impl<const N: usize> BitmapReadable<N> for SharedBitmap<N> {
+    fn complete_chunks(&self) -> usize {
+        self.read().complete_chunks()
+    }
+
+    fn get_chunk(&self, idx: usize) -> [u8; N] {
+        *self.read().get_chunk(idx)
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let guard = self.read();
+        let (chunk, bits) = guard.last_chunk();
+        (*chunk, bits)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        self.read().pruned_chunks()
+    }
+
+    fn len(&self) -> u64 {
+        BitmapReadable::<N>::len(&*self.read())
+    }
+}
+
+/// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
+///
+/// The chain terminates in a `Base` that references the shared committed bitmap. No validity
+/// check is performed. Callers must ensure they only read through batches whose chains are
+/// still valid prefixes of committed state (see [`SharedBitmap`]'s docs).
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
-    /// Committed bitmap (chain terminal).
-    Base(Arc<BitMap<N>>),
+    /// Chain terminal: shared reference to the committed bitmap.
+    Base(Arc<SharedBitmap<N>>),
     /// Speculative layer on top of a parent batch.
     Layer(Arc<BitmapBatchLayer<N>>),
 }
@@ -654,14 +773,47 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     pub(crate) parent: BitmapBatch<N>,
     /// Chunk-level overlay: materialized bytes for every chunk that differs from parent.
     pub(crate) overlay: Arc<ChunkOverlay<N>>,
-    /// Pruned-chunk count, copied from `parent` at construction. Invariant across the whole
-    /// layer chain (pruning only happens on the committed base), so caching here lets
-    /// `BitmapBatch::pruned_chunks` return in O(1) instead of walking to the Base.
-    pub(crate) pruned_chunks: usize,
+    /// Cached terminal [`SharedBitmap`] so [`BitmapBatch::shared`] and
+    /// [`BitmapBatch::pruned_chunks`] answer in O(1) instead of walking the chain.
+    pub(crate) shared: Arc<SharedBitmap<N>>,
 }
 
 impl<const N: usize> BitmapBatch<N> {
     const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+
+    /// Return the terminal [`SharedBitmap`] at the bottom of the chain.
+    fn shared(&self) -> &Arc<SharedBitmap<N>> {
+        match self {
+            Self::Base(s) => s,
+            Self::Layer(layer) => &layer.shared,
+        }
+    }
+
+    /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
+    /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
+    /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
+    fn trim_committed(&self) -> Self {
+        let shared = self.shared();
+        let committed = shared.read().len();
+        let mut kept = Vec::new();
+        let mut current = self;
+        while let Self::Layer(layer) = current {
+            if layer.overlay.len <= committed {
+                break;
+            }
+            kept.push(Arc::clone(&layer.overlay));
+            current = &layer.parent;
+        }
+        let mut result = Self::Base(Arc::clone(shared));
+        for overlay in kept.into_iter().rev() {
+            result = Self::Layer(Arc::new(BitmapBatchLayer {
+                parent: result,
+                overlay,
+                shared: Arc::clone(shared),
+            }));
+        }
+        result
+    }
 }
 
 impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
@@ -675,7 +827,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
         let mut current = self;
         loop {
             match current {
-                Self::Base(bm) => return *bm.get_chunk(idx),
+                Self::Base(shared) => return shared.get_chunk(idx),
                 Self::Layer(layer) => {
                     if let Some(&chunk) = layer.overlay.get(idx) {
                         return chunk;
@@ -702,93 +854,14 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     }
 
     fn pruned_chunks(&self) -> usize {
-        match self {
-            Self::Base(bm) => bm.pruned_chunks(),
-            Self::Layer(layer) => layer.pruned_chunks,
-        }
+        self.shared().pruned_chunks()
     }
 
     fn len(&self) -> u64 {
         match self {
-            Self::Base(bm) => BitmapReadable::<N>::len(bm.as_ref()),
+            Self::Base(shared) => BitmapReadable::<N>::len(shared.as_ref()),
             Self::Layer(layer) => layer.overlay.len,
         }
-    }
-}
-
-impl<const N: usize> BitmapBatch<N> {
-    /// Apply a chunk overlay to this bitmap. When `self` is `Base` with sole ownership, writes
-    /// overlay chunks directly into the bitmap. Otherwise creates a new `Layer`.
-    pub(super) fn apply_overlay(&mut self, overlay: Arc<ChunkOverlay<N>>) {
-        // Fast path: write overlay chunks directly into the Base bitmap.
-        if let Self::Base(base) = self {
-            if let Some(bitmap) = Arc::get_mut(base) {
-                // Extend bitmap to the overlay's length.
-                bitmap.extend_to(overlay.len);
-                // Overwrite dirty chunks.
-                for (&idx, chunk_bytes) in &overlay.chunks {
-                    if idx >= bitmap.pruned_chunks() {
-                        bitmap.set_chunk_by_index(idx, chunk_bytes);
-                    }
-                }
-                return;
-            }
-        }
-
-        // Slow path: create a new layer.
-        let pruned_chunks = self.pruned_chunks();
-        let parent = self.clone();
-        *self = Self::Layer(Arc::new(BitmapBatchLayer {
-            parent,
-            overlay,
-            pruned_chunks,
-        }));
-    }
-
-    /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
-    ///
-    /// After flattening, the new `Base` Arc has refcount 1 (assuming no external clones
-    /// are held).
-    pub(super) fn flatten(&mut self) {
-        if matches!(self, Self::Base(_)) {
-            return;
-        }
-
-        // Take ownership of the chain so that Arc refcounts are not
-        // artificially inflated by a clone.
-        let mut owned = std::mem::replace(self, Self::Base(Arc::new(BitMap::default())));
-
-        // Collect overlays from tip to base.
-        let mut overlays = Vec::new();
-        let base = loop {
-            match owned {
-                Self::Base(bm) => break bm,
-                Self::Layer(layer) => match Arc::try_unwrap(layer) {
-                    Ok(inner) => {
-                        overlays.push(inner.overlay);
-                        owned = inner.parent;
-                    }
-                    Err(arc) => {
-                        overlays.push(arc.overlay.clone());
-                        owned = arc.parent.clone();
-                    }
-                },
-            }
-        };
-
-        // Apply overlays from base to tip.
-        let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
-        for overlay in overlays.into_iter().rev() {
-            // Extend bitmap to the overlay's length.
-            bitmap.extend_to(overlay.len);
-            // Apply dirty chunks.
-            for (&idx, chunk_bytes) in &overlay.chunks {
-                if idx >= bitmap.pruned_chunks() {
-                    bitmap.set_chunk_by_index(idx, chunk_bytes);
-                }
-            }
-        }
-        *self = Self::Base(Arc::new(bitmap));
     }
 }
 
@@ -818,6 +891,10 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
+    ///
+    /// This is only valid while `self` is still on the winning branch. If a different branch has
+    /// been applied since `self` was created, `self` is no longer a valid parent and must not be
+    /// extended.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N>
     where
         H: Hasher<Digest = D>,
@@ -825,11 +902,14 @@ where
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
             Arc::clone(&self.grafted),
-            self.bitmap.clone(),
+            self.bitmap.trim_committed(),
         )
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
+    ///
+    /// This is only valid while `self` remains on the committed prefix. If a non-ancestor batch
+    /// has been applied since `self` was merkleized, do not read through it.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -855,13 +935,17 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    /// Create an initial [`MerkleizedBatch`] from the current committed DB state.
+    ///
+    /// The returned batch is rooted at the current committed prefix, but it is not a persistent
+    /// snapshot across later divergent commits. If some other branch is applied afterward, this
+    /// batch is no longer valid and must not be read through, extended, or applied.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N>> {
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,
-            bitmap: self.status.clone(),
+            bitmap: BitmapBatch::Base(Arc::clone(&self.status)),
             canonical_root: self.root,
         })
     }
@@ -1302,32 +1386,123 @@ mod tests {
         assert_eq!(scan.next_candidate(Location::new(0), 0), None);
     }
 
+    // ---- trim_committed tests ----
+    //
+    // `trim_committed` is called from `MerkleizedBatch::new_batch` to strip any `Layer`s whose
+    // overlays have already been absorbed into the shared committed bitmap by a prior apply.
+    // The implementation is a single loop that collects uncommitted overlays top-down and
+    // rebuilds a fresh chain rooted at `Base`. These tests cover distinct input shapes directly,
+    // without going through the full Db/batch machinery, so the function's structural output
+    // can be asserted.
+
+    /// Build a chain `Base(shared) -> Layer(len=L1) -> Layer(len=L2) -> ...` from a list of
+    /// overlay lengths (bottom to top). Each constructed `Layer` caches `shared` per the
+    /// struct's invariant.
+    fn make_chain(shared: &Arc<SharedBitmap<N>>, overlay_lens: &[u64]) -> BitmapBatch<N> {
+        let mut chain = BitmapBatch::Base(Arc::clone(shared));
+        for &len in overlay_lens {
+            chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+                parent: chain,
+                overlay: Arc::new(ChunkOverlay::new(len)),
+                shared: Arc::clone(shared),
+            }));
+        }
+        chain
+    }
+
+    /// Walk a chain and return its overlay lengths in bottom-to-top order. Used to assert the
+    /// structural output of `trim_committed` without touching private fields. Panics if the
+    /// chain isn't terminated by a single `Base` at the bottom.
+    fn chain_overlays(batch: &BitmapBatch<N>) -> Vec<u64> {
+        let mut lens = Vec::new();
+        let mut current = batch;
+        while let BitmapBatch::Layer(layer) = current {
+            lens.push(layer.overlay.len);
+            current = &layer.parent;
+        }
+        assert!(matches!(current, BitmapBatch::Base(_)));
+        lens.reverse();
+        lens
+    }
+
+    /// Input is already a bare `Base` with no speculative layers on top — the loop body never
+    /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
+    /// same `SharedBitmap`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
+    /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
     #[test]
-    fn test_apply_overlay() {
-        // Base: 8 bits all set, sole owner -> fast path.
-        let base = make_bitmap(&[true; 8]);
-        let mut batch = BitmapBatch::Base(Arc::new(base));
+    fn trim_committed_already_base() {
+        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let base = BitmapBatch::Base(Arc::clone(&shared));
+        let result = base.trim_committed();
+        // Still `Base`, pointing at the same shared terminal.
+        match result {
+            BitmapBatch::Base(s) => assert!(Arc::ptr_eq(&s, &shared)),
+            BitmapBatch::Layer(_) => panic!("expected Base"),
+        }
+    }
 
-        let mut overlay = ChunkOverlay::new(12);
-        let mut c0 = [0u8; N];
-        c0[0] = 0b1111_0111; // bits 0-7 set except bit 3
-        c0[1] = 0b0000_0100; // bit 10 set
-        overlay.chunks.insert(0, c0);
-        batch.apply_overlay(Arc::new(overlay));
+    /// Every layer has been absorbed by prior applies — the loop breaks on the first iteration
+    /// and `kept` stays empty, so the result is a bare `Base`. This is the steady-state
+    /// "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own layer has
+    /// `overlay.len == committed` and the next `new_batch` call should start from a clean
+    /// terminal.
+    #[test]
+    fn trim_committed_all_committed() {
+        // `shared.len() == 64`; the single layer's `overlay.len == 32 (<= 64)`, so it's committed.
+        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let chain = make_chain(&shared, &[32]);
+        let result = chain.trim_committed();
+        // Collapsed to a bare Base, pointing at the original shared.
+        match result {
+            BitmapBatch::Base(s) => assert!(Arc::ptr_eq(&s, &shared)),
+            BitmapBatch::Layer(_) => panic!("expected Base after full trim"),
+        }
+    }
 
-        // Fast path keeps Base, extends length, applies chunks.
-        assert!(matches!(batch, BitmapBatch::Base(_)));
-        assert_eq!(batch.len(), 12);
-        assert_eq!(batch.get_chunk(0)[0] & (1 << 3), 0);
-        assert_ne!(batch.get_chunk(0)[1] & (1 << 2), 0);
+    /// Every layer is still speculative — the loop walks all the way to `Base` without
+    /// breaking, and `kept` holds every overlay. The rebuilt chain is structurally equivalent
+    /// to the input (same overlay lens, same shared terminal). Real-world trigger: speculating
+    /// multiple batches deep (A, then B off A, then C off B) without `apply_batch` in between.
+    #[test]
+    fn trim_committed_none_committed() {
+        // `shared.len() == 32`; both overlays have `len > 32`, so neither is committed.
+        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 32])));
+        let chain = make_chain(&shared, &[64, 96]);
+        let result = chain.trim_committed();
+        // Structure must be preserved in bottom-to-top order.
+        assert_eq!(chain_overlays(&result), vec![64, 96]);
+    }
 
-        // Shared Arc -> slow path creates Layer.
-        let BitmapBatch::Base(ref base_arc) = batch else {
-            panic!("expected Base");
-        };
-        let _shared = Arc::clone(base_arc);
-        let overlay2 = ChunkOverlay::new(12);
-        batch.apply_overlay(Arc::new(overlay2));
-        assert!(matches!(batch, BitmapBatch::Layer(_)));
+    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix — the
+    /// dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
+    /// the rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries
+    /// the cached `shared` reference correctly. Real-world trigger: apply parent A, then B
+    /// held alive off A, then `B.new_batch()` to build C.
+    #[test]
+    fn trim_committed_exactly_one_uncommitted() {
+        // `shared.len() == 64`; committed layer (`overlay.len == 64`) + uncommitted (`96`).
+        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let chain = make_chain(&shared, &[64, 96]);
+        let result = chain.trim_committed();
+        // The committed layer is gone; only the uncommitted overlay remains.
+        assert_eq!(chain_overlays(&result), vec![96]);
+        // And the rebuilt layer's `shared` field still points at the original terminal.
+        assert!(Arc::ptr_eq(result.shared(), &shared));
+    }
+
+    /// Two or more uncommitted layers on top of a committed prefix — exercises the loop's
+    /// iterated `kept.push` and the rebuild's iterated `Arc::new(BitmapBatchLayer)`, including
+    /// the cached `shared` wire-through on every reconstructed layer. Real-world trigger:
+    /// build A, then B off A, then C off B; apply only A; then call `C.new_batch()`.
+    #[test]
+    fn trim_committed_multiple_uncommitted() {
+        // `shared.len() == 64`; committed layer (64), then two uncommitted (96, 128).
+        let shared = Arc::new(SharedBitmap::<N>::new(make_bitmap(&[true; 64])));
+        let chain = make_chain(&shared, &[64, 96, 128]);
+        let result = chain.trim_committed();
+        // Committed layer dropped; uncommitted pair preserved in order.
+        assert_eq!(chain_overlays(&result), vec![96, 128]);
+        // Every reconstructed layer must still cache the original shared terminal.
+        assert!(Arc::ptr_eq(result.shared(), &shared));
     }
 }
