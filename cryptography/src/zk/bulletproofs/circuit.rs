@@ -136,8 +136,8 @@
 
 use super::ipa;
 use crate::transcript::Transcript;
-use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, Write};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space},
     tangle::{Tangle, TangleIdx},
@@ -312,6 +312,7 @@ impl<F: Ring> Circuit<F> {
 ///
 /// This wraps the underlying IPA setup and adds two Pedersen generators used
 /// for commitments to committed values and blindings.
+#[derive(PartialEq)]
 pub struct Setup<G> {
     ipa: ipa::Setup<G>,
     pedersen_value: G,
@@ -367,6 +368,20 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
         self.ipa.encode_size()
             + self.pedersen_value.encode_size()
             + self.pedersen_blinding.encode_size()
+    }
+}
+
+impl<G: Read> Read for Setup<G>
+where
+    G::Cfg: Clone,
+{
+    type Cfg = (usize, G::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
+        let ipa = ipa::Setup::read_cfg(buf, &(*max_len, cfg.clone()))?;
+        let pedersen_value = G::read_cfg(buf, cfg)?;
+        let pedersen_blinding = G::read_cfg(buf, cfg)?;
+        Ok(Self::new(ipa, pedersen_value, pedersen_blinding))
     }
 }
 
@@ -1181,7 +1196,7 @@ pub mod fuzz {
     const MAX_BATCH_CASES: usize = 4;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
 
-    fn test_setup() -> &'static Setup<G> {
+    pub(super) fn test_setup() -> &'static Setup<G> {
         static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
         TEST_SETUP.get_or_init(|| {
             let generators = (1..=NUM_GENERATORS)
@@ -1368,11 +1383,12 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, Circuit, SparseMatrix};
+    use super::{fuzz, Circuit, Setup, SparseMatrix};
+    use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
         algebra::{Additive, Ring},
-        test::F,
+        test::{F, G},
     };
 
     #[test]
@@ -1432,6 +1448,16 @@ mod test {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_setup_roundtrip() {
+        let setup = fuzz::test_setup();
+        let encoded = setup.encode();
+        let decoded: Setup<G> = Setup::decode_cfg(encoded.clone(), &(setup.ipa.g().len(), ()))
+            .expect("setup should decode with its own length bound");
+        assert!(setup == &decoded);
+        assert_eq!(decoded.encode(), encoded);
     }
 
     #[test]
