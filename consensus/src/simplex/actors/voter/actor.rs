@@ -517,7 +517,6 @@ impl<
                 .updated(Certificate::Notarization(notarization.clone()))
                 .await;
         }
-        // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
         // The notarization must be durable before we derive ancestor certifications from it.
         self.sync_journal(view).await;
@@ -536,6 +535,26 @@ impl<
             .await;
     }
 
+    /// Journals the certification decision and signals the resolver and reporter.
+    ///
+    /// Idempotent: silently no-ops if the view was already concluded.
+    async fn finalize_certification(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        view: View,
+        success: bool,
+    ) {
+        let Some(notarization) = self.handle_certification(view, success).await else {
+            return;
+        };
+        resolver.certified(view, success).await;
+        if success {
+            self.reporter
+                .report(Activity::Certification(notarization))
+                .await;
+        }
+    }
+
     /// Derives certifications for rounds whose notarizations prove certification without
     /// waiting on the automaton, then journals and signals each one.
     async fn apply_inferred_certifications(
@@ -544,13 +563,7 @@ impl<
         view: View,
     ) {
         for inferred_view in self.state.infer_certifications(view) {
-            let Some(notarization) = self.handle_certification(inferred_view, true).await else {
-                continue;
-            };
-            debug!(%view, %inferred_view, "inferred certification from notarization");
-            resolver.certified(inferred_view, true).await;
-            self.reporter
-                .report(Activity::Certification(notarization))
+            self.finalize_certification(resolver, inferred_view, true)
                 .await;
         }
     }
@@ -777,17 +790,8 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        let Some(notarization) =
-                            self.handle_certification(round.view(), success).await
-                        else {
-                            continue;
-                        };
-                        resolver.certified(round.view(), success).await;
-                        if success {
-                            self.reporter
-                                .report(Activity::Certification(notarization))
-                                .await;
-                        }
+                        self.finalize_certification(&mut resolver, round.view(), success)
+                            .await;
                     }
                     Artifact::Nullify(nullify) => {
                         self.handle_nullify(nullify.clone()).await;
@@ -996,20 +1000,12 @@ impl<
                         if !certified {
                             warn!(?round, "proposal failed certification");
                         }
-                        let Some(notarization) = self.handle_certification(view, certified).await
-                        else {
-                            continue;
-                        };
-                        // Always forward certification outcomes to resolver.
-                        // This can happen after a nullification for the same view because
-                        // certification is asynchronous; finalization is the boundary that
-                        // cancels in-flight certification and suppresses late reporting.
-                        resolver.certified(view, certified).await;
-                        if certified {
-                            self.reporter
-                                .report(Activity::Certification(notarization))
-                                .await;
-                        }
+                        // Always forward certification outcomes to resolver. This can happen
+                        // after a nullification for the same view because certification is
+                        // asynchronous; finalization is the boundary that cancels in-flight
+                        // certification and suppresses late reporting.
+                        self.finalize_certification(&mut resolver, view, certified)
+                            .await;
                     }
                     Err(err) => {
                         // Unlike propose/verify (where failing to act will lead to a timeout

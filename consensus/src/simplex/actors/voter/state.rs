@@ -650,12 +650,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Returns views whose certifications can be inferred from `view`'s notarization.
     ///
-    /// Because an honest voter only signs a notarize for a view after certifying its parent,
-    /// a notarization for `view` proves f+1 honest peers already certified `view.parent`.
-    /// The walk follows proposal.parent pointers backward. If `view` itself has a notarized
-    /// descendant whose parent is `view`, it is included too (out-of-order arrival).
-    ///
-    /// Callers are responsible for transitioning state, journaling, and signaling.
+    /// An honest voter only signs a notarize for a view after certifying its parent, so a
+    /// notarization for `view` proves f+1 peers already certified `view.parent`. Walks
+    /// `proposal.parent` pointers backward and also includes `view` itself if a notarized
+    /// descendant already points at it (out-of-order arrival).
     pub fn infer_certifications(&self, view: View) -> Vec<View> {
         let mut inferred = Vec::new();
 
