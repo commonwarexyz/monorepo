@@ -48,9 +48,7 @@ impl crate::Signer for PrivateKey {
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let pk = self.public();
         let mut t = Transcript::new(SCHNORR_NS);
-        t.commit(namespace);
-        t.commit(msg);
-        t.commit(pk.raw.as_slice());
+        t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
 
         // Derive deterministic nonce from secret key + public transcript state
         let k = self.inner.expose(|x| {
@@ -66,11 +64,7 @@ impl crate::Signer for PrivateKey {
         let e = F::random(&mut t.noise(b"challenge"));
 
         // s = k + e * x
-        let s = self.inner.expose(|x| {
-            let mut ex = e;
-            ex *= x;
-            k + &ex
-        });
+        let s = self.inner.expose(|x| e * x + &k);
 
         let mut raw = [0u8; Signature::SIZE];
         raw[..G::SIZE].copy_from_slice(&k_big_bytes);
@@ -275,10 +269,10 @@ impl crate::Verifier for PublicKey {
 
         // Recompute the challenge
         let mut t = Transcript::new(SCHNORR_NS);
-        t.commit(namespace);
-        t.commit(msg);
-        t.commit(self.raw.as_slice());
-        t.commit(sig.raw[..G::SIZE].as_ref());
+        t.commit(namespace)
+            .commit(msg)
+            .commit(self.raw.as_slice())
+            .commit(sig.raw[..G::SIZE].as_ref());
         let e = F::random(&mut t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
