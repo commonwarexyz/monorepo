@@ -519,13 +519,8 @@ impl<
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
-        // Persist the certificate before inferring ancestor certifications from it.
-        // The notarization must be durable to serve as evidence for the inferred records.
+        // The notarization must be durable before we derive ancestor certifications from it.
         self.sync_journal(view).await;
-
-        // A notarization for this view proves f+1 honest voters had already certified its
-        // parent (a precondition to voting). Walk the ancestry and mark each eligible round
-        // as certified without waiting on the automaton.
         self.apply_inferred_certifications(resolver, view).await;
 
         // Broadcast the notarization certificate
@@ -541,8 +536,8 @@ impl<
             .await;
     }
 
-    /// Infer certifications for rounds whose notarizations prove certification without
-    /// requiring an automaton response, then journal and signal them.
+    /// Derives certifications for rounds whose notarizations prove certification without
+    /// waiting on the automaton, then journals and signals each one.
     async fn apply_inferred_certifications(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -758,7 +753,6 @@ impl<
 
         // Rebuild from journal
         let start = self.context.current();
-        let mut replayed_notarized_views = Vec::new();
         {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -774,7 +768,6 @@ impl<
                         self.reporter.report(Activity::Notarize(notarize)).await;
                     }
                     Artifact::Notarization(notarization) => {
-                        replayed_notarized_views.push(notarization.view());
                         self.handle_notarization(notarization.clone()).await;
                         resolver
                             .updated(Certificate::Notarization(notarization.clone()))
@@ -835,12 +828,9 @@ impl<
         }
         self.journal = Some(journal);
 
-        // Replay surfaces notarizations but cannot signal inferred certifications that were
-        // never journaled before a crash. Walk the ancestry of every notarized view now that
-        // the journal is writable again to recover any missing certification records.
-        replayed_notarized_views.sort_unstable();
-        replayed_notarized_views.dedup();
-        for view in replayed_notarized_views.into_iter().rev() {
+        // Recover inferred certifications that were not journaled before a crash.
+        let recovery_views: Vec<View> = self.state.notarized_views_desc().collect();
+        for view in recovery_views {
             self.apply_inferred_certifications(&mut resolver, view)
                 .await;
         }

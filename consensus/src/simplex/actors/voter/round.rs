@@ -598,11 +598,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
-            Artifact::Certification(_, _) => {
-                // Certification state transitions through state.certified in the replay
-                // handler, which advances the view and applies side effects that this
-                // per-round helper cannot express. No-op here.
-            }
+            // Certification transitions happen through state.certified during replay, so
+            // that the view advances and timeouts fire; those side effects cannot be
+            // expressed at the per-round level.
+            Artifact::Certification(_, _) => {}
         }
     }
 }
