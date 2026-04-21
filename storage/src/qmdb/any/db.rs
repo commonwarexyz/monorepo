@@ -164,7 +164,7 @@ where
             return Ok(results);
         }
 
-        // Phase 2: Sort by position for batched journal reads, then deduplicate.
+        // Phase 2: Sort by position for locality, then deduplicate.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
 
         let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
@@ -174,11 +174,33 @@ where
             }
         }
 
-        // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
+        // Phase 3: Acquire reader once, then drain page-cache hits synchronously.
+        // Only positions that miss the cache are sent to read_many (which batches
+        // I/O by section, avoiding per-item syscalls).
         let reader = self.log.reader().await;
-        let ops = reader.read_many(&positions).await?;
 
-        // Phase 4: Match operations back to keys via binary search (no HashMap).
+        let mut ops: Vec<Option<Operation<F, U>>> = Vec::with_capacity(positions.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+
+        for (i, &pos) in positions.iter().enumerate() {
+            if let Some(op) = reader.try_read_sync(pos) {
+                ops.push(Some(op));
+            } else {
+                ops.push(None);
+                miss_indices.push(i);
+                miss_positions.push(pos);
+            }
+        }
+
+        if !miss_positions.is_empty() {
+            let disk_ops = reader.read_many(&miss_positions).await?;
+            for (slot, op) in miss_indices.into_iter().zip(disk_ops) {
+                ops[slot] = Some(op);
+            }
+        }
+
+        // Phase 4: Match operations back to keys via binary search.
         for &(key_idx, pos) in &candidates {
             if results[key_idx].is_some() {
                 continue;
@@ -186,7 +208,8 @@ where
             let op_idx = positions
                 .binary_search(&pos)
                 .expect("position was deduped from candidates");
-            let Operation::Update(data) = &ops[op_idx] else {
+            let op = ops[op_idx].as_ref().expect("all positions resolved");
+            let Operation::Update(data) = op else {
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {

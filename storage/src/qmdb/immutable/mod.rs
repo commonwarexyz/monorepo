@@ -248,7 +248,27 @@ where
             }
         }
 
-        let ops = reader.read_many(&positions).await?;
+        // Drain page-cache hits synchronously; batch remaining misses.
+        let mut ops: Vec<Option<Operation<K, V>>> = Vec::with_capacity(positions.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+
+        for (i, &pos) in positions.iter().enumerate() {
+            if let Some(op) = reader.try_read_sync(pos) {
+                ops.push(Some(op));
+            } else {
+                ops.push(None);
+                miss_indices.push(i);
+                miss_positions.push(pos);
+            }
+        }
+
+        if !miss_positions.is_empty() {
+            let disk_ops = reader.read_many(&miss_positions).await?;
+            for (slot, op) in miss_indices.into_iter().zip(disk_ops) {
+                ops[slot] = Some(op);
+            }
+        }
 
         for &(key_idx, pos) in &candidates {
             if results[key_idx].is_some() {
@@ -257,7 +277,10 @@ where
             let op_idx = positions
                 .binary_search(&pos)
                 .expect("position was deduped from candidates");
-            let Operation::Set(k, v) = &ops[op_idx] else {
+            let Some(op) = ops[op_idx].as_ref() else {
+                continue;
+            };
+            let Operation::Set(k, v) = op else {
                 continue;
             };
             if k == keys[key_idx] {

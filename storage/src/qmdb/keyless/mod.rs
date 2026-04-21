@@ -156,9 +156,29 @@ where
                 return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
             }
         }
-        let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
-        let ops = reader.read_many(&positions).await?;
-        Ok(ops.into_iter().map(|op| op.into_value()).collect())
+        // Drain page-cache hits synchronously; batch remaining misses.
+        let mut results = Vec::with_capacity(locs.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+
+        for (i, loc) in locs.iter().enumerate() {
+            if let Some(op) = reader.try_read_sync(**loc) {
+                results.push(op.into_value());
+            } else {
+                results.push(None); // placeholder
+                miss_indices.push(i);
+                miss_positions.push(**loc);
+            }
+        }
+
+        if !miss_positions.is_empty() {
+            let disk_ops = reader.read_many(&miss_positions).await?;
+            for (slot, op) in miss_indices.into_iter().zip(disk_ops) {
+                results[slot] = op.into_value();
+            }
+        }
+
+        Ok(results)
     }
 
     /// Returns the location of the last commit.
