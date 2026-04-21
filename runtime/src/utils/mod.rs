@@ -172,14 +172,11 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
             if !line.starts_with("runtime_tasks_running{") || !line.contains("kind=\"Task\"") {
                 return None;
             }
-
             let name = line.split("name=\"").nth(1)?.split('"').next()?;
-            let value = line
-                .split_whitespace()
-                .last()
-                .and_then(|value| value.parse::<usize>().ok())
-                .expect("runtime_tasks_running should end with an integer gauge value");
-            name.starts_with(prefix).then_some(value)
+            if !name.starts_with(prefix) {
+                return None;
+            }
+            line.trim_end().rsplit(' ').next()?.parse::<usize>().ok()
         })
         .sum()
 }
