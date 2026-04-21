@@ -117,7 +117,7 @@ where
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
     let merkle = Journaled::<F, _, _>::init_sync(
-        context.with_label("mmr"),
+        context.with_label("merkle"),
         journaled::SyncConfig {
             config: merkle_config,
             range: range.clone(),
