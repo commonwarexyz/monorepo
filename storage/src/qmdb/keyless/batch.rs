@@ -202,7 +202,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -359,7 +359,7 @@ where
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());

@@ -955,6 +955,23 @@ where
     {
         self.inner.get(key, &db.any).await
     }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I, H>(
+        &self,
+        keys: &[&U::Key],
+        db: &super::db::Db<F, E, C, I, H, U, N>,
+    ) -> Result<Vec<Option<U::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_many(keys, &db.any).await
+    }
 }
 
 impl<F, E, C, I, H, U, const N: usize> super::db::Db<F, E, C, I, H, U, N>
