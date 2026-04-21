@@ -960,7 +960,7 @@ mod tests {
         let (blob, _) = storage.open("partition", b"read_overflow").await.unwrap();
 
         blob.write_at(0, b"x".to_vec()).await.unwrap();
-        let result = blob.read_at(u64::MAX - Header::SIZE_U64 + 1, 2).await;
+        let result = blob.read_at(u64::MAX - Header::SIZE_U64, 2).await;
         assert!(matches!(result, Err(crate::Error::OffsetOverflow)));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
