@@ -147,8 +147,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "zk_bulletproofs_ipa"
-path = "fuzz_targets/zk_bulletproofs_ipa.rs"
+name = "zk"
+path = "fuzz_targets/zk.rs"
 test = false
 doc = false
 bench = false
