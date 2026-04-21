@@ -229,6 +229,20 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Aborted)
     }
 
+    /// Returns true when certification has not yet been concluded and therefore can
+    /// still be inferred from other evidence.
+    pub const fn is_certify_inferable(&self) -> bool {
+        matches!(
+            self.certify,
+            CertifyState::Ready | CertifyState::Outstanding(_)
+        )
+    }
+
+    /// Returns true if certification has been concluded (succeeded, declined, or aborted).
+    pub const fn is_certify_decided(&self) -> bool {
+        !self.is_certify_inferable()
+    }
+
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
     pub fn elapsed_since_start(&self, now: SystemTime) -> Duration {
         now.duration_since(self.start).unwrap_or_default()
@@ -581,8 +595,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
-            Artifact::Certification(_, success) => {
-                self.certified(*success);
+            Artifact::Certification(_, _) => {
+                // Certification state transitions through state.certified in the replay
+                // handler, which advances the view and applies side effects that this
+                // per-round helper cannot express. No-op here.
             }
         }
     }

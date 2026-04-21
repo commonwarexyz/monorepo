@@ -63,8 +63,8 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -84,6 +84,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
@@ -6707,16 +6708,9 @@ mod tests {
         cancelled_certification_recertifies_after_restart::<_, _>(secp256r1::fixture);
     }
 
-    /// Demonstrates that validators in future views cannot retroactively help
-    /// stuck validators escape via nullification.
-    ///
-    /// This test extends the previous scenario to show that:
-    /// 1. A stuck validator (view 3) cannot be rescued by notarizations from future views
-    /// 2. The only escape route is a finalization certificate (which requires Byzantine cooperation)
-    ///
-    /// Once the f+1 honest validators certify view 3 and advance to view 4,
-    /// they can only vote to nullify view 4 (their current view) without equivocating.
-    /// The `timeout` function only votes to nullify `self.view` (current view).
+    /// A validator stuck on certifying view V because its automaton cannot
+    /// complete the request is rescued as soon as a notarization for view V+1 arrives,
+    /// because that notarization proves f+1 honest peers had already certified V.
     fn only_finalization_rescues_validator<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6810,72 +6804,14 @@ mod tests {
                 .resolved(Certificate::Notarization(notarization_5))
                 .await;
 
-            // The stuck validator should still not advance.
-            //
-            // Receiving a notarization for view 5 doesn't help because:
-            // 1. add_notarization() does not call enter_view() - it only adds to certification_candidates
-            // 2. To advance past view 4, the validator needs EITHER:
-            //    a. Certification of view 4 to succeed (impossible - no context)
-            //    b. A nullification certificate for view 4 (impossible - only f votes)
-            //    c. A finalization certificate (requires Byzantine to vote finalize)
-            let advanced = loop {
-                select! {
-                    msg = batcher_receiver.recv() => {
-                        match msg.unwrap() {
-                            batcher::Message::Update {
-                                current, response, ..
-                            } => {
-                                response.send(None).unwrap();
-                                if current > view_4 {
-                                    break true;
-                                }
-                            }
-                            batcher::Message::Constructed(Vote::Nullify(n)) => {
-                                // Still voting nullify for view 4 - expected
-                                assert_eq!(
-                                    n.view(),
-                                    view_4,
-                                    "should only vote nullify for stuck view"
-                                );
-                            }
-                            _ => {}
-                        }
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        break false;
-                    },
-                }
-            };
-
-            assert!(
-                !advanced,
-                "receiving a notarization for view 5 should NOT rescue the stuck validator - \
-                 they still can't certify view 4 (no context) and can't form a nullification \
-                 (not enough votes). The f+1 honest validators who advanced to view 5 cannot \
-                 retroactively help because they can only vote nullify for their current view (5), \
-                 not for view 4."
-            );
-
-            // HOWEVER: A finalization certificate WOULD rescue the stuck validator.
-            // If the Byzantine validators eventually cooperate and vote finalize,
-            // the finalization would abort the stuck certification and advance the view.
-            //
-            // Let's demonstrate this escape route works (if Byzantine cooperate):
-            let (_, finalization_5) = build_finalization(&schemes, &proposal_5, quorum);
-            mailbox
-                .resolved(Certificate::Finalization(finalization_5))
-                .await;
-
-            // Now the validator SHOULD advance (finalization aborts stuck certification)
+            // Inference from notarization_5 (parent = view 4) must rescue the stuck
+            // validator: f+1 honest voters on view 5 had already certified view 4.
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, response, ..
-                        } = msg.unwrap()
-                        {
+                        if let batcher::Message::Update { current, response, .. } = msg.unwrap() {
                             response.send(None).unwrap();
-                            if current > view_5 {
+                            if current > view_4 {
                                 break true;
                             }
                         }
@@ -6888,16 +6824,15 @@ mod tests {
 
             assert!(
                 rescued,
-                "a finalization certificate SHOULD rescue the stuck validator - \
-                 this is the ONLY escape route, but it requires Byzantine cooperation \
-                 (they must vote finalize). If Byzantine permanently withhold finalize votes, \
-                 the stuck validators are permanently excluded from consensus."
+                "a notarization for view 5 must rescue the validator stuck on view 4: the \
+                 notarization proves f+1 honest peers already certified view 4, so the \
+                 validator can infer certification without running its own automaton."
             );
         });
     }
 
     #[test_traced]
-    fn test_only_finalization_rescues_validator() {
+    fn test_notarization_rescues_stuck_validator_via_inference() {
         only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
         only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
@@ -8769,5 +8704,363 @@ mod tests {
         batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
         batcher_update_triggers_timeout(ed25519::fixture);
         batcher_update_triggers_timeout(secp256r1::fixture);
+    }
+
+    /// A notarization for view v+1 proves f+1 honest voters already certified v. Even when
+    /// the local automaton will never respond (Certifier::Pending), receiving the next
+    /// notarization must certify v through inference and signal the resolver/reporter.
+    fn notarization_infers_parent_certification<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"notarization_infers_parent_certification".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            // Automaton will never respond to certify requests. Inference is the only way
+            // to certify view 3 here.
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter) =
+                setup_voter_with_certifier(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    Duration::from_secs(600),
+                    Duration::from_secs(600),
+                    Duration::from_mins(60),
+                    mocks::application::Certifier::Pending,
+                )
+                .await;
+
+            // Land on view 3 as a follower so we never drive local propose/verify.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Deliver a notarization for view 3. Automaton is Pending; certification cannot
+            // complete normally.
+            let proposal_3 = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"view_3_proposal"),
+            );
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_3.clone()))
+                .await;
+
+            // Deliver a notarization for view 4 whose proposal.parent points at view 3. This
+            // is the evidence that certifies view 3 through inference.
+            let next_view = target_view.next();
+            let proposal_4 = Proposal::new(
+                Round::new(Epoch::new(333), next_view),
+                target_view,
+                Sha256::hash(b"view_4_proposal"),
+            );
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_4))
+                .await;
+
+            // Expect MailboxMessage::Certified{ view=3, success=true } to arrive at the
+            // resolver for the inferred view.
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certified { view, success } if view == target_view => {
+                            assert!(success, "inferred certification must be a success");
+                            break;
+                        }
+                        _ => {}
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
+                            response.send(None).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => {
+                        panic!(
+                            "inferred certification for view {target_view} never reached resolver"
+                        );
+                    },
+                }
+            }
+
+            // The reporter must have recorded the inferred notarization under view 3 via
+            // Activity::Certification (stored in the notarizations map).
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock();
+                    if matches!(
+                        notarizations.get(&target_view),
+                        Some(stored) if stored == &notarization_3
+                    ) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // State must have advanced past view 3 since certification succeeded.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { current, response, .. } = msg.unwrap() {
+                            response.send(None).unwrap();
+                            if current > target_view {
+                                break;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("voter never advanced past view {target_view} after inference");
+                    },
+                }
+            }
+
+            reporter.assert_no_faults();
+            reporter.assert_no_invalid();
+        });
+    }
+
+    #[test_traced]
+    fn test_notarization_infers_parent_certification() {
+        notarization_infers_parent_certification::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        notarization_infers_parent_certification::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        notarization_infers_parent_certification::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_infers_parent_certification::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_infers_parent_certification::<_, _>(ed25519::fixture);
+        notarization_infers_parent_certification::<_, _>(secp256r1::fixture);
+    }
+
+    /// Seeds a journal with notarizations for two adjacent views but no certifications,
+    /// mimicking the on-disk state left behind when a node crashes between syncing a
+    /// notarization and journaling its inferred ancestor certification. A fresh voter
+    /// must replay the notarizations and derive the missing certification through the
+    /// post-replay inference pass.
+    fn post_replay_pass_infers_ancestor_certification<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"post_replay_pass_inference".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let partition = "post_replay_pass_inference".to_string();
+            let epoch = Epoch::new(333);
+            let view_3 = View::new(3);
+            let view_4 = View::new(4);
+
+            let proposal_3 = Proposal::new(
+                Round::new(epoch, view_3),
+                view_3.previous().unwrap(),
+                Sha256::hash(b"post_replay_pass_view_3"),
+            );
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+
+            let proposal_4 = Proposal::new(
+                Round::new(epoch, view_4),
+                view_3,
+                Sha256::hash(b"post_replay_pass_view_4"),
+            );
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+
+            // Pre-populate the journal with both notarizations but no Certification(V3).
+            // This represents the state after a crash between syncing notarization_4 and
+            // journaling the inferred Certification(V3, true).
+            let scheme = schemes[0].clone();
+            {
+                let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+                    context.with_label("journal_seed"),
+                    JConfig {
+                        partition: partition.clone(),
+                        compression: None,
+                        codec_config: scheme.certificate_codec_config(),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        write_buffer: NZUsize!(1024 * 1024),
+                    },
+                )
+                .await
+                .expect("unable to open seed journal");
+                journal
+                    .append(
+                        view_3.get(),
+                        &Artifact::Notarization(notarization_3.clone()),
+                    )
+                    .await
+                    .expect("append notarization_3");
+                journal
+                    .append(
+                        view_4.get(),
+                        &Artifact::Notarization(notarization_4.clone()),
+                    )
+                    .await
+                    .expect("append notarization_4");
+                journal.sync_all().await.expect("sync seed journal");
+            }
+
+            // Start a fresh voter with the same partition. Certifier::Cancel guarantees the
+            // automaton cannot certify, so any Certified{view=3,...} emission must come from
+            // the post-replay inference pass.
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Cancel,
+            };
+            let (app_actor, application) = mocks::application::Application::new(
+                context.with_label("app_post_replay"),
+                app_cfg,
+            );
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition,
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(600),
+                certification_timeout: Duration::from_secs(600),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_post_replay"), voter_cfg);
+
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(16);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Observe Certified{view=3, success=true} arriving from the post-replay pass.
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certified { view, success } if view == view_3 => {
+                            assert!(
+                                success,
+                                "post-replay inference must certify view {view_3} as success"
+                            );
+                            break;
+                        }
+                        _ => {}
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
+                            response.send(None).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => {
+                        panic!(
+                            "post-replay pass never certified view {view_3}"
+                        );
+                    },
+                }
+            }
+
+            // The reporter should have observed Activity::Certification(view_3) via the
+            // reinstated notarization.
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock();
+                    if matches!(
+                        notarizations.get(&view_3),
+                        Some(stored) if stored == &notarization_3
+                    ) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            reporter.assert_no_faults();
+            reporter.assert_no_invalid();
+        });
+    }
+
+    #[test_traced]
+    fn test_post_replay_pass_infers_ancestor_certification() {
+        post_replay_pass_infers_ancestor_certification::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        post_replay_pass_infers_ancestor_certification::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        post_replay_pass_infers_ancestor_certification::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        post_replay_pass_infers_ancestor_certification::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        post_replay_pass_infers_ancestor_certification::<_, _>(ed25519::fixture);
+        post_replay_pass_infers_ancestor_certification::<_, _>(secp256r1::fixture);
     }
 }

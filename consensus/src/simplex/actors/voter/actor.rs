@@ -519,8 +519,15 @@ impl<
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
-        // Persist the certificate before informing others.
+        // Persist the certificate before inferring ancestor certifications from it.
+        // The notarization must be durable to serve as evidence for the inferred records.
         self.sync_journal(view).await;
+
+        // A notarization for this view proves f+1 honest voters had already certified its
+        // parent (a precondition to voting). Walk the ancestry and mark each eligible round
+        // as certified without waiting on the automaton.
+        self.apply_inferred_certifications(resolver, view).await;
+
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
         self.broadcast_certificate(
@@ -532,6 +539,44 @@ impl<
         self.reporter
             .report(Activity::Notarization(notarization))
             .await;
+    }
+
+    /// Infer certifications for rounds whose notarizations prove certification without
+    /// requiring an automaton response, then journal and signal them.
+    ///
+    /// All inferred artifacts are appended then synced once together so a crash between
+    /// inference and signaling cannot leave signaled-but-unjournaled state.
+    async fn apply_inferred_certifications(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        view: View,
+    ) {
+        let inferred = self.state.infer_certifications(view);
+        if inferred.is_empty() {
+            return;
+        }
+
+        let epoch = self.state.epoch();
+        for notarization in &inferred {
+            let inferred_view = notarization.view();
+            let artifact = Artifact::Certification(Rnd::new(epoch, inferred_view), true);
+            self.append_journal(inferred_view, artifact).await;
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .sync_all()
+                .await
+                .expect("unable to sync journal after inferring certifications");
+        }
+
+        for notarization in inferred {
+            let inferred_view = notarization.view();
+            debug!(%view, %inferred_view, "inferred certification from notarization");
+            resolver.certified(inferred_view, true).await;
+            self.reporter
+                .report(Activity::Certification(notarization))
+                .await;
+        }
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
@@ -806,6 +851,14 @@ impl<
             }
         }
         self.journal = Some(journal);
+
+        // Replay surfaces notarizations but cannot signal inferred certifications that were
+        // never journaled before a crash. Walk the ancestry of every notarized view now that
+        // the journal is writable again to recover any missing certification records.
+        for view in self.state.notarized_views_descending() {
+            self.apply_inferred_certifications(&mut resolver, view)
+                .await;
+        }
 
         // Log current view after recovery
         let end = self.context.current();
