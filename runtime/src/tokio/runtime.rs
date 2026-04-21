@@ -133,6 +133,14 @@ pub struct Config {
     /// Tokio sets the default value to the number of logical CPUs.
     worker_threads: usize,
 
+    /// Number of scheduler ticks between global queue polls.
+    ///
+    /// When unset, Tokio uses its default behavior for the multi-thread
+    /// scheduler. Smaller values reduce the delay before tasks woken from
+    /// outside a worker, such as io_uring completion notifications, are polled
+    /// from the global queue again.
+    global_queue_interval: Option<u32>,
+
     /// Maximum number of threads to use for blocking tasks.
     ///
     /// Unlike worker threads, blocking threads are created as needed and
@@ -178,6 +186,7 @@ impl Config {
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
+            global_queue_interval: None,
             max_blocking_threads: 512,
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
@@ -193,6 +202,11 @@ impl Config {
     /// See [Config]
     pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_global_queue_interval(mut self, n: u32) -> Self {
+        self.global_queue_interval = Some(n);
         self
     }
     /// See [Config]
@@ -250,6 +264,10 @@ impl Config {
     /// See [Config]
     pub const fn worker_threads(&self) -> usize {
         self.worker_threads
+    }
+    /// See [Config]
+    pub const fn global_queue_interval(&self) -> Option<u32> {
+        self.global_queue_interval
     }
     /// See [Config]
     pub const fn max_blocking_threads(&self) -> usize {
@@ -351,13 +369,16 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
+        let mut builder = Builder::new_multi_thread();
+        builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
             .thread_stack_size(self.cfg.thread_stack_size)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
+            .enable_all();
+        if let Some(global_queue_interval) = self.cfg.global_queue_interval {
+            builder.global_queue_interval(global_queue_interval);
+        }
+        let runtime = builder.build().expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
