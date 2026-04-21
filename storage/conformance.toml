@@ -208,7 +208,7 @@ hash = "ba4c1ce0c2975f27231e13920129ecd63ae173c10a6e481af388ada2383ea15e"
 
 ["commonware_storage::qmdb::conformance::ImmutableMmbVariableConf"]
 n_cases = 200
-hash = "aee77e198354d5cee1dae5e572cfad11248b0e8635fdc9c19245442e6785fa25"
+hash = "d148ed1d4ce0fce52bfb24463e40f777bdc5915cbb7710d31e155d5b13237d1f"
 
 ["commonware_storage::qmdb::conformance::ImmutableMmrFixedConf"]
 n_cases = 200
@@ -216,7 +216,7 @@ hash = "6a25e6efa15b15bfd6f39e588fca23c1ec431eec1f148722d8a00491876c4252"
 
 ["commonware_storage::qmdb::conformance::ImmutableMmrVariableConf"]
 n_cases = 200
-hash = "f32fda4f6c0bbde62f8f1959edeb2ac67b28f5347bd108e4118e740aa1fd8fd1"
+hash = "cafbb288de6f8d5c73ddb19df64d2e1429b4f2e273124cb1b20be3026c54d288"
 
 ["commonware_storage::qmdb::conformance::KeylessMmbFixedConf"]
 n_cases = 200
