@@ -52,14 +52,11 @@
 use super::IoBufMut;
 use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
+    metrics::{Counter, EncodeLabelSet, Family, Gauge},
     utils::MetricRegister,
 };
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-};
 use std::{
     cell::UnsafeCell,
     num::NonZeroUsize,

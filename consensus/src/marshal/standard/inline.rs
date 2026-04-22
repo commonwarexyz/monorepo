@@ -64,9 +64,8 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    metrics::Histogram,
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Registered, Spawner,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -144,7 +143,7 @@ where
     epocher: ES,
     available_blocks: AvailableBlocks<B::Digest>,
 
-    build_duration: Timed<E, Registered<Histogram>>,
+    build_duration: Timed<E>,
 }
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>

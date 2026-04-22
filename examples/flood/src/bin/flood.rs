@@ -7,9 +7,7 @@ use commonware_cryptography::{
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    tokio, Buf, Metrics, Quota, Runner, Spawner,
-};
+use commonware_runtime::{tokio, Buf, Metrics, Quota, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
@@ -177,11 +175,8 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let latency = context.histogram(
-                        "latency",
-                        "Message latency in seconds",
-                        LATENCY_BUCKETS,
-                    );
+                    let latency =
+                        context.histogram("latency", "Message latency in seconds", LATENCY_BUCKETS);
                     loop {
                         match flood_receiver.recv().await {
                             Ok((_sender, mut msg)) => {

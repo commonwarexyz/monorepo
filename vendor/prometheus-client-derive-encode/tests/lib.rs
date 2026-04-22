@@ -1,10 +1,9 @@
+use prometheus_client::{
+    encoding::{text::encode, EncodeLabelSet, EncodeLabelValue},
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use std::sync::Arc;
-
-use prometheus_client::encoding::text::encode;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
 
 #[derive(Clone, Hash, PartialEq, Eq, EncodeLabelSet, Debug)]
 struct Labels {
@@ -47,11 +46,11 @@ fn basic_flow() {
 
 mod protobuf {
     use crate::{Labels, Method};
-    use prometheus_client::encoding::protobuf::encode;
-    use prometheus_client::encoding::protobuf::openmetrics_data_model;
-    use prometheus_client::metrics::counter::Counter;
-    use prometheus_client::metrics::family::Family;
-    use prometheus_client::registry::Registry;
+    use prometheus_client::{
+        encoding::protobuf::{encode, openmetrics_data_model},
+        metrics::{counter::Counter, family::Family},
+        registry::Registry,
+    };
 
     #[test]
     fn structs() {

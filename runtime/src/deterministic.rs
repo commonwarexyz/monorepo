@@ -44,6 +44,7 @@
 
 pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
+    metrics::{Counter, Family, Gauge, Metric},
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -57,7 +58,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricRegister, Panicker, Registry,
+        MetricScope, Panicker, Registry,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Registered, Spawner as _, METRICS_PREFIX,
@@ -83,10 +84,6 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Metric,
-};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
@@ -116,7 +113,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut impl MetricRegister) -> Self {
+    pub fn init(registry: &mut MetricScope<'_>) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -124,27 +121,27 @@ impl Metrics {
             tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
         };
-        registry.register_metric(
+        registry.register(
             "iterations",
             "Total number of iterations",
             metrics.iterations.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "tasks_spawned",
             "Total number of tasks spawned",
             metrics.tasks_spawned.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "task_polls",
             "Total number of task polls",
             metrics.task_polls.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "bandwidth",
             "Total amount of data sent over network",
             metrics.network_bandwidth.clone(),

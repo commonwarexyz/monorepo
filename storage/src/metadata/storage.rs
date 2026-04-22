@@ -106,9 +106,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
-        let sync_rewrites = context.counter("sync_rewrites", "number of syncs that rewrote all data");
-        let sync_overwrites =
-            context.counter("sync_overwrites", "number of syncs that modified existing data");
+        let sync_rewrites =
+            context.counter("sync_rewrites", "number of syncs that rewrote all data");
+        let sync_overwrites = context.counter(
+            "sync_overwrites",
+            "number of syncs that modified existing data",
+        );
         let keys = context.gauge("keys", "number of tracked keys");
 
         // Return metadata

@@ -1,5 +1,5 @@
 use commonware_runtime::{
-    metrics::{Gauge, Histogram},
+    metrics::Gauge,
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
@@ -22,22 +22,17 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of serves by status
     pub serve: Registered<status::Counter>,
     /// Histogram of successful serves
-    pub serve_duration: histogram::Timed<E, Registered<Histogram>>,
+    pub serve_duration: histogram::Timed<E>,
     /// Histogram of successful fetches
-    pub fetch_duration: histogram::Timed<E, Registered<Histogram>>,
+    pub fetch_duration: histogram::Timed<E>,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let fetch_pending = context.gauge(
-            "fetch_pending",
-            "Current number of pending fetch requests",
-        );
-        let fetch_active = context.gauge(
-            "fetch_active",
-            "Current number of active fetch requests",
-        );
+        let fetch_pending =
+            context.gauge("fetch_pending", "Current number of pending fetch requests");
+        let fetch_active = context.gauge("fetch_active", "Current number of active fetch requests");
         let serve_processing = context.gauge(
             "serve_processing",
             "Current number of serves currently processing",

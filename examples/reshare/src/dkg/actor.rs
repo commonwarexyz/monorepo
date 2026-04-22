@@ -30,8 +30,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     metrics::{Counter, EncodeLabelSet, GaugeFamily},
     spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
-    Spawner,
-    Storage as RuntimeStorage,
+    Spawner, Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;

@@ -933,7 +933,7 @@ mod tests {
         join, pin_mut, FutureExt,
     };
     use prometheus_client::{
-        encoding::{EncodeLabelKey, EncodeLabelSet, EncodeLabelValue},
+        encoding::{EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, LabelSetEncoder},
         metrics::{counter::Counter, family::Family},
     };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -3191,10 +3191,7 @@ mod tests {
             name: String,
         }
         impl EncodeLabelSet for Peer {
-            fn encode(
-                &self,
-                encoder: &mut prometheus_client::encoding::LabelSetEncoder<'_>,
-            ) -> Result<(), std::fmt::Error> {
+            fn encode(&self, encoder: &mut LabelSetEncoder<'_>) -> Result<(), std::fmt::Error> {
                 let mut label = encoder.encode_label();
                 let mut key = label.encode_label_key()?;
                 EncodeLabelKey::encode(&"peer", &mut key)?;

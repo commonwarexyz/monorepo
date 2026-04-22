@@ -1,15 +1,14 @@
 //! Utility functions for interacting with any runtime.
 
-use commonware_utils::sync::{Condvar, Mutex};
-use futures::task::ArcWake;
-use prometheus_client::{
+use crate::metrics::{
     encoding::{
         text::{encode_descriptor, encode_eof, encode_metric_samples},
         EncodeMetric, MetricEncoder as PromMetricEncoder,
     },
-    metrics::MetricType,
-    registry::Metric as PrometheusMetric,
+    Metric, MetricType,
 };
+use commonware_utils::sync::{Condvar, Mutex};
+use futures::task::ArcWake;
 use std::{
     any::Any,
     borrow::Cow,
@@ -340,7 +339,7 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
 struct MetricEntry {
     family_name: String,
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
-    metric: Box<dyn PrometheusMetric>,
+    metric: Box<dyn Metric>,
     metric_any: Arc<dyn Any + Send + Sync>,
     registration: Weak<MetricRegistrationInner>,
     family_index: usize,
@@ -367,6 +366,12 @@ pub(crate) struct Registry {
     next_metric_id: u64,
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registry {
     pub fn new() -> Self {
         Self {
@@ -391,7 +396,7 @@ impl Registry {
         name: String,
         help: String,
         attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
-        metric: impl PrometheusMetric,
+        metric: impl Metric,
     ) -> u64 {
         let metric_type = metric.metric_type();
         if let Some(family) = self.families.get(&name) {
@@ -451,7 +456,7 @@ impl Registry {
         metric: Arc<M>,
     ) -> Registered<M>
     where
-        M: PrometheusMetric,
+        M: Metric,
     {
         let attributes = attributes
             .into_iter()
@@ -570,7 +575,7 @@ impl Registry {
         name: String,
         help: String,
         attributes: Vec<(String, String)>,
-        metric: impl PrometheusMetric,
+        metric: impl Metric,
     ) {
         let attributes = attributes
             .into_iter()
@@ -636,7 +641,7 @@ pub(crate) struct MetricScope<'a> {
 }
 
 impl MetricScope<'_> {
-    pub fn register(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+    pub fn register(&mut self, name: &str, help: &str, metric: impl Metric) {
         validate_label(name);
         self.registry.register_permanent(
             prefixed_name(&self.prefix, name),
@@ -656,17 +661,17 @@ impl MetricScope<'_> {
 }
 
 pub(crate) trait MetricRegister {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric);
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric);
 }
 
 impl MetricRegister for MetricScope<'_> {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric) {
         self.register(name, help, metric);
     }
 }
 
-impl MetricRegister for prometheus_client::registry::Registry {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+impl MetricRegister for crate::metrics::registry::Registry {
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric) {
         self.register(name.to_string(), help.to_string(), metric);
     }
 }

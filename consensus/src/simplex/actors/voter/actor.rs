@@ -144,16 +144,10 @@ impl<
         // Initialize metrics
         let outbound_messages =
             context.counter_family("outbound_messages", "number of outbound messages");
-        let notarization_latency = context.histogram(
-            "notarization_latency",
-            "notarization latency",
-            LATENCY,
-        );
-        let finalization_latency = context.histogram(
-            "finalization_latency",
-            "finalization latency",
-            LATENCY,
-        );
+        let notarization_latency =
+            context.histogram("notarization_latency", "notarization latency", LATENCY);
+        let finalization_latency =
+            context.histogram("finalization_latency", "finalization latency", LATENCY);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);

@@ -2,8 +2,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     metrics::{CounterFamily, EncodeLabelSet, Gauge},
     telemetry::metrics::status,
-    Metrics as RuntimeMetrics,
-    Registered,
+    Metrics as RuntimeMetrics, Registered,
 };
 
 /// Label for sequencer height metrics

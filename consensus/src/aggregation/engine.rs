@@ -23,13 +23,12 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
-    metrics::Histogram,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -67,7 +66,7 @@ struct DigestRequest<D: Digest, E: Clock> {
     result: Result<D, Error>,
 
     /// Records the time taken to get the digest.
-    timer: histogram::Timer<E, Registered<Histogram>>,
+    timer: histogram::Timer<E>,
 }
 
 /// Instance of the engine.

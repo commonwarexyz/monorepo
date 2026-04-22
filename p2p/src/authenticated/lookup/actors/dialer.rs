@@ -17,8 +17,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Registered, Resolver, SinkOf, Spawner, StreamOf,
+    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network,
+    Registered, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use rand::seq::SliceRandom;
@@ -73,10 +73,8 @@ impl<
     > Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let attempts = context.counter_family(
-            "attempts",
-            "The number of dial attempts made to each peer",
-        );
+        let attempts =
+            context.counter_family("attempts", "The number of dial attempts made to each peer");
         Self {
             context: ContextCell::new(context),
             queue: Vec::new(),

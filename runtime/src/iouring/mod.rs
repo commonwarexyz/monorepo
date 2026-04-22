@@ -148,7 +148,7 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{utils::MetricScope, Error, IoBufMut, IoBufs};
+use crate::{metrics::Gauge, utils::MetricScope, Error, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -160,7 +160,6 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
     IoUring,
 };
-use prometheus_client::metrics::gauge::Gauge;
 use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
     collections::VecDeque,

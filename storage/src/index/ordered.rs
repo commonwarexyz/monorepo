@@ -98,12 +98,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
 
 impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(
-        keys: &Gauge,
-        items: &Gauge,
-        vacant: BTreeVacantEntry<'_, T::Key, Record<V>>,
-        v: V,
-    ) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(Record {

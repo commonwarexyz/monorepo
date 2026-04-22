@@ -1,5 +1,5 @@
 use commonware_runtime::{
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Counter, Gauge},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
@@ -18,7 +18,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: Registered<status::Counter>,
     /// Histogram of application digest durations
-    pub digest_duration: histogram::Timed<E, Registered<Histogram>>,
+    pub digest_duration: histogram::Timed<E>,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {

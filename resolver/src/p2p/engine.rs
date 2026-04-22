@@ -13,13 +13,12 @@ use commonware_p2p::{
     Blocker, Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    metrics::Histogram,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -33,7 +32,7 @@ use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: PublicKey> {
-    timer: histogram::Timer<E, Registered<Histogram>>,
+    timer: histogram::Timer<E>,
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
@@ -76,7 +75,7 @@ pub struct Engine<
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Track the start time of fetch operations
-    fetch_timers: HashMap<Key, histogram::Timer<E, Registered<Histogram>>>,
+    fetch_timers: HashMap<Key, histogram::Timer<E>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.

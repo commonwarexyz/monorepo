@@ -95,9 +95,8 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    metrics::Histogram,
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Registered, Spawner,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
@@ -147,7 +146,7 @@ where
     epocher: ES,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
-    build_duration: Timed<E, Registered<Histogram>>,
+    build_duration: Timed<E>,
 }
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>

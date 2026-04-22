@@ -9,10 +9,8 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt,
-    metrics::CounterFamily,
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Registered, Sink, Spawner,
-    Stream,
+    iobuf::EncodeExt, metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
+    RateLimiter, Registered, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -377,14 +375,9 @@ mod tests {
             send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
             sent_messages: context.counter_family("sent_messages", "test sent messages"),
-            received_messages: context.counter_family(
-                "received_messages",
-                "test received messages",
-            ),
-            dropped_messages: context.counter_family(
-                "dropped_messages",
-                "test dropped messages",
-            ),
+            received_messages: context
+                .counter_family("received_messages", "test received messages"),
+            dropped_messages: context.counter_family("dropped_messages", "test dropped messages"),
             rate_limited: context.counter_family("rate_limited", "test rate limited messages"),
         }
     }

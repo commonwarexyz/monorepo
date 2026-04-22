@@ -19,9 +19,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     metrics::{Counter, CounterFamily, GaugeFamily, Histogram},
     spawn_cell,
-    telemetry::metrics::{
-        histogram::{self, Buckets},
-    },
+    telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Registered, Spawner,
 };
 use commonware_utils::{
@@ -73,8 +71,8 @@ where
     latest_vote: Registered<GaugeFamily<Peer>>,
     latest_seen: Vec<View>,
     batch_size: Registered<Histogram>,
-    verify_latency: histogram::Timed<E, Registered<Histogram>>,
-    recover_latency: histogram::Timed<E, Registered<Histogram>>,
+    verify_latency: histogram::Timed<E>,
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>

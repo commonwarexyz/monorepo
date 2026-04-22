@@ -107,9 +107,8 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    metrics::Histogram,
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Registered, Spawner, Storage,
+    Clock, Metrics, Spawner, Storage,
 };
 use commonware_utils::{
     channel::{
@@ -184,10 +183,10 @@ where
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
-    build_duration: Timed<E, Registered<Histogram>>,
-    verify_duration: Timed<E, Registered<Histogram>>,
-    proposal_parent_fetch_duration: Timed<E, Registered<Histogram>>,
-    erasure_encode_duration: Timed<E, Registered<Histogram>>,
+    build_duration: Timed<E>,
+    verify_duration: Timed<E>,
+    proposal_parent_fetch_duration: Timed<E>,
+    erasure_encode_duration: Timed<E>,
 }
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>

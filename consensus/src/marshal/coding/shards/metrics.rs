@@ -3,8 +3,7 @@
 use commonware_runtime::{
     metrics::{Counter, CounterFamily, EncodeLabelSet, Gauge, Histogram},
     telemetry::metrics::histogram::Buckets,
-    Metrics as MetricsTrait,
-    Registered,
+    Metrics as MetricsTrait, Registered,
 };
 use commonware_utils::Array;
 
@@ -54,10 +53,8 @@ impl ShardMetrics {
             "reconstruction_states_count",
             "Number of active reconstruction states",
         );
-        let shards_received = context.counter_family(
-            "shards_received",
-            "Number of shards received per peer",
-        );
+        let shards_received =
+            context.counter_family("shards_received", "Number of shards received per peer");
         let blocks_reconstructed_total = context.counter(
             "blocks_reconstructed_total",
             "Total number of blocks successfully reconstructed",

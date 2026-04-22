@@ -38,10 +38,7 @@ impl Metrics {
                 "blocked",
                 "Blocked peers (value = expiry time as epoch millis)",
             ),
-            reserved: context.gauge(
-                "reserved",
-                "Total number of outstanding reservations",
-            ),
+            reserved: context.gauge("reserved", "Total number of outstanding reservations"),
             connected: context.gauge_family(
                 "connected",
                 "Unix timestamp in milliseconds when each connected peer became active",
@@ -50,10 +47,8 @@ impl Metrics {
                 "limits",
                 "Count of the number of rate-limited reservation events for each peer",
             ),
-            updates: context.counter_family(
-                "updates",
-                "Count of the number of updates for each peer",
-            ),
+            updates: context
+                .counter_family("updates", "Count of the number of updates for each peer"),
         }
     }
 }

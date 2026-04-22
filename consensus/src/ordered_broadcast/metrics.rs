@@ -1,6 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, GaugeFamily, Histogram},
+    metrics::{Counter, EncodeLabelSet, GaugeFamily},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
@@ -39,9 +39,9 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: Registered<status::Counter>,
     /// Histogram of application verification durations
-    pub verify_duration: histogram::Timed<E, Registered<Histogram>>,
+    pub verify_duration: histogram::Timed<E>,
     /// Histogram of time from new proposal to certificate generation
-    pub e2e_duration: histogram::Timed<E, Registered<Histogram>>,
+    pub e2e_duration: histogram::Timed<E>,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {

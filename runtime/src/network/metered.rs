@@ -1,5 +1,4 @@
-use crate::{utils::MetricRegister, IoBufs, SinkOf, StreamOf};
-use prometheus_client::metrics::counter::Counter;
+use crate::{metrics::Counter, utils::MetricScope, IoBufs, SinkOf, StreamOf};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -16,29 +15,29 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(registry: &mut impl MetricRegister) -> Self {
+    fn new(registry: &mut MetricScope<'_>) -> Self {
         let metrics = Self {
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
             outbound_bandwidth: Counter::default(),
         };
-        registry.register_metric(
+        registry.register(
             "inbound_connections",
             "Number of connections created by dialing us",
             metrics.inbound_connections.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "outbound_connections",
             "Number of connections created by dialing others",
             metrics.outbound_connections.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "inbound_bandwidth",
             "Bandwidth used by receiving data from others",
             metrics.inbound_bandwidth.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "outbound_bandwidth",
             "Bandwidth used by sending data to others",
             metrics.outbound_bandwidth.clone(),
@@ -128,7 +127,7 @@ pub struct Network<N: crate::Network> {
 impl<N: crate::Network> Network<N> {
     /// Wraps `inner` to make it metered.
     /// The `registry` is used to register the metrics.
-    pub(crate) fn new(inner: N, registry: &mut impl MetricRegister) -> Self {
+    pub(crate) fn new(inner: N, registry: &mut MetricScope<'_>) -> Self {
         let metrics = Metrics::new(registry);
         Self {
             inner,

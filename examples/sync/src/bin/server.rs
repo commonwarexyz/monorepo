@@ -5,9 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::Counter,
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Registered, Runner,
-    SinkOf, Spawner, Storage, StreamOf,
+    metrics::Counter, tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network,
+    Registered, Runner, SinkOf, Spawner, Storage, StreamOf,
 };
 use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};

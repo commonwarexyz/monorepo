@@ -1,7 +1,6 @@
 //! Process metrics collection.
 
-use crate::utils::MetricRegister;
-use prometheus_client::metrics::gauge::Gauge;
+use crate::{metrics::Gauge, utils::MetricScope};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -23,7 +22,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize process metrics and register them with the given registry.
-    pub fn init(registry: &mut impl MetricRegister) -> Self {
+    pub fn init(registry: &mut MetricScope<'_>) -> Self {
         let metrics = Self {
             pid: sysinfo::Pid::from_u32(std::process::id()),
             rss: Gauge::default(),
@@ -33,12 +32,12 @@ impl Metrics {
         };
 
         // Register all metrics
-        registry.register_metric(
+        registry.register(
             "process_rss",
             "Resident set size of the current process",
             metrics.rss.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "process_virtual_memory",
             "Virtual memory size of the current process",
             metrics.virtual_memory.clone(),

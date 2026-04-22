@@ -87,7 +87,9 @@ impl Histogram {
     ///
     /// If the clock goes backwards, the observed duration is `0`.
     pub fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = end.duration_since(start).map_or(0.0, |duration| duration.as_secs_f64());
+        let duration = end
+            .duration_since(start)
+            .map_or(0.0, |duration| duration.as_secs_f64());
         self.observe(duration);
     }
 

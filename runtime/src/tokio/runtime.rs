@@ -12,13 +12,14 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
+    metrics::{Counter, Family, Gauge, Metric},
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, MetricRegister, Panicker, Registry,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricScope, Panicker, Registry,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
     SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
@@ -29,10 +30,6 @@ use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Metric,
-};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
@@ -67,17 +64,17 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut impl MetricRegister) -> Self {
+    pub fn init(registry: &mut MetricScope<'_>) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
         };
-        registry.register_metric(
+        registry.register(
             "tasks_spawned",
             "Total number of tasks spawned",
             metrics.tasks_spawned.clone(),
         );
-        registry.register_metric(
+        registry.register(
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),

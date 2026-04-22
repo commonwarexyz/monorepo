@@ -7,7 +7,9 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered};
+use commonware_runtime::{
+    buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
@@ -761,10 +763,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
         );
-        let resizes = context.counter(
-            "resizes",
-            "number of table resizing operations",
-        );
+        let resizes = context.counter("resizes", "number of table resizing operations");
 
         Ok(Self {
             context,
