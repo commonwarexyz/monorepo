@@ -1026,10 +1026,10 @@ pub(crate) mod tests {
         assert_eq!(results, vec![Some(v1.clone()), Some(v3.clone())]);
 
         // Merkleized batch: parent chain + DB fallthrough.
-        let parent = db
-            .new_batch()
-            .append(v3.clone())
-            .merkleize(&db, None, db.inactivity_floor_loc());
+        let parent =
+            db.new_batch()
+                .append(v3.clone())
+                .merkleize(&db, None, db.inactivity_floor_loc());
         let child = parent.new_batch::<Sha256>().append(V::Value::make(4));
         let results = child.get_many(&[loc1, loc2], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);
