@@ -992,8 +992,8 @@ pub(crate) mod tests {
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
-        Operation<V>: EncodeShared,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        Operation<F, V>: EncodeShared,
     {
         let v1 = V::Value::make(1);
         let v2 = V::Value::make(2);
@@ -1005,7 +1005,9 @@ pub(crate) mod tests {
         let batch = batch.append(v1.clone());
         let loc2 = batch.size();
         let batch = batch.append(v2.clone());
-        db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
+        db.apply_batch(batch.merkleize(&db, None, db.inactivity_floor_loc()))
+            .await
+            .unwrap();
         db.commit().await.unwrap();
 
         // DB-level get_many.
@@ -1024,7 +1026,10 @@ pub(crate) mod tests {
         assert_eq!(results, vec![Some(v1.clone()), Some(v3.clone())]);
 
         // Merkleized batch: parent chain + DB fallthrough.
-        let parent = db.new_batch().append(v3.clone()).merkleize(&db, None);
+        let parent = db
+            .new_batch()
+            .append(v3.clone())
+            .merkleize(&db, None, db.inactivity_floor_loc());
         let child = parent.new_batch::<Sha256>().append(V::Value::make(4));
         let results = child.get_many(&[loc1, loc2], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);

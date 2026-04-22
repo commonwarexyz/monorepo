@@ -309,7 +309,7 @@ where
                 .binary_search(&pos)
                 .expect("position was deduped from candidates");
             let Operation::Set(k, v) = &ops[op_idx] else {
-                continue;
+                return Err(Error::UnexpectedData(Location::new(pos)));
             };
             if k == keys[key_idx] {
                 results[key_idx] = Some(v.clone());
@@ -2830,7 +2830,7 @@ pub(super) mod test {
         db.apply_batch(db.new_batch().set(k1, v1).set(k2, v2).merkleize(
             &db,
             None,
-            Location::new(0),
+            db.inactivity_floor_loc(),
         ))
         .await
         .unwrap();
@@ -2853,7 +2853,7 @@ pub(super) mod test {
         let parent = db
             .new_batch()
             .set(k3, v3)
-            .merkleize(&db, None, Location::new(0));
+            .merkleize(&db, None, db.inactivity_floor_loc());
         let results = parent.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1), Some(v3), None]);
 
@@ -2862,6 +2862,43 @@ pub(super) mod test {
         let child = parent.new_batch::<Sha256>().set(k3, v3_new);
         let results = child.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1), Some(v3_new), None]);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `get_many` reports unexpected data when the snapshot points at a non-`Set` operation.
+    pub(crate) async fn test_immutable_get_many_unexpected_data<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        let key = Sha256::fill(1u8);
+        let value = Sha256::fill(11u8);
+        db.apply_batch(db.new_batch().set(key, value).merkleize(
+            &db,
+            None,
+            db.inactivity_floor_loc(),
+        ))
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+
+        let bad_key = Sha256::fill(99u8);
+        let bad_loc = db.last_commit_loc;
+        db.snapshot.insert(&bad_key, bad_loc);
+
+        let err = db.get(&bad_key).await.unwrap_err();
+        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
+
+        let err = db.get_many(&[&bad_key]).await.unwrap_err();
+        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
 
         db.destroy().await.unwrap();
     }
