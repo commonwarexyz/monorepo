@@ -130,13 +130,21 @@ where
     try_spawn(stack_size, f).expect("failed to spawn thread")
 }
 
+/// Returns the logical CPU ids currently allowed for the calling thread.
+///
+/// This queries the calling thread's affinity mask via `sched_getaffinity` and
+/// returns an empty vector if that query fails.
 #[cfg(target_os = "linux")]
-fn affinity_mask() -> Option<(Vec<libc::c_ulong>, usize)> {
+pub fn available_cpus() -> Vec<usize> {
     let word_bits = libc::c_ulong::BITS as usize;
     let mut words = 1usize;
-    loop {
+
+    // Probe `sched_getaffinity` with an exponentially growing buffer until the
+    // kernel either accepts it or reports a non-retryable error.
+    let (mask, bytes) = loop {
         let mut mask = vec![0 as libc::c_ulong; words];
         let cpusetsize = std::mem::size_of_val(mask.as_slice());
+
         // SAFETY: `mask` points to writable storage for `cpusetsize` bytes, and
         // `pid == 0` targets the calling thread as documented by the syscall.
         let result = unsafe {
@@ -147,42 +155,41 @@ fn affinity_mask() -> Option<(Vec<libc::c_ulong>, usize)> {
                 mask.as_mut_ptr(),
             )
         };
+
         if result >= 0 {
-            let bytes = result as usize;
-            return Some((mask, bytes));
+            break (mask, result as usize);
         }
 
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
             Some(libc::EINVAL) => {
-                // Kernels with larger affinity masks require probing with a larger buffer.
-                words = words.checked_mul(2)?;
-                if words.checked_mul(word_bits)? > MAX_AFFINITY_CPUS {
-                    return None;
+                // Kernels with larger affinity masks require probing with a
+                // larger buffer. Cap the probe size so invalid environments
+                // cannot force unbounded growth.
+                words = match words.checked_mul(2) {
+                    Some(words) => words,
+                    None => return Vec::new(),
+                };
+                if words
+                    .checked_mul(word_bits)
+                    .is_none_or(|bits| bits > MAX_AFFINITY_CPUS)
+                {
+                    return Vec::new();
                 }
             }
-            _ => return None,
+            _ => return Vec::new(),
         }
-    }
-}
-
-/// Returns the logical CPU ids currently allowed for the calling thread.
-///
-/// On Linux this queries the calling thread's affinity mask via `sched_getaffinity`.
-/// On other platforms, or if the affinity mask cannot be queried, it returns an
-/// empty vector.
-#[cfg(target_os = "linux")]
-pub fn available_cpus() -> Vec<usize> {
-    let Some((mask, bytes)) = affinity_mask() else {
-        return Vec::new();
     };
-    let word_bits = libc::c_ulong::BITS as usize;
+
     let mut cpus = Vec::new();
+
+    // `sched_getaffinity` reports how many bytes of the mask are meaningful.
+    // Walk that returned bitset and collect the enabled logical CPU ids.
     for cpu in 0..(bytes * 8) {
         let index = cpu / word_bits;
         let offset = cpu % word_bits;
-        if index < mask.len() && (mask[index] & ((1 as libc::c_ulong) << offset)) != 0 {
+        if (mask[index] & ((1 as libc::c_ulong) << offset)) != 0 {
             cpus.push(cpu);
         }
     }
