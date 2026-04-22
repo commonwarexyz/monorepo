@@ -1,5 +1,6 @@
 //! Helpers for resolving the configured thread stack size.
 
+use commonware_utils::vec::NonEmptyVec;
 use std::{env, sync::OnceLock, thread};
 
 /// Rust's default thread stack size.
@@ -133,9 +134,9 @@ where
 /// Returns the logical CPU ids currently allowed for the calling thread.
 ///
 /// This queries the calling thread's affinity mask via `sched_getaffinity` and
-/// returns an empty vector if that query fails.
+/// returns `None` if that query fails.
 #[cfg(target_os = "linux")]
-pub fn available_cpus() -> Vec<usize> {
+pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
     let word_bits = libc::c_ulong::BITS as usize;
     let mut words = 1usize;
 
@@ -167,18 +168,15 @@ pub fn available_cpus() -> Vec<usize> {
                 // Kernels with larger affinity masks require probing with a
                 // larger buffer. Cap the probe size so invalid environments
                 // cannot force unbounded growth.
-                words = match words.checked_mul(2) {
-                    Some(words) => words,
-                    None => return Vec::new(),
-                };
+                words = words.checked_mul(2)?;
                 if words
                     .checked_mul(word_bits)
                     .is_none_or(|bits| bits > MAX_AFFINITY_CPUS)
                 {
-                    return Vec::new();
+                    return None;
                 }
             }
-            _ => return Vec::new(),
+            _ => return None,
         }
     };
 
@@ -193,30 +191,35 @@ pub fn available_cpus() -> Vec<usize> {
             cpus.push(cpu);
         }
     }
-    cpus
+    cpus.try_into().ok()
 }
 
 /// Returns the logical CPU ids currently allowed for the calling thread.
 ///
-/// Always returns an empty vector on non-Linux platforms.
+/// Always returns `None` on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub fn available_cpus() -> Vec<usize> {
-    Vec::new()
+pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
+    None
 }
 
-/// Pins the current thread to the given logical CPU id.
+/// Sets the current thread's affinity mask to the given logical CPU ids.
 #[cfg(target_os = "linux")]
-pub(crate) fn pin_to_cpu(cpu: usize) -> Result<(), std::io::Error> {
-    if cpu >= MAX_AFFINITY_CPUS {
+pub(crate) fn set_cpu_affinity(cpus: &[usize]) -> Result<(), std::io::Error> {
+    let Some(max_cpu) = cpus.iter().copied().max() else {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    if max_cpu >= MAX_AFFINITY_CPUS {
         return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
 
     let word_bits = libc::c_ulong::BITS as usize;
-    let words = (cpu / word_bits)
+    let words = (max_cpu / word_bits)
         .checked_add(1)
         .expect("cpu bitset size overflow");
     let mut mask = vec![0 as libc::c_ulong; words];
-    mask[cpu / word_bits] |= (1 as libc::c_ulong) << (cpu % word_bits);
+    for &cpu in cpus {
+        mask[cpu / word_bits] |= (1 as libc::c_ulong) << (cpu % word_bits);
+    }
     let cpusetsize = std::mem::size_of_val(mask.as_slice());
 
     loop {
@@ -236,9 +239,8 @@ pub(crate) fn pin_to_cpu(cpu: usize) -> Result<(), std::io::Error> {
     }
 }
 
-/// Pins the current thread to the given logical CPU id.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn pin_to_cpu(_cpu: usize) -> Result<(), std::io::Error> {
+pub(crate) fn set_cpu_affinity(_cpus: &[usize]) -> Result<(), std::io::Error> {
     Err(std::io::Error::other(
         "cpu pinning is not available on this platform",
     ))
@@ -250,14 +252,46 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_available_cpus() {
-        let cpus = available_cpus();
-        assert!(!cpus.is_empty(), "expected at least one available CPU");
+    fn test_available_cpus_linux() {
+        assert!(
+            available_cpus().is_some(),
+            "expected at least one available CPU"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_set_cpu_affinity_linux() {
+        std::thread::spawn(|| {
+            let cpus = available_cpus().unwrap();
+
+            let cpu = *cpus.first();
+            set_cpu_affinity(&[cpu]).unwrap();
+            assert_eq!(available_cpus().unwrap().into_vec(), vec![cpu]);
+
+            let invalid_cpu = (0..=MAX_AFFINITY_CPUS)
+                .find(|candidate| !cpus.contains(candidate))
+                .unwrap();
+            assert!(
+                set_cpu_affinity(&[invalid_cpu]).is_err(),
+                "expected pinning to a disallowed CPU to fail",
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_available_cpus_non_linux() {
-        assert!(available_cpus().is_empty());
+        assert!(available_cpus().is_none());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_set_cpu_affinity_non_linux() {
+        for cpus in [vec![0], vec![1], vec![usize::MAX]] {
+            assert!(set_cpu_affinity(&cpus).is_err());
+        }
     }
 }

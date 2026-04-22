@@ -46,6 +46,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    use commonware_utils::vec::NonEmptyVec;
     use iobuf::PoolError;
     use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
@@ -161,6 +162,11 @@ stability_scope!(BETA {
 
     /// Interface that any task scheduler must implement to spawn tasks.
     pub trait Spawner: Clone + Send + Sync + 'static {
+        /// Return the logical CPU ids this runtime makes available for [`Spawner::pinned`] placements.
+        ///
+        /// Returns `None` if the runtime does not support CPU pinning.
+        fn available_cpus(&self) -> Option<NonEmptyVec<usize>>;
+
         /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
         ///
         /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
@@ -182,7 +188,8 @@ stability_scope!(BETA {
         /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given CPU.
         ///
         /// The `cpu` value is a Linux logical CPU id used with `sched_setaffinity`.
-        /// Use [`available_cpus`] to query the current thread's allowed CPU ids.
+        /// Use [`Spawner::available_cpus`] to query the runtime's CPU ids for placement
+        /// decisions rather than the current thread's live affinity mask.
         ///
         /// This only configures the next spawned task. Runtimes that implement CPU pinning
         /// perform validation and the pinning attempt when [`Spawner::spawn`] starts that task.
@@ -191,8 +198,8 @@ stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// [`Spawner::spawn`] may panic if CPU pinning is unavailable for the runtime, if `cpu`
-        /// is not in the current affinity mask, or if pinning fails when the task starts.
+        /// [`Spawner::spawn`] may panic if CPU pinning is unavailable for the runtime or if the
+        /// operating system rejects `cpu` when the task starts.
         fn pinned(self, cpu: usize) -> Self;
 
         /// Spawn a task with the current context.
@@ -1757,7 +1764,10 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let cpu = crate::available_cpus().into_iter().next().unwrap_or(0);
+            let cpu = context
+                .available_cpus()
+                .map(|cpus| *cpus.first())
+                .unwrap_or(0);
             let handle = context.pinned(cpu).spawn(|_| async move { 42 });
             assert!(matches!(handle.await, Ok(42)));
         });
@@ -3946,7 +3956,7 @@ mod tests {
         // Verify that pinned implies dedicated.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let cpu = crate::available_cpus().into_iter().next().unwrap_or(0);
+            let cpu = *context.available_cpus().unwrap().first();
             let root_thread = std::thread::current().id();
             let task_thread = context
                 .pinned(cpu)
@@ -3963,10 +3973,9 @@ mod tests {
     fn test_tokio_spawn_pinned_correct_cpu() {
         // Verify that a pinned task is actually running on the expected CPU,
         // for every allowed CPU id.
-        let cpus = crate::available_cpus();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            for cpu in cpus {
+            for cpu in context.available_cpus().unwrap() {
                 let actual = context
                     .clone()
                     .pinned(cpu)
@@ -3987,9 +3996,9 @@ mod tests {
     fn test_tokio_spawn_pinned_same_cpu() {
         // Verify that two separate tasks pinned to the same CPU run on
         // different threads but report the same CPU.
-        let cpu = crate::available_cpus().into_iter().last().unwrap();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            let cpu = *context.available_cpus().unwrap().last();
             let t1 = context.clone().pinned(cpu).spawn(|_| async move {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
@@ -4012,16 +4021,92 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[should_panic(expected = "failed to pin task to cpu")]
-    fn test_tokio_spawn_pinned_invalid_cpu() {
-        // Pinning to a CPU outside the current affinity mask panics when the task starts.
-        let invalid_cpu = crate::available_cpus()
-            .into_iter()
-            .last()
-            .map(|cpu| cpu + 1)
-            .unwrap();
+    fn test_tokio_available_cpus_stable_inside_pinned_task() {
+        // `Spawner::available_cpus` should keep reporting the runtime's
+        // placement set even when the current task narrows its own thread
+        // affinity with `.pinned(...)`.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            let available = context.available_cpus().unwrap();
+            let cpu = *available.first();
+
+            context
+                .pinned(cpu)
+                .spawn(move |context| {
+                    let available = available.clone();
+                    async move {
+                        // The public runtime API stays stable, while the
+                        // thread-local helper reflects the live pinned mask.
+                        assert_eq!(context.available_cpus(), Some(available.clone()));
+                        assert_eq!(utils::thread::available_cpus(), Some(NonEmptyVec::new(cpu)),);
+                    }
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tokio_spawn_dedicated_restores_baseline_affinity() {
+        // An unpinned dedicated child spawned from within pinned tasks should
+        // reset back to the runtime's placement set instead of inheriting the
+        // parent thread's narrowed affinity mask.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let available = context.available_cpus().unwrap();
+            if available.len().get() < 2 {
+                return;
+            }
+
+            let outer_cpu = available[0];
+            let inner_cpu = available[1];
+            context
+                .pinned(outer_cpu)
+                .spawn(move |context| {
+                    let available = available.clone();
+                    async move {
+                        context
+                            .pinned(inner_cpu)
+                            .spawn(move |context| {
+                                let available = available.clone();
+                                async move {
+                                    assert_eq!(
+                                        utils::thread::available_cpus(),
+                                        Some(NonEmptyVec::new(inner_cpu)),
+                                    );
+                                    // The dedicated child is unpinned, so it
+                                    // should restore the runtime baseline mask.
+                                    let dedicated_allowed = context
+                                        .dedicated()
+                                        .spawn(|_| async move { utils::thread::available_cpus() })
+                                        .await
+                                        .unwrap();
+                                    assert_eq!(dedicated_allowed, Some(available.clone()));
+                                }
+                            })
+                            .await
+                            .unwrap()
+                    }
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[should_panic(expected = "failed to pin task to cpu")]
+    fn test_tokio_spawn_pinned_invalid_cpu() {
+        // Pinning to a CPU outside the runtime baseline CPU set panics when the task starts.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let invalid_cpu = context
+                .available_cpus()
+                .as_ref()
+                .map(|cpus| *cpus.last())
+                .map(|cpu| cpu + 1);
+            let invalid_cpu = invalid_cpu.unwrap();
             context.pinned(invalid_cpu).spawn(|_| async {});
         });
     }
@@ -4039,13 +4124,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_tokio_spawn_pinned_invalid_cpu_cleans_metrics() {
-        let invalid_cpu = crate::available_cpus()
-            .into_iter()
-            .last()
-            .map(|cpu| cpu + 1)
-            .unwrap();
+        // A pinning failure happens during spawn-time startup, before the task
+        // future is polled. That failure must still clean up the task's
+        // metrics and supervision state.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            let invalid_cpu = context
+                .available_cpus()
+                .as_ref()
+                .map(|cpus| *cpus.last())
+                .map(|cpu| cpu + 1);
+            let invalid_cpu = invalid_cpu.unwrap();
             let context = context.with_label("pinned_invalid_cpu");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 context.clone().pinned(invalid_cpu).spawn(|_| async {});

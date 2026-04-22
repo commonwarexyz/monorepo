@@ -26,7 +26,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{sync::Mutex, vec::NonEmptyVec, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -335,6 +335,7 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+    available_cpus: Option<NonEmptyVec<usize>>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -480,6 +481,7 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
+            available_cpus: utils::thread::available_cpus(),
         });
 
         // Get metrics
@@ -571,6 +573,10 @@ impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated(None);
         self
+    }
+
+    fn available_cpus(&self) -> Option<NonEmptyVec<usize>> {
+        self.executor.available_cpus.clone()
     }
 
     fn pinned(mut self, cpu: usize) -> Self {
@@ -897,6 +903,10 @@ impl crate::BufferPooler for Context {
 /// Spawn a task on a dedicated thread, optionally pinning it to `cpu`, and
 /// wait for startup to complete before returning.
 ///
+/// When `cpu` is `None`, the dedicated thread restores the runtime's baseline
+/// affinity mask before polling the task so it does not inherit a parent
+/// task's temporary CPU pin.
+///
 /// # Panics
 ///
 /// Panics if the dedicated thread cannot be created, if pinning to `cpu` fails,
@@ -908,18 +918,26 @@ where
 {
     // Ensure the task can access the tokio runtime.
     let runtime_handle = executor.runtime.handle().clone();
+    let available_cpus = executor.available_cpus.clone();
 
     // The dedicated thread reports whether startup succeeded before it begins
     // polling the task future.
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
     if let Err(err) = utils::thread::try_spawn(executor.thread_stack_size, move || {
-        let result = cpu.map_or(Ok(()), utils::thread::pin_to_cpu);
-        let pinned = result.is_ok();
+        let result = cpu.map_or_else(
+            || {
+                available_cpus.as_ref().map_or(Ok(()), |available_cpus| {
+                    utils::thread::set_cpu_affinity(available_cpus)
+                })
+            },
+            |cpu| utils::thread::set_cpu_affinity(&[cpu]),
+        );
+        let started = result.is_ok();
         startup_tx
             .send(result)
             .expect("startup receiver dropped unexpectedly");
-        if pinned {
+        if started {
             runtime_handle.block_on(future);
         }
     }) {

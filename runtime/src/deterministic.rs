@@ -71,6 +71,7 @@ use commonware_utils::{
     hex,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
+    vec::NonEmptyVec,
     SystemTimeExt,
 };
 #[cfg(feature = "external")]
@@ -1133,6 +1134,10 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
+    fn available_cpus(&self) -> Option<NonEmptyVec<usize>> {
+        None
+    }
+
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated(None);
         self
