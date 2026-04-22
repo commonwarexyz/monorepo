@@ -301,7 +301,7 @@ impl<M> Registered<M> {
     /// This is intended for `Metrics` implementations outside `commonware-runtime`
     /// that need to return a [`Registered`] handle without exposing the metric in
     /// a runtime-managed registry.
-    pub fn new(metric: M) -> Self {
+    pub fn detached(metric: M) -> Self {
         Self::from_parts(Arc::new(metric), MetricRegistration::detached())
     }
 
@@ -902,8 +902,8 @@ mod tests {
     }
 
     #[test]
-    fn test_registered_new_creates_detached_handle() {
-        let registered = Registered::new(Counter::<u64>::default());
+    fn test_registered_detached_creates_detached_handle() {
+        let registered = Registered::detached(Counter::<u64>::default());
         let clone = registered.clone();
 
         registered.inc_by(2);

@@ -454,7 +454,7 @@ stability_scope!(BETA {
         /// panics.
         ///
         /// Implementations outside `commonware-runtime` that do not expose metrics
-        /// through a runtime registry may return [`Registered::new(metric)`] to
+        /// through a runtime registry may return [`Registered::detached`] to
         /// produce a detached handle.
         ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.

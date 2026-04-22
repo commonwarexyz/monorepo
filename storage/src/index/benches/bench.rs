@@ -37,7 +37,7 @@ impl Metrics for DummyMetrics {
         _: H,
         metric: M,
     ) -> commonware_runtime::Registered<M> {
-        commonware_runtime::Registered::new(metric)
+        commonware_runtime::Registered::detached(metric)
     }
 
     fn encode(&self) -> String {
