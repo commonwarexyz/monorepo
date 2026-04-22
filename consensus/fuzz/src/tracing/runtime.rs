@@ -3,9 +3,12 @@ use super::{
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
 };
 use crate::{
-    disrupter::Disrupter, invariants, simplex, strategy::SmallScopeForTracing,
-    types::ReplayedReplicaState, utils::Partition, ByzantineActor, FuzzInput, SimplexEd25519,
-    EPOCH, N4F0C4, N4F1C3, PAGE_CACHE_SIZE, PAGE_SIZE,
+    disrupter::Disrupter,
+    invariants, simplex,
+    strategy::SmallScopeForTracing,
+    types::ReplayedReplicaState,
+    utils::{sometimes_certifier, Partition},
+    ByzantineActor, FuzzInput, SimplexEd25519, EPOCH, N4F0C4, N4F1C3, PAGE_CACHE_SIZE, PAGE_SIZE,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -978,7 +981,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (actor, application) =
                 application::Application::new(primary_context.with_label("application"), app_cfg);
@@ -1038,7 +1041,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (secondary_actor, secondary_application) = application::Application::new(
                 secondary_context.with_label("application"),
@@ -1138,7 +1141,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);
@@ -1388,7 +1391,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);
@@ -1563,7 +1566,7 @@ async fn build_honest_trace_data(
             propose_latency: (10.0, 5.0),
             verify_latency: (10.0, 5.0),
             certify_latency: (10.0, 5.0),
-            should_certify: application::Certifier::Sometimes,
+            should_certify: sometimes_certifier(),
         };
         let (actor, application) =
             application::Application::new(ctx.with_label("application"), app_cfg);
@@ -1708,7 +1711,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);

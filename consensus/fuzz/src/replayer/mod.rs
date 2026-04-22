@@ -6,6 +6,7 @@ use crate::{
     invariants,
     tracing::{data::TraceData, sniffer::TraceEntry},
     types::ReplayedReplicaState,
+    utils::sometimes_certifier,
 };
 use commonware_consensus::{
     simplex::{
@@ -103,7 +104,7 @@ pub fn replay_trace(
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
+                should_certify: sometimes_certifier(),
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);

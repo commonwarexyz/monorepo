@@ -16,8 +16,8 @@ use std::{
     fmt::Write,
 };
 
-/// Returns true if the block hash is certifiable, matching
-/// `Certifier::Sometimes`: `last_byte % 11 < 9`.
+/// Returns true if the block hash is certifiable under the trace fuzzing policy:
+/// `last_byte % 11 < 9`.
 fn is_certifiable(block_hash: &str) -> bool {
     if block_hash.len() >= 2 {
         let last_two = &block_hash[block_hash.len() - 2..];
@@ -443,7 +443,7 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     writeln!(out, "    ).* from \"../replica\"").unwrap();
     writeln!(out).unwrap();
 
-    // Certify policy: derive from block hash using Certifier::Sometimes logic
+    // Certify policy: derive from block hash using the trace fuzzing policy.
     let mut certifiable_payloads: Vec<String> = vec!["GENESIS_PAYLOAD".to_string()];
     for (hash, name) in &block_map {
         if is_certifiable(hash) {
