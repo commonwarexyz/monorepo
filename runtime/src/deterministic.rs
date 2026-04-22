@@ -58,7 +58,7 @@ use crate::{
         MetricRegister,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, SharedMetric,
+        Panicker, Registry,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Registered, Spawner as _, METRICS_PREFIX,
@@ -1312,17 +1312,16 @@ impl crate::Metrics for Context {
             }
         };
         let metric = Arc::new(metric);
-        let registration = {
+        {
             let mut registry = executor.registry.lock();
-            let id = registry.register(
+            registry.register(
+                Arc::downgrade(&executor.registry),
                 prefixed_name,
                 help,
                 self.attributes.clone(),
-                SharedMetric(metric.clone()),
-            );
-            crate::MetricRegistration::new(id, Arc::downgrade(&executor.registry))
-        };
-        Registered::new(metric, registration)
+                metric,
+            )
+        }
     }
 
     fn encode(&self) -> String {

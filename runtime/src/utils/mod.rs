@@ -247,6 +247,14 @@ impl MetricRegistration {
             _inner: Arc::new(MetricRegistrationInner { id, registry }),
         }
     }
+
+    fn from_inner(inner: Arc<MetricRegistrationInner>) -> Self {
+        Self { _inner: inner }
+    }
+
+    fn downgrade(&self) -> Weak<MetricRegistrationInner> {
+        Arc::downgrade(&self._inner)
+    }
 }
 
 struct MetricRegistrationInner {
@@ -333,6 +341,8 @@ struct MetricEntry {
     family_name: String,
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     metric: Box<dyn PrometheusMetric>,
+    metric_any: Arc<dyn Any + Send + Sync>,
+    registration: Weak<MetricRegistrationInner>,
     family_index: usize,
 }
 
@@ -425,9 +435,96 @@ impl Registry {
             family_name: name,
             attributes,
             metric: Box::new(metric),
+            metric_any: Arc::new(()),
+            registration: Weak::new(),
             family_index,
         });
         id
+    }
+
+    pub fn register<M>(
+        &mut self,
+        registry: Weak<Mutex<Registry>>,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: Arc<M>,
+    ) -> Registered<M>
+    where
+        M: PrometheusMetric,
+    {
+        let attributes = attributes
+            .into_iter()
+            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
+            .collect::<Vec<_>>();
+        let metric_type = metric.metric_type();
+        let key = (name.clone(), attributes.clone());
+        if let Some(existing_id) = self.keys.get(&key).copied() {
+            if let Some(family) = self.families.get(&name) {
+                assert_eq!(
+                    family.help, help,
+                    "metric family `{}` registered with inconsistent help text",
+                    name
+                );
+            }
+            let entry = self.metric_ref(existing_id);
+            let existing_metric = Arc::clone(&entry.metric_any)
+                .downcast::<M>()
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "duplicate metric `{}` with attributes {:?} registered with different type",
+                        key.0, key.1
+                    )
+                });
+            let registration = entry
+                .registration
+                .upgrade()
+                .map(MetricRegistration::from_inner)
+                .expect("registration missing for live metric");
+            return Registered::new(existing_metric, registration);
+        }
+        if let Some(family) = self.families.get(&name) {
+            assert_eq!(
+                family.help, help,
+                "metric family `{}` registered with inconsistent help text",
+                name
+            );
+            assert_eq!(
+                family.metric_type, metric_type,
+                "metric family `{}` registered with inconsistent metric type",
+                name
+            );
+        }
+
+        let id = self.allocate_metric_id();
+        let registration = MetricRegistration::new(id, registry);
+        self.keys.insert(key, id);
+        let family = match self.families.entry(name.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut descriptor = String::new();
+                encode_descriptor(&mut descriptor, &name, &help, None, metric_type)
+                    .expect("encoding cached descriptor failed");
+                entry.insert(MetricFamily {
+                    help,
+                    metric_type,
+                    descriptor,
+                    metric_ids: Vec::new(),
+                })
+            }
+        };
+        let family_index = family.metric_ids.len();
+        family.metric_ids.push(id);
+        let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
+        self.metric_slot_mut(id).replace(MetricEntry {
+            family_name: name,
+            attributes,
+            metric: Box::new(SharedMetric(metric.clone())),
+            metric_any,
+            registration: registration.downgrade(),
+            family_index,
+        });
+        Registered::new(metric, registration)
     }
 
     fn metric_index(id: u64) -> usize {
@@ -480,20 +577,6 @@ impl Registry {
             .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
             .collect::<Vec<_>>();
         self.insert_metric(name, help, attributes, metric);
-    }
-
-    pub fn register(
-        &mut self,
-        name: String,
-        help: String,
-        attributes: Vec<(String, String)>,
-        metric: impl PrometheusMetric,
-    ) -> u64 {
-        let attributes = attributes
-            .into_iter()
-            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
-            .collect::<Vec<_>>();
-        self.insert_metric(name, help, attributes, metric)
     }
 
     pub fn unregister(&mut self, id: u64) {
@@ -594,7 +677,7 @@ mod tests {
     use crate::{deterministic, Metrics, Runner};
     use commonware_macros::test_traced;
     use futures::task::waker;
-    use prometheus_client::metrics::counter::Counter;
+    use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
@@ -739,16 +822,33 @@ mod tests {
         // Test passes if runtime doesn't panic on shutdown
     }
 
-    #[test]
-    #[should_panic(expected = "duplicate metric:")]
-    fn test_duplicate_metrics_panics() {
+    #[test_traced]
+    fn test_duplicate_metrics_reuse_existing_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register metrics with the same label, causing duplicates
             let c1 = Counter::<u64>::default();
-            let _metric_a = context.with_label("a").register("test", "help", c1);
+            let metric_a = context.with_label("a").register("test", "help", c1);
             let c2 = Counter::<u64>::default();
-            let _metric_b = context.with_label("a").register("test", "help", c2);
+            let metric_b = context.with_label("a").register("test", "help", c2);
+
+            assert!(std::ptr::eq(metric_a.metric(), metric_b.metric()));
+
+            metric_a.inc();
+            metric_b.inc_by(2);
+            let encoded = context.encode();
+            assert!(encoded.contains("a_test_total 3"));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "registered with different type")]
+    fn test_duplicate_metrics_different_type_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let counter = Counter::<u64>::default();
+            let _metric_a = context.with_label("a").register("test", "help", counter);
+            let gauge = Gauge::<i64>::default();
+            let _metric_b = context.with_label("a").register("test", "help", gauge);
         });
     }
 

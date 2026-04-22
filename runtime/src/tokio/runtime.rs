@@ -19,7 +19,7 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         self, add_attribute, signal::Stopper, supervision::Tree, MetricRegister, Panicker,
-        Registry, SharedMetric,
+        Registry,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
     SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
@@ -742,17 +742,16 @@ impl crate::Metrics for Context {
             }
         };
         let metric = Arc::new(metric);
-        let registration = {
+        {
             let mut registry = self.executor.registry.lock();
-            let id = registry.register(
+            registry.register(
+                Arc::downgrade(&self.executor.registry),
                 prefixed_name,
                 help,
                 self.attributes.clone(),
-                SharedMetric(metric.clone()),
-            );
-            crate::MetricRegistration::new(id, Arc::downgrade(&self.executor.registry))
-        };
-        Registered::new(metric, registration)
+                metric,
+            )
+        }
     }
 
     fn encode(&self) -> String {

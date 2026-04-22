@@ -435,6 +435,11 @@ stability_scope!(BETA {
         /// metric should remain exposed. Dropping the returned handle unregisters
         /// the metric immediately.
         ///
+        /// Re-registering the same metric key (same prefixed name and attributes)
+        /// returns another handle to the existing metric when the concrete metric
+        /// type matches. Registering the same key with a different metric type
+        /// panics.
+        ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
         fn register<N: Into<String>, H: Into<String>, M: Metric>(
             &self,
@@ -444,11 +449,6 @@ stability_scope!(BETA {
         ) -> Registered<M>;
 
         /// Encode all metrics into a buffer.
-        ///
-        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be
-        /// avoided by using `with_label` and `with_attribute` to create new context instances
-        /// (ensures all context instances are namespaced).
         fn encode(&self) -> String;
     }
 
