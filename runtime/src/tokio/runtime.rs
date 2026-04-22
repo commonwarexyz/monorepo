@@ -1105,6 +1105,46 @@ mod tests {
     }
 
     #[test]
+    fn test_foreign_last_sender_drop_wakes_local_receiver() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let (tx, rx) = mpsc::channel::<u64>(4);
+            let foreign = tx.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            let handle = context.dedicated().spawn(move |context| async move {
+                context
+                    .colocated()
+                    .spawn(move |_| async move {
+                        let mut rx = rx;
+                        poll_fn(|cx| {
+                            assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                            Poll::Ready(())
+                        })
+                        .await;
+
+                        drop(tx);
+                        ready_tx.send(()).unwrap();
+                        done_tx
+                            .send((mpsc::runtime::current_owner_id(), rx.recv().await))
+                            .unwrap();
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            ready_rx.await.unwrap();
+            drop(foreign);
+
+            let (owner, value) = done_rx.await.unwrap();
+            assert!(owner.is_some());
+            assert_eq!(value, None);
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
     #[ignore = "diagnostic reproducer for concurrent first-use send/recv race"]
     fn test_dedicated_concurrent_first_use_send_recv_completes() {
         let executor = Runner::default();

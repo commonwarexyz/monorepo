@@ -1,4 +1,43 @@
 //! Tokio-compatible MPSC wrappers with a transparent local fast path.
+//!
+//! This module preserves the subset of `tokio::sync::mpsc` used across the
+//! workspace while transparently switching between two implementations:
+//!
+//! - `Local`, an owner-thread-affine queue used on dedicated-thread
+//!   `LocalSet` execution.
+//! - `Shared`, plain Tokio MPSC used everywhere else.
+//!
+//! Binding is lazy. Channels start `Uninitialized`, then the first operation
+//! decides whether the channel should remain local to the current dedicated
+//! owner thread or bind directly to shared Tokio state. Once a foreign thread
+//! touches a locally bound channel, the channel promotes one-way to `Shared`.
+//!
+//! Only the workspace-used Tokio surface is implemented:
+//!
+//! - [`channel`]
+//! - [`unbounded_channel`]
+//! - [`Sender`], [`Receiver`]
+//! - [`UnboundedSender`], [`UnboundedReceiver`]
+//! - `Clone` on senders
+//! - `send`, `try_send`, unbounded `send`
+//! - `recv`, `try_recv`, `poll_recv`, `close`
+//! - [`Sender::closed`], [`Sender::is_closed`]
+//!
+//! Tokio's own error types are re-exported directly.
+//!
+//! # Ordering
+//!
+//! Successful sends preserve:
+//!
+//! - per-sender FIFO ordering
+//! - a single global order of successful sends
+//! - a fixed receive position once `send` / `try_send` returns `Ok`
+//!
+//! # Cancel Safety
+//!
+//! The async receive operations are cancel-safe: canceling a pending `recv`
+//! does not consume a value. Bounded `send` is cancel-safe with respect to
+//! message delivery: canceling a pending `send` does not enqueue the message.
 
 use crate::sync::{Condvar, Mutex};
 use futures::{future::poll_fn, task::AtomicWaker};
@@ -15,6 +54,7 @@ use std::{
 };
 use tokio::sync::{mpsc as tokio_mpsc, Notify};
 
+/// Tokio MPSC error types re-exported by the wrapper.
 pub mod error {
     pub use tokio::sync::mpsc::error::{SendError, TryRecvError, TrySendError};
 }
@@ -22,17 +62,15 @@ pub mod error {
 use error::{SendError, TryRecvError, TrySendError};
 
 const MODE_UNINITIALIZED: u8 = 0;
-const MODE_BINDING_LOCAL: u8 = 1;
-const MODE_BINDING_SHARED: u8 = 2;
-const MODE_LOCAL: u8 = 3;
-const MODE_PROMOTING: u8 = 4;
-const MODE_SHARED: u8 = 5;
+const MODE_BINDING: u8 = 1;
+const MODE_LOCAL: u8 = 2;
+const MODE_PROMOTING: u8 = 3;
+const MODE_SHARED: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Uninitialized,
-    BindingLocal,
-    BindingShared,
+    Binding,
     Local,
     Promoting,
     Shared,
@@ -42,8 +80,7 @@ impl Mode {
     const fn as_u8(self) -> u8 {
         match self {
             Self::Uninitialized => MODE_UNINITIALIZED,
-            Self::BindingLocal => MODE_BINDING_LOCAL,
-            Self::BindingShared => MODE_BINDING_SHARED,
+            Self::Binding => MODE_BINDING,
             Self::Local => MODE_LOCAL,
             Self::Promoting => MODE_PROMOTING,
             Self::Shared => MODE_SHARED,
@@ -54,8 +91,7 @@ impl Mode {
     const fn from_u8(mode: u8) -> Self {
         match mode {
             MODE_UNINITIALIZED => Self::Uninitialized,
-            MODE_BINDING_LOCAL => Self::BindingLocal,
-            MODE_BINDING_SHARED => Self::BindingShared,
+            MODE_BINDING => Self::Binding,
             MODE_LOCAL => Self::Local,
             MODE_PROMOTING => Self::Promoting,
             MODE_SHARED => Self::Shared,
@@ -116,6 +152,24 @@ impl<T> Common<T> {
         self.mode.load(Ordering::Relaxed)
     }
 
+    fn try_begin_initialize(&self) -> bool {
+        self.mode
+            .compare_exchange(
+                Mode::Uninitialized.as_u8(),
+                Mode::Binding.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn finish_local_initialize(&self, owner: runtime::OwnerHandle) {
+        self.owner_id.store(owner.id, Ordering::Release);
+        *self.owner.lock() = Some(owner);
+        self.mode.store(Mode::Local.as_u8(), Ordering::Release);
+        self.notify_state_change();
+    }
+
     #[inline]
     fn current_is_owner(&self) -> bool {
         runtime::current_owner_id_raw() == self.owner_id.load(Ordering::Relaxed)
@@ -150,10 +204,13 @@ impl<T> Common<T> {
         self.sender_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn sender_dropped(&self) {
+    fn sender_dropped(&self) -> bool {
         if self.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.wake_owner_if_local();
             self.notify_state_change();
+            true
+        } else {
+            false
         }
     }
 
@@ -176,7 +233,7 @@ impl<T> Common<T> {
     }
 
     fn wait_binding_complete(&self) {
-        while matches!(self.load_mode(), Mode::BindingLocal | Mode::BindingShared) {
+        while self.load_mode() == Mode::Binding {
             std::hint::spin_loop();
         }
     }
@@ -214,6 +271,16 @@ impl<T> Common<T> {
             }
         })
         .await
+    }
+
+    #[inline]
+    fn poll_mode_change(&self, cx: &mut Context<'_>, mode: Mode) -> Poll<()> {
+        self.recv_waker.register(cx.waker());
+        if self.load_mode() != mode {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 
     #[inline]
@@ -300,32 +367,12 @@ impl<T> BoundedInner<T> {
 
     fn try_initialize(&self) {
         let owner = runtime::current_owner();
-        let binding = if owner.is_some() {
-            Mode::BindingLocal
-        } else {
-            Mode::BindingShared
-        };
-        if self
-            .common
-            .mode
-            .compare_exchange(
-                Mode::Uninitialized.as_u8(),
-                binding.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
+        if !self.common.try_begin_initialize() {
             return;
         }
 
         match owner {
-            Some(owner) => {
-                self.common.owner_id.store(owner.id, Ordering::Release);
-                *self.common.owner.lock() = Some(owner);
-                self.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
-                self.common.notify_state_change();
-            }
+            Some(owner) => self.common.finish_local_initialize(owner),
             None => {
                 self.promotion_fallback.lock().take();
                 self.common.publish_shared();
@@ -476,6 +523,10 @@ impl<T> BoundedInner<T> {
         }
 
         self.promotion_fallback.lock().take();
+        // A receiver task may still be parked on the owner-local waker. Wake
+        // it before publishing shared mode so `LocalSet` reschedules it to
+        // observe the transition.
+        self.common.wake_local_recv();
         self.common.publish_shared();
         self.notify_space_all();
     }
@@ -504,6 +555,7 @@ impl<T> Future for BoundedRecvFuture<'_, T> {
     }
 }
 
+/// The sending half of a bounded channel.
 pub struct Sender<T> {
     inner: Arc<BoundedInner<T>>,
     fallback: tokio_mpsc::Sender<T>,
@@ -530,22 +582,41 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.inner.common.sender_dropped();
+        if self.inner.common.sender_dropped()
+            && matches!(self.inner.common.load_mode(), Mode::Local)
+            && !self.inner.common.current_is_owner()
+        {
+            // A pending owner-local receiver must observe disconnection, so a
+            // final foreign sender drop promotes through the owner thread.
+            BoundedInner::start_promotion(&self.inner);
+        }
     }
 }
 
 impl<T> Sender<T> {
+    #[inline(always)]
+    fn finish_shared_send(&self, result: Result<(), SendError<T>>) -> Result<(), SendError<T>> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.inner.common.set_closed();
+                Err(err)
+            }
+        }
+    }
+
+    /// Sends a value, waiting for capacity when the bounded channel is full.
+    ///
+    /// When the channel is locally bound and used from its owner thread, this
+    /// uses the local queue fast path. Otherwise it promotes to, or directly
+    /// uses, Tokio shared mode.
+    ///
+    /// Canceling a pending send does not enqueue the value.
     #[inline]
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mode = self.inner.common.load_mode_raw_relaxed();
         if mode == MODE_SHARED {
-            return match self.fallback.send(value).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    self.inner.common.set_closed();
-                    Err(err)
-                }
-            };
+            return self.finish_shared_send(self.fallback.send(value).await);
         }
         if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
             return self.send_local_owner(value).await;
@@ -602,7 +673,7 @@ impl<T> Sender<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => {
+                Mode::Binding => {
                     self.inner.common.wait_binding_complete();
                 }
                 Mode::Local if self.inner.common.current_is_owner() => {
@@ -644,14 +715,8 @@ impl<T> Sender<T> {
                     self.inner.common.wait_mode_change_async(Mode::Promoting).await;
                 }
                 Mode::Shared => {
-                    return match self.fallback.send(value.take().expect("value must be present")).await
-                    {
-                        Ok(()) => Ok(()),
-                        Err(err) => {
-                            self.inner.common.set_closed();
-                            Err(err)
-                        }
-                    };
+                    return self
+                        .finish_shared_send(self.fallback.send(value.take().expect("value must be present")).await);
                 }
             }
         }
@@ -659,6 +724,7 @@ impl<T> Sender<T> {
 }
 
 impl<T> Sender<T> {
+    /// Attempts to send a value without waiting for capacity.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
         match self.try_send_fast(value) {
             Ok(result) => result,
@@ -666,10 +732,12 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Resolves when the receiver has been closed or dropped.
     pub async fn closed(&self) {
         self.inner.common.wait_closed_async().await;
     }
 
+    /// Returns `true` once the receiver has been closed or dropped.
     pub fn is_closed(&self) -> bool {
         self.inner.common.is_closed()
     }
@@ -702,7 +770,7 @@ impl<T> Sender<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => self.inner.common.wait_binding_complete(),
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_send_local(value);
                 }
@@ -730,6 +798,7 @@ impl<T> Sender<T> {
     }
 }
 
+/// The receiving half of a bounded channel.
 pub struct Receiver<T> {
     inner: Arc<BoundedInner<T>>,
     fallback: tokio_mpsc::Receiver<T>,
@@ -746,11 +815,16 @@ impl<T> core::fmt::Debug for Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Receives the next value from the channel.
+    ///
+    /// This future is cancel-safe: canceling a pending receive does not
+    /// consume a queued value.
     #[inline]
     pub fn recv(&mut self) -> impl Future<Output = Option<T>> + '_ {
         BoundedRecvFuture { receiver: self }
     }
 
+    /// Attempts to receive a value without waiting.
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mode = self.inner.common.load_mode_raw_relaxed();
@@ -763,6 +837,7 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Polls for the next value from the channel.
     #[inline]
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let mode = self.inner.common.load_mode_raw_relaxed();
@@ -808,11 +883,7 @@ impl<T> Receiver<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => {
-                    self.inner
-                        .common
-                        .wait_mode_change_blocking(self.inner.common.load_mode());
-                }
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_recv_local();
                 }
@@ -835,10 +906,8 @@ impl<T> Receiver<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => {
-                    let mode = self.inner.common.load_mode();
-                    self.inner.common.recv_waker.register(cx.waker());
-                    if self.inner.common.load_mode() != mode {
+                Mode::Binding => {
+                    if self.inner.common.poll_mode_change(cx, Mode::Binding).is_ready() {
                         continue;
                     }
                     return Poll::Pending;
@@ -853,8 +922,12 @@ impl<T> Receiver<T> {
                     self.inner.run_promotion();
                 }
                 Mode::Promoting => {
-                    self.inner.common.recv_waker.register(cx.waker());
-                    if self.inner.common.load_mode() != Mode::Promoting {
+                    if self
+                        .inner
+                        .common
+                        .poll_mode_change(cx, Mode::Promoting)
+                        .is_ready()
+                    {
                         continue;
                     }
                     return Poll::Pending;
@@ -864,6 +937,10 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Closes the channel.
+    ///
+    /// After closing, future sends fail immediately, but already queued values
+    /// remain readable until the channel is drained.
     pub fn close(&mut self) {
         self.inner.common.set_closed();
         self.inner.notify_space_all();
@@ -874,11 +951,7 @@ impl<T> Receiver<T> {
                     self.inner.try_initialize();
                     return;
                 }
-                Mode::BindingLocal | Mode::BindingShared => {
-                    self.inner
-                        .common
-                        .wait_mode_change_blocking(self.inner.common.load_mode());
-                }
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => return,
                 Mode::Local => {
                     BoundedInner::start_promotion(&self.inner);
@@ -933,32 +1006,12 @@ impl<T> UnboundedInner<T> {
 
     fn try_initialize(&self) {
         let owner = runtime::current_owner();
-        let binding = if owner.is_some() {
-            Mode::BindingLocal
-        } else {
-            Mode::BindingShared
-        };
-        if self
-            .common
-            .mode
-            .compare_exchange(
-                Mode::Uninitialized.as_u8(),
-                binding.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
+        if !self.common.try_begin_initialize() {
             return;
         }
 
         match owner {
-            Some(owner) => {
-                self.common.owner_id.store(owner.id, Ordering::Release);
-                *self.common.owner.lock() = Some(owner);
-                self.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
-                self.common.notify_state_change();
-            }
+            Some(owner) => self.common.finish_local_initialize(owner),
             None => {
                 self.promotion_fallback.lock().take();
                 self.common.publish_shared();
@@ -1084,6 +1137,10 @@ impl<T> UnboundedInner<T> {
         }
 
         self.promotion_fallback.lock().take();
+        // A receiver task may still be parked on the owner-local waker. Wake
+        // it before publishing shared mode so `LocalSet` reschedules it to
+        // observe the transition.
+        self.common.wake_local_recv();
         self.common.publish_shared();
     }
 }
@@ -1111,6 +1168,7 @@ impl<T> Future for UnboundedRecvFuture<'_, T> {
     }
 }
 
+/// The sending half of an unbounded channel.
 pub struct UnboundedSender<T> {
     inner: Arc<UnboundedInner<T>>,
     fallback: tokio_mpsc::UnboundedSender<T>,
@@ -1137,11 +1195,19 @@ impl<T> Clone for UnboundedSender<T> {
 
 impl<T> Drop for UnboundedSender<T> {
     fn drop(&mut self) {
-        self.inner.common.sender_dropped();
+        if self.inner.common.sender_dropped()
+            && matches!(self.inner.common.load_mode(), Mode::Local)
+            && !self.inner.common.current_is_owner()
+        {
+            // A pending owner-local receiver must observe disconnection, so a
+            // final foreign sender drop promotes through the owner thread.
+            UnboundedInner::start_promotion(&self.inner);
+        }
     }
 }
 
 impl<T> UnboundedSender<T> {
+    /// Sends a value without backpressure.
     #[inline]
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mode = self.inner.common.load_mode_raw_relaxed();
@@ -1155,7 +1221,7 @@ impl<T> UnboundedSender<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => self.inner.common.wait_binding_complete(),
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_send_local(value);
                 }
@@ -1182,15 +1248,18 @@ impl<T> UnboundedSender<T> {
         }
     }
 
+    /// Resolves when the receiver has been closed or dropped.
     pub async fn closed(&self) {
         self.inner.common.wait_closed_async().await;
     }
 
+    /// Returns `true` once the receiver has been closed or dropped.
     pub fn is_closed(&self) -> bool {
         self.inner.common.is_closed()
     }
 }
 
+/// The receiving half of an unbounded channel.
 pub struct UnboundedReceiver<T> {
     inner: Arc<UnboundedInner<T>>,
     fallback: tokio_mpsc::UnboundedReceiver<T>,
@@ -1207,11 +1276,16 @@ impl<T> core::fmt::Debug for UnboundedReceiver<T> {
 }
 
 impl<T> UnboundedReceiver<T> {
+    /// Receives the next value from the channel.
+    ///
+    /// This future is cancel-safe: canceling a pending receive does not
+    /// consume a queued value.
     #[inline]
     pub fn recv(&mut self) -> impl Future<Output = Option<T>> + '_ {
         UnboundedRecvFuture { receiver: self }
     }
 
+    /// Attempts to receive a value without waiting.
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mode = self.inner.common.load_mode_raw_relaxed();
@@ -1225,11 +1299,7 @@ impl<T> UnboundedReceiver<T> {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => {
-                    self.inner
-                        .common
-                        .wait_mode_change_blocking(self.inner.common.load_mode());
-                }
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => {
                     return self.inner.try_recv_local();
                 }
@@ -1246,38 +1316,28 @@ impl<T> UnboundedReceiver<T> {
         }
     }
 
+    /// Polls for the next value from the channel.
     #[inline]
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let mode = self.inner.common.load_mode_raw_relaxed();
         if mode == MODE_SHARED {
             return Pin::new(&mut self.fallback).poll_recv(cx);
         }
+        if mode == MODE_LOCAL && self.inner.common.current_is_owner() {
+            return self.poll_recv_fast_local(cx);
+        }
         loop {
             self.inner.promote_if_owner();
             match self.inner.common.load_mode() {
                 Mode::Uninitialized => self.inner.try_initialize(),
-                Mode::BindingLocal | Mode::BindingShared => {
-                    let mode = self.inner.common.load_mode();
-                    self.inner.common.recv_waker.register(cx.waker());
-                    if self.inner.common.load_mode() != mode {
+                Mode::Binding => {
+                    if self.inner.common.poll_mode_change(cx, Mode::Binding).is_ready() {
                         continue;
                     }
                     return Poll::Pending;
                 }
                 Mode::Local if self.inner.common.current_is_owner() => {
-                    if let Ok(value) = self.inner.try_recv_local() {
-                        return Poll::Ready(Some(value));
-                    }
-                    self.inner.common.register_local_recv_waker(cx.waker());
-                    self.inner.promote_if_owner();
-                    if self.inner.common.load_mode() != Mode::Local {
-                        continue;
-                    }
-                    match self.inner.try_recv_local() {
-                        Ok(value) => return Poll::Ready(Some(value)),
-                        Err(TryRecvError::Disconnected) => return Poll::Ready(None),
-                        Err(TryRecvError::Empty) => return Poll::Pending,
-                    }
+                    return self.poll_recv_fast_local(cx);
                 }
                 Mode::Local => {
                     UnboundedInner::start_promotion(&self.inner);
@@ -1286,8 +1346,12 @@ impl<T> UnboundedReceiver<T> {
                     self.inner.run_promotion();
                 }
                 Mode::Promoting => {
-                    self.inner.common.recv_waker.register(cx.waker());
-                    if self.inner.common.load_mode() != Mode::Promoting {
+                    if self
+                        .inner
+                        .common
+                        .poll_mode_change(cx, Mode::Promoting)
+                        .is_ready()
+                    {
                         continue;
                     }
                     return Poll::Pending;
@@ -1297,6 +1361,27 @@ impl<T> UnboundedReceiver<T> {
         }
     }
 
+    #[inline]
+    fn poll_recv_fast_local(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        if let Ok(value) = self.inner.try_recv_local() {
+            return Poll::Ready(Some(value));
+        }
+        self.inner.common.register_local_recv_waker(cx.waker());
+        self.inner.promote_if_owner();
+        if self.inner.common.load_mode() != Mode::Local {
+            return Pin::new(&mut self.fallback).poll_recv(cx);
+        }
+        match self.inner.try_recv_local() {
+            Ok(value) => Poll::Ready(Some(value)),
+            Err(TryRecvError::Disconnected) => Poll::Ready(None),
+            Err(TryRecvError::Empty) => Poll::Pending,
+        }
+    }
+
+    /// Closes the channel.
+    ///
+    /// After closing, future sends fail immediately, but already queued values
+    /// remain readable until the channel is drained.
     pub fn close(&mut self) {
         self.inner.common.set_closed();
         loop {
@@ -1306,11 +1391,7 @@ impl<T> UnboundedReceiver<T> {
                     self.inner.try_initialize();
                     return;
                 }
-                Mode::BindingLocal | Mode::BindingShared => {
-                    self.inner
-                        .common
-                        .wait_mode_change_blocking(self.inner.common.load_mode());
-                }
+                Mode::Binding => self.inner.common.wait_binding_complete(),
                 Mode::Local if self.inner.common.current_is_owner() => return,
                 Mode::Local => {
                     UnboundedInner::start_promotion(&self.inner);
@@ -1349,6 +1430,12 @@ impl<T> Drop for UnboundedReceiver<T> {
     }
 }
 
+/// Creates a bounded channel.
+///
+/// The channel binds lazily on first use. If first used from a dedicated
+/// owner-thread `LocalSet`, the owner thread uses a local queue fast path until
+/// a foreign thread touches the channel, at which point the channel promotes to
+/// Tokio shared mode.
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let (fallback_tx, fallback_rx) = tokio_mpsc::channel(capacity);
     let inner = Arc::new(BoundedInner::new(capacity, fallback_tx.clone()));
@@ -1365,6 +1452,10 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
+/// Creates an unbounded channel.
+///
+/// Binding and promotion semantics match [`channel`], but without bounded
+/// capacity or sender-side waiting.
 pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
     let (fallback_tx, fallback_rx) = tokio_mpsc::unbounded_channel();
     let inner = Arc::new(UnboundedInner::new(fallback_tx.clone()));
@@ -1381,6 +1472,8 @@ pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
     )
 }
 
+/// Hidden runtime hook used to register dedicated-thread local owners and to
+/// schedule promotion work back onto the owner thread.
 #[doc(hidden)]
 pub mod runtime {
     use futures::{future::poll_fn, pin_mut};
@@ -1425,6 +1518,7 @@ pub mod runtime {
         alive: Arc<AtomicBool>,
     }
 
+    /// Installed on dedicated Tokio runtime threads while running a `LocalSet`.
     pub struct LocalOwner {
         previous: Option<OwnerHandle>,
         previous_id: u64,
@@ -1433,6 +1527,7 @@ pub mod runtime {
     }
 
     impl LocalOwner {
+        /// Installs owner-thread metadata for the current thread.
         pub fn install() -> Self {
             let id = NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed);
             let (promotions, receiver) = unbounded_channel();
@@ -1452,6 +1547,7 @@ pub mod runtime {
             }
         }
 
+        /// Runs a future while draining owner-thread promotion work.
         pub async fn run<F: Future>(mut self, future: F) -> F::Output {
             pin_mut!(future);
             poll_fn(|cx| {
@@ -1489,11 +1585,13 @@ pub mod runtime {
     }
 
     #[inline]
+    /// Returns the current owner id, or `0` when no owner is installed.
     pub fn current_owner_id_raw() -> u64 {
         CURRENT_OWNER_ID.with(Cell::get)
     }
 
     #[inline]
+    /// Returns the current owner id when running on a dedicated owner thread.
     pub fn current_owner_id() -> Option<u64> {
         match current_owner_id_raw() {
             0 => None,
@@ -1556,7 +1654,22 @@ pub mod runtime {
 mod tests {
     use super::*;
     use futures::{future::poll_fn, pin_mut, Future, FutureExt};
-    use std::thread;
+    use std::{
+        sync::{
+            atomic::AtomicUsize as StdAtomicUsize,
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    struct CountJob(Arc<StdAtomicUsize>);
+
+    impl runtime::PromotionJob for CountJob {
+        fn run(self: Box<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn owner() -> runtime::LocalOwner {
         runtime::LocalOwner::install()
@@ -1570,6 +1683,694 @@ mod tests {
             cx.waker().wake_by_ref();
             future.as_mut().poll(cx)
         }))
+    }
+
+    fn dead_owner() -> runtime::OwnerHandle {
+        let owner = runtime::LocalOwner::install();
+        let handle = runtime::current_owner().unwrap();
+        drop(owner);
+        handle
+    }
+
+    fn delayed<F>(action: F) -> thread::JoinHandle<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1));
+            action();
+        })
+    }
+
+    fn stale_local_bounded() -> (Sender<u64>, Receiver<u64>) {
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.try_send(0).unwrap();
+            assert_eq!(rx.recv().await, Some(0));
+            (tx, rx)
+        })
+    }
+
+    fn stale_local_unbounded() -> (UnboundedSender<u64>, UnboundedReceiver<u64>) {
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            tx.send(0).unwrap();
+            assert_eq!(rx.recv().await, Some(0));
+            (tx, rx)
+        })
+    }
+
+    #[test]
+    fn test_mode_binding_round_trip() {
+        assert_eq!(Mode::from_u8(MODE_BINDING), Mode::Binding);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid channel mode")]
+    fn test_invalid_mode_panics() {
+        let _ = Mode::from_u8(u8::MAX);
+    }
+
+    #[test]
+    fn test_internal_waiters_and_runtime_hooks() {
+        assert_eq!(runtime::current_owner_id(), None);
+
+        let common = Arc::new(Common::<u64>::new(0));
+
+        common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+        {
+            let notifier = Arc::clone(&common);
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(1));
+                notifier.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                notifier.notify_state_change();
+            });
+            common.wait_binding_complete();
+            handle.join().unwrap();
+        }
+
+        common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        {
+            let notifier = Arc::clone(&common);
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(1));
+                notifier.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                notifier.notify_state_change();
+            });
+            common.wait_mode_change_blocking(Mode::Promoting);
+            handle.join().unwrap();
+        }
+
+        common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        {
+            let notifier = Arc::clone(&common);
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(1));
+                notifier.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                notifier.notify_state_change();
+            });
+            futures::executor::block_on(common.wait_mode_change_async(Mode::Promoting));
+            handle.join().unwrap();
+        }
+
+        common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        {
+            let notifier = Arc::clone(&common);
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(1));
+                notifier.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                notifier.notify_state_change();
+            });
+            futures::executor::block_on(poll_fn(|cx| {
+                common.poll_mode_change(cx, Mode::Promoting)
+            }));
+            handle.join().unwrap();
+        }
+
+        let ran = Arc::new(StdAtomicUsize::new(0));
+        block_on_owner({
+            let ran = Arc::clone(&ran);
+            poll_fn(move |_| {
+                let owner = runtime::current_owner().unwrap();
+                assert_eq!(runtime::current_owner_id(), Some(owner.id));
+                runtime::enqueue_promotion(&owner, CountJob(Arc::clone(&ran))).unwrap();
+                Poll::Ready(())
+            })
+        });
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        let ran = Arc::new(StdAtomicUsize::new(0));
+        let dead_owner = dead_owner();
+        assert_eq!(
+            runtime::enqueue_promotion(&dead_owner, CountJob(Arc::clone(&ran))),
+            Err(())
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        runtime::wake_owner(&dead_owner);
+
+        block_on_owner(async {
+            let common = Arc::new(Common::<u64>::new(0));
+            let owner = runtime::current_owner().unwrap();
+            common.owner_id.store(owner.id, Ordering::Release);
+            *common.owner.lock() = Some(owner);
+            common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+
+            let wake = Arc::clone(&common);
+            thread::spawn(move || wake.wake_owner_if_local()).join().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_mode_change_async_ready_on_notification() {
+        let common = Arc::new(Common::<u64>::new(0));
+        common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+        let notifier = Arc::clone(&common);
+        let handle = delayed(move || notifier.notify_state_change());
+
+        futures::executor::block_on(common.wait_mode_change_async(Mode::Promoting));
+        handle.join().unwrap();
+        assert_eq!(common.load_mode(), Mode::Promoting);
+    }
+
+    #[test]
+    fn test_bounded_sender_private_slow_paths() {
+        block_on_owner(async {
+            let (tx, _rx) = channel::<u64>(1);
+            assert_eq!(tx.try_send_slow(1), Ok(()));
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&tx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+            });
+
+            assert_eq!(tx.try_send_slow(2), Ok(()));
+            handle.join().unwrap();
+            assert_eq!(rx.fallback.try_recv().unwrap(), 2);
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&tx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+            });
+
+            tx.send_slow_async(3).await.unwrap();
+            handle.join().unwrap();
+            assert_eq!(rx.fallback.try_recv().unwrap(), 3);
+        });
+
+        futures::executor::block_on(async {
+            let (tx, rx) = channel::<u64>(1);
+            tx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            tx.fallback.try_send(10).unwrap();
+            let inner = Arc::clone(&tx.inner);
+            let handle = thread::spawn(move || {
+                let mut rx = rx;
+                thread::sleep(Duration::from_millis(1));
+                assert_eq!(rx.fallback.try_recv(), Ok(10));
+                inner.space_notify.notify_waiters();
+                loop {
+                    match rx.fallback.try_recv() {
+                        Ok(11) => return,
+                        Ok(other) => panic!("unexpected receive value: {other}"),
+                        Err(TryRecvError::Empty) => thread::yield_now(),
+                        Err(other) => panic!("unexpected receive error: {other:?}"),
+                    }
+                }
+            });
+
+            tx.send_slow_async(11).await.unwrap();
+            handle.join().unwrap();
+        });
+
+        block_on_owner(async {
+            let (tx, _rx) = channel::<u64>(1);
+            tx.try_send(4).unwrap();
+            tx.inner.common.set_closed();
+            assert!(matches!(tx.send_local_owner(5).await, Err(SendError(5))));
+        });
+
+        block_on_owner(async {
+            let (tx, _rx) = channel::<u64>(1);
+            tx.try_send(6).unwrap();
+            let inner = Arc::clone(&tx.inner);
+            let handle = delayed(move || {
+                inner.common.set_closed();
+                inner.space_notify.notify_waiters();
+            });
+            assert!(matches!(tx.send_local_owner(7).await, Err(SendError(7))));
+            handle.join().unwrap();
+        });
+
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.try_send(8).unwrap();
+            let inner = Arc::clone(&tx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+                inner.space_notify.notify_waiters();
+            });
+            tx.send_local_owner(9).await.unwrap();
+            handle.join().unwrap();
+            assert_eq!(rx.fallback.try_recv().unwrap(), 9);
+        });
+
+        let (tx, _rx) = stale_local_bounded();
+        tx.inner.common.set_closed();
+        assert!(matches!(tx.try_send_slow(12), Err(TrySendError::Closed(12))));
+
+        let (tx, _rx) = stale_local_bounded();
+        tx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        tx.inner.common.set_closed();
+        assert!(matches!(tx.try_send_slow(13), Err(TrySendError::Closed(13))));
+
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            let owner = runtime::current_owner().unwrap();
+            tx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *tx.inner.common.owner.lock() = Some(owner);
+            tx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+            assert_eq!(tx.try_send_slow(14), Ok(()));
+            assert_eq!(rx.fallback.try_recv().unwrap(), 14);
+        });
+
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            let owner = runtime::current_owner().unwrap();
+            tx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *tx.inner.common.owner.lock() = Some(owner);
+            tx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+            tx.send_slow_async(15).await.unwrap();
+            assert_eq!(rx.fallback.try_recv().unwrap(), 15);
+        });
+    }
+
+    #[test]
+    fn test_bounded_receiver_private_slow_paths() {
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            tx.fallback.try_send(1).unwrap();
+            assert_eq!(rx.try_recv().unwrap(), 1);
+        });
+
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.try_send(2).unwrap();
+            assert_eq!(rx.try_recv_slow().unwrap(), 2);
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.fallback.try_send(3).unwrap();
+            rx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&rx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+            });
+
+            assert_eq!(rx.try_recv_slow().unwrap(), 3);
+            handle.join().unwrap();
+        });
+
+        let (_tx, mut rx) = stale_local_bounded();
+        assert_eq!(rx.try_recv_slow(), Err(TryRecvError::Empty));
+
+        block_on_owner(async {
+            let (_tx, mut rx) = channel::<u64>(1);
+            let owner = runtime::current_owner().unwrap();
+            rx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *rx.inner.common.owner.lock() = Some(owner);
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+            unsafe {
+                (*rx.inner.common.local_queue_ptr()).push_back(4);
+            }
+
+            assert_eq!(rx.try_recv_slow().unwrap(), 4);
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.fallback.try_send(5).unwrap();
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&rx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+            });
+
+            assert_eq!(rx.try_recv_slow().unwrap(), 5);
+            handle.join().unwrap();
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.fallback.try_send(6).unwrap();
+            rx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&rx.inner);
+            let handle = delayed(move || {
+                tx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                tx.inner.common.notify_state_change();
+                inner.common.notify_state_change();
+            });
+
+            assert_eq!(poll_fn(|cx| rx.poll_recv_slow(cx)).await, Some(6));
+            handle.join().unwrap();
+        });
+
+        block_on_owner(async {
+            let (_tx, mut rx) = channel::<u64>(1);
+            let owner = runtime::current_owner().unwrap();
+            rx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *rx.inner.common.owner.lock() = Some(owner);
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+            unsafe {
+                (*rx.inner.common.local_queue_ptr()).push_back(7);
+            }
+
+            assert_eq!(poll_fn(|cx| rx.poll_recv_slow(cx)).await, Some(7));
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            tx.fallback.try_send(8).unwrap();
+            rx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            assert_eq!(poll_fn(|cx| rx.poll_recv_fast_local(cx)).await, Some(8));
+        });
+
+        let (tx, mut rx) = stale_local_bounded();
+        rx.close();
+        assert!(tx.is_closed());
+        assert_eq!(tx.inner.common.load_mode(), Mode::Shared);
+
+        let (tx, mut rx) = stale_local_bounded();
+        rx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+        let inner = Arc::clone(&rx.inner);
+        let handle = delayed(move || {
+            inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            inner.common.notify_state_change();
+        });
+        rx.close();
+        handle.join().unwrap();
+        assert!(tx.is_closed());
+
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            let owner = runtime::current_owner().unwrap();
+            rx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *rx.inner.common.owner.lock() = Some(owner);
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+            rx.close();
+            assert!(tx.is_closed());
+        });
+
+        let (tx, rx) = stale_local_bounded();
+        drop(rx);
+        assert_eq!(tx.inner.common.load_mode(), Mode::Shared);
+    }
+
+    #[test]
+    fn test_unbounded_sender_private_slow_paths() {
+        let (tx, _rx) = stale_local_unbounded();
+        tx.inner.common.set_closed();
+        assert!(matches!(tx.send(1), Err(SendError(1))));
+
+        let (tx, _rx) = stale_local_unbounded();
+        tx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        tx.inner.common.set_closed();
+        assert!(matches!(tx.send(2), Err(SendError(2))));
+
+        let (tx, mut rx) = unbounded_channel::<u64>();
+        tx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+        let inner = Arc::clone(&tx.inner);
+        let handle = delayed(move || {
+            inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            inner.common.notify_state_change();
+        });
+        tx.send(3).unwrap();
+        handle.join().unwrap();
+        assert_eq!(rx.fallback.try_recv().unwrap(), 3);
+
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            let owner = runtime::current_owner().unwrap();
+            tx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *tx.inner.common.owner.lock() = Some(owner);
+            tx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+            tx.send(4).unwrap();
+            assert_eq!(rx.fallback.try_recv().unwrap(), 4);
+        });
+    }
+
+    #[test]
+    fn test_unbounded_receiver_private_slow_paths() {
+        let (tx, mut rx) = unbounded_channel::<u64>();
+        tx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+        tx.fallback.send(1).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), 1);
+
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            tx.send(2).unwrap();
+            assert_eq!(rx.try_recv(), Ok(2));
+        });
+
+        let (_tx, mut rx) = stale_local_unbounded();
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        block_on_owner(async {
+            let (_tx, mut rx) = unbounded_channel::<u64>();
+            let owner = runtime::current_owner().unwrap();
+            rx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *rx.inner.common.owner.lock() = Some(owner);
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+            unsafe {
+                (*rx.inner.common.local_queue_ptr()).push_back(3);
+            }
+            assert_eq!(rx.try_recv(), Ok(3));
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            tx.fallback.send(4).unwrap();
+            rx.inner.common.mode.store(Mode::Binding.as_u8(), Ordering::Release);
+            let inner = Arc::clone(&rx.inner);
+            let handle = delayed(move || {
+                inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+                inner.common.notify_state_change();
+            });
+
+            assert_eq!(poll_fn(|cx| rx.poll_recv(cx)).await, Some(4));
+            handle.join().unwrap();
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            tx.fallback.send(5).unwrap();
+            rx.inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+            assert_eq!(poll_fn(|cx| rx.poll_recv_fast_local(cx)).await, Some(5));
+        });
+
+        let (tx, mut rx) = stale_local_unbounded();
+        rx.close();
+        assert!(tx.is_closed());
+        assert_eq!(tx.inner.common.load_mode(), Mode::Shared);
+
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            let owner = runtime::current_owner().unwrap();
+            rx.inner.common.owner_id.store(owner.id, Ordering::Release);
+            *rx.inner.common.owner.lock() = Some(owner);
+            rx.inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+
+            rx.close();
+            assert!(tx.is_closed());
+        });
+
+        let (tx, rx) = stale_local_unbounded();
+        drop(rx);
+        assert_eq!(tx.inner.common.load_mode(), Mode::Shared);
+    }
+
+    #[test]
+    fn test_bounded_shared_paths_and_debug() {
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            assert!(format!("{tx:?}").contains("Sender"));
+            assert!(format!("{rx:?}").contains("Receiver"));
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            tx.send(1).await.unwrap();
+            assert!(matches!(tx.try_send(2), Err(TrySendError::Full(2))));
+            assert_eq!(poll_fn(|cx| rx.poll_recv(cx)).await, Some(1));
+
+            rx.close();
+            assert_eq!(rx.recv().await, None);
+            assert!(matches!(tx.try_send(3), Err(TrySendError::Closed(3))));
+        });
+
+        futures::executor::block_on(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            drop(rx);
+            assert!(matches!(tx.send(9).await, Err(SendError(9))));
+        });
+    }
+
+    #[test]
+    fn test_unbounded_shared_paths_and_debug() {
+        futures::executor::block_on(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            assert!(format!("{tx:?}").contains("UnboundedSender"));
+            assert!(format!("{rx:?}").contains("UnboundedReceiver"));
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+            let closed = tx.closed();
+            futures::pin_mut!(closed);
+            assert!(closed.as_mut().now_or_never().is_none());
+
+            tx.send(1).unwrap();
+            assert_eq!(poll_fn(|cx| rx.poll_recv(cx)).await, Some(1));
+
+            rx.close();
+            closed.await;
+            assert!(tx.is_closed());
+            assert_eq!(rx.recv().await, None);
+            assert!(matches!(tx.send(2), Err(SendError(2))));
+        });
+    }
+
+    #[test]
+    fn test_bounded_promotion_fallback_paths() {
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::channel::<u64>(1);
+        let inner = Arc::new(BoundedInner::new(1, fallback_tx));
+        inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+        inner.try_initialize();
+        BoundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::channel::<u64>(1);
+        let inner = Arc::new(BoundedInner::new(1, fallback_tx));
+        inner.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        BoundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+        unsafe {
+            assert!((*inner.common.local_queue_ptr()).is_empty());
+        }
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::channel::<u64>(1);
+        let inner = Arc::new(BoundedInner::new(1, fallback_tx));
+        inner.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+        let dead_owner = dead_owner();
+        inner.common.owner_id.store(dead_owner.id, Ordering::Release);
+        *inner.common.owner.lock() = Some(dead_owner);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        BoundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::channel::<u64>(1);
+        let inner = BoundedInner::new(1, fallback_tx);
+        inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        inner.common.receiver_alive.store(false, Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        inner.run_promotion();
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, fallback_rx) = tokio_mpsc::channel::<u64>(1);
+        drop(fallback_rx);
+        let inner = BoundedInner::new(1, fallback_tx);
+        inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        inner.run_promotion();
+        assert!(inner.common.is_closed());
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+    }
+
+    #[test]
+    fn test_unbounded_promotion_fallback_paths() {
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::unbounded_channel::<u64>();
+        let inner = Arc::new(UnboundedInner::new(fallback_tx));
+        inner.common.mode.store(Mode::Shared.as_u8(), Ordering::Release);
+        inner.try_initialize();
+        UnboundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::unbounded_channel::<u64>();
+        let inner = Arc::new(UnboundedInner::new(fallback_tx));
+        inner.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        UnboundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+        unsafe {
+            assert!((*inner.common.local_queue_ptr()).is_empty());
+        }
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::unbounded_channel::<u64>();
+        let inner = Arc::new(UnboundedInner::new(fallback_tx));
+        inner.common.mode.store(Mode::Local.as_u8(), Ordering::Release);
+        let dead_owner = dead_owner();
+        inner.common.owner_id.store(dead_owner.id, Ordering::Release);
+        *inner.common.owner.lock() = Some(dead_owner);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        UnboundedInner::start_promotion(&inner);
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, _fallback_rx) = tokio_mpsc::unbounded_channel::<u64>();
+        let inner = UnboundedInner::new(fallback_tx);
+        inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        inner.common.receiver_alive.store(false, Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        inner.run_promotion();
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+
+        let (fallback_tx, fallback_rx) = tokio_mpsc::unbounded_channel::<u64>();
+        drop(fallback_rx);
+        let inner = UnboundedInner::new(fallback_tx);
+        inner.common.mode.store(Mode::Promoting.as_u8(), Ordering::Release);
+        unsafe {
+            (*inner.common.local_queue_ptr()).push_back(1);
+        }
+        inner.run_promotion();
+        assert!(inner.common.is_closed());
+        assert_eq!(inner.common.load_mode(), Mode::Shared);
+    }
+
+    #[test]
+    fn test_final_foreign_sender_drop_promotes_without_owner() {
+        let (tx, rx) = block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+            poll_fn(|cx| {
+                assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+            (tx, rx)
+        });
+        drop(tx);
+        drop(rx);
+
+        let (tx, rx) = block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+            poll_fn(|cx| {
+                assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+            (tx, rx)
+        });
+        drop(tx);
+        drop(rx);
     }
 
     #[test]
@@ -1621,6 +2422,68 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_try_send_error_variants() {
+        block_on_owner(async {
+            let (tx, mut rx) = channel(1);
+            tx.try_send(1).unwrap();
+            assert!(matches!(tx.try_send(2), Err(TrySendError::Full(2))));
+
+            rx.close();
+            assert!(matches!(tx.try_send(3), Err(TrySendError::Closed(3))));
+            assert_eq!(rx.recv().await, Some(1));
+            assert_eq!(rx.recv().await, None);
+        });
+    }
+
+    #[test]
+    fn test_bounded_send_cancellation_does_not_enqueue() {
+        block_on_owner(async {
+            let (tx, mut rx) = channel(1);
+            tx.send(1).await.unwrap();
+
+            let blocked = tx.send(2);
+            futures::pin_mut!(blocked);
+            assert!(blocked.as_mut().now_or_never().is_none());
+            drop(blocked);
+
+            assert_eq!(rx.recv().await, Some(1));
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        });
+    }
+
+    #[test]
+    fn test_bounded_recv_cancellation_does_not_consume() {
+        block_on_owner(async {
+            let (tx, mut rx) = channel::<u64>(1);
+
+            {
+                let recv = rx.recv();
+                futures::pin_mut!(recv);
+                assert!(recv.as_mut().now_or_never().is_none());
+            }
+
+            tx.send(7).await.unwrap();
+            assert_eq!(rx.recv().await, Some(7));
+        });
+    }
+
+    #[test]
+    fn test_unbounded_recv_cancellation_does_not_consume() {
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel::<u64>();
+
+            {
+                let recv = rx.recv();
+                futures::pin_mut!(recv);
+                assert!(recv.as_mut().now_or_never().is_none());
+            }
+
+            tx.send(9).unwrap();
+            assert_eq!(rx.recv().await, Some(9));
+        });
+    }
+
+    #[test]
     fn test_close_semantics() {
         block_on_owner(async {
             let (tx, mut rx) = channel(4);
@@ -1666,6 +2529,34 @@ mod tests {
     }
 
     #[test]
+    fn test_foreign_async_sender_promotes_and_preserves_order() {
+        block_on_owner(async {
+            let (tx, mut rx) = channel(8);
+            let foreign = tx.clone();
+
+            poll_fn(|cx| {
+                assert!(matches!(rx.poll_recv(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+
+            tx.send(1).await.unwrap();
+
+            let (ready_tx, ready_rx) = futures::channel::oneshot::channel();
+            let handle = thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                futures::executor::block_on(foreign.send(2)).unwrap();
+            });
+
+            ready_rx.await.unwrap();
+            assert_eq!(rx.recv().await, Some(1));
+            assert_eq!(rx.recv().await, Some(2));
+            handle.join().unwrap();
+            assert_eq!(tx.inner.common.load_mode(), Mode::Shared);
+        });
+    }
+
+    #[test]
     fn test_foreign_receiver_operation_promotes() {
         block_on_owner(async {
             let (tx, rx) = channel(4);
@@ -1699,6 +2590,21 @@ mod tests {
             assert_eq!(rx.recv().await, Some(1));
             assert_eq!(rx.recv().await, Some(2));
             handle.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_unbounded_close_semantics() {
+        block_on_owner(async {
+            let (tx, mut rx) = unbounded_channel();
+            tx.send(1).unwrap();
+            tx.send(2).unwrap();
+            rx.close();
+
+            assert!(matches!(tx.send(3), Err(SendError(3))));
+            assert_eq!(rx.recv().await, Some(1));
+            assert_eq!(rx.recv().await, Some(2));
+            assert_eq!(rx.recv().await, None);
         });
     }
 

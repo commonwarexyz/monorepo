@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types, clippy::manual_async_fn)]
+
 use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Handle, Runner as _, Spawner as _,

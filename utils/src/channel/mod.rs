@@ -2,7 +2,6 @@
 
 pub mod fallible;
 pub mod mpsc;
+pub mod oneshot;
 pub mod ring;
 pub mod tracked;
-
-pub use tokio::sync::oneshot;
