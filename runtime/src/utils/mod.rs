@@ -410,7 +410,7 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn scope(&mut self) -> MetricScope<'_> {
+    pub const fn scope(&mut self) -> MetricScope<'_> {
         MetricScope {
             registry: self,
             prefix: String::new(),
@@ -953,7 +953,7 @@ mod tests {
     fn test_encode_type_aware_suffixes() {
         let mut registry = Registry::default();
         register_permanent_counter(&mut registry, "requests", "request count", 3);
-        let histogram = Histogram::new([0.1, 1.0, 10.0].into_iter());
+        let histogram = Histogram::new([0.1, 1.0, 10.0]);
         histogram.observe(0.5);
         registry.register_permanent(
             "latency".to_string(),
@@ -1071,7 +1071,7 @@ mod tests {
         counter.inc_by(7);
         let gauge = Gauge::<i64>::default();
         gauge.set(-3);
-        let histogram = Histogram::new([0.1, 1.0].into_iter());
+        let histogram = Histogram::new([0.1, 1.0]);
         histogram.observe(0.5);
 
         let mut ours = Registry::default();
