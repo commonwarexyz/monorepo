@@ -114,93 +114,127 @@ where
         .expect("failed to spawn thread")
 }
 
-/// Returns the number of available CPUs, or `None` if it cannot be determined.
-///
-/// The result is cached after the first call.
-#[cfg(unix)]
-pub fn available_cores() -> Option<usize> {
-    static CORES: OnceLock<Option<usize>> = OnceLock::new();
-    *CORES.get_or_init(|| {
-        // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
-        // preconditions.
-        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        if n <= 0 {
-            None
-        } else {
-            Some(n as usize)
-        }
-    })
-}
-
-/// Returns the number of available CPUs, or `None` if it cannot be determined.
-///
-/// Always returns `None` on non-Unix platforms.
-#[cfg(not(unix))]
-pub const fn available_cores() -> Option<usize> {
-    None
-}
-
-/// Pins the current thread to the given core.
-///
-/// If the CPU count cannot be queried or `sched_setaffinity` fails, a warning
-/// is logged once and the thread continues unpinned.
-///
-/// # Panics
-///
-/// Panics if `core` is greater than or equal to the number of available CPUs.
 #[cfg(target_os = "linux")]
-pub(crate) fn pin_to_core(core: usize) {
-    static WARN_CPUS: Once = Once::new();
-    static WARN_AFFINITY: Once = Once::new();
+fn affinity_mask() -> Option<(Vec<libc::c_ulong>, usize)> {
+    let word_bits = libc::c_ulong::BITS as usize;
+    let mut words = 1usize;
+    loop {
+        let mut mask = vec![0 as libc::c_ulong; words];
+        let cpusetsize = std::mem::size_of_val(mask.as_slice());
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_sched_getaffinity,
+                0,
+                cpusetsize,
+                mask.as_mut_ptr(),
+            )
+        };
+        if result >= 0 {
+            let bytes = result as usize;
+            return Some((mask, bytes));
+        }
 
-    let Some(num_cores) = available_cores() else {
-        WARN_CPUS.call_once(|| {
-            tracing::warn!("failed to query CPU count, skipping core pinning");
-        });
-        return;
-    };
-    assert!(
-        core < num_cores,
-        "core {core} out of range ({num_cores} available)"
-    );
-
-    // SAFETY: `cpu_set` is zeroed and then a single valid CPU index is set.
-    unsafe {
-        let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(core, &mut cpu_set);
-        let result = libc::sched_setaffinity(
-            0, // current thread
-            std::mem::size_of::<libc::cpu_set_t>(),
-            &cpu_set,
-        );
-        if result != 0 {
-            WARN_AFFINITY.call_once(|| {
-                tracing::warn!(core, "sched_setaffinity failed, skipping core pinning");
-            });
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EINVAL) => {
+                // Kernels with larger affinity masks require probing with a larger buffer.
+                words = words.checked_mul(2)?;
+                if words.checked_mul(word_bits)? > 1 << 20 {
+                    return None;
+                }
+            }
+            _ => return None,
         }
     }
 }
 
-/// Pins the current thread to the given core.
+/// Returns the logical CPU ids currently allowed for the calling thread.
+///
+/// On Linux this queries the calling thread's affinity mask via `sched_getaffinity`.
+/// On other platforms, or if the affinity mask cannot be queried, it returns an
+/// empty vector.
+#[cfg(target_os = "linux")]
+pub fn available_cpus() -> Vec<usize> {
+    let Some((mask, bytes)) = affinity_mask() else {
+        return Vec::new();
+    };
+    let word_bits = libc::c_ulong::BITS as usize;
+    let mut cpus = Vec::new();
+    for cpu in 0..(bytes * 8) {
+        let index = cpu / word_bits;
+        let offset = cpu % word_bits;
+        if index < mask.len() && (mask[index] & ((1 as libc::c_ulong) << offset)) != 0 {
+            cpus.push(cpu);
+        }
+    }
+    cpus
+}
+
+/// Returns the logical CPU ids currently allowed for the calling thread.
+///
+/// Always returns an empty vector on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn available_cpus() -> Vec<usize> {
+    Vec::new()
+}
+
+/// Pins the current thread to the given logical CPU id.
+///
+/// If `sched_setaffinity` fails, a warning is logged once and the thread
+/// continues unpinned.
+#[cfg(target_os = "linux")]
+pub(crate) fn pin_to_cpu(cpu: usize) {
+    static WARN_AFFINITY: Once = Once::new();
+
+    let word_bits = libc::c_ulong::BITS as usize;
+    let words = (cpu / word_bits)
+        .checked_add(1)
+        .expect("cpu bitset size overflow");
+    let mut mask = vec![0 as libc::c_ulong; words];
+    mask[cpu / word_bits] |= (1 as libc::c_ulong) << (cpu % word_bits);
+    let cpusetsize = std::mem::size_of_val(mask.as_slice());
+
+    loop {
+        let result =
+            unsafe { libc::syscall(libc::SYS_sched_setaffinity, 0, cpusetsize, mask.as_ptr()) };
+        if result == 0 {
+            return;
+        }
+
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            _ => {
+                WARN_AFFINITY.call_once(|| {
+                    tracing::warn!(cpu, ?err, "sched_setaffinity failed, skipping CPU pinning");
+                });
+                return;
+            }
+        }
+    }
+}
+
+/// Pins the current thread to the given logical CPU id.
 ///
 /// No-op on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub(crate) const fn pin_to_core(_core: usize) {}
+pub(crate) const fn pin_to_cpu(_cpu: usize) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
-    fn test_available_cores() {
-        let n = available_cores().expect("available_cores returned None on Unix");
-        assert!(n >= 1, "expected at least 1 core, got {n}");
+    fn test_available_cpus() {
+        let cpus = available_cpus();
+        assert!(!cpus.is_empty(), "expected at least one available CPU");
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn test_available_cores_non_unix() {
-        assert!(available_cores().is_none());
+    fn test_available_cpus_non_linux() {
+        assert!(available_cpus().is_empty());
     }
 }

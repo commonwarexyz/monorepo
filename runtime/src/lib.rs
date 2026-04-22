@@ -179,20 +179,21 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         fn dedicated(self) -> Self;
 
-        /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given core.
+        /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given CPU.
         ///
-        /// Core pinning is currently Linux only and a no-op on other platforms. Pinning may
+        /// The `cpu` value is a Linux logical CPU id used with `sched_setaffinity`.
+        /// Use [`available_cpus`] to query the current thread's allowed CPU ids.
+        ///
+        /// CPU pinning is currently Linux only and a no-op on other platforms. Pinning may
         /// silently fail in restricted environments (e.g. containers with cgroup CPU limits),
         /// this method will still succeed but the thread will run unpinned.
-        ///
-        /// Use [`available_cores`] to query the number of available CPUs.
         ///
         /// Implies [`Spawner::dedicated`].
         ///
         /// # Panics
         ///
-        /// Panics if `core` is greater than or equal to the number of available CPUs.
-        fn pinned(self, core: usize) -> Self;
+        /// Panics if `cpu` is not in the current affinity mask, when that can be determined.
+        fn pinned(self, cpu: usize) -> Self;
 
         /// Spawn a task with the current context.
         ///
@@ -1749,7 +1750,8 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.pinned(0).spawn(|_| async move { 42 });
+            let cpu = crate::available_cpus().into_iter().next().unwrap_or(0);
+            let handle = context.pinned(cpu).spawn(|_| async move { 42 });
             assert!(matches!(handle.await, Ok(42)));
         });
     }
@@ -3935,9 +3937,10 @@ mod tests {
         // Verify that pinned implies dedicated.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            let cpu = crate::available_cpus().into_iter().next().unwrap_or(0);
             let root_thread = std::thread::current().id();
             let task_thread = context
-                .pinned(0)
+                .pinned(cpu)
                 .spawn(|_| async move { std::thread::current().id() })
                 .await
                 .unwrap();
@@ -3948,16 +3951,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_tokio_spawn_pinned_correct_core() {
-        // Verify that a pinned task is actually running on the expected core,
-        // for every available core.
-        let num_cores = crate::available_cores().unwrap();
+    fn test_tokio_spawn_pinned_correct_cpu() {
+        // Verify that a pinned task is actually running on the expected CPU,
+        // for every allowed CPU id.
+        let cpus = crate::available_cpus();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            for core in 0..num_cores {
+            for cpu in cpus {
                 let actual = context
                     .clone()
-                    .pinned(core)
+                    .pinned(cpu)
                     .spawn(|_| async move {
                         // SAFETY: `sched_getcpu` is a read-only query with no
                         // preconditions.
@@ -3965,25 +3968,25 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                assert_eq!(actual, core);
+                assert_eq!(actual, cpu);
             }
         });
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_tokio_spawn_pinned_same_core() {
-        // Verify that two separate tasks pinned to the same core run on
+    fn test_tokio_spawn_pinned_same_cpu() {
+        // Verify that two separate tasks pinned to the same CPU run on
         // different threads but report the same CPU.
+        let cpu = crate::available_cpus().into_iter().last().unwrap();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let core = crate::available_cores().unwrap() - 1;
-            let t1 = context.clone().pinned(core).spawn(|_| async move {
+            let t1 = context.clone().pinned(cpu).spawn(|_| async move {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
                 (std::thread::current().id(), unsafe { libc::sched_getcpu() })
             });
-            let t2 = context.clone().pinned(core).spawn(|_| async move {
+            let t2 = context.clone().pinned(cpu).spawn(|_| async move {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
                 (std::thread::current().id(), unsafe { libc::sched_getcpu() })
@@ -3993,20 +3996,24 @@ mod tests {
             let (thread2, cpu2) = r2.unwrap();
             // Different dedicated threads.
             assert_ne!(thread1, thread2);
-            // Same core.
+            // Same CPU.
             assert_eq!(cpu1, cpu2);
         });
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[should_panic(expected = "out of range")]
-    fn test_tokio_spawn_pinned_invalid_core() {
-        // Pinning to a core beyond the available count panics eagerly.
-        let num_cores = crate::available_cores().unwrap();
+    #[should_panic(expected = "not in the current affinity mask")]
+    fn test_tokio_spawn_pinned_invalid_cpu() {
+        // Pinning to a CPU outside the current affinity mask panics eagerly.
+        let invalid_cpu = crate::available_cpus()
+            .into_iter()
+            .last()
+            .map(|cpu| cpu + 1)
+            .unwrap();
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            context.pinned(num_cores).spawn(|_| async {});
+            context.pinned(invalid_cpu).spawn(|_| async {});
         });
     }
 

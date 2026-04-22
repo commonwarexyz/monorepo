@@ -573,14 +573,15 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn pinned(mut self, core: usize) -> Self {
-        if let Some(num_cores) = utils::thread::available_cores() {
+    fn pinned(mut self, cpu: usize) -> Self {
+        let cpus = utils::thread::available_cpus();
+        if !cpus.is_empty() {
             assert!(
-                core < num_cores,
-                "core {core} out of range ({num_cores} available)"
+                cpus.contains(&cpu),
+                "cpu {cpu} not in the current affinity mask"
             );
         }
-        self.execution = Execution::Dedicated(Some(core));
+        self.execution = Execution::Dedicated(Some(cpu));
         self
     }
 
@@ -628,14 +629,14 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        if let Execution::Dedicated(core) = past {
+        if let Execution::Dedicated(cpu) = past {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
-                    // Pin before running any work on this thread
-                    if let Some(core) = core {
-                        utils::thread::pin_to_core(core);
+                    // Pin before running any work on this thread.
+                    if let Some(cpu) = cpu {
+                        utils::thread::pin_to_cpu(cpu);
                     }
                     handle.block_on(f);
                 }

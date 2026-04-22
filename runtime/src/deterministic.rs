@@ -1138,8 +1138,8 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn pinned(mut self, core: usize) -> Self {
-        self.execution = Execution::Dedicated(Some(core));
+    fn pinned(mut self, cpu: usize) -> Self {
+        self.execution = Execution::Dedicated(Some(cpu));
         self
     }
 
