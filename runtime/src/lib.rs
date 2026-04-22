@@ -185,7 +185,7 @@ stability_scope!(BETA {
 
         /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given CPU.
         ///
-        /// Use [`crate::utils::thread::available_cpus`] to query valid CPU ids for placement decisions.
+        /// Use [`crate::utils::available_cpus`] to query valid CPU ids for placement decisions.
         ///
         /// Runtimes that implement CPU pinning perform validation and the pinning attempt when
         /// [`Spawner::spawn`] starts that task.
