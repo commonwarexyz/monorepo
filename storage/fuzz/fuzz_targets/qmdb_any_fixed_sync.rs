@@ -5,8 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::mmr::Family,
-    mmr::journaled::Config as MmrConfig,
+    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
     qmdb::{
         any::{
             unordered::fixed::{Db, Operation as FixedOperation},
@@ -22,7 +21,7 @@ use std::{num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type FixedDb = Db<Family, deterministic::Context, Key, Value, Sha256, TwoCap>;
+type FixedDb<F> = Db<F, deterministic::Context, Key, Value, Sha256, TwoCap>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -94,8 +93,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        merkle_config: MmrConfig {
-            journal_partition: format!("{test_name}-mmr"),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
@@ -112,24 +111,26 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     }
 }
 
-async fn test_sync<
-    R: sync::resolver::Resolver<
-        Family = Family,
-        Digest = commonware_cryptography::sha256::Digest,
-        Op = FixedOperation<Family, Key, Value>,
-    >,
->(
+async fn test_sync<F, R>(
     context: deterministic::Context,
     resolver: R,
-    target: sync::Target<Family, commonware_cryptography::sha256::Digest>,
+    target: sync::Target<F, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
-) -> bool {
+) -> bool
+where
+    F: MerkleFamily,
+    R: sync::resolver::Resolver<
+        Family = F,
+        Digest = commonware_cryptography::sha256::Digest,
+        Op = FixedOperation<F, Key, Value>,
+    >,
+{
     let db_config = test_config(test_name, &context);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
+    let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
         context: context.with_label("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
@@ -156,14 +157,14 @@ async fn test_sync<
     }
 }
 
-const TEST_NAME: &str = "qmdb-any-fixed-fuzz-test";
-
-fn fuzz(mut input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
+    input.commit_counter = 0;
     let runner = deterministic::Runner::default();
 
+    let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(TEST_NAME, &context);
-        let mut db = FixedDb::init(context.clone(), cfg)
+        let cfg = test_config(&test_name, &context);
+        let mut db: FixedDb<F> = Db::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
@@ -245,7 +246,7 @@ fn fuzz(mut input: FuzzInput) {
                         wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
-                        &format!("full_{sync_id}"),
+                        &format!("{test_name}-full_{sync_id}"),
                         sync_id,
                     )
                     .await;
@@ -259,8 +260,8 @@ fn fuzz(mut input: FuzzInput) {
                     pending_writes.clear();
                     drop(db);
 
-                    let cfg = test_config(TEST_NAME, &context);
-                    db = FixedDb::init(
+                    let cfg = test_config(&test_name, &context);
+                    db = Db::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
@@ -283,6 +284,11 @@ fn fuzz(mut input: FuzzInput) {
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
+}
+
+fn fuzz(mut input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&mut input, "qmdb-any-fixed-fuzz-mmr");
+    fuzz_family::<mmb::Family>(&mut input, "qmdb-any-fixed-fuzz-mmb");
 }
 
 fuzz_target!(|input: FuzzInput| {
