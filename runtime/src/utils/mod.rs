@@ -247,6 +247,15 @@ impl MetricRegistration {
         }
     }
 
+    fn detached() -> Self {
+        Self {
+            _inner: Arc::new(MetricRegistrationInner {
+                id: 0,
+                registry: Weak::new(),
+            }),
+        }
+    }
+
     const fn from_inner(inner: Arc<MetricRegistrationInner>) -> Self {
         Self { _inner: inner }
     }
@@ -287,7 +296,16 @@ impl<M> Clone for Registered<M> {
 }
 
 impl<M> Registered<M> {
-    pub(crate) const fn new(metric: Arc<M>, registration: MetricRegistration) -> Self {
+    /// Create a detached metric handle that does not unregister from any runtime registry.
+    ///
+    /// This is intended for `Metrics` implementations outside `commonware-runtime`
+    /// that need to return a [`Registered`] handle without exposing the metric in
+    /// a runtime-managed registry.
+    pub fn new(metric: M) -> Self {
+        Self::from_parts(Arc::new(metric), MetricRegistration::detached())
+    }
+
+    pub(crate) const fn from_parts(metric: Arc<M>, registration: MetricRegistration) -> Self {
         Self {
             metric,
             _registration: registration,
@@ -496,7 +514,10 @@ impl Registry {
                             key.0, key.1
                         )
                     });
-                return Registered::new(existing_metric, MetricRegistration::from_inner(inner));
+                return Registered::from_parts(
+                    existing_metric,
+                    MetricRegistration::from_inner(inner),
+                );
             }
             // The existing entry's last handle is mid-drop: its Weak no longer
             // upgrades, but the pending `unregister` call has not yet run.
@@ -546,7 +567,7 @@ impl Registry {
             registration: registration.downgrade(),
             family_index,
         });
-        Registered::new(metric, registration)
+        Registered::from_parts(metric, registration)
     }
 
     fn metric_index(id: u64) -> usize {
@@ -878,6 +899,18 @@ mod tests {
             let gauge = Gauge::<i64>::default();
             let _metric_b = context.with_label("a").register("test", "help", gauge);
         });
+    }
+
+    #[test]
+    fn test_registered_new_creates_detached_handle() {
+        let registered = Registered::new(Counter::<u64>::default());
+        let clone = registered.clone();
+
+        registered.inc_by(2);
+        drop(registered);
+        clone.inc();
+
+        assert_eq!(clone.get(), 3);
     }
 
     fn register_permanent_counter(registry: &mut Registry, name: &str, help: &str, value: u64) {

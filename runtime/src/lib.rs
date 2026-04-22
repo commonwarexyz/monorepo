@@ -453,6 +453,10 @@ stability_scope!(BETA {
         /// type matches. Registering the same key with a different metric type
         /// panics.
         ///
+        /// Implementations outside `commonware-runtime` that do not expose metrics
+        /// through a runtime registry may return [`Registered::new(metric)`] to
+        /// produce a detached handle.
+        ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
         fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
             &self,

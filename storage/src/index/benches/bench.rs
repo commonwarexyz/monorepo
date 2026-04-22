@@ -35,9 +35,9 @@ impl Metrics for DummyMetrics {
         &self,
         _: N,
         _: H,
-        _: M,
+        metric: M,
     ) -> commonware_runtime::Registered<M> {
-        panic!("dummy metrics do not support register")
+        commonware_runtime::Registered::new(metric)
     }
 
     fn encode(&self) -> String {
