@@ -1,7 +1,5 @@
 //! Helpers for resolving the configured thread stack size.
 
-#[cfg(target_os = "linux")]
-use commonware_utils::sync::Once;
 use std::{env, sync::OnceLock, thread};
 
 /// Rust's default thread stack size.
@@ -181,12 +179,11 @@ pub fn available_cpus() -> Vec<usize> {
 
 /// Pins the current thread to the given logical CPU id.
 ///
-/// If `sched_setaffinity` fails, a warning is logged once and the thread
-/// continues unpinned.
+/// # Panics
+///
+/// Panics if `sched_setaffinity` fails.
 #[cfg(target_os = "linux")]
 pub(crate) fn pin_to_cpu(cpu: usize) {
-    static WARN_AFFINITY: Once = Once::new();
-
     let word_bits = libc::c_ulong::BITS as usize;
     let words = (cpu / word_bits)
         .checked_add(1)
@@ -205,21 +202,20 @@ pub(crate) fn pin_to_cpu(cpu: usize) {
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            _ => {
-                WARN_AFFINITY.call_once(|| {
-                    tracing::warn!(cpu, ?err, "sched_setaffinity failed, skipping CPU pinning");
-                });
-                return;
-            }
+            _ => panic!("sched_setaffinity failed for cpu {cpu}: {err}"),
         }
     }
 }
 
 /// Pins the current thread to the given logical CPU id.
 ///
-/// No-op on non-Linux platforms.
+/// # Panics
+///
+/// Always panics on non-Linux platforms, where CPU pinning is unavailable.
 #[cfg(not(target_os = "linux"))]
-pub(crate) const fn pin_to_cpu(_cpu: usize) {}
+pub(crate) fn pin_to_cpu(_cpu: usize) {
+    panic!("cpu pinning is not available on this platform")
+}
 
 #[cfg(test)]
 mod tests {

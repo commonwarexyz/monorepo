@@ -184,15 +184,12 @@ stability_scope!(BETA {
         /// The `cpu` value is a Linux logical CPU id used with `sched_setaffinity`.
         /// Use [`available_cpus`] to query the current thread's allowed CPU ids.
         ///
-        /// CPU pinning is currently Linux only and a no-op on other platforms. Pinning may
-        /// silently fail in restricted environments (e.g. containers with cgroup CPU limits),
-        /// this method will still succeed but the thread will run unpinned.
-        ///
         /// Implies [`Spawner::dedicated`].
         ///
         /// # Panics
         ///
-        /// Panics if `cpu` is not in the current affinity mask, when that can be determined.
+        /// Panics if CPU pinning is unavailable, if `cpu` is not in the current affinity mask,
+        /// or if pinning fails.
         fn pinned(self, cpu: usize) -> Self;
 
         /// Spawn a task with the current context.
@@ -3572,6 +3569,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "cpu pinning is not available in deterministic runtime")]
     fn test_deterministic_spawn_pinned() {
         let executor = deterministic::Runner::default();
         test_spawn_pinned(executor);
@@ -3926,12 +3924,14 @@ mod tests {
         test_spawn_dedicated(executor);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_tokio_spawn_pinned() {
         let executor = tokio::Runner::default();
         test_spawn_pinned(executor);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_tokio_spawn_pinned_dedicated_thread() {
         // Verify that pinned implies dedicated.
@@ -4015,6 +4015,14 @@ mod tests {
         executor.start(|context| async move {
             context.pinned(invalid_cpu).spawn(|_| async {});
         });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    #[should_panic(expected = "cpu pinning is not available")]
+    fn test_tokio_spawn_pinned_unavailable() {
+        let executor = tokio::Runner::default();
+        test_spawn_pinned(executor);
     }
 
     #[test]

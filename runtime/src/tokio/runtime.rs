@@ -575,12 +575,14 @@ impl crate::Spawner for Context {
 
     fn pinned(mut self, cpu: usize) -> Self {
         let cpus = utils::thread::available_cpus();
-        if !cpus.is_empty() {
-            assert!(
-                cpus.contains(&cpu),
-                "cpu {cpu} not in the current affinity mask"
-            );
-        }
+        assert!(
+            !cpus.is_empty(),
+            "cpu pinning is not available on this platform or the affinity mask could not be queried"
+        );
+        assert!(
+            cpus.contains(&cpu),
+            "cpu {cpu} not in the current affinity mask"
+        );
         self.execution = Execution::Dedicated(Some(cpu));
         self
     }
