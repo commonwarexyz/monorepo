@@ -68,72 +68,6 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     KeylessDb::<F>::init(ctx, cfg).await.unwrap()
 }
 
-// -- Variant enums --
-
-#[derive(Debug, Clone, Copy)]
-pub enum FixedValueVariant {
-    AnyUnorderedFixed,
-    AnyOrderedFixed,
-    AnyUnorderedVariable,
-    AnyOrderedVariable,
-    CurrentUnorderedFixed,
-    CurrentOrderedFixed,
-    CurrentUnorderedVariable,
-    CurrentOrderedVariable,
-}
-
-impl FixedValueVariant {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::AnyUnorderedFixed => "any::unordered::fixed",
-            Self::AnyOrderedFixed => "any::ordered::fixed",
-            Self::AnyUnorderedVariable => "any::unordered::variable",
-            Self::AnyOrderedVariable => "any::ordered::variable",
-            Self::CurrentUnorderedFixed => "current::unordered::fixed",
-            Self::CurrentOrderedFixed => "current::ordered::fixed",
-            Self::CurrentUnorderedVariable => "current::unordered::variable",
-            Self::CurrentOrderedVariable => "current::ordered::variable",
-        }
-    }
-}
-
-pub const FIXED_VALUE_VARIANTS: [FixedValueVariant; 8] = [
-    FixedValueVariant::AnyUnorderedFixed,
-    FixedValueVariant::AnyOrderedFixed,
-    FixedValueVariant::AnyUnorderedVariable,
-    FixedValueVariant::AnyOrderedVariable,
-    FixedValueVariant::CurrentUnorderedFixed,
-    FixedValueVariant::CurrentOrderedFixed,
-    FixedValueVariant::CurrentUnorderedVariable,
-    FixedValueVariant::CurrentOrderedVariable,
-];
-
-#[derive(Debug, Clone, Copy)]
-pub enum VarValueVariant {
-    AnyUnordered,
-    AnyOrdered,
-    CurrentUnordered,
-    CurrentOrdered,
-}
-
-impl VarValueVariant {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::AnyUnordered => "any::unordered",
-            Self::AnyOrdered => "any::ordered",
-            Self::CurrentUnordered => "current::unordered",
-            Self::CurrentOrdered => "current::ordered",
-        }
-    }
-}
-
-pub const VAR_VALUE_VARIANTS: [VarValueVariant; 4] = [
-    VarValueVariant::AnyUnordered,
-    VarValueVariant::AnyOrdered,
-    VarValueVariant::CurrentUnordered,
-    VarValueVariant::CurrentOrdered,
-];
-
 // -- Config builders --
 
 const PARTITION_FIX: &str = "bench-fixed";
@@ -250,242 +184,265 @@ pub fn keyless_cfg(
     }
 }
 
-// -- Dispatch macros --
+// -- Shared variant definitions --
 
-/// Internal helper: construct a db, bind it, execute body.
-macro_rules! dispatch_arm {
-    ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg_fn:ident) => {{
-        #[allow(unused_mut)]
-        let mut $db = <$DbType>::init($ctx.clone(), $crate::common::$cfg_fn(&$ctx))
-            .await
-            .unwrap();
-        $body
-    }};
-}
-
-/// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
-macro_rules! with_fixed_value_db {
-    ($ctx:expr, $F:ty, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::FixedValueVariant::*;
-        match $variant {
-            AnyUnorderedFixed => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUFixDb<$F>,
-                any_fix_cfg
-            ),
-            AnyOrderedFixed => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOFixDb<$F>,
-                any_fix_cfg
-            ),
-            AnyUnorderedVariable => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarDigestDb<$F>,
-                any_var_digest_cfg
-            ),
-            AnyOrderedVariable => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarDigestDb<$F>,
-                any_var_digest_cfg
-            ),
-            CurrentUnorderedFixed => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUFixDb<$F>,
-                cur_fix_cfg
-            ),
-            CurrentOrderedFixed => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOFixDb<$F>,
-                cur_fix_cfg
-            ),
-            CurrentUnorderedVariable => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarDigestDb<$F>,
-                cur_var_digest_cfg
-            ),
-            CurrentOrderedVariable => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarDigestDb<$F>,
-                cur_var_digest_cfg
-            ),
+macro_rules! define_db_variants {
+    (
+        enum $enum_name:ident;
+        const $variants_name:ident;
+        dispatch $dispatch_name:ident;
+        timed_dispatch $timed_dispatch_name:ident;
+        entries = [
+            $(
+                {
+                    entry: $entry:ident,
+                    name: $name:literal,
+                    db: $db:ty,
+                    cfg: $cfg:path,
+                }
+            )+
+        ];
+    ) => {
+        #[derive(Debug, Clone, Copy)]
+        enum $enum_name {
+            $($entry),+
         }
-    }};
-}
 
-/// Construct a variable-value (Vec<u8>) database for the given variant, bind it as `$db`,
-/// execute `$body`.
-macro_rules! with_var_value_db {
-    ($ctx:expr, $F:ty, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::VarValueVariant::*;
-        match $variant {
-            AnyUnordered => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarVecDb<$F>,
-                any_var_vec_cfg
-            ),
-            AnyOrdered => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarVecDb<$F>,
-                any_var_vec_cfg
-            ),
-            CurrentUnordered => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarVecDb<$F>,
-                cur_var_vec_cfg
-            ),
-            CurrentOrdered => $crate::common::dispatch_arm!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarVecDb<$F>,
-                cur_var_vec_cfg
-            ),
+        impl $enum_name {
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$entry => $name),+
+                }
+            }
         }
-    }};
-}
 
-pub(crate) use dispatch_arm;
-pub(crate) use with_fixed_value_db;
-pub(crate) use with_var_value_db;
+        const $variants_name: &[$enum_name] = &[$($enum_name::$entry),+];
 
-/// Internal helper: construct a db from a pre-built config, bind it, execute body.
-macro_rules! dispatch_arm_with_cfg {
-    ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg:expr) => {{
-        #[allow(unused_mut)]
-        let mut $db = <$DbType>::init($ctx.clone(), $cfg.clone()).await.unwrap();
-        $body
-    }};
-}
-
-/// Like `with_fixed_value_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_fixed_value_db_cfg {
-    ($ctx:expr, $F:ty, $variant:expr, $any_fixed:expr, $current_fixed:expr,
-     $any_var:expr, $current_var:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::FixedValueVariant::*;
-        match $variant {
-            AnyUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUFixDb<$F>,
-                $any_fixed
-            ),
-            AnyOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOFixDb<$F>,
-                $any_fixed
-            ),
-            AnyUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarDigestDb<$F>,
-                $any_var
-            ),
-            AnyOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarDigestDb<$F>,
-                $any_var
-            ),
-            CurrentUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUFixDb<$F>,
-                $current_fixed
-            ),
-            CurrentOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOFixDb<$F>,
-                $current_fixed
-            ),
-            CurrentUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarDigestDb<$F>,
-                $current_var
-            ),
-            CurrentOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarDigestDb<$F>,
-                $current_var
-            ),
+        macro_rules! $dispatch_name {
+            ($ctx_expr:expr, $variant_expr:expr, |$db_name:ident| $body:expr) => {
+                match $variant_expr {
+                    $(
+                        $enum_name::$entry => {
+                            let ctx = $ctx_expr;
+                            let cfg = $cfg(&ctx);
+                            #[allow(unused_mut)]
+                            let mut $db_name = <$db>::init(ctx.clone(), cfg).await.unwrap();
+                            $body
+                        }
+                    )+
+                }
+            };
         }
-    }};
-}
 
-/// Like `with_var_value_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_var_value_db_cfg {
-    ($ctx:expr, $F:ty, $variant:expr, $any_var:expr, $current_var:expr,
-     |mut $db:ident| $body:expr) => {{
-        use $crate::common::VarValueVariant::*;
-        match $variant {
-            AnyUnordered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarVecDb<$F>,
-                $any_var
-            ),
-            AnyOrdered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarVecDb<$F>,
-                $any_var
-            ),
-            CurrentUnordered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarVecDb<$F>,
-                $current_var
-            ),
-            CurrentOrdered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarVecDb<$F>,
-                $current_var
-            ),
+        #[allow(unused_macros)]
+        macro_rules! $timed_dispatch_name {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, |$db_name:ident| $body:expr) => {
+                match $variant_expr {
+                    $(
+                        $enum_name::$entry => {
+                            let ctx = $ctx_expr;
+                            let cfg = $cfg(&ctx);
+                            let start = std::time::Instant::now();
+                            for _ in 0..$iters {
+                                #[allow(unused_mut)]
+                                let mut $db_name =
+                                    <$db>::init(ctx.clone(), cfg.clone()).await.unwrap();
+                                $body
+                            }
+                            start.elapsed()
+                        }
+                    )+
+                }
+            };
         }
-    }};
+    };
 }
 
-pub(crate) use dispatch_arm_with_cfg;
-pub(crate) use with_fixed_value_db_cfg;
-pub(crate) use with_var_value_db_cfg;
+pub(crate) use define_db_variants;
+
+macro_rules! define_fixed_variants {
+    (
+        enum $enum_name:ident;
+        const $variants_name:ident;
+        dispatch $dispatch_name:ident;
+        timed_dispatch $timed_dispatch_name:ident;
+    ) => {
+        $crate::common::define_db_variants! {
+            enum $enum_name;
+            const $variants_name;
+            dispatch $dispatch_name;
+            timed_dispatch $timed_dispatch_name;
+            entries = [
+                {
+                    entry: AnyUnorderedFixedMmr,
+                    name: "any::unordered::fixed::mmr",
+                    db: $crate::common::AnyUFixDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyUnorderedFixedMmb,
+                    name: "any::unordered::fixed::mmb",
+                    db: $crate::common::AnyUFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyOrderedFixedMmr,
+                    name: "any::ordered::fixed::mmr",
+                    db: $crate::common::AnyOFixDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyOrderedFixedMmb,
+                    name: "any::ordered::fixed::mmb",
+                    db: $crate::common::AnyOFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyUnorderedVariableMmr,
+                    name: "any::unordered::variable::mmr",
+                    db: $crate::common::AnyUVarDigestDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_var_digest_cfg,
+                }
+                {
+                    entry: AnyUnorderedVariableMmb,
+                    name: "any::unordered::variable::mmb",
+                    db: $crate::common::AnyUVarDigestDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_var_digest_cfg,
+                }
+                {
+                    entry: AnyOrderedVariableMmr,
+                    name: "any::ordered::variable::mmr",
+                    db: $crate::common::AnyOVarDigestDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_var_digest_cfg,
+                }
+                {
+                    entry: AnyOrderedVariableMmb,
+                    name: "any::ordered::variable::mmb",
+                    db: $crate::common::AnyOVarDigestDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_var_digest_cfg,
+                }
+                {
+                    entry: CurrentUnorderedFixedMmr,
+                    name: "current::unordered::fixed::mmr",
+                    db: $crate::common::CurUFixDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentUnorderedFixedMmb,
+                    name: "current::unordered::fixed::mmb",
+                    db: $crate::common::CurUFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentOrderedFixedMmr,
+                    name: "current::ordered::fixed::mmr",
+                    db: $crate::common::CurOFixDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentOrderedFixedMmb,
+                    name: "current::ordered::fixed::mmb",
+                    db: $crate::common::CurOFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentUnorderedVariableMmr,
+                    name: "current::unordered::variable::mmr",
+                    db: $crate::common::CurUVarDigestDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_var_digest_cfg,
+                }
+                {
+                    entry: CurrentUnorderedVariableMmb,
+                    name: "current::unordered::variable::mmb",
+                    db: $crate::common::CurUVarDigestDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_var_digest_cfg,
+                }
+                {
+                    entry: CurrentOrderedVariableMmr,
+                    name: "current::ordered::variable::mmr",
+                    db: $crate::common::CurOVarDigestDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_var_digest_cfg,
+                }
+                {
+                    entry: CurrentOrderedVariableMmb,
+                    name: "current::ordered::variable::mmb",
+                    db: $crate::common::CurOVarDigestDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_var_digest_cfg,
+                }
+            ];
+        }
+    };
+}
+
+pub(crate) use define_fixed_variants;
+
+macro_rules! define_vec_variants {
+    (
+        enum $enum_name:ident;
+        const $variants_name:ident;
+        dispatch $dispatch_name:ident;
+        timed_dispatch $timed_dispatch_name:ident;
+    ) => {
+        $crate::common::define_db_variants! {
+            enum $enum_name;
+            const $variants_name;
+            dispatch $dispatch_name;
+            timed_dispatch $timed_dispatch_name;
+            entries = [
+                {
+                    entry: AnyUnorderedMmr,
+                    name: "any::unordered::variable-vec::mmr",
+                    db: $crate::common::AnyUVarVecDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_var_vec_cfg,
+                }
+                {
+                    entry: AnyUnorderedMmb,
+                    name: "any::unordered::variable-vec::mmb",
+                    db: $crate::common::AnyUVarVecDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_var_vec_cfg,
+                }
+                {
+                    entry: AnyOrderedMmr,
+                    name: "any::ordered::variable-vec::mmr",
+                    db: $crate::common::AnyOVarVecDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_var_vec_cfg,
+                }
+                {
+                    entry: AnyOrderedMmb,
+                    name: "any::ordered::variable-vec::mmb",
+                    db: $crate::common::AnyOVarVecDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_var_vec_cfg,
+                }
+                {
+                    entry: CurrentUnorderedMmr,
+                    name: "current::unordered::variable-vec::mmr",
+                    db: $crate::common::CurUVarVecDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_var_vec_cfg,
+                }
+                {
+                    entry: CurrentUnorderedMmb,
+                    name: "current::unordered::variable-vec::mmb",
+                    db: $crate::common::CurUVarVecDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_var_vec_cfg,
+                }
+                {
+                    entry: CurrentOrderedMmr,
+                    name: "current::ordered::variable-vec::mmr",
+                    db: $crate::common::CurOVarVecDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_var_vec_cfg,
+                }
+                {
+                    entry: CurrentOrderedMmb,
+                    name: "current::ordered::variable-vec::mmb",
+                    db: $crate::common::CurOVarVecDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_var_vec_cfg,
+                }
+            ];
+        }
+    };
+}
+
+pub(crate) use define_vec_variants;
 
 // -- Data generation --
 

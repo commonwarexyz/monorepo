@@ -4,15 +4,15 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    gen_random_kv, make_fixed_value, make_var_value, open_keyless_db, with_fixed_value_db,
-    with_var_value_db, Digest, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
+    define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
+    open_keyless_db, Digest,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    merkle::{mmb, mmr, Family, Graftable},
+    merkle::{mmb, mmr, Family},
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
@@ -48,14 +48,23 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     elapsed
 }
 
-fn bench_fixed_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
+// -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --
+
+define_fixed_variants! {
+    enum FixedVariant;
+    const FIXED_VARIANTS;
+    dispatch dispatch_fixed;
+    timed_dispatch dispatch_fixed_timed_init;
+}
+
+fn bench_fixed_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for variant in FIXED_VALUE_VARIANTS {
+            for &variant in FIXED_VARIANTS {
                 c.bench_function(
                     &format!(
-                        "{}/variant={} family={family} elements={elements} operations={operations}",
+                        "{}/variant={} elements={elements} operations={operations}",
                         module_path!(),
                         variant.name(),
                     ),
@@ -65,8 +74,8 @@ fn bench_fixed_value_generate_family<F: Graftable>(c: &mut Criterion, family: &s
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_fixed_value_db!(ctx, F, variant, |mut db| {
-                                    bench_db::<F, _>(
+                                total += dispatch_fixed!(ctx.clone(), variant, |db| {
+                                    bench_db(
                                         db,
                                         elements,
                                         operations,
@@ -85,19 +94,23 @@ fn bench_fixed_value_generate_family<F: Graftable>(c: &mut Criterion, family: &s
     }
 }
 
-fn bench_fixed_value_generate(c: &mut Criterion) {
-    bench_fixed_value_generate_family::<mmr::Family>(c, "mmr");
-    bench_fixed_value_generate_family::<mmb::Family>(c, "mmb");
+// -- Variable-value variants (8 = 4 db shapes x 2 merkle families) --
+
+define_vec_variants! {
+    enum VarVariant;
+    const VEC_VARIANTS;
+    dispatch dispatch_var;
+    timed_dispatch dispatch_var_timed_init;
 }
 
-fn bench_var_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
+fn bench_var_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for variant in VAR_VALUE_VARIANTS {
+            for &variant in VEC_VARIANTS {
                 c.bench_function(
                     &format!(
-                        "{}/variant={} family={family} elements={elements} operations={operations}",
+                        "{}/variant={} elements={elements} operations={operations}",
                         module_path!(),
                         variant.name(),
                     ),
@@ -107,15 +120,9 @@ fn bench_var_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_var_value_db!(ctx, F, variant, |mut db| {
-                                    bench_db::<F, _>(
-                                        db,
-                                        elements,
-                                        operations,
-                                        commit_freq,
-                                        make_var_value,
-                                    )
-                                    .await
+                                total += dispatch_var!(ctx.clone(), variant, |db| {
+                                    bench_db(db, elements, operations, commit_freq, make_var_value)
+                                        .await
                                 });
                             }
                             total
@@ -127,59 +134,106 @@ fn bench_var_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str
     }
 }
 
-fn bench_var_value_generate(c: &mut Criterion) {
-    bench_var_value_generate_family::<mmr::Family>(c, "mmr");
-    bench_var_value_generate_family::<mmb::Family>(c, "mmb");
-}
+// -- Keyless variants --
 
 const KEYLESS_OPS: u64 = 10_000;
 const KEYLESS_COMMIT_FREQ: u32 = 25;
 
-fn bench_keyless_generate_family<F: Family>(c: &mut Criterion, family: &str) {
-    let runner = tokio::Runner::new(Config::default());
-    for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
-        c.bench_function(
-            &format!(
-                "{}/variant=keyless family={family} operations={operations}",
-                module_path!()
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let start = Instant::now();
+macro_rules! keyless_variants {
+    (
+        $(
+            $entry:ident {
+                name: $name:literal,
+                init: |$ctx:ident| $init:expr,
+            }
+        )+
+    ) => {
+        #[derive(Debug, Clone, Copy)]
+        enum KeylessVariant {
+            $($entry),+
+        }
 
-                        let mut db = open_keyless_db::<F>(ctx.clone()).await;
-                        let mut rng = StdRng::seed_from_u64(42);
-                        let mut batch = db.new_batch();
-                        for _ in 0u64..operations {
-                            let v = make_var_value(&mut rng);
-                            batch = batch.append(v);
-                            if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                                let merkleized =
-                                    batch.merkleize(&db, None, db.inactivity_floor_loc());
-                                db.apply_batch(merkleized).await.unwrap();
-                                batch = db.new_batch();
-                            }
+        impl KeylessVariant {
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$entry => $name),+
+                }
+            }
+        }
+
+        const KEYLESS_VARIANTS: &[KeylessVariant] = &[$(KeylessVariant::$entry),+];
+
+        macro_rules! dispatch_keyless {
+            ($ctx_expr:expr, $variant_expr:expr, |$db_name:ident| $body:expr) => {
+                match $variant_expr {
+                    $(
+                        KeylessVariant::$entry => {
+                            let $ctx = $ctx_expr;
+                            let mut $db_name = $init.await;
+                            $body
                         }
-                        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-                        db.apply_batch(merkleized).await.unwrap();
-                        db.sync().await.unwrap();
+                    )+
+                }
+            };
+        }
+    };
+}
 
-                        total += start.elapsed();
-                        db.destroy().await.unwrap();
-                    }
-                    total
-                });
-            },
-        );
+keyless_variants! {
+    Mmr {
+        name: "keyless::mmr",
+        init: |ctx| open_keyless_db::<mmr::Family>(ctx.clone()),
+    }
+    Mmb {
+        name: "keyless::mmb",
+        init: |ctx| open_keyless_db::<mmb::Family>(ctx.clone()),
     }
 }
 
 fn bench_keyless_generate(c: &mut Criterion) {
-    bench_keyless_generate_family::<mmr::Family>(c, "mmr");
-    bench_keyless_generate_family::<mmb::Family>(c, "mmb");
+    let runner = tokio::Runner::new(Config::default());
+    for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
+        for &variant in KEYLESS_VARIANTS {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            dispatch_keyless!(ctx.clone(), variant, |db| {
+                                let mut rng = StdRng::seed_from_u64(42);
+                                let mut batch = db.new_batch();
+                                for _ in 0u64..operations {
+                                    let v = make_var_value(&mut rng);
+                                    batch = batch.append(v);
+                                    if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
+                                        let merkleized =
+                                            batch.merkleize(&db, None, db.inactivity_floor_loc());
+                                        db.apply_batch(merkleized).await.unwrap();
+                                        batch = db.new_batch();
+                                    }
+                                }
+                                let merkleized =
+                                    batch.merkleize(&db, None, db.inactivity_floor_loc());
+                                db.apply_batch(merkleized).await.unwrap();
+                                db.sync().await.unwrap();
+
+                                total += start.elapsed();
+                                db.destroy().await.unwrap();
+                            });
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
 }
 
 criterion_group! {
