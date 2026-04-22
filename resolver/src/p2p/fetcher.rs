@@ -18,6 +18,7 @@ use std::{
 };
 use tracing::debug;
 
+/// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 struct Peer<P: PublicKey> {
     peer: P,

@@ -37,6 +37,7 @@ use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
 
+/// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 struct Peer<P: PublicKey> {
     peer: P,

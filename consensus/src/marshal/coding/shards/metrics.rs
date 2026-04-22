@@ -7,7 +7,7 @@ use commonware_runtime::{
     Metrics as MetricsTrait, Registered,
 };
 
-/// Label for per-peer metrics.
+/// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 pub struct Peer<P: PublicKey> {
     pub peer: P,

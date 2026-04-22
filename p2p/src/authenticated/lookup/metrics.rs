@@ -4,6 +4,7 @@ use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct
 use commonware_utils::Array;
 use std::fmt::Write;
 
+/// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 pub struct Peer<P: PublicKey> {
     pub peer: P,

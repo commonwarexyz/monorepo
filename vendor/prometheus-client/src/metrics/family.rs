@@ -282,21 +282,18 @@ impl<S: Clone + std::hash::Hash + Eq, M, C: MetricConstructor<M>> Family<S, M, C
     }
 
     /// Access a metric by a borrowed form of its label set. Avoids constructing the
-    /// full label set on the common hit path; clones only when inserting on the miss
-    /// path, using the `From<&Q>` impl.
+    /// full label set on the common hit path. Clones via `From<&Q>` only when
+    /// inserting on the miss path.
     pub fn get_or_create_by<Q>(&self, key: &Q) -> MappedRwLockReadGuard<'_, M>
     where
         Q: std::hash::Hash + Eq + ?Sized,
         S: std::borrow::Borrow<Q>,
         for<'a> S: From<&'a Q>,
     {
+        if let Ok(metric) =
+            RwLockReadGuard::try_map(self.metrics.read(), |metrics| metrics.get(key))
         {
-            let read_guard = self.metrics.read();
-            if read_guard.contains_key(key) {
-                return RwLockReadGuard::map(read_guard, |metrics| {
-                    metrics.get(key).expect("metric to exist after contains check")
-                });
-            }
+            return metric;
         }
 
         let mut write_guard = self.metrics.write();

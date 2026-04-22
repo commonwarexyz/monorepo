@@ -2,6 +2,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 use commonware_utils::Array;
 
+/// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 pub struct Peer<P: PublicKey> {
     pub peer: P,
@@ -34,6 +35,7 @@ impl Timeout {
     }
 }
 
+/// Per-leader label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 pub struct Leader<P: PublicKey> {
     pub leader: P,

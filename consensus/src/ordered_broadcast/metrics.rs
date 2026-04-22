@@ -6,10 +6,9 @@ use commonware_runtime::{
 };
 use std::sync::Arc;
 
-/// Label for sequencer height metrics
+/// Per-sequencer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 pub struct Sequencer<P: PublicKey> {
-    /// The sequencer's public key
     pub sequencer: P,
 }
 
