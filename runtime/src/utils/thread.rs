@@ -195,7 +195,7 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
 ///
 /// Always returns `None` on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
+pub(crate) const fn available_cpus() -> Option<NonEmptyVec<usize>> {
     None
 }
 
