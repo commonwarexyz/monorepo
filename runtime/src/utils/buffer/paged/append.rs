@@ -2457,6 +2457,54 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_invalidates_cache() {
+        // Regression: shrinking a blob across a page boundary must drop cached pages for the
+        // truncated region. Before the fix, `try_read_sync` (which bypasses the tip buffer)
+        // would observe pre-resize bytes at offsets later reclaimed by new appends.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let (blob, blob_size) = context
+                .open("test_partition", b"resize_invalidates_cache")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write + sync a full page so it lands in the page cache. Use a distinct byte
+            // pattern so a stale cache read would be obvious.
+            let page_size = PAGE_SIZE.get() as usize;
+            let old_bytes = vec![0xAAu8; page_size];
+            append.append(&old_bytes).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Confirm page 0 is reachable via the cache-only fast path.
+            let mut probe = vec![0u8; 16];
+            assert!(append.try_read_sync(0, &mut probe));
+            assert_eq!(probe, vec![0xAAu8; 16]);
+
+            // Rewind to 0 (crossing the page boundary) and append a new, distinct pattern.
+            append.resize(0).await.unwrap();
+            let new_bytes = vec![0xBBu8; 16];
+            append.append(&new_bytes).await.unwrap();
+
+            // The cache must not serve pre-resize bytes. Either try_read_sync misses (cache
+            // was invalidated) or it returns the new pattern; it must never return 0xAA.
+            let mut probe = vec![0u8; 16];
+            let hit = append.try_read_sync(0, &mut probe);
+            assert!(
+                !hit || probe == new_bytes,
+                "try_read_sync served stale pre-resize bytes: {probe:?}"
+            );
+        });
+    }
+
+    #[test]
     fn test_reopen_partial_tail_append_and_resize() {
         let executor = deterministic::Runner::default();
 

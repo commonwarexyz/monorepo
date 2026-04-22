@@ -107,12 +107,15 @@ struct Cache {
     /// # Invariants
     ///
     /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
-    /// matching key.
+    /// matching key. (The converse is not true: after [Self::invalidate_from] a slot may retain
+    /// a stale key that is no longer present in `index`.)
     index: HashMap<(u64, u64), usize>,
 
     /// Metadata for each cache slot.
     ///
-    /// Each `entries` slot has exactly one corresponding `index` entry.
+    /// Every entry reachable via `index` has a matching key here. Slots that were invalidated by
+    /// [Self::invalidate_from] retain their stale key but are unreachable from `index` and will
+    /// be reclaimed by the Clock evictor on the next sweep.
     entries: Vec<CacheEntry>,
 
     /// Per-slot page buffers allocated from the pool.
@@ -547,11 +550,15 @@ impl Cache {
             self.clock = (self.clock + 1) % self.entries.len();
         }
 
-        // Evict and replace. Unchecked `remove`: for a live slot the old key is in `index`;
-        // for an invalidated slot its stale `entry.key` is not, and `remove` is a no-op.
+        // Evict and replace. Only drop the old `entry.key` from `index` when it still points
+        // to this slot: after `invalidate_from` a slot may hold a stale key that has since
+        // been re-cached at a different slot, and an unconditional `remove` would orphan
+        // that live entry.
         let slot = self.clock;
         let entry = &mut self.entries[slot];
-        self.index.remove(&entry.key);
+        if self.index.get(&entry.key) == Some(&slot) {
+            self.index.remove(&entry.key);
+        }
         self.index.insert(key, slot);
         entry.key = key;
         entry.referenced.store(true, Ordering::Relaxed);
@@ -783,6 +790,56 @@ mod tests {
             &buf[..PAGE_SIZE.get() as usize - 2],
             [1; PAGE_SIZE.get() as usize - 2]
         );
+    }
+
+    #[test_traced]
+    fn test_invalidate_from_does_not_orphan_re_cached_page() {
+        // Regression: when the Clock evictor lands on an invalidated slot whose stale key has
+        // since been re-cached at a different slot, the old index entry (pointing to the
+        // live slot) must not be removed.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
+        let blob_id = 0u64;
+        let page_size = PAGE_SIZE.get() as usize;
+
+        // Fill both slots, then invalidate them so both carry stale keys with referenced=false.
+        cache.cache(blob_id, &vec![0xAA; page_size], 0);
+        cache.cache(blob_id, &vec![0xBB; page_size], 1);
+        cache.invalidate_from(blob_id, 0);
+
+        // Re-cache page 1. Clock sits at slot 0, which is referenced=false, so the insert
+        // lands at slot 0 (slot 1 still holds its stale (blob, 1) key).
+        cache.cache(blob_id, &vec![0xCC; page_size], 1);
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64),
+            page_size,
+            "page 1 should be readable after re-cache"
+        );
+        assert_eq!(buf, vec![0xCC; page_size]);
+
+        // Cache a new page. Clock now advances to slot 1 (still referenced=false), evicts it.
+        // With the buggy unconditional `index.remove(entry.key)` this would remove the live
+        // (blob, 1) -> slot 0 mapping, orphaning slot 0.
+        cache.cache(blob_id, &vec![0xDD; page_size], 2);
+
+        // Slot 0 must still be reachable via its live index entry.
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64),
+            page_size,
+            "live page 1 was orphaned by stale-slot eviction"
+        );
+        assert_eq!(buf, vec![0xCC; page_size]);
+
+        // And the newly cached page 2 is also reachable.
+        let mut buf = vec![0u8; page_size];
+        assert_eq!(
+            cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64 * 2),
+            page_size
+        );
+        assert_eq!(buf, vec![0xDD; page_size]);
     }
 
     #[test_traced]
