@@ -11,55 +11,51 @@ pub use super::db::KeyValueProof;
 use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::Location,
+    merkle::{Graftable, Location},
     qmdb::{
         any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
+pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
+    F,
+    E,
+    Journal<E, Operation<F, K, V>>,
+    K,
+    FixedEncoding<V>,
+    Index<T, Location<F>>,
+    H,
+    N,
+>;
 
 impl<
-        E: RStorage + Clock + Metrics,
+        F: Graftable,
+        E: Context,
         K: Array,
         V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N>
+    > Db<F, E, K, V, H, T, N>
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-    /// the bitmap MMR if a thread pool is provided.
-    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-        crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+    /// the bitmap Merkle tree if a thread pool is provided.
+    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config).await
     }
 }
 
 pub mod partitioned {
     //! A variant of [super] that uses a partitioned index for the snapshot.
 
-    pub use super::KeyValueProof;
-    use crate::{
-        index::partitioned::ordered::Index,
-        journal::contiguous::fixed::Journal,
-        mmr::Location,
-        qmdb::{
-            any::{ordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
-            current::FixedConfig as Config,
-            Error,
-        },
-        translator::Translator,
-    };
-    use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-    use commonware_utils::Array;
+    use super::*;
+    use crate::index::partitioned::ordered::Index;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -67,31 +63,33 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::ordered::db::Db<
+            F,
             E,
-            Journal<E, Operation<K, V>>,
+            Journal<E, Operation<F, K, V>>,
             K,
             FixedEncoding<V>,
-            Index<T, Location, P>,
+            Index<T, Location<F>, P>,
             H,
             N,
         >;
 
     impl<
-            E: RStorage + Clock + Metrics,
+            F: Graftable,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N>
+        > Db<F, E, K, V, H, T, P, N>
     {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
-        /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
-        pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-            crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+        /// Merkleization to initialize the bitmap Merkle tree if a thread pool is provided.
+        pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
+            crate::qmdb::current::init(context, config).await
         }
     }
 }
@@ -100,6 +98,7 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
+        mmr,
         qmdb::{
             current::{ordered::tests as shared, tests::fixed_config},
             Error,
@@ -108,11 +107,14 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
+    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_utils::{
+        bitmap::{Prunable as BitMap, Readable as _},
+        NZU64,
+    };
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
@@ -147,15 +149,17 @@ pub mod test {
             let key = Sha256::fill(0x11);
             for i in 0..chunk_bits + 10 {
                 let value = Sha256::hash(&i.to_be_bytes());
-                let finalized = db
+                let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(None)
+                    .merkleize(&db, None)
                     .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(finalized).await.unwrap();
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
             }
+
+            // Prune the database
+            db.prune(db.sync_boundary()).await.unwrap();
 
             assert!(
                 db.status.pruned_chunks() > 0,

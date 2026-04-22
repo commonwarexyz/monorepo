@@ -13,6 +13,9 @@
 //! If the `Translator` maps many keys to the same translated key, the performance of `Index` will
 //! degrade substantially (each conflicting key may contain the desired value).
 
+use crate::translator::Translator;
+use commonware_runtime::Metrics;
+
 mod storage;
 
 pub mod ordered;
@@ -159,6 +162,12 @@ pub trait Unordered: Send + Sync {
     /// Returns the total number of items pruned from the index, for use in testing.
     #[cfg(test)]
     fn pruned(&self) -> usize;
+}
+
+/// A trait for index types that can be constructed from a metrics context and translator.
+pub trait Factory<T: Translator>: Unordered + Sized {
+    /// Create a new index with the given metrics context and translator.
+    fn new(ctx: impl Metrics, translator: T) -> Self;
 }
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows

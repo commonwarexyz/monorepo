@@ -21,14 +21,14 @@ mod tests {
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
         let hasher = H::new();
         let mut mmb = Mmb::new(&hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&mmb, &hasher)
         };
-        mmb.apply(changeset).unwrap();
+        mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
     }
 
@@ -38,14 +38,14 @@ mod tests {
         let mut mmb = Mmb::new(&hasher);
 
         for i in 0u64..8 {
-            let changeset = {
+            let batch = {
                 let mut batch = mmb.new_batch();
                 let loc = batch.leaves();
                 batch = batch.add(&hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mmb, &hasher)
             };
-            mmb.apply(changeset).unwrap();
+            mmb.apply_batch(&batch).unwrap();
         }
         assert_eq!(*mmb.leaves(), 8);
         assert_eq!(*mmb.size(), 13);
@@ -139,7 +139,9 @@ mod tests {
 
         let mmb_copy = Mmb::init(
             Config {
-                nodes: mmb.nodes.iter().copied().collect(),
+                nodes: (*Position::try_from(prune_loc).unwrap()..*mmb.size())
+                    .map(|i| mmb.get_node(Position::new(i)).unwrap())
+                    .collect(),
                 pruning_boundary: prune_loc,
                 pinned_nodes: mmb.node_digests_to_pin(prune_loc),
             },

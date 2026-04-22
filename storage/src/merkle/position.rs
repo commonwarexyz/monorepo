@@ -357,12 +357,12 @@ mod tests {
     use super::{Location as GenericLocation, Position as GenericPosition};
     use crate::{
         merkle::Family as _,
-        mmr::{mem::Mmr, Family as MmrFamily, StandardHasher as Standard},
+        mmr::{self, mem::Mmr, StandardHasher as Standard},
     };
     use commonware_cryptography::Sha256;
 
-    type Location = GenericLocation<MmrFamily>;
-    type Position = GenericPosition<MmrFamily>;
+    type Location = GenericLocation<mmr::Family>;
+    type Position = GenericPosition<mmr::Family>;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -400,24 +400,24 @@ mod tests {
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
 
         // Exceeding MAX_NODES returns None, but MAX_NODES itself IS valid (inclusive bound)
-        assert!(MmrFamily::MAX_NODES.checked_add(1).is_none());
-        assert!(Position::new(*MmrFamily::MAX_NODES - 5)
+        assert!(mmr::Family::MAX_NODES.checked_add(1).is_none());
+        assert!(Position::new(*mmr::Family::MAX_NODES - 5)
             .checked_add(10)
             .is_none());
         // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
-            Position::new(*MmrFamily::MAX_NODES - 10)
+            Position::new(*mmr::Family::MAX_NODES - 10)
                 .checked_add(10)
                 .unwrap(),
-            *MmrFamily::MAX_NODES
+            *mmr::Family::MAX_NODES
         );
 
         // MAX_NODES - 11 + 10 = MAX_NODES - 1, also valid
         assert_eq!(
-            Position::new(*MmrFamily::MAX_NODES - 11)
+            Position::new(*mmr::Family::MAX_NODES - 11)
                 .checked_add(10)
                 .unwrap(),
-            *MmrFamily::MAX_NODES - 1
+            *mmr::Family::MAX_NODES - 1
         );
     }
 
@@ -436,19 +436,19 @@ mod tests {
         // Saturates AT MAX_NODES (inclusive bound)
         assert_eq!(
             Position::new(u64::MAX).saturating_add(1),
-            *MmrFamily::MAX_NODES
+            *mmr::Family::MAX_NODES
         );
         assert_eq!(
-            MmrFamily::MAX_NODES.saturating_add(1),
-            *MmrFamily::MAX_NODES
+            mmr::Family::MAX_NODES.saturating_add(1),
+            *mmr::Family::MAX_NODES
         );
         assert_eq!(
-            MmrFamily::MAX_NODES.saturating_add(1000),
-            *MmrFamily::MAX_NODES
+            mmr::Family::MAX_NODES.saturating_add(1000),
+            *mmr::Family::MAX_NODES
         );
         assert_eq!(
-            Position::new(*MmrFamily::MAX_NODES - 5).saturating_add(10),
-            *MmrFamily::MAX_NODES
+            Position::new(*mmr::Family::MAX_NODES - 5).saturating_add(10),
+            *mmr::Family::MAX_NODES
         );
     }
 
@@ -516,8 +516,8 @@ mod tests {
         // MAX_NODES = max MMR size = 2^63 - 1 (for 2^62 leaves).
         let max_leaves = 1u64 << 62;
         let max_size = 2 * max_leaves - 1; // 2^63 - 1
-        assert_eq!(*MmrFamily::MAX_NODES, max_size);
-        assert_eq!(*MmrFamily::MAX_NODES, (1u64 << 63) - 1);
+        assert_eq!(*mmr::Family::MAX_NODES, max_size);
+        assert_eq!(*mmr::Family::MAX_NODES, (1u64 << 63) - 1);
         assert_eq!(max_size.leading_zeros(), 1); // top bit clear
 
         // One more leaf would overflow: size = 2^63, top bit set.
@@ -525,8 +525,8 @@ mod tests {
         assert_eq!(overflow_size.leading_zeros(), 0);
 
         // MAX_LEAVES is a valid location (inclusive bound) and converts to MAX_NODES.
-        let pos = Position::try_from(MmrFamily::MAX_LEAVES).unwrap();
-        assert_eq!(pos, MmrFamily::MAX_NODES);
+        let pos = Position::try_from(mmr::Family::MAX_LEAVES).unwrap();
+        assert_eq!(pos, mmr::Family::MAX_NODES);
     }
 
     #[test]
@@ -548,12 +548,11 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_valid_size());
-            let changeset = mmr
+            let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
-            mmr.apply(changeset).unwrap();
+                .merkleize(&mmr, &hasher);
+            mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }
 
@@ -561,7 +560,7 @@ mod tests {
         assert!(!Position::new(u64::MAX).is_valid_size());
         assert!(Position::new(u64::MAX >> 1).is_valid_size()); // 2^63 - 1 = MAX_NODES
         assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
-        assert!(MmrFamily::MAX_NODES.is_valid_size()); // MAX_NODES is the largest valid MMR size
+        assert!(mmr::Family::MAX_NODES.is_valid_size()); // MAX_NODES is the largest valid MMR size
     }
 
     #[test]
@@ -581,13 +580,13 @@ mod tests {
         assert_eq!(decoded, pos);
 
         // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
-        let pos = MmrFamily::MAX_NODES;
+        let pos = mmr::Family::MAX_NODES;
         let encoded = pos.encode();
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
 
         // MAX_NODES - 1 is also valid
-        let pos = MmrFamily::MAX_NODES - 1;
+        let pos = mmr::Family::MAX_NODES - 1;
         let encoded = pos.encode();
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
@@ -598,7 +597,7 @@ mod tests {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
         // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
-        let invalid_value = *MmrFamily::MAX_NODES + 1;
+        let invalid_value = *mmr::Family::MAX_NODES + 1;
         let encoded = UInt(invalid_value).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());

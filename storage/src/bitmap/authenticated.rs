@@ -11,20 +11,23 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher, storage::Storage},
-    metadata::{Config as MConfig, Metadata},
-    mmr::{
-        self,
-        batch::UnmerkleizedBatch,
-        iterator::nodes_to_pin,
-        mem::{Config, Mmr},
-        verification, Error, Location, Position, Proof,
+    merkle::{
+        batch::MIN_TO_PARALLELIZE,
+        hasher::Hasher,
+        mmr::{
+            self,
+            mem::{Config, Mmr},
+            verification, Error, Location, Position, Proof,
+        },
+        storage::Storage,
+        Family as _,
     },
+    metadata::{Config as MConfig, Metadata},
+    Context,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
     sequence::prefixed_u64::U64,
@@ -104,12 +107,7 @@ pub type UnmerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<
-    E: Clock + RStorage + Metrics,
-    D: Digest,
-    const N: usize,
-    S: State<D> = Merkleized<D>,
-> {
+pub struct BitMap<E: Context, D: Digest, const N: usize, S: State<D> = Merkleized<D>> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
@@ -144,7 +142,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
+impl<E: Context, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -288,7 +286,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
+impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
     /// Initialize a bitmap from the metadata in the given partition. If the partition is empty,
     /// returns an empty bitmap. Otherwise restores the pruned state (the caller must replay
     /// retained elements to restore its full state).
@@ -337,7 +335,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         }
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
+        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
@@ -394,7 +392,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             pruned_loc.is_valid(),
             "expected valid location from pruned_chunks"
         );
-        for (i, digest) in nodes_to_pin(pruned_loc).enumerate() {
+        for (i, digest) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());
@@ -514,7 +512,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
+impl<E: Context, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -563,7 +561,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
-        let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
+        let mut batch = self.mmr.new_batch().with_pool(self.pool.clone());
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
@@ -608,8 +606,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         batch = batch.update_leaf_batched(&dirty)?;
 
         // Merkleize and apply.
-        let changeset = batch.merkleize(hasher).finalize();
-        self.mmr.apply(changeset)?;
+        let batch = batch.merkleize(&self.mmr, hasher);
+        self.mmr.apply_batch(&batch)?;
 
         // Compute the bitmap root.
         let mmr_root = *self.mmr.root();
@@ -632,9 +630,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<mmr::Family>
-    for MerkleizedBitMap<E, D, N>
-{
+impl<E: Context, D: Digest, const N: usize> Storage<mmr::Family> for MerkleizedBitMap<E, D, N> {
     type Digest = D;
 
     async fn size(&self) -> Position {
@@ -660,7 +656,7 @@ mod tests {
     type TestContext = deterministic::Context;
     type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
 
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
+    impl<E: Context, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning

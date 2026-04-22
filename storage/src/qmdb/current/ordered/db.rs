@@ -6,7 +6,7 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    mmr::Location,
+    merkle::{self, Location},
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -16,16 +16,16 @@ use crate::{
         operation::Key,
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<K: Key, D: Digest, const N: usize> {
-    pub proof: OperationProof<D, N>,
+pub struct KeyValueProof<F: merkle::Family, K: Key, D: Digest, const N: usize> {
+    pub proof: OperationProof<F, D, N>,
     pub next_key: K,
 }
 
@@ -33,24 +33,25 @@ pub struct KeyValueProof<K: Key, D: Digest, const N: usize> {
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<E, C, K, V, I, H, const N: usize> =
-    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N>;
+pub type Db<F, E, C, K, V, I, H, const N: usize> =
+    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N>;
 
 // Shared read-only functionality.
 impl<
-        E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<K, V>>,
+        F: merkle::Graftable,
+        E: Context,
+        C: Contiguous<Item = Operation<F, K, V>>,
         K: Key,
         V: ValueEncoding,
-        I: OrderedIndex<Value = Location>,
+        I: OrderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N>
+    > Db<F, E, C, K, V, I, H, N>
 where
-    Operation<K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         self.any.get(key).await
     }
 
@@ -60,7 +61,7 @@ where
         hasher: &mut H,
         key: K,
         value: V::Value,
-        proof: &KeyValueProof<K, H::Digest, N>,
+        proof: &KeyValueProof<F, K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let op = Operation::Update(Update {
@@ -74,7 +75,7 @@ where
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, Update<K, V>)>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location<F>, Update<K, V>)>, Error<F>> {
         self.any.get_span(key).await
     }
 
@@ -83,7 +84,7 @@ where
     pub async fn stream_range<'a>(
         &'a self,
         start: K,
-    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
+    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error<F>>> + 'a, Error<F>>
     where
         V: 'a,
     {
@@ -95,7 +96,7 @@ where
     pub fn verify_exclusion_proof(
         hasher: &mut H,
         key: &K,
-        proof: &super::ExclusionProof<K, V, H::Digest, N>,
+        proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let (op_proof, op) = match proof {
@@ -104,7 +105,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>>::span_contains(
+                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -133,16 +134,17 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
+        F: merkle::Graftable,
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
         K: Key,
         V: ValueEncoding,
-        I: OrderedIndex<Value = Location>,
+        I: OrderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N>
+    > Db<F, E, C, K, V, I, H, N>
 where
-    Operation<K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
@@ -155,10 +157,10 @@ where
         &self,
         hasher: &mut H,
         key: K,
-    ) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
+    ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((data, loc)) = op_loc else {
-            return Err(Error::KeyNotFound);
+            return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(hasher, loc).await?;
 
@@ -177,12 +179,12 @@ where
         &self,
         hasher: &mut H,
         key: &K,
-    ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
+    ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
                     // Cannot prove exclusion of a key that exists in the db.
-                    return Err(Error::KeyExists);
+                    return Err(Error::<F>::KeyExists);
                 }
                 let op_proof = self.operation_proof(hasher, loc).await?;
                 Ok(super::ExclusionProof::KeyValue(op_proof, key_data))

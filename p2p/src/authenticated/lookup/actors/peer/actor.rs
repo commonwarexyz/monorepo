@@ -125,7 +125,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     }
 
     pub async fn run<Si: Sink, St: Stream>(
-        mut self,
+        self,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
@@ -158,6 +158,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                     // Enter into the main loop
                     let mut batch = Vec::with_capacity(self.send_batch_size);
+                    let (control, high, low) = &mut (self.control, self.high, self.low);
                     select_loop! {
                         context,
                         on_stopped => {},
@@ -168,36 +169,60 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &self.sent_messages,
                                 &mut batch,
                                 metrics::Message::new_ping(&peer),
-                                types::Message::Ping.encode_with_pool(&pool).into(),
+                                types::Message::Ping.encode_with_pool(&pool),
                             );
                             Self::extend_send_many(
-                                &peer, self.send_batch_size, &mut batch,
-                                &mut self.control, &mut self.high, &mut self.low,
-                                &rate_limits, &self.sent_messages,
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                control,
+                                high,
+                                low,
+                                &rate_limits,
+                                &self.sent_messages,
                             )?;
-                            conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
+                            conn_sender
+                                .send_many(batch.drain(..))
+                                .await
+                                .map_err(Error::SendFailed)?;
                             deadline = context.current() + self.ping_frequency;
                         },
                         // Await any outbound message (control, high, or low), then
                         // drain already-queued messages into a single runtime write.
                         // Priority order: control > high > low.
-                        msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
+                        msg = recv_prioritized(control, high, low) => {
                             match msg {
                                 Prioritized::Closed => return Err(Error::PeerDisconnected),
                                 Prioritized::Control(msg) => match msg {
-                                    Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                                    Message::Kill => {
+                                        return Err(Error::PeerKilled(peer.to_string()))
+                                    }
                                 },
                                 Prioritized::Data(encoded) => {
-                                    let (metric, payload) = Self::prepare_data(&peer, encoded, &rate_limits);
-                                    Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
-                                },
+                                    let (metric, payload) =
+                                        Self::prepare_data(&peer, encoded, &rate_limits);
+                                    Self::push_batched(
+                                        &self.sent_messages,
+                                        &mut batch,
+                                        metric,
+                                        payload,
+                                    );
+                                }
                             }
                             Self::extend_send_many(
-                                &peer, self.send_batch_size, &mut batch,
-                                &mut self.control, &mut self.high, &mut self.low,
-                                &rate_limits, &self.sent_messages,
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                control,
+                                high,
+                                low,
+                                &rate_limits,
+                                &self.sent_messages,
                             )?;
-                            conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
+                            conn_sender
+                                .send_many(batch.drain(..))
+                                .await
+                                .map_err(Error::SendFailed)?;
                         },
                     }
 

@@ -6,9 +6,10 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location},
+    merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
+    mmr::journaled::Config as MerkleConfig,
     qmdb::{
-        immutable::{Config, Immutable},
+        immutable::{variable::Db as Immutable, Config},
         verify_proof,
     },
     translator::TwoCap,
@@ -39,6 +40,7 @@ enum ImmutableOperation {
     Commit {
         has_metadata: bool,
         metadata_size: usize,
+        advance_floor: bool,
     },
     Prune {
         loc: u64,
@@ -91,10 +93,14 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
-fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
+#[allow(clippy::type_complexity)]
+fn db_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr: MmrConfig {
+        merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),
@@ -106,7 +112,7 @@ fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeC
             partition: format!("log-{suffix}"),
             items_per_section: NZU64!(ITEMS_PER_SECTION),
             compression: None,
-            codec_config: ((0..=10000).into(), ()),
+            codec_config: ((), ((0..=10000).into(), ())),
             write_buffer: NZUsize!(1024),
             page_cache,
         },
@@ -116,11 +122,11 @@ fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeC
 
 /// Assign locations to pending keys based on sorted order (matching BTreeMap
 /// iteration in `merkleize()`).
-fn assign_pending_locations(
+fn assign_pending_locations<F: MerkleFamily>(
     pending: &[(Digest, Vec<u8>)],
-    base: Location,
-    keys_set: &mut Vec<(Digest, Location)>,
-    set_locations: &mut Vec<(Digest, Location)>,
+    base: Location<F>,
+    keys_set: &mut Vec<(Digest, Location<F>)>,
+    set_locations: &mut Vec<(Digest, Location<F>)>,
 ) {
     let mut sorted_keys: Vec<Digest> = pending.iter().map(|(k, _)| *k).collect();
     sorted_keys.sort();
@@ -131,208 +137,224 @@ fn assign_pending_locations(
     }
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::seeded(input.seed);
 
-    runner.start(|context| async move {
-        let mut rng = StdRng::seed_from_u64(input.seed);
+    runner.start(|context| {
+        let operations = input.operations.clone();
+        async move {
+            let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let cfg = db_config("fuzz-partition", &context);
-        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
-            .await
-            .unwrap();
+            let cfg = db_config(suffix, &context);
+            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
+                .await
+                .unwrap();
 
-        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let mut keys_set = Vec::new();
-        let mut set_locations = Vec::new(); // Track locations that contain Set operations
-        let mut last_commit_loc = None;
-        let mut pending_sets: Vec<(Digest, Vec<u8>)> = Vec::new();
+            let hasher = Standard::<Sha256>::new();
+            let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
+            let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
+            let mut last_commit_loc: Option<Location<F>> = None;
+            let mut pending_sets: Vec<(Digest, Vec<u8>)> = Vec::new();
 
-        for op in input.operations {
-            match op {
-                ImmutableOperation::Set {
-                    key_seed,
-                    value_size,
-                } => {
-                    let key = generate_key(&mut rng, key_seed);
-                    let value = generate_value(&mut rng, value_size);
+            for op in operations {
+                match op {
+                    ImmutableOperation::Set {
+                        key_seed,
+                        value_size,
+                    } => {
+                        let key = generate_key(&mut rng, key_seed);
+                        let value = generate_value(&mut rng, value_size);
 
-                    if !keys_set.iter().any(|(k, _): &(Digest, _)| k == &key)
-                        && !pending_sets.iter().any(|(k, _): &(Digest, _)| k == &key)
-                    {
-                        pending_sets.push((key, value));
+                        if !keys_set.iter().any(|(k, _)| k == &key)
+                            && !pending_sets.iter().any(|(k, _)| k == &key)
+                        {
+                            pending_sets.push((key, value));
+                        }
                     }
-                }
 
-                ImmutableOperation::Get { key_seed } => {
-                    let key = generate_key(&mut rng, key_seed);
-                    let _ = db.get(&key).await;
-                }
+                    ImmutableOperation::Get { key_seed } => {
+                        let key = generate_key(&mut rng, key_seed);
+                        let _ = db.get(&key).await;
+                    }
 
-                ImmutableOperation::Commit {
-                    has_metadata,
-                    metadata_size,
-                } => {
-                    let metadata = if has_metadata {
-                        Some(generate_value(&mut rng, metadata_size))
-                    } else {
-                        None
-                    };
+                    ImmutableOperation::Commit {
+                        has_metadata,
+                        metadata_size,
+                        advance_floor,
+                    } => {
+                        let metadata = if has_metadata {
+                            Some(generate_value(&mut rng, metadata_size))
+                        } else {
+                            None
+                        };
 
-                    assign_pending_locations(
-                        &pending_sets,
-                        db.bounds().await.end,
-                        &mut keys_set,
-                        &mut set_locations,
-                    );
-                    let finalized = {
+                        let end = db.bounds().await.end;
+                        let pending_count = pending_sets.len() as u64;
+                        assign_pending_locations(
+                            &pending_sets,
+                            end,
+                            &mut keys_set,
+                            &mut set_locations,
+                        );
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
                             batch = batch.set(k, v);
                         }
-                        batch.merkleize(metadata).finalize()
-                    };
-                    db.apply_batch(finalized).await.unwrap();
-                    db.commit().await.unwrap();
-                    last_commit_loc = Some(db.bounds().await.end - 1);
-                }
+                        let floor = if advance_floor {
+                            // Advance floor to the commit location (end of this batch).
+                            // total_size = end + pending_count + 1 (commit op).
+                            // Floor at the commit op is the maximum valid value.
+                            Location::new(*end + pending_count)
+                        } else {
+                            db.inactivity_floor_loc()
+                        };
+                        let merkleized = batch.merkleize(&db, metadata, floor);
+                        db.apply_batch(merkleized).await.unwrap();
+                        db.commit().await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                    }
 
-                ImmutableOperation::Prune { loc } => {
-                    if let Some(commit_loc) = last_commit_loc {
-                        let safe_loc = loc % (commit_loc + 1).as_u64();
-                        let safe_loc = Location::new(safe_loc);
+                    ImmutableOperation::Prune { loc } => {
+                        if let Some(commit_loc) = last_commit_loc {
+                            let safe_loc = loc % (commit_loc + 1).as_u64();
+                            let safe_loc = Location::new(safe_loc);
+                            assign_pending_locations(
+                                &pending_sets,
+                                db.bounds().await.end,
+                                &mut keys_set,
+                                &mut set_locations,
+                            );
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            // Set the floor to at least safe_loc so the prune succeeds,
+                            // but never below the current floor (monotonicity).
+                            let floor = safe_loc.max(db.inactivity_floor_loc());
+                            let merkleized = batch.merkleize(&db, None, floor);
+                            db.apply_batch(merkleized).await.unwrap();
+                            db.commit().await.unwrap();
+                            last_commit_loc = Some(db.bounds().await.end - 1);
+                            db.prune(safe_loc).await.expect("prune should not fail");
+                            let oldest = db.bounds().await.start;
+                            set_locations.retain(|(_, l)| *l >= oldest);
+                            keys_set.retain(|(_, l)| *l >= oldest);
+                        }
+                    }
+
+                    ImmutableOperation::Proof {
+                        start_index,
+                        max_ops,
+                    } => {
+                        let op_count = db.bounds().await.end;
+                        if op_count > 0 {
+                            let safe_start = start_index % op_count.as_u64();
+                            let safe_start = Location::new(safe_start);
+                            let safe_max_ops =
+                                NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
+                            assign_pending_locations(
+                                &pending_sets,
+                                db.bounds().await.end,
+                                &mut keys_set,
+                                &mut set_locations,
+                            );
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            let floor = db.inactivity_floor_loc();
+                            let merkleized = batch.merkleize(&db, None, floor);
+                            db.apply_batch(merkleized).await.unwrap();
+                            db.commit().await.unwrap();
+                            last_commit_loc = Some(db.bounds().await.end - 1);
+                            if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
+                                let root = db.root();
+                                let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
+                            }
+                        }
+                    }
+
+                    ImmutableOperation::HistoricalProof {
+                        size,
+                        start_loc,
+                        max_ops,
+                    } => {
+                        let op_count = db.bounds().await.end;
+                        if op_count > 0 && pending_sets.is_empty() {
+                            let safe_size = (size % op_count.as_u64()).max(1);
+                            let safe_size = Location::new(safe_size);
+                            let safe_start = start_loc % safe_size.as_u64();
+                            let safe_start = Location::new(safe_start);
+                            let safe_max_ops =
+                                NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
+
+                            let floor = db.inactivity_floor_loc();
+                            let batch = db.new_batch().merkleize(&db, None, floor);
+                            db.apply_batch(batch).await.unwrap();
+                            db.commit().await.unwrap();
+                            last_commit_loc = Some(db.bounds().await.end - 1);
+                            if safe_start >= db.bounds().await.start {
+                                let _ = db
+                                    .historical_proof(safe_size, safe_start, safe_max_ops)
+                                    .await;
+                            }
+                        }
+                    }
+
+                    ImmutableOperation::GetMetadata => {
+                        let _ = db.get_metadata().await;
+                    }
+
+                    ImmutableOperation::OpCount => {
+                        let _ = db.bounds().await.end;
+                    }
+
+                    ImmutableOperation::OldestRetainedLoc => {
+                        let _ = db.bounds().await.start;
+                    }
+
+                    ImmutableOperation::Root => {
                         assign_pending_locations(
                             &pending_sets,
                             db.bounds().await.end,
                             &mut keys_set,
                             &mut set_locations,
                         );
-                        let finalized = {
-                            let mut batch = db.new_batch();
-                            for (k, v) in pending_sets.drain(..) {
-                                batch = batch.set(k, v);
-                            }
-                            batch.merkleize(None).finalize()
-                        };
-                        db.apply_batch(finalized).await.unwrap();
-                        db.commit().await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
-                        db.prune(safe_loc).await.expect("prune should not fail");
-                        let oldest = db.bounds().await.start;
-                        set_locations.retain(|(_, l): &(_, Location)| *l >= oldest);
-                        keys_set.retain(|(_, l): &(_, Location)| *l >= oldest);
-                    }
-                }
-
-                ImmutableOperation::Proof {
-                    start_index,
-                    max_ops,
-                } => {
-                    let op_count = db.bounds().await.end;
-                    if op_count > 0 {
-                        let safe_start = start_index % op_count.as_u64();
-                        let safe_start = Location::new(safe_start);
-                        let safe_max_ops =
-                            NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-                        assign_pending_locations(
-                            &pending_sets,
-                            db.bounds().await.end,
-                            &mut keys_set,
-                            &mut set_locations,
-                        );
-                        let finalized = {
-                            let mut batch = db.new_batch();
-                            for (k, v) in pending_sets.drain(..) {
-                                batch = batch.set(k, v);
-                            }
-                            batch.merkleize(None).finalize()
-                        };
-                        db.apply_batch(finalized).await.unwrap();
-                        db.commit().await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
-                        if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
-                            let root = db.root();
-                            let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
-                        }
-                    }
-                }
-
-                ImmutableOperation::HistoricalProof {
-                    size,
-                    start_loc,
-                    max_ops,
-                } => {
-                    let op_count = db.bounds().await.end;
-                    if op_count > 0 && pending_sets.is_empty() {
-                        let safe_size = (size % op_count.as_u64()).max(1);
-                        let safe_size = Location::new(safe_size);
-                        let safe_start = start_loc % safe_size.as_u64();
-                        let safe_start = Location::new(safe_start);
-                        let safe_max_ops =
-                            NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-
-                        let finalized = db.new_batch().merkleize(None).finalize();
-                        db.apply_batch(finalized).await.unwrap();
-                        db.commit().await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
-                        if safe_start >= db.bounds().await.start {
-                            let _ = db
-                                .historical_proof(safe_size, safe_start, safe_max_ops)
-                                .await;
-                        }
-                    }
-                }
-
-                ImmutableOperation::GetMetadata => {
-                    let _ = db.get_metadata().await;
-                }
-
-                ImmutableOperation::OpCount => {
-                    let _ = db.bounds().await.end;
-                }
-
-                ImmutableOperation::OldestRetainedLoc => {
-                    let _ = db.bounds().await.start;
-                }
-
-                ImmutableOperation::Root => {
-                    assign_pending_locations(
-                        &pending_sets,
-                        db.bounds().await.end,
-                        &mut keys_set,
-                        &mut set_locations,
-                    );
-                    let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
                             batch = batch.set(k, v);
                         }
-                        batch.merkleize(None).finalize()
-                    };
-                    db.apply_batch(finalized).await.unwrap();
-                    db.commit().await.unwrap();
-                    last_commit_loc = Some(db.bounds().await.end - 1);
-                    let _ = db.root();
+                        let floor = db.inactivity_floor_loc();
+                        let merkleized = batch.merkleize(&db, None, floor);
+                        db.apply_batch(merkleized).await.unwrap();
+                        db.commit().await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        let _ = db.root();
+                    }
                 }
             }
-        }
 
-        assign_pending_locations(
-            &pending_sets,
-            db.bounds().await.end,
-            &mut keys_set,
-            &mut set_locations,
-        );
-        let finalized = {
+            assign_pending_locations(
+                &pending_sets,
+                db.bounds().await.end,
+                &mut keys_set,
+                &mut set_locations,
+            );
             let mut batch = db.new_batch();
             for (k, v) in pending_sets.drain(..) {
                 batch = batch.set(k, v);
             }
-            batch.merkleize(None).finalize()
-        };
-        db.apply_batch(finalized).await.unwrap();
-        db.destroy().await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            let merkleized = batch.merkleize(&db, None, floor);
+            db.apply_batch(merkleized).await.unwrap();
+            db.destroy().await.unwrap();
+        }
     });
+}
+
+fn fuzz(input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&input, "fuzz-mmr");
+    fuzz_family::<mmb::Family>(&input, "fuzz-mmb");
 }
 
 fuzz_target!(|input: FuzzInput| {

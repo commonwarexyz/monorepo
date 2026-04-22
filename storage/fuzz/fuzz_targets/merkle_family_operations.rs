@@ -32,8 +32,8 @@ fn add<F: MerkleFamily>(
 ) -> Location<F> {
     let batch = merkle.new_batch();
     let loc = batch.leaves();
-    let changeset = batch.add(hasher, data).merkleize(hasher).finalize();
-    merkle.apply(changeset).unwrap();
+    let batch = batch.add(hasher, data).merkleize(merkle, hasher);
+    merkle.apply_batch(&batch).unwrap();
     loc
 }
 
@@ -46,9 +46,8 @@ fn update_leaf<F: MerkleFamily>(
     let batch = merkle
         .new_batch()
         .update_leaf(hasher, loc, data)?
-        .merkleize(hasher)
-        .finalize();
-    merkle.apply(batch).unwrap();
+        .merkleize(merkle, hasher);
+    merkle.apply_batch(&batch).unwrap();
     Ok(())
 }
 

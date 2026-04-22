@@ -5,11 +5,13 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher};
+use commonware_storage::merkle::{self, mem::Mem, Family, Location};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
+
+type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 enum Strategy {
@@ -28,10 +30,7 @@ const N_LEAVES: [usize; 1] = [100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
 
-/// Benchmark the performance of randomly updating leaves in an MMR.
-fn bench_update(c: &mut Criterion) {
-    let cfg = Config::default();
-    let runner = tokio::Runner::new(cfg);
+fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, family: &str) {
     for updates in [1_000_000, 100_000] {
         for leaves in N_LEAVES {
             for strategy in [
@@ -41,14 +40,11 @@ fn bench_update(c: &mut Criterion) {
             ] {
                 c.bench_function(
                     &format!(
-                        "{}/updates={} leaves={} strategy={:?}",
+                        "{}/updates={updates} leaves={leaves} strategy={strategy:?} family={family}",
                         module_path!(),
-                        updates,
-                        leaves,
-                        strategy,
                     ),
                     |b| {
-                        b.to_async(&runner).iter_custom(|_iters| async move {
+                        b.to_async(runner).iter_custom(|_iters| async move {
                             let pool = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
@@ -62,10 +58,9 @@ fn bench_update(c: &mut Criterion) {
                             let mut leaf_locations = Vec::with_capacity(leaves);
                             let h = StandardHasher::<Sha256>::new();
 
-                            // Append random elements to MMR
-                            let mut mmr = Mmr::new(&h);
-                            let changeset = {
-                                let mut batch = UnmerkleizedBatch::new(&mmr);
+                            let mut mem = Mem::<F, _>::new(&h);
+                            let batch = {
+                                let mut batch = mem.new_batch();
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
@@ -73,9 +68,9 @@ fn bench_update(c: &mut Criterion) {
                                     leaf_locations.push(loc);
                                     batch = batch.add(&h, &digest);
                                 }
-                                batch.merkleize(&h).finalize()
+                                batch.merkleize(&mem, &h)
                             };
-                            mmr.apply(changeset).unwrap();
+                            mem.apply_batch(&batch).unwrap();
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -94,24 +89,25 @@ fn bench_update(c: &mut Criterion) {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
                                         let batch =
-                                            mmr.new_batch().update_leaf(&h, *loc, element).unwrap();
-                                        mmr.apply(batch.merkleize(&h).finalize()).unwrap();
+                                            mem.new_batch().update_leaf(&h, *loc, element).unwrap();
+                                        let batch = batch.merkleize(&mem, &h);
+                                        mem.apply_batch(&batch).unwrap();
                                     }
                                 }
                                 _ => {
                                     let updates: Vec<(
-                                        Location,
+                                        Location<F>,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    let changeset = {
-                                        let mut batch = UnmerkleizedBatch::new(&mmr);
+                                    let batch = {
+                                        let mut batch = mem.new_batch();
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
                                         batch = batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&h).finalize()
+                                        batch.merkleize(&mem, &h)
                                     };
-                                    mmr.apply(changeset).unwrap();
+                                    mem.apply_batch(&batch).unwrap();
                                 }
                             }
 
@@ -122,6 +118,13 @@ fn bench_update(c: &mut Criterion) {
             }
         }
     }
+}
+
+fn bench_update(c: &mut Criterion) {
+    let cfg = Config::default();
+    let runner = tokio::Runner::new(cfg);
+    bench_update_family::<commonware_storage::mmr::Family>(c, &runner, "mmr");
+    bench_update_family::<commonware_storage::mmb::Family>(c, &runner, "mmb");
 }
 
 criterion_group! {

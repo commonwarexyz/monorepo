@@ -5,7 +5,10 @@ use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    merkle::{
+        journaled::Config as MmrConfig,
+        mmr::{self, Location, Proof},
+    },
     qmdb::{
         self,
         immutable::{self, Config},
@@ -16,20 +19,20 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = immutable::Operation<Key, Value>;
+pub type Operation = immutable::variable::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),
         NZUsize!(10),
     );
     Config {
-        mmr: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
@@ -41,7 +44,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
             partition: "log".into(),
             items_per_section: NZU64!(4096),
             compression: None,
-            codec_config: (),
+            codec_config: ((), ()),
             write_buffer: NZUsize!(4096),
             page_cache,
         },
@@ -71,12 +74,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            operations.push(Operation::Commit(None, Location::new(0)));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
+    operations.push(Operation::Commit(Some(Sha256::fill(1)), Location::new(0)));
     operations
 }
 
@@ -84,6 +87,7 @@ impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
@@ -93,7 +97,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
@@ -106,9 +110,9 @@ where
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(metadata) => {
-                    let finalized = batch.merkleize(metadata).finalize();
-                    self.apply_batch(finalized).await?;
+                Operation::Commit(metadata, floor) => {
+                    let merkleized = batch.merkleize(self, metadata, floor);
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }
@@ -125,10 +129,8 @@ where
         self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        // For Immutable databases, all retained operations are active,
-        // so the inactivity floor equals the pruning boundary.
-        self.bounds().await.start
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     fn historical_proof(
@@ -136,14 +138,15 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
 

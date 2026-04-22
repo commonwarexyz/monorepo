@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > The Proof is in the Pairing</title>
+    <meta name="description" content="Blockchains are especially
+well-suited for two use cases: payments and trading. We’ve made real
+progress in scaling these systems with many chains supporting 10K–100K
+TPS. But what happens when we introduce privacy?">
+    <meta name="author" content="Guru Vamsi Policharla">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/batch-pari" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/batch-pari.png" />
+    <meta property="og:title" content="The Proof is in the Pairing" />
+    <meta property="og:description" content="Blockchains are especially
+well-suited for two use cases: payments and trading. We’ve made real
+progress in scaling these systems with many chains supporting 10K–100K
+TPS. But what happens when we introduce privacy?" />
+    <meta property="article:author" content="Guru Vamsi Policharla" />
+    <meta property="article:published_time" content="2026-03-24T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-03-24T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/batch-pari" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/batch-pari" />
+    <meta property="twitter:title" content="The Proof is in the
+Pairing" />
+    <meta property="twitter:description" content="Blockchains are
+especially well-suited for two use cases: payments and trading. We’ve
+made real progress in scaling these systems with many chains supporting
+10K–100K TPS. But what happens when we introduce privacy?" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/batch-pari.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/gvamsip" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>The Proof is in the Pairing</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/gvamsip">Guru
+Vamsi Policharla</a></div>
+                        <div class="date">March 24th, 2026</div>
+        </div>
+        <p>Blockchains are especially well-suited for two use cases:
+        payments and trading. We’ve made real progress in scaling these
+        systems with many chains supporting 10K–100K TPS. But what
+        happens when we introduce privacy?</p>
+        <p>Recall that there are really only two tools at our
+        disposal:</p>
+        <ul>
+        <li>zero-knowledge proofs for private payments, smart contracts,
+        and zk-identity</li>
+        <li><em>advanced</em> encryption schemes for privacy of pending
+        bids/trades</li>
+        </ul>
+        <p>The chain (validators) needs to verify every proof and
+        decrypt every ciphertext to process the block. Very loosely
+        speaking, this translates to a “few” public key operations
+        (exponentiations/pairings) per transaction when using
+        pairing-based techniques. Note that this is (asymptotically)
+        optimal, so doing much better is difficult. So if we budget
+        <span class="math inline">\(\approx 1\)</span> ms privacy
+        overhead per transaction (about the time taken for a pairing on
+        BLS12-381), processing 100K transactions requires 100s in
+        single-core CPU time. Assuming perfect parallelization, we can
+        of course reach 100K TPS with 100 cores—or a GPU—but this is
+        deeply unsatisfying both cryptographically and because it places
+        specialized hardware requirements on validators.</p>
+        <h2 id="verifying-zksnarks-at-scale">Verifying zkSNARKs at
+        Scale</h2>
+        <p>Note that if we just want to quickly verify proofs on chain,
+        there are known techniques that utilize an untrusted third party
+        to reduce the cost of verification on chain (<a
+        href="https://eprint.iacr.org/2019/099">MBK+19</a>, <a
+        href="https://eprint.iacr.org/2019/1177">BMM+19</a>, <a
+        href="https://eprint.iacr.org/2021/529">GMN21</a>). In fact, <a
+        href="https://eprint.iacr.org/2021/529">GMN21</a> shows that
+        verification time can be sub-linear in the number of proofs.</p>
+        <p>But this strategy comes with two limitations:</p>
+        <ol type="1">
+        <li>introduces an extra “hop” in each slot from proposer <span
+        class="math inline">\(\rightarrow\)</span> aggregator <span
+        class="math inline">\(\rightarrow\)</span> validator, which in
+        turn increases latency</li>
+        <li>relies on availability of the aggregator to maintain the
+        system’s throughput</li>
+        </ol>
+        <p><strong>Our goal:</strong> fast verification of SNARKs on
+        chain with <i><b><u>zero latency overhead</u></b></i> and no
+        additional assumptions.</p>
+        <p>The zero-latency requirement immediately disallows any
+        strategy that <em>delegates</em> verification to a third party.
+        This also means that verification cannot be sub-linear time, as
+        validators need to, at the very least, read all proofs in the
+        block. Giving up sub-linear verification might seem like we’re
+        going in the opposite direction of scaling, but in practice
+        validators typically still perform a non-trivial amount of work
+        for each transaction. In private payments, for instance, they
+        update the state with newly minted UTXOs and check nullifiers to
+        prevent double spending. Thus, if we can drive
+        <em>amortized</em> proof verification costs down to roughly the
+        cost of transaction processing/dissemination, we are in very
+        good shape.</p>
+        <h3 id="our-solution">Our Solution</h3>
+        <p>While it’s true that we can’t verify individual proofs any
+        faster, verifying a <em>batch</em> of proofs can be much faster.
+        Similar ideas can be traced back to the early days of
+        pairing-based signatures and Groth-Sahai proofs (see <a
+        href="https://eprint.iacr.org/2007/172">CHP07</a>, <a
+        href="https://eprint.iacr.org/2008/015.pdf">FGHP09</a>, and <a
+        href="https://eprint.iacr.org/2010/040.pdf">BFI+10</a>). In
+        fact, the ZCash team also <a
+        href="https://github.com/zcash/zcash/issues/2465#issuecomment-310745119">discussed</a>
+        batch verification of Groth16 proofs in the context of private
+        payments back in 2017.</p>
+        <p>Our starting point is the Pari proof system (<a
+        href="https://eprint.iacr.org/2024/1245">DMS24</a>), which was
+        later improved in Glock (<a
+        href="https://eprint.iacr.org/2025/1485">Eagen25</a>). We recall
+        the verification algorithm:</p>
+        <ol type="1">
+        <li><p>Parse the verification key <span
+        class="math inline">\(\textsf{ivk} = ((A,B), [\alpha]_1,
+        [\beta]_1, [\delta_1]_2, [\delta_2]_2, [\tau]_2, [\delta_1
+        \tau]_2)\)</span>, where <span class="math inline">\(A\)</span>
+        and <span class="math inline">\(B\)</span> form the square R1CS
+        relation.</p></li>
+        <li><p>Parse the proof <span class="math inline">\(\pi = (T, U,
+        v_a, v_b) \in \mathbb{G}_1^2 \times
+        \mathbb{F}^2\)</span>.</p></li>
+        <li><p>Compute the challenge <span class="math inline">\(r :=
+        H(\textsf{transcript})\)</span>.</p></li>
+        <li><p>Compute <span class="math inline">\(x_A := A \cdot (x \|
+        0)\)</span> and <span class="math inline">\(x_B := B \cdot (x \|
+        0)\)</span>, and interpolate over domain <span
+        class="math inline">\(K\)</span> to obtain polynomials <span
+        class="math inline">\(\hat{x}_A\)</span> and <span
+        class="math inline">\(\hat{x}_B\)</span>.</p></li>
+        <li><p>Compute the quotient evaluation, where <span
+        class="math inline">\(z_K\)</span> is the vanishing polynomial
+        on the domain <span class="math inline">\(K\)</span>:</p>
+        <p><span class="math display">\[v_q := \frac{(v_a +
+        \hat{x}_A(r))^2 - (v_b +
+        \hat{x}_B(r))}{z_K(r)}\]</span></p></li>
+        <li><p>Check the pairing equation:</p>
+        <p><span class="math display">\[e(T,\; [\delta_2]_2)
+        \stackrel{?}{=} e(U,\; [\delta_1 \tau]_2 - r \cdot [\delta_1]_2)
+        \cdot e(v_a \cdot [\alpha]_1 + v_b \cdot [\beta]_1 + v_q \cdot
+        [1]_1,\; [1]_2)\]</span></p></li>
+        </ol>
+        <p>Rearranging the last equation, we have:</p>
+        <p><span class="math display">\[e(\colorbox{lightgrey}{$T$},\;
+        [\delta_2]_2) \stackrel{?}{=} e(\colorbox{lightgrey}{$U$},\;
+        [\delta_1 \tau]_2) \cdot e(\colorbox{lightgrey}{$-r \cdot U$},\;
+        [\delta_1]_2) \cdot e(\colorbox{lightgrey}{$v_a$} \cdot
+        [\alpha]_1 + \colorbox{lightgrey}{$v_b$} \cdot [\beta]_1 +
+        \colorbox{lightgrey}{$v_q$} \cdot [1]_1,\; [1]_2)\]</span></p>
+        <p>where only the <span
+        class="math inline">\(\colorbox{lightgrey}{\text{highlighted}}\)</span>
+        terms change across different proofs (under the same
+        verification key). Thus, we can batch verify multiple proofs
+        (see <a href="https://eprint.iacr.org/2008/015.pdf">FGHP09</a>)
+        by taking a random linear combination using three <span
+        class="math inline">\(\mathbb{G}_1\)</span> MSMs for the <span
+        class="math inline">\(T, U, r\cdot U\)</span> terms, field
+        multiplications for the <span class="math inline">\(v_a, v_b,
+        v_q\)</span> terms, and finally checking a single multi-pairing.
+        Of course, we still need to carry out steps 1-5 for each proof,
+        but these are very fast hashing and field operations. This
+        strategy applies more broadly to KZG opening proofs and
+        KZG-based SNARKs such as Plonk. For example, <a
+        href="https://github.com/Consensys/gnark/blob/6e6960808dfdc41e56d089d870f12ce2bc7f8289/std/recursion/plonk/verifier.go#L946-L973">gnark</a>
+        uses it for more efficient recursion of Plonk proofs.</p>
+        <p>A quick implementation (with room for further optimization)
+        of this idea can be found <a
+        href="https://github.com/guruvamsi-policharla/garuda-pari/pull/1">here</a>,
+        and it shows a <span class="math inline">\(60\times\)</span>
+        speedup when verifying <span
+        class="math inline">\(2^{16}\)</span> proofs relative to naive
+        individual verification. Both experiments were run in
+        single-threaded mode. Concretely, this amounts to <span
+        class="math inline">\(\approx 10\mu\text{s}\)</span> per proof
+        on an M5 MacBook Pro, down from 0.6 ms per proof. And the more
+        proofs you verify, the faster it gets!</p>
+        <div data-align="center">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: center;">N</th>
+        <th style="text-align: center;">Individual</th>
+        <th style="text-align: center;">Batch</th>
+        <th style="text-align: center;">Speedup</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">2</td>
+        <td style="text-align: center;">1.361 ms</td>
+        <td style="text-align: center;">0.882 ms</td>
+        <td style="text-align: center;">1.54x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">32</td>
+        <td style="text-align: center;">19.123 ms</td>
+        <td style="text-align: center;">2.007 ms</td>
+        <td style="text-align: center;">9.53x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">512</td>
+        <td style="text-align: center;">303.118 ms</td>
+        <td style="text-align: center;">9.934 ms</td>
+        <td style="text-align: center;">30.51x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">8192</td>
+        <td style="text-align: center;">4834.206 ms</td>
+        <td style="text-align: center;">100.030 ms</td>
+        <td style="text-align: center;">48.33x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">65536</td>
+        <td style="text-align: center;">38307.696 ms</td>
+        <td style="text-align: center;">644.543 ms</td>
+        <td style="text-align: center;">59.43x</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p>Even at just 32 proofs, we see an order-of-magnitude speedup
+        in verification time. If we can bring down gas costs
+        proportionally, verifying a SNARK can be cheaper than an ERC-20
+        transfer. A parallel implementation using 8 threads is able to
+        verify over 500K proofs in <span
+        class="math inline">\(&lt;750\)</span> ms.</p>
+        <div data-align="center">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: center;">N</th>
+        <th style="text-align: center;">Individual</th>
+        <th style="text-align: center;">Parallel Batch</th>
+        <th style="text-align: center;">Speedup</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">16</td>
+        <td style="text-align: center;">8.898 ms</td>
+        <td style="text-align: center;">1.635 ms</td>
+        <td style="text-align: center;">5.44x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">256</td>
+        <td style="text-align: center;">154.882 ms</td>
+        <td style="text-align: center;">3.124 ms</td>
+        <td style="text-align: center;">49.58x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">4096</td>
+        <td style="text-align: center;">2456.701 ms</td>
+        <td style="text-align: center;">14.391 ms</td>
+        <td style="text-align: center;">170.71x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">65536</td>
+        <td style="text-align: center;">38665.625 ms</td>
+        <td style="text-align: center;">120.024 ms</td>
+        <td style="text-align: center;">322.15x</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">524288</td>
+        <td style="text-align: center;">311908.648 ms</td>
+        <td style="text-align: center;">735.246 ms</td>
+        <td style="text-align: center;">424.22x</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p>Any project currently using Groth16 proofs can use Pari/Glock
+        as a <strong>drop-in replacement</strong>. In fact, you don’t
+        even have to rewrite circuits as the Pari proof system can be
+        extended to support standard R1CS circuits (see Remark 2.3 in <a
+        href="https://eprint.iacr.org/2024/1245">DMS24</a>) by
+        increasing the proof size to 2 <span
+        class="math inline">\(\mathbb{G}_1\)</span> elements and 3 <span
+        class="math inline">\(\mathbb{F}\)</span> elements.</p>
+        <p>Stay tuned for our upcoming posts on scaling timelock
+        encryption and batched threshold encryption for encrypted
+        mempools!</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>

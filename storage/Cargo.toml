@@ -109,9 +109,9 @@ harness = false
 path = "src/journal/benches/bench.rs"
 
 [[bench]]
-name="mmr"
+name="merkle"
 harness = false
-path = "src/merkle/mmr/benches/bench.rs"
+path = "src/merkle/benches/bench.rs"
 
 [[bench]]
 name="ordinal"

@@ -117,7 +117,7 @@ curl http://localhost:9090/metrics
 4. **Sync Iteration Loop**: For each sync iteration:
    - **Database Initialization**: Client opens a new database (or reopens existing one)
    - **Connection**: Client establishes connection to server
-   - **Initial Sync Target**: Client requests server metadata to determine sync target (inactivity floor, size, and root digest)
+   - **Initial Sync Target**: Client requests server metadata to determine sync target (sync boundary, size, and root digest)
    - **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
    - **Sync Completion**: Client continues until all operations are applied and state matches server's target
    - **Database Closure**: Client closes the database to prepare for next iteration

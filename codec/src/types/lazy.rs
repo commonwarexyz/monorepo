@@ -1,6 +1,6 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
@@ -160,6 +160,15 @@ impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
             .expect("Lazy should have a value if pending is None")
             .encode_size()
     }
+
+    fn encode_inline_size(&self) -> usize {
+        if self.pending.is_some() {
+            return 0;
+        }
+        self.get()
+            .expect("Lazy should have a value if pending is None")
+            .encode_inline_size()
+    }
 }
 
 impl<T: Read + Write> Write for Lazy<T> {
@@ -172,6 +181,17 @@ impl<T: Read + Write> Write for Lazy<T> {
         self.get()
             .expect("Lazy should have a value if pending is None")
             .write(buf);
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        if let Some(pending) = &self.pending {
+            // Write raw bytes without length prefix (Bytes::write_bufs adds a length prefix)
+            buf.push(pending.bytes.clone());
+            return;
+        }
+        self.get()
+            .expect("Lazy should have a value if pending is None")
+            .write_bufs(buf);
     }
 }
 

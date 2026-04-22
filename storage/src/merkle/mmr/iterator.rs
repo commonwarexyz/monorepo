@@ -3,8 +3,8 @@
 //! new MMR variants or extensions.
 
 use crate::merkle::{
-    mmr::{Family, Location, Position},
-    Family as MerkleFamily,
+    mmr::{Family, Position},
+    Family as _,
 };
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
@@ -111,7 +111,6 @@ impl Iterator for PeakIterator {
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-#[cfg(any(feature = "std", test))]
 pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     let mut pos = pos.as_u64();
 
@@ -130,32 +129,10 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     pos as u32
 }
 
-/// Return the list of pruned (pos < `start_pos`) node positions that are still required for
-/// proving any retained node.
-///
-/// This set consists of every pruned node that is either (1) a peak, or (2) has no descendent
-/// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
-/// shown to always be the left-child of its parent.)
-///
-/// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
-/// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
-/// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
-/// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
-/// whose size is less than the pruning boundary.
-///
-/// # Panics
-///
-/// Panics if `start_loc` is not a valid location.
-pub(crate) fn nodes_to_pin(start_loc: Location) -> impl Iterator<Item = Position> {
-    assert!(start_loc.is_valid(), "start_loc invalid");
-    let start_pos = Family::location_to_position(start_loc);
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location, StandardHasher as Standard};
+    use crate::merkle::mmr::{mem::Mmr, Location, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -165,7 +142,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::new(&hasher);
         let digest = [1u8; 32];
-        let (changeset, loc_to_pos) = {
+        let (batch, loc_to_pos) = {
             let mut batch = mmr.new_batch();
             let mut positions = Vec::with_capacity(1000);
             for _ in 0..1000 {
@@ -173,9 +150,9 @@ mod tests {
                 batch = batch.add(&hasher, &digest);
                 positions.push(Position::try_from(loc).unwrap());
             }
-            (batch.merkleize(&hasher).finalize(), positions)
+            (batch.merkleize(&mmr, &hasher), positions)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
 
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
@@ -231,12 +208,11 @@ mod tests {
                 }
             }
 
-            let changeset = mmr
+            let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
-            mmr.apply(changeset).unwrap();
+                .merkleize(&mmr, &hasher);
+            mmr.apply_batch(&batch).unwrap();
         }
     }
 

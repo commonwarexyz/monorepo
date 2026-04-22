@@ -491,12 +491,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         ))
     }
 
-    /// Appends an item to `Journal` in a given `section`, returning the offset
-    /// where the item was written and the size of the item (which may now be smaller
-    /// than the encoded size from the codec, if compression is enabled).
-    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        // Create buffer with item data (no checksum, no alignment)
-        let (buf, item_len) = if let Some(compression) = self.compression {
+    /// Encode an item.
+    ///
+    /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
+    /// possibly compressed) payload, excluding the size prefix.
+    pub(crate) fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
+        if let Some(compression) = compression {
             // Compressed: encode first, then compress
             let encoded = item.encode();
             let compressed =
@@ -515,7 +515,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             UInt(item_len_u32).write(&mut buf);
             buf.put_slice(&compressed);
 
-            (buf, item_len)
+            Ok((buf, item_len_u32))
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
             let item_len = item.encode_size();
@@ -532,19 +532,30 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             UInt(item_len_u32).write(&mut buf);
             item.write(&mut buf);
 
-            (buf, item_len)
-        };
+            Ok((buf, item_len_u32))
+        }
+    }
 
-        // Get or create blob
+    /// Appends an item to `Journal` in a given `section`, returning the offset
+    /// where the item was written and the size of the item (which may differ
+    /// from the raw encoded size if compression is enabled).
+    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
+        let (buf, item_len) = Self::encode_item(self.compression, item)?;
+        self.append_raw(section, &buf)
+            .await
+            .map(|offset| (offset, item_len))
+    }
+
+    /// Append pre-encoded bytes to the given section, returning the byte offset
+    /// where the data was written.
+    ///
+    /// The buffer must be in the on-disk format produced by [Self::encode_item].
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
-
-        // Get current position - this is where we'll write (no alignment)
         let offset = blob.size().await;
-
-        // Append item to blob
-        blob.append(&buf).await?;
+        blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
-        Ok((offset, item_len as u32))
+        Ok(offset)
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
@@ -567,6 +578,62 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let (_, _, item) =
             Self::read(self.compression.is_some(), &self.codec_config, blob, offset).await?;
         Ok(item)
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+        let blob = self.manager.get(section).ok()??;
+        let remaining = blob.try_size()?.checked_sub(offset)?;
+        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
+        if header_len == 0 {
+            return None;
+        }
+
+        // Read the varint header to determine item size.
+        let mut header = [0u8; MAX_U32_VARINT_SIZE];
+        if !blob.try_read_sync(offset, &mut header[..header_len]) {
+            return None;
+        }
+        let mut cursor = Cursor::new(&header[..header_len]);
+        let (_, item_info) = find_item(&mut cursor, offset).ok()?;
+
+        let (varint_len, data_len) = match item_info {
+            ItemInfo::Complete {
+                varint_len,
+                data_len,
+            } => (varint_len, data_len),
+            ItemInfo::Incomplete {
+                varint_len,
+                total_len,
+                ..
+            } => (varint_len, total_len),
+        };
+        let item_len = varint_len.checked_add(data_len)?;
+        if item_len > usize::try_from(remaining).ok()? {
+            return None;
+        }
+
+        // If the full item fits in the header read, decode directly.
+        if item_len <= header_len {
+            return decode_item::<V>(
+                &header[varint_len..varint_len + data_len],
+                &self.codec_config,
+                self.compression.is_some(),
+            )
+            .ok();
+        }
+
+        // Otherwise try reading the full item from cache.
+        let mut full = vec![0u8; item_len];
+        if !blob.try_read_sync(offset, &mut full) {
+            return None;
+        }
+        decode_item::<V>(
+            &full[varint_len..varint_len + data_len],
+            &self.codec_config,
+            self.compression.is_some(),
+        )
+        .ok()
     }
 
     /// Gets the size of the journal for a specific section.

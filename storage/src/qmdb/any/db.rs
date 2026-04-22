@@ -10,17 +10,37 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{iterator::nodes_to_pin, Location, Proof},
-    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
-    Persistable,
+    merkle::{Family, Location, Proof},
+    qmdb::{
+        build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
+        update_known_loc, Error,
+    },
+    Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
+use std::collections::HashMap;
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
+pub(crate) type AuthenticatedLog<F, E, C, H> = authenticated::Journal<F, E, C, H>;
+
+/// Snapshot mutation needed to undo one operation while rewinding.
+enum SnapshotUndo<F: Family, K> {
+    Replace {
+        key: K,
+        old_loc: Location<F>,
+        new_loc: Location<F>,
+    },
+    Remove {
+        key: K,
+        old_loc: Location<F>,
+    },
+    Insert {
+        key: K,
+        new_loc: Location<F>,
+    },
+}
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -29,9 +49,10 @@ pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
-    E: Storage + Clock + Metrics,
+    F: Family,
+    E: Context,
     C: Contiguous<Item: CodecShared>,
-    I: UnorderedIndex<Value = Location>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
 > {
@@ -42,14 +63,14 @@ pub struct Db<
     ///
     /// - The log is never pruned beyond the inactivity floor.
     /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<E, C, H>,
+    pub(crate) log: AuthenticatedLog<F, E, C, H>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: Location,
+    pub(crate) inactivity_floor_loc: Location<F>,
 
     /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location,
+    pub(crate) last_commit_loc: Location<F>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -67,18 +88,26 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<E, U, C, I, H> Db<E, C, I, H, U>
+impl<F, E, U, C, I, H> Db<F, E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    F: Family,
+    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
+    #[cfg(any(test, feature = "test-traits"))]
+    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
+    /// Return the most recent location from which this database can safely be synced, and the
+    /// upper bound on [`Self::prune`]'s `loc`. For `any`, this equals the inactivity floor.
+    pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -88,7 +117,7 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
         match self.log.reader().await.read(*self.last_commit_loc).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
@@ -100,9 +129,9 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let reader = self.log.reader().await;
         for loc in locs {
             let op = reader.read(*loc).await?;
@@ -118,23 +147,26 @@ where
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location> {
+    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
-    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
-    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(
+        &self,
+        loc: Location<F>,
+    ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
         if !loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+            return Err(crate::merkle::Error::LocationOverflow(loc).into());
         }
-        let futs: Vec<_> = nodes_to_pin(loc)
+        let futs: Vec<_> = F::nodes_to_pin(loc)
             .map(|p| async move {
                 self.log
-                    .mmr
+                    .merkle
                     .get_node(p)
                     .await?
-                    .ok_or(crate::mmr::Error::ElementPruned(p).into())
+                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
             })
             .collect();
         futures::future::try_join_all(futs).await
@@ -142,25 +174,26 @@ where
 }
 
 // Functionality requiring Mutable journal.
-impl<E, U, C, I, H> Db<E, C, I, H, U>
+impl<F, E, U, C, I, H> Db<F, E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    F: Family,
+    E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
+    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
+            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
                 self.inactivity_floor_loc,
             ));
@@ -173,10 +206,10 @@ where
 
     pub async fn historical_proof(
         &self,
-        historical_size: Location,
-        start_loc: Location,
+        historical_size: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -185,23 +218,172 @@ where
 
     pub async fn proof(
         &self,
-        loc: Location,
+        loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the authenticated log and the in-memory snapshot, then restores metadata
+    /// (`last_commit_loc`, `inactivity_floor_loc`, `active_keys`) for the new tip commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target's required logical range is not fully retained (for example, the target
+    ///   inactivity floor is pruned)
+    /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state before
+    /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
+    /// from `rewind` and reopen from storage.
+    ///
+    /// Returns the list of locations restored to active state in the snapshot.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
+    pub async fn rewind(&mut self, size: Location<F>) -> Result<Vec<Location<F>>, Error<F>> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+
+        if rewind_size == current_size {
+            return Ok(Vec::new());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
+        // Read everything needed for rewind before mutating storage.
+        let (rewind_floor, undos, active_keys_delta) = {
+            let reader = self.log.reader().await;
+            let bounds = reader.bounds();
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            if rewind_size <= bounds.start {
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(
+                    *rewind_last_loc,
+                )));
+            }
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < bounds.start {
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+
+            let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
+            let mut active_keys_delta = 0isize;
+            let mut prior_state_by_key: HashMap<U::Key, Option<Location<F>>> = HashMap::new();
+
+            // Reconstruct key state once in a single pass from the rewind floor.
+            for loc in *rewind_floor..current_size {
+                let op = reader.read(loc).await?;
+                let op_loc = Location::new(loc);
+                match op {
+                    Operation::CommitFloor(_, _) => {}
+                    Operation::Update(update) => {
+                        let key = update.key().clone();
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                undos.push(SnapshotUndo::Replace {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                    new_loc: previous_loc,
+                                });
+                            } else {
+                                active_keys_delta -= 1;
+                                undos.push(SnapshotUndo::Remove {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                });
+                            }
+                        }
+
+                        prior_state_by_key.insert(key, Some(op_loc));
+                    }
+                    Operation::Delete(key) => {
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                active_keys_delta += 1;
+                                undos.push(SnapshotUndo::Insert {
+                                    key: key.clone(),
+                                    new_loc: previous_loc,
+                                });
+                            }
+                        }
+
+                        prior_state_by_key.insert(key, None);
+                    }
+                }
+            }
+
+            // Undo operations must run from newest to oldest removed operation.
+            undos.reverse();
+
+            (rewind_floor, undos, active_keys_delta)
+        };
+
+        // Journal rewind happens before in-memory undo application. If any later step fails, this
+        // handle may be internally diverged and must be dropped by the caller. This step is not
+        // restart-stable until a later commit/sync boundary.
+        self.log.rewind(rewind_size).await?;
+
+        let mut restored_locs = Vec::new();
+        for undo in undos {
+            match undo {
+                SnapshotUndo::Replace {
+                    key,
+                    old_loc,
+                    new_loc,
+                } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
+                }
+                SnapshotUndo::Remove { key, old_loc } => {
+                    delete_known_loc(&mut self.snapshot, &key, old_loc)
+                }
+                SnapshotUndo::Insert { key, new_loc } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    self.snapshot.insert(&key, new_loc);
+                }
+            }
+        }
+
+        self.active_keys = self
+            .active_keys
+            .checked_add_signed(active_keys_delta)
+            .ok_or(Error::DataCorrupted(
+                "active_keys underflow while rewinding",
+            ))?;
+        self.last_commit_loc = Location::new(rewind_size - 1);
+        self.inactivity_floor_loc = rewind_floor;
+
+        Ok(restored_locs)
     }
 }
 
 // Functionality requiring Mutable + Persistable journal.
-impl<E, U, C, I, H> Db<E, C, I, H, U>
+impl<F, E, U, C, I, H> Db<F, E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    F: Family,
+    E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -209,14 +391,14 @@ where
     /// # Panics
     ///
     /// Panics if the log is empty or the last operation is not a commit floor operation.
-    pub async fn init_from_log<F>(
+    pub async fn init_from_log<Cb>(
         mut index: I,
-        log: AuthenticatedLog<E, C, H>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
+        log: AuthenticatedLog<F, E, C, H>,
+        known_inactivity_floor: Option<Location<F>>,
+        mut callback: Cb,
+    ) -> Result<Self, crate::qmdb::Error<F>>
     where
-        F: FnMut(bool, Option<Location>),
+        Cb: FnMut(bool, Option<Location<F>>),
     {
         // If the last-known inactivity floor is behind the current floor, then invoke the callback
         // appropriately to report the inactive bits.
@@ -255,42 +437,43 @@ where
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.sync().await.map_err(Into::into)
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    pub async fn commit(&self) -> Result<(), Error> {
+    pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.commit().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
+    pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.destroy().await.map_err(Into::into)
     }
 }
 
-impl<E, U, C, I, H> Persistable for Db<E, C, I, H, U>
+impl<F, E, U, C, I, H> Persistable for Db<F, E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    F: Family,
+    E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
-    type Error = Error;
+    type Error = crate::qmdb::Error<F>;
 
-    async fn commit(&self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
         Self::sync(self).await
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         self.destroy().await
     }
 }

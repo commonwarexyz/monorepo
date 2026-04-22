@@ -94,7 +94,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             ),
             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
         };
-        Ok((metric, payload.encode_with_pool(pool).into()))
+        Ok((metric, payload.encode_with_pool(pool)))
     }
 
     /// Converts pre-encoded data into an outbound metric/payload pair.
@@ -160,7 +160,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     }
 
     pub async fn run<O: Sink, I: Stream>(
-        mut self,
+        self,
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
@@ -200,6 +200,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                     // Enter into the main loop
                     let mut batch = Vec::with_capacity(self.send_batch_size);
+                    let (control, high, low) = &mut (self.control, self.high, self.low);
                     select_loop! {
                         context,
                         on_stopped => {},
@@ -213,19 +214,32 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         // Await any outbound message (control, high, or low), then
                         // drain already-queued messages into a single runtime write.
                         // Priority order: control > high > low.
-                        msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
+                        msg = recv_prioritized(control, high, low) => {
                             let (metric, payload) = match msg {
                                 Prioritized::Closed => return Err(Error::PeerDisconnected),
-                                Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool)?,
-                                Prioritized::Data(encoded) => Self::prepare_data(&peer, encoded, &rate_limits),
+                                Prioritized::Control(msg) => {
+                                    Self::prepare_control(&peer, msg, &pool)?
+                                }
+                                Prioritized::Data(encoded) => {
+                                    Self::prepare_data(&peer, encoded, &rate_limits)
+                                }
                             };
                             Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
                             Self::extend_send_many(
-                                &peer, self.send_batch_size, &mut batch,
-                                &mut self.control, &pool, &mut self.high, &mut self.low,
-                                &rate_limits, &self.sent_messages,
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                control,
+                                &pool,
+                                high,
+                                low,
+                                &rate_limits,
+                                &self.sent_messages,
                             )?;
-                            conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
+                            conn_sender
+                                .send_many(batch.drain(..))
+                                .await
+                                .map_err(Error::SendFailed)?;
                         },
                     }
 

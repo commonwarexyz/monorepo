@@ -17,8 +17,8 @@ mod conformance;
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("mmr error: {0}")]
-    Mmr(anyhow::Error),
+    #[error("merkle error: {0}")]
+    Merkle(anyhow::Error),
     #[error("journal error: {0}")]
     Journal(anyhow::Error),
     #[error("runtime error: {0}")]
@@ -63,4 +63,6 @@ pub enum Error {
     InvalidConfiguration(String),
     #[error("checksum mismatch: expected={0}, found={1}")]
     ChecksumMismatch(u32, u32),
+    #[error("empty append")]
+    EmptyAppend,
 }

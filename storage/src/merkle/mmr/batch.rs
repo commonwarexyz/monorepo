@@ -7,10 +7,7 @@
 use crate::merkle::{batch, mmr::Family};
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = batch::UnmerkleizedBatch<'a, Family, D, P>;
+pub type UnmerkleizedBatch<D> = batch::UnmerkleizedBatch<Family, D>;
 
 /// A batch whose root digest has been computed.
-pub type MerkleizedBatch<'a, D, P> = batch::MerkleizedBatch<'a, Family, D, P>;
-
-/// Owned set of changes against a base MMR.
-pub type Changeset<D> = batch::Changeset<Family, D>;
+pub type MerkleizedBatch<D> = batch::MerkleizedBatch<Family, D>;

@@ -1,11 +1,11 @@
 use crate::net::{ErrorResponse, RequestId};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, IsUnit, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    mmr::{self, Location, Proof},
     qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
@@ -51,7 +51,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: Target<D>,
+    pub target: Target<mmr::Family, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -84,7 +84,8 @@ where
 
 impl<Op, D> super::Message for Message<Op, D>
 where
-    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
+    Op: Encode + Read + Send + Sync + 'static,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -141,7 +142,8 @@ where
 
 impl<Op, D> Read for Message<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -258,7 +260,8 @@ where
 
 impl<Op, D> Read for GetOperationsResponse<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -267,7 +270,7 @@ where
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+            Vec::<Op>::read_cfg(buf, &(range_cfg, Op::Cfg::default()))?
         };
         let has_pinned_nodes = u8::read(buf)? != 0;
         let pinned_nodes = if has_pinned_nodes {
@@ -331,7 +334,7 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = Target::<D>::read_cfg(buf, &())?;
+        let target = Target::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }
