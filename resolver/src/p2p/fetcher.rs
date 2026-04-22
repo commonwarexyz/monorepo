@@ -6,7 +6,7 @@ use commonware_runtime::{
         histogram::Buckets,
         status::{self, CounterExt, GaugeExt, Status},
     },
-    Clock, Metrics,
+    Clock, Metrics, Registered,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use prometheus_client::{
@@ -135,16 +135,16 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Family<Peer, Gauge>,
+    performance: Registered<Family<Peer, Gauge>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
-    requests_created: status::Counter,
+    requests_created: Registered<status::Counter>,
 
     /// Status of individual network requests sent to peers
-    requests_sent: status::Counter,
+    requests_sent: Registered<status::Counter>,
 
     /// Histogram of successful response durations
-    resolves: Histogram,
+    resolves: Registered<Histogram>,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -159,29 +159,25 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = Family::<Peer, Gauge>::default();
-        context.register(
+        let performance = context.register(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
-            performance.clone(),
+            Family::<Peer, Gauge>::default(),
         );
-        let requests_created = status::Counter::default();
-        context.register(
+        let requests_created = context.register(
             "requests_created",
             "Status of request creation attempts",
-            requests_created.clone(),
+            status::Counter::default(),
         );
-        let requests_sent = status::Counter::default();
-        context.register(
+        let requests_sent = context.register(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            requests_sent.clone(),
+            status::Counter::default(),
         );
-        let resolves = Histogram::new(Buckets::NETWORK);
-        context.register(
+        let resolves = context.register(
             "resolves",
             "Number and duration of requests that were resolved",
-            resolves.clone(),
+            Histogram::new(Buckets::NETWORK),
         );
         Self {
             context,

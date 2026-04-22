@@ -15,7 +15,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf,
+    Registered, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -62,7 +62,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: Family<metrics::Peer, Counter>,
+    attempts: Registered<Family<metrics::Peer, Counter>>,
 }
 
 impl<
@@ -71,11 +71,10 @@ impl<
     > Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let attempts = Family::<metrics::Peer, Counter>::default();
-        context.register(
+        let attempts = context.register(
             "attempts",
             "The number of dial attempts made to each peer",
-            attempts.clone(),
+            Family::<metrics::Peer, Counter>::default(),
         );
         Self {
             context: ContextCell::new(context),

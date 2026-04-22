@@ -174,6 +174,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
+                        self.metrics
+                            .updates
+                            .get_or_create(&metrics::Peer::new(primary))
+                            .inc();
                         reset_peers.push(primary.clone());
                     }
                     entry
@@ -195,6 +199,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
+                        self.metrics
+                            .updates
+                            .get_or_create(&metrics::Peer::new(secondary))
+                            .inc();
                         reset_peers.push(secondary.clone());
                     }
                     entry

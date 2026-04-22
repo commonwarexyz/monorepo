@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -416,11 +416,11 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     resize_progress: Option<u32>,
 
     // Metrics
-    puts: Counter,
-    gets: Counter,
-    unnecessary_reads: Counter,
-    unnecessary_writes: Counter,
-    resizes: Counter,
+    puts: Registered<Counter>,
+    gets: Registered<Counter>,
+    unnecessary_reads: Registered<Counter>,
+    unnecessary_writes: Registered<Counter>,
+    resizes: Registered<Counter>,
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
@@ -752,27 +752,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.register("puts", "number of put operations", Counter::default());
+        let gets = context.register("gets", "number of get operations", Counter::default());
+        let unnecessary_reads = context.register(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
+            Counter::default(),
         );
-        context.register(
+        let unnecessary_writes = context.register(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
+            Counter::default(),
         );
-        context.register(
+        let resizes = context.register(
             "resizes",
             "number of table resizing operations",
-            resizes.clone(),
+            Counter::default(),
         );
 
         Ok(Self {

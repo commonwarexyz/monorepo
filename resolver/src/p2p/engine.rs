@@ -18,7 +18,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -26,13 +26,14 @@ use commonware_utils::{
     Span,
 };
 use futures::future::{self, Either};
+use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: PublicKey> {
-    timer: histogram::Timer<E>,
+    timer: histogram::Timer<E, Registered<Histogram>>,
     peer: P,
     id: u64,
     result: Result<Bytes, oneshot::error::RecvError>,
@@ -75,7 +76,7 @@ pub struct Engine<
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Track the start time of fetch operations
-    fetch_timers: HashMap<Key, histogram::Timer<E>>,
+    fetch_timers: HashMap<Key, histogram::Timer<E, Registered<Histogram>>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.

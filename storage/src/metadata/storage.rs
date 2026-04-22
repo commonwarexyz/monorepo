@@ -2,7 +2,9 @@ use super::{Config, Error};
 use crate::Context;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Blob, BufMut, Error as RError};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Blob, BufMut, Error as RError, Registered,
+};
 use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -74,9 +76,9 @@ pub struct Metadata<E: Context, K: Span, V: Codec> {
     partition: String,
     state: AsyncMutex<State<E::Blob, K>>,
 
-    sync_overwrites: Counter,
-    sync_rewrites: Counter,
-    keys: Gauge,
+    sync_overwrites: Registered<Counter>,
+    sync_rewrites: Registered<Counter>,
+    keys: Registered<Gauge>,
 }
 
 impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
@@ -104,20 +106,17 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
-        let sync_rewrites = Counter::default();
-        let sync_overwrites = Counter::default();
-        let keys = Gauge::default();
-        context.register(
+        let sync_rewrites = context.register(
             "sync_rewrites",
             "number of syncs that rewrote all data",
-            sync_rewrites.clone(),
+            Counter::default(),
         );
-        context.register(
+        let sync_overwrites = context.register(
             "sync_overwrites",
             "number of syncs that modified existing data",
-            sync_overwrites.clone(),
+            Counter::default(),
         );
-        context.register("keys", "number of tracked keys", keys.clone());
+        let keys = context.register("keys", "number of tracked keys", Gauge::default());
 
         // Return metadata
         let _ = keys.try_set(map.len());

@@ -19,7 +19,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics,
-    Network as RNetwork, Quota, Spawner,
+    Network as RNetwork, Quota, Registered, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
@@ -171,8 +171,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
 
     // Metrics for received and sent messages
-    received_messages: Family<metrics::Message, Counter>,
-    sent_messages: Family<metrics::Message, Counter>,
+    received_messages: Registered<Family<metrics::Message, Counter>>,
+    sent_messages: Registered<Family<metrics::Message, Counter>>,
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
@@ -183,13 +183,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
-        let sent_messages = Family::<metrics::Message, Counter>::default();
-        let received_messages = Family::<metrics::Message, Counter>::default();
-        context.register("messages_sent", "messages sent", sent_messages.clone());
-        context.register(
+        let sent_messages =
+            context.register("messages_sent", "messages sent", Family::<metrics::Message, Counter>::default());
+        let received_messages = context.register(
             "messages_received",
             "messages received",
-            received_messages.clone(),
+            Family::<metrics::Message, Counter>::default(),
         );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
@@ -532,7 +531,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     sampler,
                     success_rate,
                     self.max_size,
-                    self.received_messages.clone(),
+                    self.received_messages.metric().clone(),
                 );
                 self.links.insert(key, link);
                 send_result(result, Ok(()))

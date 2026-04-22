@@ -9,7 +9,8 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Storage,
+    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Registered,
+    Storage,
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
@@ -126,12 +127,12 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     intervals: RMap,
 
     // Metrics
-    items_tracked: Gauge,
-    indices_pruned: Counter,
-    unnecessary_reads: Counter,
-    gets: Counter,
-    has: Counter,
-    syncs: Counter,
+    items_tracked: Registered<Gauge>,
+    indices_pruned: Registered<Counter>,
+    unnecessary_reads: Registered<Counter>,
+    gets: Registered<Counter>,
+    has: Registered<Counter>,
+    syncs: Registered<Counter>,
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -202,30 +203,18 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let indices_pruned = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register(
-            "indices_pruned",
-            "Number of indices pruned",
-            indices_pruned.clone(),
-        );
-        context.register(
+        let items_tracked =
+            context.register("items_tracked", "Number of items tracked", Gauge::default());
+        let indices_pruned =
+            context.register("indices_pruned", "Number of indices pruned", Counter::default());
+        let unnecessary_reads = context.register(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
+            Counter::default(),
         );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let gets = context.register("gets", "Number of gets performed", Counter::default());
+        let has = context.register("has", "Number of has performed", Counter::default());
+        let syncs = context.register("syncs", "Number of syncs called", Counter::default());
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated archive

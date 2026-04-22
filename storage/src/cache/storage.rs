@@ -4,7 +4,9 @@ use crate::{
     rmap::RMap,
 };
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Storage};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Registered, Storage,
+};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,10 +69,10 @@ pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     indices: BTreeMap<u64, u64>,
     intervals: RMap,
 
-    items_tracked: Gauge,
-    gets: Counter,
-    has: Counter,
-    syncs: Counter,
+    items_tracked: Registered<Gauge>,
+    gets: Registered<Counter>,
+    has: Registered<Counter>,
+    syncs: Registered<Counter>,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
@@ -118,18 +120,11 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let items_tracked =
+            context.register("items_tracked", "Number of items tracked", Gauge::default());
+        let gets = context.register("gets", "Number of gets performed", Counter::default());
+        let has = context.register("has", "Number of has performed", Counter::default());
+        let syncs = context.register("syncs", "Number of syncs called", Counter::default());
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated cache

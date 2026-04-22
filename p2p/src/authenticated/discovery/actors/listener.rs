@@ -9,7 +9,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics,
-    Network, Quota, SinkOf, Spawner, StreamOf,
+    Network, Quota, Registered, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -43,38 +43,34 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    handshakes_blocked: Counter,
-    handshakes_concurrent_rate_limited: Counter,
-    handshakes_ip_rate_limited: Counter,
-    handshakes_subnet_rate_limited: Counter,
+    handshakes_blocked: Registered<Counter>,
+    handshakes_concurrent_rate_limited: Registered<Counter>,
+    handshakes_ip_rate_limited: Registered<Counter>,
+    handshakes_subnet_rate_limited: Registered<Counter>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_blocked = Counter::default();
-        context.register(
+        let handshakes_blocked = context.register(
             "handshakes_blocked",
             "number of handshake attempts blocked because the IP was private",
-            handshakes_blocked.clone(),
+            Counter::default(),
         );
-        let handshakes_concurrent_rate_limited = Counter::default();
-        context.register(
+        let handshakes_concurrent_rate_limited = context.register(
             "handshake_concurrent_rate_limited",
             "number of handshake attempts dropped because maximum concurrent handshakes was reached",
-            handshakes_concurrent_rate_limited.clone(),
+            Counter::default(),
         );
-        let handshakes_ip_rate_limited = Counter::default();
-        context.register(
+        let handshakes_ip_rate_limited = context.register(
             "handshake_ip_rate_limited",
             "number of handshake attempts dropped because an IP exceeded its rate limit",
-            handshakes_ip_rate_limited.clone(),
+            Counter::default(),
         );
-        let handshakes_subnet_rate_limited = Counter::default();
-        context.register(
+        let handshakes_subnet_rate_limited = context.register(
             "handshake_subnet_rate_limited",
             "number of handshake attempts dropped because a subnet exceeded its rate limit",
-            handshakes_subnet_rate_limited.clone(),
+            Counter::default(),
         );
 
         Self {

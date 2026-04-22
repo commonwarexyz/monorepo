@@ -157,8 +157,11 @@ fn main() {
             .with_label("flood_sender")
             .spawn(move |context| async move {
                 let mut rng = SmallRng::seed_from_u64(0);
-                let messages: Counter<u64, AtomicU64> = Counter::default();
-                context.register("messages", "Sent messages", messages.clone());
+                let messages = context.register(
+                    "messages",
+                    "Sent messages",
+                    Counter::<u64, AtomicU64>::default(),
+                );
                 loop {
                     // Create message with timestamp in first 8 bytes
                     let mut msg = vec![0u8; config.message_size as usize];
@@ -180,8 +183,11 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let latency = Histogram::new(LATENCY_BUCKETS);
-                    context.register("latency", "Message latency in seconds", latency.clone());
+                    let latency = context.register(
+                        "latency",
+                        "Message latency in seconds",
+                        Histogram::new(LATENCY_BUCKETS),
+                    );
                     loop {
                         match flood_receiver.recv().await {
                             Ok((_sender, mut msg)) => {
