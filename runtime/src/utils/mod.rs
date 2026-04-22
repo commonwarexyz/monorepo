@@ -7,9 +7,9 @@ use prometheus_client::{
     registry::{Metric, Registry as PrometheusRegistry},
 };
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -478,13 +478,31 @@ pub(crate) struct RegisteredMetric {
     pub metric: Box<dyn Any + Send + Sync>,
 }
 
+/// Map from `prefixed_name` to the `TypeId` of the first metric registered
+/// under that name.
+///
+/// Attribute-distinguished registrations (same `prefixed_name`, different
+/// attributes) coalesce into one OpenMetrics family at encode time, which keeps
+/// only the first TYPE block. Registering the same `prefixed_name` under
+/// different attributes with incompatible metric types (e.g. `Counter` vs
+/// `Gauge`) would emit a family whose TYPE describes only the first
+/// registration while samples from later ones carry incompatible semantics.
+pub(crate) type FamilyTypes = HashMap<String, TypeId>;
+
 /// Implements `Observer::register()` get-or-register semantics. First call at a
 /// `(prefixed_name, attributes)` key inserts `default` into both the dedup map
 /// and the prometheus registry; later calls return a clone of the first-registered
-/// handle. Panics on type mismatch (e.g. a `Counter` registered where a `Gauge`
-/// already exists).
+/// handle.
+///
+/// Panics on:
+/// - type mismatch at an exact `(prefixed_name, attributes)` key (e.g. a
+///   `Counter` registered where a `Gauge` already exists);
+/// - type mismatch across attribute-distinguished registrations for the same
+///   `prefixed_name`, which would otherwise produce a coalesced family with a
+///   TYPE describing only the first registration.
 pub(crate) fn get_or_register<M: Metric + Clone>(
     registered_metrics: &Mutex<HashMap<MetricKey, RegisteredMetric>>,
+    family_types: &Mutex<FamilyTypes>,
     registry: &Mutex<Registry>,
     attributes: &[(String, String)],
     scope_id: Option<u64>,
@@ -507,6 +525,26 @@ pub(crate) fn get_or_register<M: Metric + Clone>(
             })
             .clone();
     }
+
+    // New attribute-distinguished entry: enforce family type consistency across
+    // all registrations sharing this `prefixed_name`. Entries accumulate for the
+    // life of the runtime; a matching type on later re-registration is a no-op.
+    let type_id = TypeId::of::<M>();
+    match family_types.lock().entry(prefixed_name.clone()) {
+        Entry::Occupied(entry) => {
+            assert!(
+                *entry.get() == type_id,
+                "metric type mismatch for {prefixed_name} across attributes/scopes: \
+                 previously registered as {:?}, now {:?}",
+                entry.get(),
+                type_id,
+            );
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(type_id);
+        }
+    }
+
     registered.insert(
         metric_key,
         RegisteredMetric {

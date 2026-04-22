@@ -2547,6 +2547,58 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "metric type mismatch for engine_votes across attributes/scopes")]
+    fn test_deterministic_metrics_attribute_type_mismatch_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let counter_ctx = context.child("engine").with_attribute("epoch", 1);
+            let counter = counter_ctx.register("votes", "vote count", Counter::<u64>::default());
+            counter.inc();
+
+            let gauge_ctx = context.child("engine").with_attribute("epoch", 2);
+            let _ = gauge_ctx.register("votes", "vote count", Gauge::<i64>::default());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "metric type mismatch for engine_votes across attributes/scopes")]
+    fn test_tokio_metrics_attribute_type_mismatch_panics() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let counter_ctx = context.child("engine").with_attribute("epoch", 1);
+            let counter = counter_ctx.register("votes", "vote count", Counter::<u64>::default());
+            counter.inc();
+
+            let gauge_ctx = context.child("engine").with_attribute("epoch", 2);
+            let _ = gauge_ctx.register("votes", "vote count", Gauge::<i64>::default());
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attribute_same_type_allowed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let c1 = context
+                .child("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
+            c1.inc();
+
+            let c2 = context
+                .child("engine")
+                .with_attribute("epoch", 2)
+                .register("votes", "vote count", Counter::<u64>::default());
+            c2.inc();
+            c2.inc();
+
+            let buffer = context.encode();
+            assert_eq!(buffer.matches("# TYPE engine_votes").count(), 1);
+            assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
+            assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
+        });
+    }
+
+    #[test]
     fn test_deterministic_namespace_guard_allows_prefix_related_siblings() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -18,8 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, get_or_register, signal::Stopper, supervision::Tree, MetricKey,
-        Panicker, RegisteredMetric, Registry, ScopeGuard,
+        self, add_attribute, get_or_register, signal::Stopper, supervision::Tree, FamilyTypes,
+        MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, SinkOf, Spawner as _, StreamOf,
     Supervisor as _, METRICS_PREFIX,
@@ -314,6 +314,7 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     registered_metrics: Mutex<HashMap<MetricKey, RegisteredMetric>>,
+    family_types: Mutex<FamilyTypes>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -457,6 +458,7 @@ impl crate::Runner for Runner {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashMap::new()),
+            family_types: Mutex::new(FamilyTypes::new()),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -723,6 +725,7 @@ impl crate::Observer for Context {
         let scope_id = self.scope.as_ref().map(|s| s.scope_id());
         get_or_register(
             &self.executor.registered_metrics,
+            &self.executor.family_types,
             &self.executor.registry,
             &self.attributes,
             scope_id,

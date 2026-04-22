@@ -57,7 +57,7 @@ use crate::{
         add_attribute, get_or_register,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
+        FamilyTypes, MetricKey, Panicker, RegisteredMetric, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Name, Panicked, Spawner as _, Supervisor as _, METRICS_PREFIX,
@@ -424,6 +424,7 @@ impl NamespaceGuard {
 pub struct Executor {
     registry: Mutex<Registry>,
     registered_metrics: Mutex<HashMap<MetricKey, RegisteredMetric>>,
+    family_types: Mutex<FamilyTypes>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -1012,6 +1013,7 @@ impl Context {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashMap::new()),
+            family_types: Mutex::new(FamilyTypes::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -1092,6 +1094,7 @@ impl Context {
             // New state for the new runtime
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashMap::new()),
+            family_types: Mutex::new(FamilyTypes::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1407,6 +1410,7 @@ impl crate::Observer for Context {
         let scope_id = self.scope.as_ref().map(|s| s.scope_id());
         get_or_register(
             &executor.registered_metrics,
+            &executor.family_types,
             &executor.registry,
             &self.attributes,
             scope_id,
