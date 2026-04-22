@@ -36,11 +36,11 @@ proc-macro = true
 name = "lib"
 path = "tests/lib.rs"
 
-[dependencies.proc-macro2]
-version = "1"
-
 [dependencies.proc-macro-crate]
 version = "3"
+
+[dependencies.proc-macro2]
+version = "1"
 
 [dependencies.quote]
 version = "1"
