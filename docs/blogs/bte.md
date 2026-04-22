@@ -114,7 +114,7 @@ $$
   \mathsf{pd}_j \circ g_2 = \sum_{i\in[B]} \mathsf{ct}_{i,1}\circ v_j^i
   $$
 
-A more formal presentation can be found in the [paper](https://github.com/commonwarexyz/simple-bte/blob/main/bte-paper.pdf).
+A more formal presentation can be found in the [paper](https://eprint.iacr.org/2026/760).
 
 ## Accelerating Decryption via FFT
 
