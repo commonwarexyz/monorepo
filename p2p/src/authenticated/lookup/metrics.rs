@@ -1,8 +1,7 @@
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct, LabelValueEncoder};
-use commonware_utils::Array;
-use std::fmt::Write;
+use commonware_runtime::metrics::EncodeStruct;
+use std::fmt;
 
 /// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
@@ -17,39 +16,37 @@ pub enum MessageType {
     Invalid,
 }
 
-impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Data(channel) => encoder.write_str(&format!("data_{channel}")),
-            Self::Ping => encoder.write_str("ping"),
-            Self::Invalid => encoder.write_str("invalid"),
+            Self::Data(channel) => write!(f, "data_{channel}"),
+            Self::Ping => f.write_str("ping"),
+            Self::Invalid => f.write_str("invalid"),
         }
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Message {
-    pub peer: String,
+/// Per-peer, per-message-type label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Message<P: PublicKey> {
+    pub peer: P,
     pub message: MessageType,
 }
 
-impl Message {
-    pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
+impl<P: PublicKey> Message<P> {
+    fn new(peer: &P, message: MessageType) -> Self {
         Self {
-            peer: peer.to_string(),
-            message: MessageType::Data(channel),
+            peer: peer.clone(),
+            message,
         }
     }
-    pub fn new_ping(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Ping,
-        }
+    pub fn new_data(peer: &P, channel: Channel) -> Self {
+        Self::new(peer, MessageType::Data(channel))
     }
-    pub fn new_invalid(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Invalid,
-        }
+    pub fn new_ping(peer: &P) -> Self {
+        Self::new(peer, MessageType::Ping)
+    }
+    pub fn new_invalid(peer: &P) -> Self {
+        Self::new(peer, MessageType::Invalid)
     }
 }

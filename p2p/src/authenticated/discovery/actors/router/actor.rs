@@ -33,7 +33,7 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
-    messages_dropped: Registered<Family<metrics::Message, Counter>>,
+    messages_dropped: Registered<Family<metrics::Message<P>, Counter>>,
 }
 
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {

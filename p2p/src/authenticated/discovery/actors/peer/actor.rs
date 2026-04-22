@@ -44,10 +44,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
-    sent_messages: Registered<Family<metrics::Message, Counter>>,
-    received_messages: Registered<Family<metrics::Message, Counter>>,
-    dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    rate_limited: Registered<Family<metrics::Message, Counter>>,
+    sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    received_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
@@ -83,7 +83,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         msg: Message<C>,
         pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message, IoBufs), Error> {
+    ) -> Result<(metrics::Message<C>, IoBufs), Error> {
         let (metric, payload) = match msg {
             Message::BitVec(bit_vec) => (
                 metrics::Message::new_bit_vec(peer),
@@ -103,7 +103,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         msg: EncodedData,
         rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message, IoBufs) {
+    ) -> (metrics::Message<C>, IoBufs) {
         let encoded = msg.validate_channel(rate_limits);
         (
             metrics::Message::new_data(peer, encoded.channel),
@@ -113,9 +113,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     /// Records the send metric and appends the payload to the batch.
     fn push_batched(
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &Family<metrics::Message<C>, Counter>,
         batch: &mut Vec<IoBufs>,
-        metric: metrics::Message,
+        metric: metrics::Message<C>,
         payload: IoBufs,
     ) {
         sent_messages.get_or_create(&metric).inc();
@@ -137,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &Family<metrics::Message<C>, Counter>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {

@@ -2,6 +2,7 @@
 
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     metrics::{Counter, Family},
     Registered,
@@ -15,14 +16,14 @@ pub use actor::Actor;
 mod ingress;
 pub use ingress::Message;
 
-pub struct Config {
+pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
     pub send_batch_size: NonZeroUsize,
     pub ping_frequency: std::time::Duration,
-    pub sent_messages: Registered<Family<metrics::Message, Counter>>,
-    pub received_messages: Registered<Family<metrics::Message, Counter>>,
-    pub dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    pub rate_limited: Registered<Family<metrics::Message, Counter>>,
+    pub sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub received_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
 }
 
 #[derive(Error, Debug)]

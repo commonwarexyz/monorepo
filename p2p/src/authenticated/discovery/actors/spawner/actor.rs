@@ -40,10 +40,10 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
-    sent_messages: Registered<Family<metrics::Message, Counter>>,
-    received_messages: Registered<Family<metrics::Message, Counter>>,
-    dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    rate_limited: Registered<Family<metrics::Message, Counter>>,
+    sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    received_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
 }
 
 impl<
@@ -135,10 +135,10 @@ impl<
                                 let (peer_actor, messenger) = peer::Actor::new(
                                     context,
                                     peer::Config {
-                                        sent_messages: sent_messages.clone(),
-                                        received_messages: received_messages.clone(),
-                                        dropped_messages: dropped_messages.clone(),
-                                        rate_limited: rate_limited.clone(),
+                                        sent_messages,
+                                        received_messages,
+                                        dropped_messages,
+                                        rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,

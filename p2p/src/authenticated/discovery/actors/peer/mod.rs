@@ -27,10 +27,10 @@ pub struct Config<C: PublicKey> {
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
 
-    pub sent_messages: Registered<Family<metrics::Message, Counter>>,
-    pub received_messages: Registered<Family<metrics::Message, Counter>>,
-    pub dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    pub rate_limited: Registered<Family<metrics::Message, Counter>>,
+    pub sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub received_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    pub rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
 }
 
 #[derive(Error, Debug)]

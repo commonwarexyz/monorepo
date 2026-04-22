@@ -33,10 +33,10 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
-    sent_messages: Registered<Family<metrics::Message, Counter>>,
-    received_messages: Registered<Family<metrics::Message, Counter>>,
-    dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    rate_limited: Registered<Family<metrics::Message, Counter>>,
+    sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    received_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
+    rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
 }
 
 impl<
@@ -118,10 +118,10 @@ impl<
                                     context,
                                     peer::Config {
                                         ping_frequency: self.ping_frequency,
-                                        sent_messages: sent_messages.clone(),
-                                        received_messages: received_messages.clone(),
-                                        dropped_messages: dropped_messages.clone(),
-                                        rate_limited: rate_limited.clone(),
+                                        sent_messages,
+                                        received_messages,
+                                        dropped_messages,
+                                        rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
                                     },
