@@ -119,6 +119,8 @@ fn affinity_mask() -> Option<(Vec<libc::c_ulong>, usize)> {
     loop {
         let mut mask = vec![0 as libc::c_ulong; words];
         let cpusetsize = std::mem::size_of_val(mask.as_slice());
+        // SAFETY: `mask` points to writable storage for `cpusetsize` bytes, and
+        // `pid == 0` targets the calling thread as documented by the syscall.
         let result = unsafe {
             libc::syscall(
                 libc::SYS_sched_getaffinity,
@@ -193,6 +195,8 @@ pub(crate) fn pin_to_cpu(cpu: usize) {
     let cpusetsize = std::mem::size_of_val(mask.as_slice());
 
     loop {
+        // SAFETY: `mask` points to readable storage for `cpusetsize` bytes, and
+        // `pid == 0` targets the calling thread as documented by the syscall.
         let result =
             unsafe { libc::syscall(libc::SYS_sched_setaffinity, 0, cpusetsize, mask.as_ptr()) };
         if result == 0 {
