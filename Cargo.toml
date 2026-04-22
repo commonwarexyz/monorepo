@@ -170,6 +170,9 @@ x25519-dalek = "2.0.1"
 zeroize = "1.5.7"
 zstd = "0.13.2"
 
+[patch.crates-io]
+prometheus-client = { path = "vendor/prometheus-client" }
+
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.
 overflow-checks = true

@@ -57,10 +57,10 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeGuard,
+        Panicker, Registry, SharedMetric,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
+    Metrics as _, Panicked, Registered, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -92,8 +92,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -368,13 +367,9 @@ impl Default for Config {
     }
 }
 
-/// A (prefixed_name, attributes) pair identifying a unique metric registration.
-type MetricKey = (String, Vec<(String, String)>);
-
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<MetricKey>>,
+    registry: Arc<Mutex<Registry>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -891,7 +886,6 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -908,7 +902,6 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -971,8 +964,7 @@ impl Context {
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registry: Arc::new(Mutex::new(registry)),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -990,7 +982,6 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -1050,8 +1041,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            registry: Arc::new(Mutex::new(registry)),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1062,7 +1052,6 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1289,29 +1278,6 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn with_scope(&self) -> Self {
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
-
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        let weak = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Some(exec) = weak.upgrade() {
-                exec.registry.lock().remove_scope(id);
-            }
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
-    }
-
     fn with_span(&self) -> Self {
         Self {
             traced: true,
@@ -1319,12 +1285,14 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         let name = name.into();
         let help = help.into();
-
-        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
@@ -1342,26 +1310,18 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-
-        // Check for duplicate registration (O(1) lookup)
-        let metric_key = (prefixed_name.clone(), self.attributes.clone());
-        let is_new = executor.registered_metrics.lock().insert(metric_key);
-        assert!(
-            is_new,
-            "duplicate metric: {} with attributes {:?}",
-            prefixed_name, self.attributes
-        );
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
+        let metric = Arc::new(metric);
+        let registration = {
+            let mut registry = executor.registry.lock();
+            let id = registry.register(
+                prefixed_name,
+                help,
+                self.attributes.clone(),
+                SharedMetric(metric.clone()),
+            );
+            crate::MetricRegistration::new(id, Arc::downgrade(&executor.registry))
+        };
+        Registered::new(metric, registration)
     }
 
     fn encode(&self) -> String {

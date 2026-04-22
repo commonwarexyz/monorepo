@@ -18,10 +18,10 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, SharedMetric,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
+    SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -37,7 +37,6 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
-    borrow::Cow,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -329,7 +328,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    registry: Arc<Mutex<Registry>>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -474,7 +473,7 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            registry: Arc::new(Mutex::new(registry)),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -492,7 +491,6 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
-            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -530,7 +528,6 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -547,7 +544,6 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -721,25 +717,6 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn with_scope(&self) -> Self {
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        // Closure is infallible to avoid panicking in Drop.
-        let executor = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            executor.registry.lock().remove_scope(id);
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
-    }
-
     fn with_span(&self) -> Self {
         Self {
             traced: true,
@@ -747,8 +724,14 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
         let name = name.into();
+        let help = help.into();
         let prefixed_name = {
             let prefix = &self.name;
             if prefix.is_empty() {
@@ -757,17 +740,18 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-
-        // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
-        let sub_registry = self
-            .attributes
-            .iter()
-            .fold(scoped, |reg, (k, v): &(String, String)| {
-                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-            });
-        sub_registry.register(prefixed_name, help, metric);
+        let metric = Arc::new(metric);
+        let registration = {
+            let mut registry = self.executor.registry.lock();
+            let id = registry.register(
+                prefixed_name,
+                help,
+                self.attributes.clone(),
+                SharedMetric(metric.clone()),
+            );
+            crate::MetricRegistration::new(id, Arc::downgrade(&self.executor.registry))
+        };
+        Registered::new(metric, registration)
     }
 
     fn encode(&self) -> String {

@@ -3936,8 +3936,6 @@ dependencies = [
 [[package]]
 name = "prometheus-client"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4500adecd7af8e0e9f4dbce15cfee07ce913fbf6ad605cc468b83f2d531ee94"
 dependencies = [
  "dtoa",
  "itoa",

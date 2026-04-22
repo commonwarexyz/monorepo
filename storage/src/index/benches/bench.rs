@@ -28,15 +28,18 @@ impl Metrics for DummyMetrics {
         Self
     }
 
-    fn with_scope(&self) -> Self {
-        Self
-    }
-
     fn with_span(&self) -> Self {
         Self
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _: N,
+        _: H,
+        _: M,
+    ) -> commonware_runtime::Registered<M> {
+        panic!("dummy metrics do not support register")
+    }
 
     fn encode(&self) -> String {
         "".into()

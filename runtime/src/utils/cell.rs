@@ -153,15 +153,16 @@ where
         Self::Present(self.as_present().with_attribute(key, value))
     }
 
-    fn with_scope(&self) -> Self {
-        Self::Present(self.as_present().with_scope())
-    }
-
     fn with_span(&self) -> Self {
         Self::Present(self.as_present().with_span())
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> crate::Registered<M> {
         self.as_present().register(name, help, metric)
     }
 

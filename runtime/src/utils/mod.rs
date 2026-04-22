@@ -2,13 +2,23 @@
 
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
-use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
+use prometheus_client::{
+    encoding::{
+        text::{encode_descriptor, encode_eof, encode_metric_samples, encode_registry},
+        EncodeMetric,
+        MetricEncoder as PromMetricEncoder,
+    },
+    metrics::MetricType,
+    registry::{Metric as PrometheusMetric, Registry as PrometheusRegistry},
+};
 use std::{
     any::Any,
-    collections::BTreeMap,
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
     future::Future,
+    ops::Deref,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Weak},
     task::{Context, Poll},
 };
 
@@ -218,268 +228,132 @@ pub fn add_attribute(
     }
 }
 
-/// A writer that groups metrics by family name and deduplicates HELP/TYPE metadata
-/// during Prometheus encoding.
-///
-/// When the same metric is registered across scoped registries (via
-/// `Registry::encode`), prometheus_client outputs each scope's metrics
-/// separately, interleaving families. This writer collects all lines and
-/// regroups them so that every sample for a given metric name appears
-/// together with a single HELP/TYPE header.
-///
-/// Also strips `# EOF` lines so that `Registry::encode` can append exactly one at
-/// the end of the combined output.
-///
-/// Uses "first wins" semantics: keeps the first HELP/TYPE description encountered
-/// for each metric name and discards subsequent duplicates.
-pub struct MetricEncoder {
-    line_buffer: String,
-    families: BTreeMap<String, MetricFamily>,
-    active_family: Option<String>,
+/// Internal handle that unregisters a metric when dropped.
+#[derive(Clone)]
+pub(crate) struct MetricRegistration {
+    _inner: Arc<MetricRegistrationInner>,
 }
 
-#[derive(Default)]
-struct MetricFamily {
-    help: Option<String>,
-    type_line: Option<String>,
-    unit: Option<String>,
-    metric_type: Option<String>,
-    data: Vec<String>,
-}
-
-/// OpenMetrics data lines use type-specific suffixes that differ from the
-/// base name in HELP/TYPE headers (e.g., a counter named `foo` emits data
-/// as `foo_total`). Each suffix is only valid for specific metric types.
-///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#suffixes>
-const TYPED_SUFFIXES: &[(&str, &[&str])] = &[
-    ("_total", &["counter"]),
-    ("_bucket", &["histogram", "gaugehistogram"]),
-    ("_count", &["histogram", "summary"]),
-    ("_sum", &["histogram", "summary"]),
-    ("_gcount", &["gaugehistogram"]),
-    ("_gsum", &["gaugehistogram"]),
-    ("_created", &["counter", "histogram", "summary"]),
-    ("_info", &["info"]),
-];
-
-/// Returns true if `sample_name` can belong to `family_name` (either an
-/// exact match or a valid type-specific suffix per the OpenMetrics spec).
-///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#suffixes>
-fn family_accepts_sample(
-    families: &BTreeMap<String, MetricFamily>,
-    family_name: &str,
-    sample_name: &str,
-) -> bool {
-    if sample_name == family_name {
-        return true;
-    }
-    let Some(metric_type) = families
-        .get(family_name)
-        .and_then(|family| family.metric_type.as_deref())
-    else {
-        return false;
-    };
-    let Some(suffix) = sample_name.strip_prefix(family_name) else {
-        return false;
-    };
-    TYPED_SUFFIXES.iter().any(|(known_suffix, valid_types)| {
-        suffix == *known_suffix && valid_types.contains(&metric_type)
-    })
-}
-
-/// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
-///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#abnf>
-fn extract_metric_name(line: &str) -> &str {
-    let end = line.find(['{', ' ']).unwrap_or(line.len());
-    &line[..end]
-}
-
-impl MetricEncoder {
-    pub const fn new() -> Self {
+impl MetricRegistration {
+    pub(crate) fn new(id: u64, registry: Weak<Mutex<Registry>>) -> Self {
         Self {
-            line_buffer: String::new(),
-            families: BTreeMap::new(),
-            active_family: None,
-        }
-    }
-
-    pub fn into_string(mut self) -> String {
-        if !self.line_buffer.is_empty() {
-            self.flush_line();
-        }
-        let total: usize = self
-            .families
-            .values()
-            .map(|f| {
-                f.help.as_ref().map_or(0, |h| h.len() + 1)
-                    + f.type_line.as_ref().map_or(0, |t| t.len() + 1)
-                    + f.unit.as_ref().map_or(0, |u| u.len() + 1)
-                    + f.data.iter().map(|d| d.len() + 1).sum::<usize>()
-            })
-            .sum();
-        let mut output = String::with_capacity(total);
-        for family in self.families.values() {
-            if let Some(help) = &family.help {
-                output.push_str(help);
-                output.push('\n');
-            }
-            if let Some(type_line) = &family.type_line {
-                output.push_str(type_line);
-                output.push('\n');
-            }
-            if let Some(unit) = &family.unit {
-                output.push_str(unit);
-                output.push('\n');
-            }
-            for data in &family.data {
-                output.push_str(data);
-                output.push('\n');
-            }
-        }
-        output
-    }
-
-    /// Resolve a data line's metric name to its family key, inserting a new
-    /// family if none exists, and return a mutable reference to it.
-    ///
-    /// OpenMetrics appends type-specific suffixes to data lines that differ
-    /// from the base name in HELP/TYPE headers (e.g., a counter named "votes"
-    /// emits data as "votes_total"). This method uses the TYPE declaration to
-    /// correctly match suffixed data lines to their family, even when another
-    /// family with the suffixed name exists (e.g., a gauge named "votes_total").
-    fn resolve_data_family(&mut self, name: &str) -> &mut MetricFamily {
-        let key = self.find_typed_family(name).unwrap_or(name);
-        self.families.entry(key.to_string()).or_default()
-    }
-
-    /// Try to find an existing family whose TYPE declaration expects the
-    /// suffix present in `name`.
-    fn find_typed_family<'a>(&self, name: &'a str) -> Option<&'a str> {
-        TYPED_SUFFIXES.iter().find_map(|(suffix, valid_types)| {
-            let base = name.strip_suffix(suffix)?;
-            let family = self.families.get(base)?;
-            let t = family.metric_type.as_deref()?;
-            valid_types.contains(&t).then_some(base)
-        })
-    }
-
-    fn flush_line(&mut self) {
-        let line = std::mem::take(&mut self.line_buffer);
-        if line == "# EOF" {
-            self.active_family = None;
-            return;
-        }
-        if let Some(rest) = line.strip_prefix("# HELP ") {
-            let name = rest.split_whitespace().next().unwrap_or("").to_string();
-            let family = self.families.entry(name.clone()).or_default();
-            if family.help.is_none() {
-                family.help = Some(line);
-            }
-            self.active_family = Some(name);
-        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let mut parts = rest.split_whitespace();
-            let name = parts.next().unwrap_or("").to_string();
-            let metric_type = parts.next().map(|s| s.to_string());
-            let family = self.families.entry(name.clone()).or_default();
-            if family.type_line.is_none() {
-                family.type_line = Some(line);
-                family.metric_type = metric_type;
-            }
-            self.active_family = Some(name);
-        } else if let Some(rest) = line.strip_prefix("# UNIT ") {
-            let name = rest.split_whitespace().next().unwrap_or("").to_string();
-            let family = self.families.entry(name.clone()).or_default();
-            if family.unit.is_none() {
-                family.unit = Some(line);
-            }
-            self.active_family = Some(name);
-        } else {
-            let name = extract_metric_name(&line);
-            if let Some(family_name) = &self.active_family {
-                if family_accepts_sample(&self.families, family_name, name) {
-                    self.families
-                        .get_mut(family_name.as_str())
-                        .unwrap()
-                        .data
-                        .push(line);
-                    return;
-                }
-            }
-            let family = self.resolve_data_family(name);
-            family.data.push(line);
+            _inner: Arc::new(MetricRegistrationInner { id, registry }),
         }
     }
 }
 
-impl Default for MetricEncoder {
-    fn default() -> Self {
-        Self::new()
-    }
+struct MetricRegistrationInner {
+    id: u64,
+    registry: Weak<Mutex<Registry>>,
 }
 
-impl std::fmt::Write for MetricEncoder {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let mut remaining = s;
-        while let Some(pos) = remaining.find('\n') {
-            self.line_buffer.push_str(&remaining[..pos]);
-            self.flush_line();
-            remaining = &remaining[pos + 1..];
-        }
-        self.line_buffer.push_str(remaining);
-        Ok(())
-    }
-}
-
-/// Internal handle that deregisters a metric scope when dropped.
-///
-/// Stored inside contexts via `Arc<ScopeGuard>`. When the last context clone
-/// holding this handle is dropped, the scope's metrics are automatically removed.
-pub(crate) struct ScopeGuard {
-    scope_id: u64,
-    cleanup: Option<Box<dyn FnOnce(u64) + Send + Sync>>,
-}
-
-impl ScopeGuard {
-    pub(crate) fn new(scope_id: u64, cleanup: impl FnOnce(u64) + Send + Sync + 'static) -> Self {
-        Self {
-            scope_id,
-            cleanup: Some(Box::new(cleanup)),
-        }
-    }
-
-    pub(crate) const fn scope_id(&self) -> u64 {
-        self.scope_id
-    }
-}
-
-impl Drop for ScopeGuard {
+impl Drop for MetricRegistrationInner {
     fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup(self.scope_id);
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        registry.lock().unregister(self.id);
+    }
+}
+
+/// A registered metric whose lifetime controls whether the metric is exposed.
+#[must_use = "registered metrics are removed when the returned handle is dropped"]
+pub struct Registered<M> {
+    metric: Arc<M>,
+    _registration: MetricRegistration,
+}
+
+impl<M> Clone for Registered<M> {
+    fn clone(&self) -> Self {
+        Self {
+            metric: self.metric.clone(),
+            _registration: self._registration.clone(),
         }
     }
 }
 
-/// Manages multiple prometheus registries with lifecycle-based scoping.
+impl<M> Registered<M> {
+    pub(crate) fn new(metric: Arc<M>, registration: MetricRegistration) -> Self {
+        Self {
+            metric,
+            _registration: registration,
+        }
+    }
+
+    pub fn metric(&self) -> &M {
+        self.metric.as_ref()
+    }
+}
+
+impl<M> Deref for Registered<M> {
+    type Target = M;
+
+    fn deref(&self) -> &Self::Target {
+        self.metric()
+    }
+}
+
+impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registered")
+            .field("metric", self.metric())
+            .finish_non_exhaustive()
+    }
+}
+
+type MetricKey = (String, Vec<(Cow<'static, str>, Cow<'static, str>)>);
+
+pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
+
+impl<M: std::fmt::Debug> std::fmt::Debug for SharedMetric<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
+    fn encode(&self, encoder: PromMetricEncoder<'_>) -> Result<(), std::fmt::Error> {
+        self.0.encode(encoder)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        self.0.metric_type()
+    }
+}
+
+#[derive(Debug)]
+struct MetricEntry {
+    name: String,
+    help: String,
+    attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
+    metric: Box<dyn PrometheusMetric>,
+}
+
+struct LiveMetricFamily<'a> {
+    help: &'a str,
+    metric_type: MetricType,
+    metrics: Vec<&'a MetricEntry>,
+}
+
+/// Manages runtime-internal metrics plus user-registered metrics with explicit lifetimes.
 ///
-/// Holds a permanent root registry for long-lived metrics (runtime internals)
-/// and a collection of scoped registries that can be removed when the associated
-/// work (e.g., an epoch's consensus engine) is done.
+/// Runtime internals continue to use a normal `prometheus_client::Registry` rooted
+/// under `METRICS_PREFIX`. User metrics are stored in a live-entry table so they
+/// can be unregistered when the owning registration handle drops.
 pub(crate) struct Registry {
     root: PrometheusRegistry,
-    scopes: BTreeMap<u64, PrometheusRegistry>,
-    next_scope_id: u64,
+    metrics: BTreeMap<u64, Arc<MetricEntry>>,
+    keys: HashMap<MetricKey, u64>,
+    next_metric_id: u64,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             root: PrometheusRegistry::default(),
-            scopes: BTreeMap::new(),
-            next_scope_id: 0,
+            metrics: BTreeMap::new(),
+            keys: HashMap::new(),
+            next_metric_id: 0,
         }
     }
 
@@ -487,35 +361,94 @@ impl Registry {
         &mut self.root
     }
 
-    pub fn create_scope(&mut self) -> u64 {
-        let id = self.next_scope_id;
-        self.next_scope_id = self.next_scope_id.checked_add(1).expect("scope overflow");
-        self.scopes.insert(id, PrometheusRegistry::default());
+    pub fn register(
+        &mut self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: impl PrometheusMetric,
+    ) -> u64 {
+        let attributes = attributes
+            .into_iter()
+            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
+            .collect::<Vec<_>>();
+        let id = self.next_metric_id;
+        self.next_metric_id = self
+            .next_metric_id
+            .checked_add(1)
+            .expect("metric id overflow");
+        let key = (name.clone(), attributes.clone());
+        let prior = self.keys.insert(key.clone(), id);
+        assert!(
+            prior.is_none(),
+            "duplicate metric: {} with attributes {:?}",
+            key.0,
+            key.1
+        );
+        self.metrics.insert(
+            id,
+            Arc::new(MetricEntry {
+                name,
+                help,
+                attributes,
+                metric: Box::new(metric),
+            }),
+        );
         id
     }
 
-    pub fn get_scope(&mut self, scope: Option<u64>) -> &mut PrometheusRegistry {
-        match scope {
-            None => &mut self.root,
-            Some(id) => self
-                .scopes
-                .get_mut(&id)
-                .unwrap_or_else(|| panic!("scope {id} not found (already deregistered?)")),
-        }
-    }
-
-    pub fn remove_scope(&mut self, id: u64) {
-        self.scopes.remove(&id);
+    pub fn unregister(&mut self, id: u64) {
+        let Some(metric) = self.metrics.remove(&id) else {
+            return;
+        };
+        self.keys
+            .remove(&(metric.name.clone(), metric.attributes.clone()));
     }
 
     pub fn encode(&self) -> String {
-        let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &self.root).expect("encoding root failed");
-        for registry in self.scopes.values() {
-            encode(&mut encoder, registry).expect("encoding scope failed");
+        let mut output = String::new();
+        encode_registry(&mut output, &self.root).expect("encoding root failed");
+
+        let mut families = BTreeMap::<&str, LiveMetricFamily<'_>>::new();
+        for metric in self.metrics.values() {
+            let metric = metric.as_ref();
+            let metric_type = metric.metric.metric_type();
+            let family = families
+                .entry(metric.name.as_str())
+                .or_insert_with(|| LiveMetricFamily {
+                    help: metric.help.as_str(),
+                    metric_type,
+                    metrics: Vec::new(),
+                });
+            assert_eq!(
+                family.help, metric.help,
+                "metric family `{}` registered with inconsistent help text",
+                metric.name
+            );
+            assert_eq!(
+                family.metric_type, metric_type,
+                "metric family `{}` registered with inconsistent metric type",
+                metric.name
+            );
+            family.metrics.push(metric);
         }
-        let mut output = encoder.into_string();
-        output.push_str("# EOF\n");
+
+        for (name, family) in families {
+            encode_descriptor(&mut output, name, family.help, None, family.metric_type)
+                .expect("encoding live descriptor failed");
+            for metric in family.metrics {
+                encode_metric_samples(
+                    &mut output,
+                    name,
+                    &metric.attributes,
+                    None,
+                    metric.metric.as_ref(),
+                )
+                .expect("encoding live metric samples failed");
+            }
+        }
+
+        encode_eof(&mut output).expect("encoding EOF failed");
         output
     }
 }
@@ -528,325 +461,6 @@ mod tests {
     use futures::task::waker;
     use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    fn encode_dedup(input: &str) -> String {
-        use std::fmt::Write;
-        let mut encoder = MetricEncoder::new();
-        encoder.write_str(input).unwrap();
-        encoder.into_string()
-    }
-
-    #[test]
-    fn test_metric_encoder_empty() {
-        assert_eq!(encode_dedup(""), "");
-        assert_eq!(encode_dedup("# EOF\n"), "");
-    }
-
-    #[test]
-    fn test_metric_encoder_no_duplicates() {
-        let input = r#"# HELP foo_total A counter.
-# TYPE foo_total counter
-foo_total 1
-# HELP bar_gauge A gauge.
-# TYPE bar_gauge gauge
-bar_gauge 42
-# EOF
-"#;
-        let expected = r#"# HELP bar_gauge A gauge.
-# TYPE bar_gauge gauge
-bar_gauge 42
-# HELP foo_total A counter.
-# TYPE foo_total counter
-foo_total 1
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_with_duplicates() {
-        let input = r#"# HELP votes_total vote count.
-# TYPE votes_total counter
-votes_total{epoch="e5"} 1
-# HELP votes_total vote count.
-# TYPE votes_total counter
-votes_total{epoch="e6"} 2
-# EOF
-"#;
-        let expected = r#"# HELP votes_total vote count.
-# TYPE votes_total counter
-votes_total{epoch="e5"} 1
-votes_total{epoch="e6"} 2
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_multiple_metrics() {
-        let input = r#"# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="x"} 1
-# HELP b_total Second.
-# TYPE b_total counter
-b_total 5
-# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="y"} 2
-# EOF
-"#;
-        let expected = r#"# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="x"} 1
-a_total{tag="y"} 2
-# HELP b_total Second.
-# TYPE b_total counter
-b_total 5
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_groups_by_name() {
-        let input = r#"# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="x"} 1
-# HELP b_total Second.
-# TYPE b_total counter
-b_total 5
-# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="y"} 2
-# EOF
-"#;
-        let expected = r#"# HELP a_total First.
-# TYPE a_total counter
-a_total{tag="x"} 1
-a_total{tag="y"} 2
-# HELP b_total Second.
-# TYPE b_total counter
-b_total 5
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_deterministic_order() {
-        let input = r#"# HELP z First alphabetically last.
-# TYPE z counter
-z_total 1
-# HELP a Last alphabetically first.
-# TYPE a counter
-a_total 2
-# EOF
-"#;
-        let expected = r#"# HELP a Last alphabetically first.
-# TYPE a counter
-a_total 2
-# HELP z First alphabetically last.
-# TYPE z counter
-z_total 1
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_counter_suffix_grouping() {
-        // prometheus_client uses the base name for HELP/TYPE (e.g., "ab_votes")
-        // but appends "_total" to the data line (e.g., "ab_votes_total").
-        // A metric whose name sorts between these (e.g., "ab_votes_size")
-        // must not split the family.
-        let input = r#"# HELP ab_votes vote count.
-# TYPE ab_votes counter
-ab_votes_total{epoch="1"} 1
-# HELP ab_votes_size size gauge.
-# TYPE ab_votes_size gauge
-ab_votes_size 99
-# HELP ab_votes vote count.
-# TYPE ab_votes counter
-ab_votes_total{epoch="2"} 2
-# EOF
-"#;
-        let expected = r#"# HELP ab_votes vote count.
-# TYPE ab_votes counter
-ab_votes_total{epoch="1"} 1
-ab_votes_total{epoch="2"} 2
-# HELP ab_votes_size size gauge.
-# TYPE ab_votes_size gauge
-ab_votes_size 99
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_type_aware_suffix() {
-        // A gauge named "foo_total" and a counter named "foo" both produce
-        // data lines called "foo_total". The encoder must use the TYPE info
-        // to route each data line to the correct family.
-        let input = r#"# HELP foo_total A gauge.
-# TYPE foo_total gauge
-foo_total 42
-# HELP foo A counter.
-# TYPE foo counter
-foo_total 1
-# EOF
-"#;
-        let expected = r#"# HELP foo A counter.
-# TYPE foo counter
-foo_total 1
-# HELP foo_total A gauge.
-# TYPE foo_total gauge
-foo_total 42
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_literal_suffix_family_not_hijacked() {
-        // A family may legitimately end with a reserved OpenMetrics suffix.
-        // The encoder must not always remap "foo_created" to base family "foo".
-        let input = r#"# HELP foo A counter.
-# TYPE foo counter
-foo_total 1
-# HELP foo_created A gauge.
-# TYPE foo_created gauge
-foo_created 42
-# EOF
-"#;
-        let expected = r#"# HELP foo A counter.
-# TYPE foo counter
-foo_total 1
-# HELP foo_created A gauge.
-# TYPE foo_created gauge
-foo_created 42
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_type_aware_suffix_interleaved_segments() {
-        // Two families may emit lines with the same sample name (`foo_total`):
-        // a counter named `foo` and a gauge named `foo_total`.
-        //
-        // Repeated counter descriptors (as emitted by separate scoped registries)
-        // must keep all counter samples in family `foo` and not leak them into
-        // family `foo_total`.
-        let input = r#"# HELP foo Counter.
-# TYPE foo counter
-foo_total{scope="a"} 1
-# HELP foo_total Gauge.
-# TYPE foo_total gauge
-foo_total 42
-# HELP foo Counter.
-# TYPE foo counter
-foo_total{scope="b"} 2
-# EOF
-"#;
-        let expected = r#"# HELP foo Counter.
-# TYPE foo counter
-foo_total{scope="a"} 1
-foo_total{scope="b"} 2
-# HELP foo_total Gauge.
-# TYPE foo_total gauge
-foo_total 42
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_unit_metadata_is_grouped() {
-        let input = r#"# HELP latency Latency histogram.
-# TYPE latency histogram
-# UNIT latency seconds
-latency_sum 1.2
-latency_count 3
-# HELP requests Requests.
-# TYPE requests counter
-requests_total 9
-# EOF
-"#;
-        let expected = r#"# HELP latency Latency histogram.
-# TYPE latency histogram
-# UNIT latency seconds
-latency_sum 1.2
-latency_count 3
-# HELP requests Requests.
-# TYPE requests counter
-requests_total 9
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_unit_metadata_deduped_across_segments() {
-        let input = r#"# HELP req Requests.
-# TYPE req counter
-# UNIT req requests
-req_total{scope="a"} 1
-# HELP req Requests.
-# TYPE req counter
-# UNIT req requests
-req_total{scope="b"} 2
-# EOF
-"#;
-        let expected = r#"# HELP req Requests.
-# TYPE req counter
-# UNIT req requests
-req_total{scope="a"} 1
-req_total{scope="b"} 2
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_fallback_uses_typed_suffix_even_if_literal_exists() {
-        // Regression test for a buggy fallback that preferred `contains_key(name)`
-        // before typed-suffix mapping.
-        //
-        // Here `foo_total` exists as its own counter family, but a sample named
-        // `foo_total` can only come from counter family `foo` (because
-        // `foo_total` counter samples are `foo_total_total`).
-        //
-        // We force fallback mode by ending descriptor groups with `# EOF`, which
-        // clears `active_family`.
-        let input = r#"# HELP foo_total Counter with literal suffix.
-# TYPE foo_total counter
-foo_total_total 9
-# EOF
-# HELP foo Base counter.
-# TYPE foo counter
-# EOF
-foo_total{scope="x"} 1
-# EOF
-"#;
-        let expected = r#"# HELP foo Base counter.
-# TYPE foo counter
-foo_total{scope="x"} 1
-# HELP foo_total Counter with literal suffix.
-# TYPE foo_total counter
-foo_total_total 9
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test]
-    fn test_metric_encoder_strips_intermediate_eof() {
-        let input = r#"# HELP a_total Root.
-# TYPE a_total counter
-a_total 1
-# EOF
-# HELP b_total Scoped.
-# TYPE b_total counter
-b_total 2
-# EOF
-"#;
-        let expected = r#"# HELP a_total Root.
-# TYPE a_total counter
-a_total 1
-# HELP b_total Scoped.
-# TYPE b_total counter
-b_total 2
-"#;
-        assert_eq!(encode_dedup(input), expected);
-    }
 
     #[test]
     fn test_blocker_waits_until_wake() {
@@ -983,9 +597,9 @@ b_total 2
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
             let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
+            let _metric_a = context.with_label("a").register("test", "help", c1);
             let c2 = Counter::<u64>::default();
-            context.with_label("b").register("test", "help", c2);
+            let _metric_b = context.with_label("b").register("test", "help", c2);
         });
         // Test passes if runtime doesn't panic on shutdown
     }
@@ -997,9 +611,9 @@ b_total 2
         executor.start(|context| async move {
             // Register metrics with the same label, causing duplicates
             let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
+            let _metric_a = context.with_label("a").register("test", "help", c1);
             let c2 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c2);
+            let _metric_b = context.with_label("a").register("test", "help", c2);
         });
     }
 }
