@@ -237,6 +237,14 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    fn test_keyless_get_many() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_get_many(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_keyless_batch_chained() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;

@@ -263,6 +263,62 @@ where
         Ok(None)
     }
 
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
+
+        let reader = self.journal.reader().await;
+        let oldest = reader.bounds().start;
+
+        for (key_idx, key) in keys.iter().enumerate() {
+            for &loc in self.snapshot.get(key) {
+                if loc < oldest {
+                    continue;
+                }
+                candidates.push((key_idx, *loc));
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(results);
+        }
+
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+
+        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
+        for &(_, pos) in &candidates {
+            if positions.last() != Some(&pos) {
+                positions.push(pos);
+            }
+        }
+
+        let ops = reader.read_many(&positions).await?;
+
+        for &(key_idx, pos) in &candidates {
+            if results[key_idx].is_some() {
+                continue;
+            }
+            let op_idx = positions
+                .binary_search(&pos)
+                .expect("position was deduped from candidates");
+            let Operation::Set(k, v) = &ops[op_idx] else {
+                return Err(Error::UnexpectedData(Location::new(pos)));
+            };
+            if k == keys[key_idx] {
+                results[key_idx] = Some(v.clone());
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
     /// location is otherwise assumed valid.
@@ -2743,6 +2799,106 @@ pub(super) mod test {
         // Follow-on commit replaced the anchor: its metadata was `None`, so `get_metadata`
         // should no longer return the original metadata.
         assert_eq!(db.get_metadata().await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `get_many` on the DB and on unmerkleized/merkleized batches returns results
+    /// that match individual `get` calls.
+    pub(crate) async fn test_immutable_get_many<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        let k1 = Sha256::fill(1u8);
+        let k2 = Sha256::fill(2u8);
+        let k3 = Sha256::fill(3u8);
+        let k_missing = Sha256::fill(99u8);
+
+        let v1 = Sha256::fill(11u8);
+        let v2 = Sha256::fill(12u8);
+        let v3 = Sha256::fill(13u8);
+
+        // Commit k1 and k2 to disk.
+        db.apply_batch(db.new_batch().set(k1, v1).set(k2, v2).merkleize(
+            &db,
+            None,
+            db.inactivity_floor_loc(),
+        ))
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+
+        // DB-level get_many.
+        let results = db.get_many(&[&k1, &k2, &k_missing]).await.unwrap();
+        assert_eq!(results, vec![Some(v1), Some(v2), None]);
+
+        // Empty input.
+        let results = db.get_many(&([] as [&Digest; 0])).await.unwrap();
+        assert!(results.is_empty());
+
+        // Unmerkleized batch: mutations + DB fallthrough.
+        let batch = db.new_batch().set(k3, v3);
+        let results = batch.get_many(&[&k3, &k1, &k_missing], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v3), Some(v1), None]);
+
+        // Merkleized batch: diff + parent chain + DB fallthrough.
+        let parent = db
+            .new_batch()
+            .set(k3, v3)
+            .merkleize(&db, None, db.inactivity_floor_loc());
+        let results = parent.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v1), Some(v3), None]);
+
+        // Child of merkleized parent reads parent diff.
+        let v3_new = Sha256::fill(30u8);
+        let child = parent.new_batch::<Sha256>().set(k3, v3_new);
+        let results = child.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v1), Some(v3_new), None]);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `get_many` reports unexpected data when the snapshot points at a non-`Set` operation.
+    pub(crate) async fn test_immutable_get_many_unexpected_data<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        let key = Sha256::fill(1u8);
+        let value = Sha256::fill(11u8);
+        db.apply_batch(db.new_batch().set(key, value).merkleize(
+            &db,
+            None,
+            db.inactivity_floor_loc(),
+        ))
+        .await
+        .unwrap();
+        db.commit().await.unwrap();
+
+        let bad_key = Sha256::fill(99u8);
+        let bad_loc = db.last_commit_loc;
+        db.snapshot.insert(&bad_key, bad_loc);
+
+        let err = db.get(&bad_key).await.unwrap_err();
+        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
+
+        let err = db.get_many(&[&bad_key]).await.unwrap_err();
+        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
 
         db.destroy().await.unwrap();
     }
