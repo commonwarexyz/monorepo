@@ -918,7 +918,6 @@ where
 {
     // Ensure the task can access the tokio runtime.
     let runtime_handle = executor.runtime.handle().clone();
-    let thread_stack_size = executor.thread_stack_size;
     let available_cpus = if cpu.is_none() {
         executor.available_cpus.clone()
     } else {
@@ -929,7 +928,7 @@ where
     // polling the task future.
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
-    if let Err(err) = utils::thread::try_spawn(thread_stack_size, move || {
+    if let Err(err) = utils::thread::try_spawn(executor.thread_stack_size, move || {
         let cpu = cpu.map(|cpu| [cpu]);
         let cpus = cpu
             .as_ref()
