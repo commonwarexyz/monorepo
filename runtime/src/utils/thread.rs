@@ -273,7 +273,7 @@ pub(crate) fn reset_cpu_affinity() -> Result<(), std::io::Error> {
 ///
 /// Always returns `Ok(())` since CPU affinity is not available on this platform.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn reset_cpu_affinity() -> Result<(), std::io::Error> {
+pub(crate) const fn reset_cpu_affinity() -> Result<(), std::io::Error> {
     Ok(())
 }
 
