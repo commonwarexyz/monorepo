@@ -454,8 +454,8 @@ stability_scope!(BETA {
         /// panics.
         ///
         /// Implementations outside `commonware-runtime` that do not expose metrics
-        /// through a runtime registry may return [`Registered::detached`] to
-        /// produce a detached handle.
+        /// through a runtime registry may return [`Registered::detached`] or use
+        /// [`Registered::with_registration`] with a custom [`Registration`].
         ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
         fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(

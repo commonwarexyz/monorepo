@@ -234,43 +234,59 @@ pub fn add_attribute(
     }
 }
 
-/// Internal handle that unregisters a metric when dropped.
+trait RegistrationGuard: Send + Sync {}
+
+impl<T: Send + Sync> RegistrationGuard for T {}
+
+struct GuardHolder<G>(Mutex<G>);
+
+/// A shared lifecycle token for a [`Registered`] metric handle.
+///
+/// When the last clone of the associated [`Registered`] handle is dropped, this
+/// registration is dropped as well. Runtime-managed metrics use that drop to
+/// unregister themselves from the runtime registry, while external callers may
+/// attach any custom drop guard.
 #[derive(Clone)]
-pub(crate) struct MetricRegistration {
-    _inner: Arc<MetricRegistrationInner>,
+pub struct Registration {
+    inner: Arc<dyn RegistrationGuard>,
 }
 
-impl MetricRegistration {
-    pub(crate) fn new(id: u64, registry: Weak<Mutex<Registry>>) -> Self {
+impl Registration {
+    /// Create a registration that performs no action when dropped.
+    pub fn detached() -> Self {
+        Self::from_guard(())
+    }
+
+    /// Create a registration from a guard that should be dropped when the last
+    /// associated [`Registered`] handle is dropped.
+    ///
+    /// This can be used by external `Metrics` implementations to run custom
+    /// teardown or notification logic by providing a guard type that implements
+    /// [`Drop`].
+    pub fn from_guard<G>(guard: G) -> Self
+    where
+        G: Send + 'static,
+    {
         Self {
-            _inner: Arc::new(MetricRegistrationInner { id, registry }),
+            inner: Arc::new(GuardHolder(Mutex::new(guard))),
         }
     }
 
-    fn detached() -> Self {
-        Self {
-            _inner: Arc::new(MetricRegistrationInner {
-                id: 0,
-                registry: Weak::new(),
-            }),
-        }
+    fn from_inner(inner: Arc<dyn RegistrationGuard>) -> Self {
+        Self { inner }
     }
 
-    const fn from_inner(inner: Arc<MetricRegistrationInner>) -> Self {
-        Self { _inner: inner }
-    }
-
-    fn downgrade(&self) -> Weak<MetricRegistrationInner> {
-        Arc::downgrade(&self._inner)
+    fn downgrade(&self) -> Weak<dyn RegistrationGuard> {
+        Arc::downgrade(&self.inner)
     }
 }
 
-struct MetricRegistrationInner {
+struct RuntimeRegistration {
     id: u64,
     registry: Weak<Mutex<Registry>>,
 }
 
-impl Drop for MetricRegistrationInner {
+impl Drop for RuntimeRegistration {
     fn drop(&mut self) {
         let Some(registry) = self.registry.upgrade() else {
             return;
@@ -279,18 +295,18 @@ impl Drop for MetricRegistrationInner {
     }
 }
 
-/// A registered metric whose lifetime controls whether the metric is exposed.
-#[must_use = "registered metrics are removed when the returned handle is dropped"]
+/// A metric handle whose lifetime controls registry exposure and attached cleanup.
+#[must_use = "registered metrics are removed and attached cleanup runs when the returned handle is dropped"]
 pub struct Registered<M> {
     metric: Arc<M>,
-    _registration: MetricRegistration,
+    registration: Registration,
 }
 
 impl<M> Clone for Registered<M> {
     fn clone(&self) -> Self {
         Self {
             metric: self.metric.clone(),
-            _registration: self._registration.clone(),
+            registration: self.registration.clone(),
         }
     }
 }
@@ -300,15 +316,24 @@ impl<M> Registered<M> {
     ///
     /// This is intended for `Metrics` implementations outside `commonware-runtime`
     /// that need to return a [`Registered`] handle without exposing the metric in
-    /// a runtime-managed registry.
+    /// a runtime-managed registry. If you need custom drop behavior, use
+    /// [`Registered::with_registration`].
     pub fn detached(metric: M) -> Self {
-        Self::from_parts(Arc::new(metric), MetricRegistration::detached())
+        Self::with_registration(metric, Registration::detached())
     }
 
-    pub(crate) const fn from_parts(metric: Arc<M>, registration: MetricRegistration) -> Self {
+    /// Create a metric handle with an explicit lifecycle registration.
+    ///
+    /// The provided [`Registration`] is dropped when the last clone of this
+    /// handle is dropped.
+    pub fn with_registration(metric: M, registration: Registration) -> Self {
+        Self::from_parts(Arc::new(metric), registration)
+    }
+
+    pub(crate) fn from_parts(metric: Arc<M>, registration: Registration) -> Self {
         Self {
             metric,
-            _registration: registration,
+            registration,
         }
     }
 
@@ -359,7 +384,7 @@ struct MetricEntry {
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     metric: Box<dyn Metric>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    registration: Weak<MetricRegistrationInner>,
+    registration: Option<Weak<dyn RegistrationGuard>>,
     family_index: usize,
 }
 
@@ -470,7 +495,7 @@ impl Registry {
             attributes,
             metric: Box::new(metric),
             metric_any: Arc::new(()),
-            registration: Weak::new(),
+            registration: None,
             family_index,
         });
         id
@@ -498,7 +523,7 @@ impl Registry {
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
-            if let Some(inner) = entry.registration.upgrade() {
+            if let Some(inner) = entry.registration.as_ref().and_then(Weak::upgrade) {
                 if let Some(family) = self.families.get(&name) {
                     assert_eq!(
                         family.help, help,
@@ -514,10 +539,7 @@ impl Registry {
                             key.0, key.1
                         )
                     });
-                return Registered::from_parts(
-                    existing_metric,
-                    MetricRegistration::from_inner(inner),
-                );
+                return Registered::from_parts(existing_metric, Registration::from_inner(inner));
             }
             // The existing entry's last handle is mid-drop: its Weak no longer
             // upgrades, but the pending `unregister` call has not yet run.
@@ -540,7 +562,7 @@ impl Registry {
         }
 
         let id = self.allocate_metric_id();
-        let registration = MetricRegistration::new(id, registry);
+        let registration = Registration::from_guard(RuntimeRegistration { id, registry });
         self.keys.insert(key, id);
         let family = match self.families.entry(name.clone()) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -564,7 +586,7 @@ impl Registry {
             attributes,
             metric: Box::new(SharedMetric(metric.clone())),
             metric_any,
-            registration: registration.downgrade(),
+            registration: Some(registration.downgrade()),
             family_index,
         });
         Registered::from_parts(metric, registration)
@@ -730,7 +752,10 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use futures::{future, task::waker};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, TryRecvError},
+    };
 
     #[test]
     fn test_blocker_waits_until_wake() {
@@ -911,6 +936,31 @@ mod tests {
         clone.inc();
 
         assert_eq!(clone.get(), 3);
+    }
+
+    #[test]
+    fn test_registered_with_registration_notifies_on_last_drop() {
+        struct NotifyOnDrop(mpsc::Sender<&'static str>);
+
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send("dropped");
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let registered = Registered::with_registration(
+            Counter::<u64>::default(),
+            Registration::from_guard(NotifyOnDrop(tx)),
+        );
+        let clone = registered.clone();
+
+        drop(registered);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        drop(clone);
+        assert_eq!(rx.recv().unwrap(), "dropped");
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
     }
 
     fn register_permanent_counter(registry: &mut Registry, name: &str, help: &str, value: u64) {
