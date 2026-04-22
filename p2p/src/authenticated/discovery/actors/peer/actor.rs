@@ -15,15 +15,16 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink,
-    Spawner, Stream,
+    iobuf::EncodeExt,
+    metrics::CounterFamily,
+    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Registered, Sink, Spawner,
+    Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -43,10 +44,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
-    sent_messages: Family<metrics::Message, Counter>,
-    received_messages: Family<metrics::Message, Counter>,
-    dropped_messages: Family<metrics::Message, Counter>,
-    rate_limited: Family<metrics::Message, Counter>,
+    sent_messages: Registered<CounterFamily<metrics::Message>>,
+    received_messages: Registered<CounterFamily<metrics::Message>>,
+    dropped_messages: Registered<CounterFamily<metrics::Message>>,
+    rate_limited: Registered<CounterFamily<metrics::Message>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
@@ -112,7 +113,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     /// Records the send metric and appends the payload to the batch.
     fn push_batched(
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &CounterFamily<metrics::Message>,
         batch: &mut Vec<IoBufs>,
         metric: metrics::Message,
         payload: IoBufs,
@@ -136,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &CounterFamily<metrics::Message>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
@@ -432,7 +433,6 @@ mod tests {
     use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
-    use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -442,7 +442,7 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
+    fn default_peer_config(context: &impl Metrics, me: PublicKey) -> Config<PublicKey> {
         Config {
             mailbox_size: 10,
             send_batch_size: NZUsize!(8),
@@ -455,10 +455,16 @@ mod tests {
                 Duration::from_secs(60),
                 IP_NAMESPACE.to_vec(),
             ),
-            sent_messages: Family::<metrics::Message, Counter>::default(),
-            received_messages: Family::<metrics::Message, Counter>::default(),
-            dropped_messages: Family::<metrics::Message, Counter>::default(),
-            rate_limited: Family::<metrics::Message, Counter>::default(),
+            sent_messages: context.counter_family("sent_messages", "test sent messages"),
+            received_messages: context.counter_family(
+                "received_messages",
+                "test received messages",
+            ),
+            dropped_messages: context.counter_family(
+                "dropped_messages",
+                "test dropped messages",
+            ),
+            rate_limited: context.counter_family("rate_limited", "test rate limited messages"),
         }
     }
 
@@ -533,7 +539,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.clone(),
-                default_peer_config(remote_pk),
+                default_peer_config(&context, remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -632,7 +638,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.clone(),
-                default_peer_config(remote_pk),
+                default_peer_config(&context, remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -737,7 +743,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.clone(),
-                default_peer_config(remote_pk),
+                default_peer_config(&context, remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -838,7 +844,8 @@ mod tests {
                 .expect("listen result failed");
 
             // Create dropped_messages metric to track drops
-            let dropped_messages = Family::<metrics::Message, Counter>::default();
+            let dropped_messages =
+                context.counter_family("dropped_messages_override", "test dropped messages");
 
             // Create peer config with our metric
             let config = Config {
@@ -853,10 +860,16 @@ mod tests {
                     Duration::from_secs(60),
                     IP_NAMESPACE.to_vec(),
                 ),
-                sent_messages: Family::<metrics::Message, Counter>::default(),
-                received_messages: Family::<metrics::Message, Counter>::default(),
+                sent_messages: context.counter_family("sent_messages_override", "test sent messages"),
+                received_messages: context.counter_family(
+                    "received_messages_override",
+                    "test received messages",
+                ),
                 dropped_messages: dropped_messages.clone(),
-                rate_limited: Family::<metrics::Message, Counter>::default(),
+                rate_limited: context.counter_family(
+                    "rate_limited_override",
+                    "test rate limited messages",
+                ),
             };
 
             let (peer_actor, _messenger) =
@@ -986,10 +999,13 @@ mod tests {
 
             // Clone the received_messages family so we can inspect it after
             // the actor finishes.
-            let received_messages = Family::<metrics::Message, Counter>::default();
+            let received_messages = context.counter_family(
+                "received_messages_override",
+                "test received messages override",
+            );
             let cfg = Config {
                 received_messages: received_messages.clone(),
-                ..default_peer_config(remote_pk)
+                ..default_peer_config(&context, remote_pk)
             };
             let (peer_actor, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);

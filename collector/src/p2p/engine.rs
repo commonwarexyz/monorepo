@@ -11,14 +11,13 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Registered, Spawner,
+    metrics::{Counter, Gauge},
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::Pool,
 };
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
@@ -74,10 +73,9 @@ where
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
 
         // Create metrics
-        let outstanding =
-            context.register("outstanding", "outstanding commitments", Gauge::default());
-        let requests = context.register("requests", "processed requests", Counter::default());
-        let responses = context.register("responses", "sent responses", Counter::default());
+        let outstanding = context.gauge("outstanding", "outstanding commitments");
+        let requests = context.counter("requests", "processed requests");
+        let responses = context.counter("responses", "sent responses");
 
         (
             Self {

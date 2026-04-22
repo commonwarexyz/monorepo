@@ -64,6 +64,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
+    metrics::Histogram,
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics, Registered, Spawner,
 };
@@ -71,7 +72,6 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::debug;
@@ -164,10 +164,10 @@ where
     ///
     /// Registers a `build_duration` histogram for proposal latency.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
-        let build_histogram = context.register(
+        let build_histogram = context.histogram(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
 

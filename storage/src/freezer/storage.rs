@@ -7,10 +7,9 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered};
+use commonware_runtime::{buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
-use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
 
@@ -752,22 +751,19 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = context.register("puts", "number of put operations", Counter::default());
-        let gets = context.register("gets", "number of get operations", Counter::default());
-        let unnecessary_reads = context.register(
+        let puts = context.counter("puts", "number of put operations");
+        let gets = context.counter("gets", "number of get operations");
+        let unnecessary_reads = context.counter(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            Counter::default(),
         );
-        let unnecessary_writes = context.register(
+        let unnecessary_writes = context.counter(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            Counter::default(),
         );
-        let resizes = context.register(
+        let resizes = context.counter(
             "resizes",
             "number of table resizing operations",
-            Counter::default(),
         );
 
         Ok(Self {

@@ -2,17 +2,14 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
+    metrics::{EncodeLabelSet, GaugeFamily, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
-        status::{self, CounterExt, GaugeExt, Status},
+        status::{self, CounterExt, Status},
     },
     Clock, Metrics, Registered,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{family::Family, gauge::Gauge, histogram::Histogram},
-};
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -135,7 +132,7 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Registered<Family<Peer, Gauge>>,
+    performance: Registered<GaugeFamily<Peer>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
     requests_created: Registered<status::Counter>,
@@ -159,10 +156,9 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = context.register(
+        let performance = context.gauge_family(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
-            Family::<Peer, Gauge>::default(),
         );
         let requests_created = context.register(
             "requests_created",
@@ -174,10 +170,10 @@ where
             "Status of individual network requests sent to peers",
             status::Counter::default(),
         );
-        let resolves = context.register(
+        let resolves = context.histogram(
             "resolves",
             "Number and duration of requests that were resolved",
-            Histogram::new(Buckets::NETWORK),
+            Buckets::NETWORK,
         );
         Self {
             context,

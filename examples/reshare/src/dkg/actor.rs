@@ -28,14 +28,12 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Clock,
-    ContextCell, Handle, Metrics, Registered, Spawner, Storage as RuntimeStorage,
+    metrics::{Counter, EncodeLabelSet, GaugeFamily},
+    spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
+    Spawner,
+    Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
@@ -135,8 +133,8 @@ where
     failed_epochs: Registered<Counter>,
     our_reveals: Registered<Counter>,
     all_reveals: Registered<Counter>,
-    latest_share: Registered<Family<Peer, Gauge>>,
-    latest_ack: Registered<Family<Peer, Gauge>>,
+    latest_share: Registered<GaugeFamily<Peer>>,
+    latest_ack: Registered<GaugeFamily<Peer>>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -154,21 +152,17 @@ where
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         // Create metrics
-        let successful_epochs =
-            context.register("successful_epochs", "successful epochs", Counter::default());
-        let failed_epochs = context.register("failed_epochs", "failed epochs", Counter::default());
-        let our_reveals =
-            context.register("our_reveals", "our share was revealed", Counter::default());
-        let all_reveals = context.register("all_reveals", "all share reveals", Counter::default());
-        let latest_share = context.register(
+        let successful_epochs = context.counter("successful_epochs", "successful epochs");
+        let failed_epochs = context.counter("failed_epochs", "failed epochs");
+        let our_reveals = context.counter("our_reveals", "our share was revealed");
+        let all_reveals = context.counter("all_reveals", "all share reveals");
+        let latest_share = context.gauge_family(
             "latest_share",
             "epoch of latest valid share received per dealer",
-            Family::<Peer, Gauge>::default(),
         );
-        let latest_ack = context.register(
+        let latest_ack = context.gauge_family(
             "latest_ack",
             "epoch of latest valid ack received per player",
-            Family::<Peer, Gauge>::default(),
         );
 
         (

@@ -23,10 +23,11 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
+    metrics::Histogram,
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, GaugeExt, Status},
+        status::{CounterExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
 };
@@ -66,7 +67,7 @@ struct DigestRequest<D: Digest, E: Clock> {
     result: Result<D, Error>,
 
     /// Records the time taken to get the digest.
-    timer: histogram::Timer<E, Registered<prometheus_client::metrics::histogram::Histogram>>,
+    timer: histogram::Timer<E, Registered<Histogram>>,
 }
 
 /// Instance of the engine.

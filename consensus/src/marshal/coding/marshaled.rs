@@ -107,6 +107,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    metrics::Histogram,
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics, Registered, Spawner, Storage,
 };
@@ -118,7 +119,6 @@ use commonware_utils::{
     NZU16,
 };
 use futures::future::{ready, try_join, Either, Ready};
-use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
@@ -223,31 +223,31 @@ where
 
         let clock = Arc::new(context.clone());
 
-        let build_histogram = context.register(
+        let build_histogram = context.histogram(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram, clock.clone());
 
-        let verify_histogram = context.register(
+        let verify_histogram = context.histogram(
             "verify_duration",
             "Histogram of time taken for the application to verify a block, in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
         let verify_duration = Timed::new(verify_histogram, clock.clone());
 
-        let parent_fetch_histogram = context.register(
+        let parent_fetch_histogram = context.histogram(
             "parent_fetch_duration",
             "Histogram of time taken to fetch a parent block in proposal, in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram, clock.clone());
 
-        let erasure_histogram = context.register(
+        let erasure_histogram = context.histogram(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
         let erasure_encode_duration = Timed::new(erasure_histogram, clock);
 

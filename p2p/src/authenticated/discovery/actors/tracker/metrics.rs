@@ -1,6 +1,8 @@
 use crate::authenticated::discovery::metrics;
-use commonware_runtime::{Metrics as RuntimeMetrics, Registered};
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
+use commonware_runtime::{
+    metrics::{CounterFamily, Gauge, GaugeFamily},
+    Metrics as RuntimeMetrics, Registered,
+};
 
 /// Metrics for the [super::Actor]
 pub struct Metrics {
@@ -10,54 +12,48 @@ pub struct Metrics {
     pub tracked: Registered<Gauge>,
 
     /// Blocked peers (value = expiry time as epoch millis).
-    pub blocked: Registered<Family<metrics::Peer, Gauge>>,
+    pub blocked: Registered<GaugeFamily<metrics::Peer>>,
 
     /// The total number of outstanding reservations.
     pub reserved: Registered<Gauge>,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connected: Registered<Family<metrics::Peer, Gauge>>,
+    pub connected: Registered<GaugeFamily<metrics::Peer>>,
 
     /// A count of the number of rate-limited reservation events for each peer.
-    pub limits: Registered<Family<metrics::Peer, Counter>>,
+    pub limits: Registered<CounterFamily<metrics::Peer>>,
 
     /// A count of the number of updates for each peer.
-    pub updates: Registered<Family<metrics::Peer, Counter>>,
+    pub updates: Registered<CounterFamily<metrics::Peer>>,
 }
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         Self {
-            tracked: context.register(
+            tracked: context.gauge(
                 "tracked",
                 "Total number of unique peers in all peer sets being tracked",
-                Gauge::default(),
             ),
-            blocked: context.register(
+            blocked: context.gauge_family(
                 "blocked",
                 "Blocked peers (value = expiry time as epoch millis)",
-                Family::<metrics::Peer, Gauge>::default(),
             ),
-            reserved: context.register(
+            reserved: context.gauge(
                 "reserved",
                 "Total number of outstanding reservations",
-                Gauge::default(),
             ),
-            connected: context.register(
+            connected: context.gauge_family(
                 "connected",
                 "Unix timestamp in milliseconds when each connected peer became active",
-                Family::<metrics::Peer, Gauge>::default(),
             ),
-            limits: context.register(
+            limits: context.counter_family(
                 "limits",
                 "Count of the number of rate-limited reservation events for each peer",
-                Family::<metrics::Peer, Counter>::default(),
             ),
-            updates: context.register(
+            updates: context.counter_family(
                 "updates",
                 "Count of the number of updates for each peer",
-                Family::<metrics::Peer, Counter>::default(),
             ),
         }
     }

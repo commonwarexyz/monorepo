@@ -10,11 +10,10 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Sink, Spawner,
-    Stream,
+    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Registered, Sink, Spawner, Stream,
 };
 use commonware_utils::channel::mpsc;
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 use tracing::debug;
@@ -33,10 +32,10 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
-    sent_messages: Registered<Family<metrics::Message, Counter>>,
-    received_messages: Registered<Family<metrics::Message, Counter>>,
-    dropped_messages: Registered<Family<metrics::Message, Counter>>,
-    rate_limited: Registered<Family<metrics::Message, Counter>>,
+    sent_messages: Registered<CounterFamily<metrics::Message>>,
+    received_messages: Registered<CounterFamily<metrics::Message>>,
+    dropped_messages: Registered<CounterFamily<metrics::Message>>,
+    rate_limited: Registered<CounterFamily<metrics::Message>>,
 }
 
 impl<
@@ -47,26 +46,14 @@ impl<
     > Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
-        let sent_messages = context.register(
-            "messages_sent",
-            "messages sent",
-            Family::<metrics::Message, Counter>::default(),
-        );
-        let received_messages = context.register(
-            "messages_received",
-            "messages received",
-            Family::<metrics::Message, Counter>::default(),
-        );
-        let dropped_messages = context.register(
+        let sent_messages = context.counter_family("messages_sent", "messages sent");
+        let received_messages = context.counter_family("messages_received", "messages received");
+        let dropped_messages = context.counter_family(
             "messages_dropped",
             "messages dropped due to full application buffer",
-            Family::<metrics::Message, Counter>::default(),
         );
-        let rate_limited = context.register(
-            "messages_rate_limited",
-            "messages rate limited",
-            Family::<metrics::Message, Counter>::default(),
-        );
+        let rate_limited =
+            context.counter_family("messages_rate_limited", "messages rate limited");
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
@@ -131,10 +118,10 @@ impl<
                                     context,
                                     peer::Config {
                                         ping_frequency: self.ping_frequency,
-                                        sent_messages: sent_messages.metric().clone(),
-                                        received_messages: received_messages.metric().clone(),
-                                        dropped_messages: dropped_messages.metric().clone(),
-                                        rate_limited: rate_limited.metric().clone(),
+                                        sent_messages: sent_messages.clone(),
+                                        received_messages: received_messages.clone(),
+                                        dropped_messages: dropped_messages.clone(),
+                                        rate_limited: rate_limited.clone(),
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
                                     },

@@ -1,7 +1,6 @@
 //! Utilities for working with histograms.
 
-use crate::Clock;
-use prometheus_client::metrics::histogram::Histogram;
+use crate::{metrics::Histogram, Clock, Registered};
 use std::{sync::Arc, time::SystemTime};
 
 /// Holds constants for bucket sizes for histograms.
@@ -36,25 +35,6 @@ impl Buckets {
     ];
 }
 
-/// Extension trait for histograms.
-pub trait HistogramExt {
-    /// Observe the duration between two points in time, in seconds.
-    ///
-    /// If the clock goes backwards, the duration is 0.
-    fn observe_between(&self, start: SystemTime, end: SystemTime);
-}
-
-impl HistogramExt for Histogram {
-    fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = end.duration_since(start).map_or(
-            // Clock went backwards
-            0.0,
-            |duration| duration.as_secs_f64(),
-        );
-        self.observe(duration);
-    }
-}
-
 /// A clonable handle to a histogram.
 pub trait HistogramHandle: Clone {
     /// Return the underlying histogram.
@@ -67,7 +47,7 @@ impl HistogramHandle for Histogram {
     }
 }
 
-impl HistogramHandle for crate::Registered<Histogram> {
+impl HistogramHandle for Registered<Histogram> {
     fn histogram(&self) -> &Histogram {
         self.metric()
     }

@@ -12,9 +12,7 @@ use crate::{
     Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
-};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
 use rand::{seq::IteratorRandom, Rng};
 use std::{

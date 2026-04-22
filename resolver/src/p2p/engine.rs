@@ -13,10 +13,11 @@ use commonware_p2p::{
     Blocker, Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    metrics::Histogram,
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, GaugeExt, Status},
+        status::{CounterExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner,
 };
@@ -26,7 +27,6 @@ use commonware_utils::{
     Span,
 };
 use futures::future::{self, Either};
-use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};

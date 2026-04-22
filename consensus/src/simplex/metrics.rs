@@ -1,5 +1,5 @@
+use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue};
 use commonware_utils::Array;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Peer {

@@ -21,11 +21,12 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
-    ContextCell, Handle, Metrics, Network, Registered, Spawner, Storage,
+    buffer::paged::CacheRef,
+    metrics::Gauge,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Registered, Spawner,
+    Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
-use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
@@ -112,7 +113,7 @@ where
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
-        let latest_epoch = context.register("latest_epoch", "current epoch", Gauge::default());
+        let latest_epoch = context.gauge("latest_epoch", "current epoch");
 
         (
             Self {

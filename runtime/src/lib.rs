@@ -47,7 +47,6 @@ stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
     use iobuf::PoolError;
-    use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
     use std::{
         future::Future,
@@ -65,6 +64,24 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
+    /// Re-exports of Prometheus types under the runtime namespace.
+    pub mod metrics {
+        pub use prometheus_client::{collector, encoding, registry};
+
+        pub use prometheus_client::encoding::*;
+        pub use prometheus_client::metrics::*;
+        pub use prometheus_client::registry::*;
+
+        pub use counter::Counter;
+        pub use family::Family;
+        pub use gauge::Gauge;
+        pub use histogram::Histogram;
+
+        /// Raw Prometheus counter family.
+        pub type CounterFamily<S> = family::Family<S, counter::Counter>;
+        /// Raw Prometheus gauge family.
+        pub type GaugeFamily<S> = family::Family<S, gauge::Gauge>;
+    }
 
     pub mod iobuf;
     pub use iobuf::{
@@ -441,12 +458,81 @@ stability_scope!(BETA {
         /// panics.
         ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
             &self,
             name: N,
             help: H,
             metric: M,
         ) -> Registered<M>;
+
+        /// Register a counter with the runtime.
+        fn counter<N: Into<String>, H: Into<String>>(
+            &self,
+            name: N,
+            help: H,
+        ) -> Registered<metrics::Counter> {
+            self.register(name, help, metrics::Counter::default())
+        }
+
+        /// Register a gauge with the runtime.
+        fn gauge<N: Into<String>, H: Into<String>>(
+            &self,
+            name: N,
+            help: H,
+        ) -> Registered<metrics::Gauge> {
+            self.register(name, help, metrics::Gauge::default())
+        }
+
+        /// Register a histogram with the runtime.
+        fn histogram<N: Into<String>, H: Into<String>, I>(
+            &self,
+            name: N,
+            help: H,
+            buckets: I,
+        ) -> Registered<metrics::Histogram>
+        where
+            I: IntoIterator<Item = f64>,
+        {
+            self.register(name, help, metrics::Histogram::new(buckets))
+        }
+
+        /// Register a counter family with the runtime.
+        fn counter_family<N: Into<String>, H: Into<String>, S>(
+            &self,
+            name: N,
+            help: H,
+        ) -> Registered<metrics::CounterFamily<S>>
+        where
+            S: Clone
+                + std::fmt::Debug
+                + std::hash::Hash
+                + Eq
+                + metrics::EncodeLabelSet
+                + Send
+                + Sync
+                + 'static,
+        {
+            self.register(name, help, metrics::CounterFamily::<S>::default())
+        }
+
+        /// Register a gauge family with the runtime.
+        fn gauge_family<N: Into<String>, H: Into<String>, S>(
+            &self,
+            name: N,
+            help: H,
+        ) -> Registered<metrics::GaugeFamily<S>>
+        where
+            S: Clone
+                + std::fmt::Debug
+                + std::hash::Hash
+                + Eq
+                + metrics::EncodeLabelSet
+                + Send
+                + Sync
+                + 'static,
+        {
+            self.register(name, help, metrics::GaugeFamily::<S>::default())
+        }
 
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;

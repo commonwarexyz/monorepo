@@ -9,12 +9,11 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Write,
     },
-    telemetry::metrics::status::GaugeExt,
+    metrics::{Counter, Gauge},
     Blob, BufferPool, Error as RError, Metrics, Registered, Storage,
 };
 use commonware_utils::hex;
 use futures::future::try_join_all;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
@@ -169,9 +168,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         // Initialize metrics
-        let tracked = context.register("tracked", "Number of blobs", Gauge::default());
-        let synced = context.register("synced", "Number of syncs", Counter::default());
-        let pruned = context.register("pruned", "Number of blobs pruned", Counter::default());
+        let tracked = context.gauge("tracked", "Number of blobs");
+        let synced = context.counter("synced", "Number of syncs");
+        let pruned = context.counter("pruned", "Number of blobs pruned");
         let _ = tracked.try_set(blobs.len());
 
         Ok(Self {

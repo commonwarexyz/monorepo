@@ -17,19 +17,16 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    metrics::{Counter, CounterFamily, GaugeFamily, Histogram},
     spawn_cell,
     telemetry::metrics::{
         histogram::{self, Buckets},
-        status::GaugeExt,
     },
     Clock, ContextCell, Handle, Metrics, Registered, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
     ordered::{Quorum, Set},
-};
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
@@ -72,8 +69,8 @@ where
 
     added: Registered<Counter>,
     verified: Registered<Counter>,
-    inbound_messages: Registered<Family<Inbound, Counter>>,
-    latest_vote: Registered<Family<Peer, Gauge>>,
+    inbound_messages: Registered<CounterFamily<Inbound>>,
+    latest_vote: Registered<GaugeFamily<Peer>>,
     latest_seen: Vec<View>,
     batch_size: Registered<Histogram>,
     verify_latency: histogram::Timed<E, Registered<Histogram>>,
@@ -93,43 +90,29 @@ where
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let participants = cfg.scheme.participants().clone();
         let participant_count = participants.len();
-        let added = context.register(
-            "added",
-            "number of messages added to the verifier",
-            Counter::default(),
-        );
-        let verified = context.register(
-            "verified",
-            "number of messages verified",
-            Counter::default(),
-        );
-        let inbound_messages = context.register(
-            "inbound_messages",
-            "number of inbound messages",
-            Family::<Inbound, Counter>::default(),
-        );
-        let latest_vote = context.register(
-            "latest_vote",
-            "view of latest vote received per peer",
-            Family::<Peer, Gauge>::default(),
-        );
+        let added = context.counter("added", "number of messages added to the verifier");
+        let verified = context.counter("verified", "number of messages verified");
+        let inbound_messages =
+            context.counter_family("inbound_messages", "number of inbound messages");
+        let latest_vote =
+            context.gauge_family("latest_vote", "view of latest vote received per peer");
         for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
-        let batch_size = context.register(
+        let batch_size = context.histogram(
             "batch_size",
             "number of messages in a signature verification batch",
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
+            [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
-        let verify_latency = context.register(
+        let verify_latency = context.histogram(
             "verify_latency",
             "latency of signature verification",
-            Histogram::new(Buckets::CRYPTOGRAPHY),
+            Buckets::CRYPTOGRAPHY,
         );
-        let recover_latency = context.register(
+        let recover_latency = context.histogram(
             "recover_latency",
             "certificate recover latency",
-            Histogram::new(Buckets::CRYPTOGRAPHY),
+            Buckets::CRYPTOGRAPHY,
         );
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());

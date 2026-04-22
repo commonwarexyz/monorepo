@@ -22,7 +22,7 @@
 //!
 //! This runtime enforces metrics are unique and well-formed:
 //! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
-//! - Metric names must be unique (panics on duplicate registration)
+//! - Re-registering the same metric key reuses the existing metric handle when the type matches
 //!
 //! # Example
 //!

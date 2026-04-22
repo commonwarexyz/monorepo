@@ -8,6 +8,7 @@ use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use std::{
     iter::{self, once},
     sync::Arc,
+    time::SystemTime,
 };
 
 /// Open Metrics [`Histogram`] to measure distributions of discrete events.
@@ -80,6 +81,14 @@ impl Histogram {
     /// Observe the given value.
     pub fn observe(&self, v: f64) {
         self.observe_and_bucket(v);
+    }
+
+    /// Observe the duration between two points in time, in seconds.
+    ///
+    /// If the clock goes backwards, the observed duration is `0`.
+    pub fn observe_between(&self, start: SystemTime, end: SystemTime) {
+        let duration = end.duration_since(start).map_or(0.0, |duration| duration.as_secs_f64());
+        self.observe(duration);
     }
 
     /// Observes the given value, returning the index of the first bucket the

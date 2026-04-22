@@ -9,8 +9,10 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_runtime::{Metrics, Registered};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use commonware_runtime::{
+    metrics::{Counter, Gauge},
+    Metrics, Registered,
+};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
@@ -91,7 +93,12 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
 
 impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
+    fn create(
+        keys: &Gauge,
+        items: &Gauge,
+        vacant: VacantEntry<'_, T::Key, Record<V>>,
+        v: V,
+    ) {
         keys.inc();
         items.inc();
         vacant.insert(Record {
@@ -105,13 +112,9 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
         Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-            keys: ctx.register(
-                "keys",
-                "Number of translated keys in the index",
-                Gauge::default(),
-            ),
-            items: ctx.register("items", "Number of items in the index", Gauge::default()),
-            pruned: ctx.register("pruned", "Number of items pruned", Counter::default()),
+            keys: ctx.gauge("keys", "Number of translated keys in the index"),
+            items: ctx.gauge("items", "Number of items in the index"),
+            pruned: ctx.counter("pruned", "Number of items pruned"),
         }
     }
 }

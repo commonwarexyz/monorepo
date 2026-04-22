@@ -1,7 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::Metrics;
+use commonware_runtime::{metrics::Metric, Metrics};
 use criterion::criterion_main;
-use prometheus_client::registry::Metric;
 
 mod hashmap_insert;
 mod hashmap_insert_fixed;

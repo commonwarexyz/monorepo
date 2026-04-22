@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
+    telemetry::metrics::status::{CounterExt, Status},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{

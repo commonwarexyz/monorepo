@@ -1,8 +1,8 @@
 use commonware_runtime::{
+    metrics::{Counter, Gauge, Histogram},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
@@ -24,11 +24,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let tip = context.register(
-            "tip",
-            "Lowest height without a certificate",
-            Gauge::default(),
-        );
+        let tip = context.gauge("tip", "Lowest height without a certificate");
         let digest = context.register(
             "digest",
             "Number of digests returned by the automaton by status",
@@ -39,20 +35,16 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of Ack messages processed by status",
             status::Counter::default(),
         );
-        let certificates = context.register(
-            "certificates",
-            "Number of certificates produced",
-            Counter::default(),
-        );
+        let certificates = context.counter("certificates", "Number of certificates produced");
         let rebroadcast = context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
             status::Counter::default(),
         );
-        let digest_duration = context.register(
+        let digest_duration = context.histogram(
             "digest_duration",
             "Histogram of application digest durations",
-            Histogram::new(histogram::Buckets::LOCAL),
+            histogram::Buckets::LOCAL,
         );
         let clock = Arc::new(context);
 

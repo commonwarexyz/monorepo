@@ -1,7 +1,6 @@
 //! Metrics for [super::Queue].
 
-use commonware_runtime::{Metrics as RuntimeMetrics, Registered};
-use prometheus_client::metrics::gauge::Gauge;
+use commonware_runtime::{metrics::Gauge, Metrics as RuntimeMetrics, Registered};
 
 /// Metrics for [super::Queue].
 pub struct Metrics {
@@ -19,9 +18,9 @@ impl Metrics {
     /// Metric names will be prefixed with the context's label.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
-            tip: context.register("tip", "Total enqueued items", Gauge::default()),
-            floor: context.register("floor", "Acknowledged items", Gauge::default()),
-            next: context.register("next", "Next item to dequeue", Gauge::default()),
+            tip: context.gauge("tip", "Total enqueued items"),
+            floor: context.gauge("floor", "Acknowledged items"),
+            next: context.gauge("next", "Next item to dequeue"),
         }
     }
 }

@@ -14,14 +14,14 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Registered, Spawner,
+    metrics::CounterFamily, spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Registered,
+    Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, ring},
     NZUsize,
 };
 use futures::SinkExt;
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -33,7 +33,7 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
-    messages_dropped: Registered<Family<metrics::Message, Counter>>,
+    messages_dropped: Registered<CounterFamily<metrics::Message>>,
 }
 
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
@@ -45,11 +45,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
         let pool = context.network_buffer_pool().clone();
 
         // Create metrics
-        let messages_dropped = context.register(
-            "messages_dropped",
-            "messages dropped",
-            Family::<metrics::Message, Counter>::default(),
-        );
+        let messages_dropped = context.counter_family("messages_dropped", "messages dropped");
 
         // Create actor
         (

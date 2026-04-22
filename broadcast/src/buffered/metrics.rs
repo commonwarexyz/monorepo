@@ -1,8 +1,9 @@
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics, Registered};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+use commonware_runtime::{
+    metrics::{CounterFamily, EncodeLabelSet, Gauge},
+    telemetry::metrics::status,
+    Metrics as RuntimeMetrics,
+    Registered,
 };
 
 /// Label for sequencer height metrics
@@ -24,7 +25,7 @@ impl SequencerLabel {
 /// Metrics for the [super::Engine]
 pub struct Metrics {
     /// Number of broadcasts received by peer
-    pub peer: Registered<Family<SequencerLabel, Counter>>,
+    pub peer: Registered<CounterFamily<SequencerLabel>>,
     /// Number of received messages by status
     pub receive: Registered<status::Counter>,
     /// Number of `subscribe` requests by status
@@ -40,11 +41,7 @@ impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         Self {
-            peer: context.register(
-                "peer",
-                "Number of broadcasts received by peer",
-                Family::<SequencerLabel, Counter>::default(),
-            ),
+            peer: context.counter_family("peer", "Number of broadcasts received by peer"),
             receive: context.register(
                 "receive",
                 "Number of received messages by status",
@@ -60,11 +57,7 @@ impl Metrics {
                 "Number of `get` requests by status",
                 status::Counter::default(),
             ),
-            waiters: context.register(
-                "waiters",
-                "Number of digests being awaited",
-                Gauge::default(),
-            ),
+            waiters: context.gauge("waiters", "Number of digests being awaited"),
         }
     }
 }

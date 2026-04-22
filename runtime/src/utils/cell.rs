@@ -1,6 +1,5 @@
-use crate::{signal, Error, Handle};
+use crate::{metrics::Metric, signal, Error, Handle};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,

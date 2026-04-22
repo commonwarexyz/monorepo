@@ -32,10 +32,11 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
+    metrics::Histogram,
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, GaugeExt, Status},
+        status::{CounterExt, Status},
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
 };
@@ -55,7 +56,7 @@ use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
 struct Verify<C: PublicKey, D: Digest, E: Clock> {
-    timer: histogram::Timer<E, Registered<prometheus_client::metrics::histogram::Histogram>>,
+    timer: histogram::Timer<E, Registered<Histogram>>,
     context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
@@ -197,8 +198,7 @@ pub struct Engine<
     metrics: metrics::Metrics<E>,
 
     // The timer of my last new proposal
-    propose_timer:
-        Option<histogram::Timer<E, Registered<prometheus_client::metrics::histogram::Histogram>>>,
+    propose_timer: Option<histogram::Timer<E, Registered<Histogram>>>,
 }
 
 impl<

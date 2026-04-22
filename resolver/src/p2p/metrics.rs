@@ -1,8 +1,8 @@
 use commonware_runtime::{
+    metrics::{Gauge, Histogram},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
-use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
 /// Metrics for the peer actor.
@@ -30,26 +30,19 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let fetch_pending = context.register(
+        let fetch_pending = context.gauge(
             "fetch_pending",
             "Current number of pending fetch requests",
-            Gauge::default(),
         );
-        let fetch_active = context.register(
+        let fetch_active = context.gauge(
             "fetch_active",
             "Current number of active fetch requests",
-            Gauge::default(),
         );
-        let serve_processing = context.register(
+        let serve_processing = context.gauge(
             "serve_processing",
             "Current number of serves currently processing",
-            Gauge::default(),
         );
-        let peers_blocked = context.register(
-            "peers_blocked",
-            "Current number of blocked peers",
-            Gauge::default(),
-        );
+        let peers_blocked = context.gauge("peers_blocked", "Current number of blocked peers");
         let fetch = context.register(
             "fetch",
             "Number of fetches by status",
@@ -65,15 +58,15 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of serves by status",
             status::Counter::default(),
         );
-        let serve_duration_registered = context.register(
+        let serve_duration_registered = context.histogram(
             "serve_duration",
             "Histogram of successful serves",
-            Histogram::new(histogram::Buckets::LOCAL),
+            histogram::Buckets::LOCAL,
         );
-        let fetch_duration_registered = context.register(
+        let fetch_duration_registered = context.histogram(
             "fetch_duration",
             "Histogram of successful fetches",
-            Histogram::new(histogram::Buckets::NETWORK),
+            histogram::Buckets::NETWORK,
         );
         let clock = Arc::new(context);
 

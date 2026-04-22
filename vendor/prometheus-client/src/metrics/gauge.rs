@@ -217,6 +217,44 @@ impl Atomic<i64> for AtomicI64 {
 }
 
 #[cfg(target_has_atomic = "64")]
+impl Gauge<i64, AtomicI64> {
+    /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy.
+    ///
+    /// Returns the previous value.
+    pub fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error> {
+        let val = val.try_into()?;
+        Ok(self.set(val))
+    }
+
+    /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
+    ///
+    /// Returns the previous value.
+    pub fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
+        let val = val.try_into()?;
+        Ok(self.inner().fetch_max(val, Ordering::Relaxed))
+    }
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+impl Gauge<i32, AtomicI32> {
+    /// Sets the [`Gauge`] using a value convertible to `i32`, if conversion is not lossy.
+    ///
+    /// Returns the previous value.
+    pub fn try_set<T: TryInto<i32>>(&self, val: T) -> Result<i32, T::Error> {
+        let val = val.try_into()?;
+        Ok(self.set(val))
+    }
+
+    /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
+    ///
+    /// Returns the previous value.
+    pub fn try_set_max<T: TryInto<i32> + Copy>(&self, val: T) -> Result<i32, T::Error> {
+        let val = val.try_into()?;
+        Ok(self.inner().fetch_max(val, Ordering::Relaxed))
+    }
+}
+
+#[cfg(target_has_atomic = "64")]
 impl Atomic<u64> for AtomicU64 {
     fn inc(&self) -> u64 {
         self.inc_by(1)

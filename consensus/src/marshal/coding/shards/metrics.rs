@@ -1,13 +1,12 @@
 //! Metrics for the shard engine.
 
 use commonware_runtime::{
-    telemetry::metrics::histogram::Buckets, Metrics as MetricsTrait, Registered,
+    metrics::{Counter, CounterFamily, EncodeLabelSet, Gauge, Histogram},
+    telemetry::metrics::histogram::Buckets,
+    Metrics as MetricsTrait,
+    Registered,
 };
 use commonware_utils::Array;
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
-};
 
 /// Label for per-peer metrics.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -32,7 +31,7 @@ pub struct ShardMetrics {
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Registered<Gauge>,
     /// Number of shards received per peer.
-    pub shards_received: Registered<Family<Peer, Counter>>,
+    pub shards_received: Registered<CounterFamily<Peer>>,
     /// Total number of blocks successfully reconstructed.
     pub blocks_reconstructed_total: Registered<Counter>,
     /// Total number of block reconstruction failures.
@@ -42,35 +41,30 @@ pub struct ShardMetrics {
 impl ShardMetrics {
     /// Create and register metrics with the given context.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let erasure_decode_duration = context.register(
+        let erasure_decode_duration = context.histogram(
             "erasure_decode_duration",
             "Histogram of erasure decoding duration in seconds",
-            Histogram::new(Buckets::LOCAL),
+            Buckets::LOCAL,
         );
-        let reconstructed_blocks_cache_count = context.register(
+        let reconstructed_blocks_cache_count = context.gauge(
             "reconstructed_blocks_cache_count",
             "Number of blocks in the reconstructed blocks cache",
-            Gauge::default(),
         );
-        let reconstruction_states_count = context.register(
+        let reconstruction_states_count = context.gauge(
             "reconstruction_states_count",
             "Number of active reconstruction states",
-            Gauge::default(),
         );
-        let shards_received = context.register(
+        let shards_received = context.counter_family(
             "shards_received",
             "Number of shards received per peer",
-            Family::<Peer, Counter>::default(),
         );
-        let blocks_reconstructed_total = context.register(
+        let blocks_reconstructed_total = context.counter(
             "blocks_reconstructed_total",
             "Total number of blocks successfully reconstructed",
-            Counter::default(),
         );
-        let reconstruction_failures_total = context.register(
+        let reconstruction_failures_total = context.counter(
             "reconstruction_failures_total",
             "Total number of block reconstruction failures",
-            Counter::default(),
         );
 
         Self {

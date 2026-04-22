@@ -1,10 +1,6 @@
 //! Recording metrics with a status.
 
-use prometheus_client::{
-    encoding::{EncodeLabelSet, EncodeLabelValue},
-    metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
-};
-use std::sync::atomic::Ordering;
+use crate::metrics::{EncodeLabelSet, EncodeLabelValue};
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -30,7 +26,7 @@ pub enum Status {
 }
 
 /// A counter metric with a status label.
-pub type Counter = Family<Label, DefaultCounter>;
+pub type Counter = crate::metrics::CounterFamily<Label>;
 
 /// Trait providing convenience methods for `Counter`.
 pub trait CounterExt {
@@ -81,29 +77,5 @@ impl CounterGuard {
 impl Drop for CounterGuard {
     fn drop(&mut self) {
         self.metric.inc(self.status);
-    }
-}
-
-/// Trait providing convenience methods for `Gauge`.
-pub trait GaugeExt {
-    /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy, returning the previous value if successful.
-    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error>;
-
-    /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
-    /// Returns the previous value.
-    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error>;
-}
-
-impl GaugeExt for Gauge {
-    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error> {
-        // Prevent casting if conversion is lossy
-        let val = val.try_into()?;
-        let out = self.set(val);
-        Ok(out)
-    }
-
-    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
-        let val = val.try_into()?;
-        Ok(self.inner().fetch_max(val, Ordering::Relaxed))
     }
 }

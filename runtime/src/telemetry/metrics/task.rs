@@ -1,6 +1,6 @@
 //! Recording metrics related to tasks.
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
+use crate::metrics::{EncodeLabelSet, EncodeLabelValue};
 
 /// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

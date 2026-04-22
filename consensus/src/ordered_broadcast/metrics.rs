@@ -1,11 +1,8 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
+    metrics::{Counter, EncodeLabelSet, GaugeFamily, Histogram},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
-};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
 use std::sync::Arc;
 
@@ -28,7 +25,7 @@ impl SequencerLabel {
 /// Metrics for the [super::Engine]
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Height per sequencer
-    pub sequencer_heights: Registered<Family<SequencerLabel, Gauge>>,
+    pub sequencer_heights: Registered<GaugeFamily<SequencerLabel>>,
     /// Number of acks processed by status
     pub acks: Registered<status::Counter>,
     /// Number of nodes processed by status
@@ -50,11 +47,8 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let sequencer_heights = context.register(
-            "sequencer_heights",
-            "Height per sequencer tracked",
-            Family::default(),
-        );
+        let sequencer_heights =
+            context.gauge_family("sequencer_heights", "Height per sequencer tracked");
         let acks = context.register(
             "acks",
             "Number of acks processed by status",
@@ -70,11 +64,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of application verifications by status",
             status::Counter::default(),
         );
-        let certificates = context.register(
-            "certificates",
-            "Number of certificates produced",
-            Counter::default(),
-        );
+        let certificates = context.counter("certificates", "Number of certificates produced");
         let propose = context.register(
             "propose",
             "Number of propose attempts by status",
@@ -85,15 +75,15 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of rebroadcast attempts by status",
             status::Counter::default(),
         );
-        let verify_duration = context.register(
+        let verify_duration = context.histogram(
             "verify_duration",
             "Histogram of application verification durations",
-            Histogram::new(histogram::Buckets::LOCAL),
+            histogram::Buckets::LOCAL,
         );
-        let e2e_duration = context.register(
+        let e2e_duration = context.histogram(
             "e2e_duration",
             "Histogram of time from new proposal to certificate generation",
-            Histogram::new(histogram::Buckets::NETWORK),
+            histogram::Buckets::NETWORK,
         );
         let clock = Arc::new(context);
 

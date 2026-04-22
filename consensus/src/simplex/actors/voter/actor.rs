@@ -23,8 +23,9 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Registered, Spawner, Storage,
+    buffer::paged::CacheRef,
+    metrics::{CounterFamily, Histogram},
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -36,7 +37,6 @@ use futures::{
     future::{ready, Either},
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
     num::NonZeroUsize,
@@ -119,7 +119,7 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    outbound_messages: Registered<Family<Outbound, Counter>>,
+    outbound_messages: Registered<CounterFamily<Outbound>>,
     notarization_latency: Registered<Histogram>,
     finalization_latency: Registered<Histogram>,
 }
@@ -142,20 +142,17 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = context.register(
-            "outbound_messages",
-            "number of outbound messages",
-            Family::<Outbound, Counter>::default(),
-        );
-        let notarization_latency = context.register(
+        let outbound_messages =
+            context.counter_family("outbound_messages", "number of outbound messages");
+        let notarization_latency = context.histogram(
             "notarization_latency",
             "notarization latency",
-            Histogram::new(LATENCY),
+            LATENCY,
         );
-        let finalization_latency = context.register(
+        let finalization_latency = context.histogram(
             "finalization_latency",
             "finalization latency",
-            Histogram::new(LATENCY),
+            LATENCY,
         );
 
         // Initialize store

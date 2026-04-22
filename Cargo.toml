@@ -172,6 +172,7 @@ zstd = "0.13.2"
 
 [patch.crates-io]
 prometheus-client = { path = "vendor/prometheus-client" }
+prometheus-client-derive-encode = { path = "vendor/prometheus-client-derive-encode" }
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

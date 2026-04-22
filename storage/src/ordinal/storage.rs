@@ -6,11 +6,11 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
+    metrics::Counter,
     Blob, Buf, BufMut, BufferPooler, Error as RError, Registered,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
-use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
@@ -232,11 +232,11 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             .collect();
 
         // Initialize metrics
-        let puts = context.register("puts", "Number of put calls", Counter::default());
-        let gets = context.register("gets", "Number of get calls", Counter::default());
-        let has = context.register("has", "Number of has calls", Counter::default());
-        let syncs = context.register("syncs", "Number of sync calls", Counter::default());
-        let pruned = context.register("pruned", "Number of pruned blobs", Counter::default());
+        let puts = context.counter("puts", "Number of put calls");
+        let gets = context.counter("gets", "Number of get calls");
+        let has = context.counter("has", "Number of has calls");
+        let syncs = context.counter("syncs", "Number of sync calls");
+        let pruned = context.counter("pruned", "Number of pruned blobs");
 
         Ok(Self {
             context,

@@ -1,6 +1,6 @@
 use crate::Channel;
+use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use commonware_utils::Array;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use std::fmt::Write;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

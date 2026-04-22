@@ -6,10 +6,9 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, BufferPooler, Registered};
+use commonware_runtime::{metrics::Counter, Buf, BufMut, BufferPooler, Registered};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
-use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -175,9 +174,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         .await?;
 
         // Initialize metrics
-        let gets = context.register("gets", "Number of gets performed", Counter::default());
-        let has = context.register("has", "Number of has performed", Counter::default());
-        let syncs = context.register("syncs", "Number of syncs called", Counter::default());
+        let gets = context.counter("gets", "Number of gets performed");
+        let has = context.counter("has", "Number of has performed");
+        let syncs = context.counter("syncs", "Number of syncs called");
 
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),

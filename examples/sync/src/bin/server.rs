@@ -5,6 +5,7 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
+    metrics::Counter,
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Registered, Runner,
     SinkOf, Spawner, Storage, StreamOf,
 };
@@ -23,7 +24,6 @@ use commonware_utils::{
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
-use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -79,16 +79,11 @@ impl<DB> State<DB> {
     {
         Self {
             database: AsyncRwLock::new(database),
-            request_counter: context.register(
-                "requests",
-                "Number of requests received",
-                Counter::default(),
-            ),
-            error_counter: context.register("error", "Number of errors", Counter::default()),
-            ops_counter: context.register(
+            request_counter: context.counter("requests", "Number of requests received"),
+            error_counter: context.counter("error", "Number of errors"),
+            ops_counter: context.counter(
                 "ops_added",
                 "Number of operations added since server start, not including the initial operations",
-                Counter::default(),
             ),
             last_operation_time: Mutex::new(SystemTime::now()),
         }
