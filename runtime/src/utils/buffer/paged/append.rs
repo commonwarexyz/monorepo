@@ -857,12 +857,6 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Implementation note: rewinding the blob across a page boundary potentially results in
-        // stale data remaining in the page cache. We don't proactively purge the data
-        // within this function since it would be inaccessible anyway. Instead we ensure it is
-        // always updated should the blob grow back to the point where we have new data for the same
-        // page, if any old data hasn't expired naturally by then.
-
         let logical_page_size = self.cache_ref.page_size();
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
@@ -888,6 +882,12 @@ impl<B: Blob> Append<B> {
         // Resize the underlying blob.
         blob_guard.blob.resize(new_physical_size).await?;
         blob_guard.partial_page_state = None;
+
+        // Evict cached pages at or beyond the new full-page boundary. The page at `full_pages` (if
+        // partial) is now owned by the tip buffer, and anything above is beyond the new logical
+        // size. Leaving their pre-resize contents in the cache lets `try_read_sync` (which bypasses
+        // the tip buffer) observe stale bytes once the tip is repopulated.
+        self.cache_ref.invalidate_from(self.id, full_pages);
 
         // Update blob state and buffer based on the desired logical size. The partial page data is
         // read with CRC validation; the validated length may exceed partial_bytes (reflecting the

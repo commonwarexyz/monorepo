@@ -137,6 +137,12 @@ struct Cache {
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
 struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
+    ///
+    /// # Invariant
+    ///
+    /// Every live cache slot has a matching entry in `index`. Slots that have been invalidated (see
+    /// [Cache::invalidate_from]) retain their stale key here but are no longer reachable via
+    /// `index` and will be reclaimed first by the Clock evictor.
     key: (u64, u64),
 
     /// A bit indicating whether this page was recently referenced.
@@ -425,6 +431,13 @@ impl CacheRef {
 
         buf.len()
     }
+
+    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
+    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
+    /// buffer (or future writes) now owns.
+    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
+        self.cache.write().invalidate_from(blob_id, start_page);
+    }
 }
 
 impl Cache {
@@ -525,7 +538,8 @@ impl Cache {
             return;
         }
 
-        // Cache full: find slot to evict using Clock algorithm
+        // Cache full: find slot to evict using Clock algorithm. Invalidated slots (`referenced =
+        // false`, stale `entry.key` no longer in `index`) are reclaimed on the first sweep.
         while self.entries[self.clock].referenced.load(Ordering::Relaxed) {
             self.entries[self.clock]
                 .referenced
@@ -533,10 +547,11 @@ impl Cache {
             self.clock = (self.clock + 1) % self.entries.len();
         }
 
-        // Evict and replace
+        // Evict and replace. Unchecked `remove`: for a live slot the old key is in `index`;
+        // for an invalidated slot its stale `entry.key` is not, and `remove` is a no-op.
         let slot = self.clock;
         let entry = &mut self.entries[slot];
-        assert!(self.index.remove(&entry.key).is_some());
+        self.index.remove(&entry.key);
         self.index.insert(key, slot);
         entry.key = key;
         entry.referenced.store(true, Ordering::Relaxed);
@@ -544,6 +559,21 @@ impl Cache {
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
+    }
+
+    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. The slots keep their
+    /// (now stale) `entry.key` so the Clock evictor can reclaim them; `read_at` and the
+    /// duplicate-update path never reach them because `index` no longer maps to them.
+    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
+        self.index.retain(|&(bid, page_num), &mut slot| {
+            if bid != blob_id || page_num < start_page {
+                return true;
+            }
+            self.entries[slot]
+                .referenced
+                .store(false, Ordering::Relaxed);
+            false
+        });
     }
 }
 
