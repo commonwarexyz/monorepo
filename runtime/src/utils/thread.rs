@@ -138,7 +138,7 @@ where
 #[cfg(target_os = "linux")]
 pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
     let word_bits = libc::c_ulong::BITS as usize;
-    let mut words = 1usize;
+    let mut words = 1;
 
     // Probe `sched_getaffinity` with an exponentially growing buffer until the
     // kernel either accepts it or reports a non-retryable error.
@@ -169,12 +169,9 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
                 // larger buffer. Cap the probe size so invalid environments
                 // cannot force unbounded growth.
                 words = words.checked_mul(2)?;
-                if words
+                words
                     .checked_mul(word_bits)
-                    .is_none_or(|bits| bits > MAX_AFFINITY_CPUS)
-                {
-                    return None;
-                }
+                    .map(|bits| bits > MAX_AFFINITY_CPUS)?;
             }
             _ => return None,
         }
