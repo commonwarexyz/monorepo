@@ -1106,7 +1106,7 @@ mod tests {
     use crate::{IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
-    use prometheus_client::registry::Registry;
+    use crate::metrics::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
         io::Write,

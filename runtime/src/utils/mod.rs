@@ -356,7 +356,7 @@ struct MetricFamily {
 /// Manages runtime-internal metrics plus user-registered metrics with explicit lifetimes.
 ///
 /// Runtime internals are stored permanently in the same table as user metrics, but
-/// registered through a prefixed scope. User metrics additionally get a drop-based
+/// registered with a fixed prefix. User metrics additionally get a drop-based
 /// registration handle so they can be unregistered when the owning handle drops.
 pub(crate) struct Registry {
     metrics: Vec<Option<MetricEntry>>,
@@ -592,23 +592,30 @@ impl Registry {
         else {
             return;
         };
-        self.keys
-            .remove(&(metric.family_name.clone(), metric.attributes.clone()));
+        let MetricEntry {
+            family_name,
+            attributes,
+            family_index,
+            ..
+        } = metric;
+        let key = (family_name, attributes);
+        self.keys.remove(&key);
+        let (family_name, _) = key;
         let (swapped_metric_id, remove_family) = {
             let family = self
                 .families
-                .get_mut(&metric.family_name)
+                .get_mut(&family_name)
                 .expect("family missing during unregister");
-            let removed = family.metric_ids.swap_remove(metric.family_index);
+            let removed = family.metric_ids.swap_remove(family_index);
             debug_assert_eq!(removed, id, "family index mismatch during unregister");
-            let swapped = family.metric_ids.get(metric.family_index).copied();
+            let swapped = family.metric_ids.get(family_index).copied();
             (swapped, family.metric_ids.is_empty())
         };
         if let Some(swapped_metric_id) = swapped_metric_id {
-            self.metric_mut(swapped_metric_id).family_index = metric.family_index;
+            self.metric_mut(swapped_metric_id).family_index = family_index;
         }
         if remove_family {
-            self.families.remove(&metric.family_name);
+            self.families.remove(&family_name);
         }
         self.free_metric_ids.push(id);
     }
@@ -663,10 +670,9 @@ impl MetricScope<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Metrics, Runner};
+    use crate::{deterministic, metrics::Counter, metrics::Gauge, Metrics, Runner, Spawner};
     use commonware_macros::test_traced;
-    use futures::task::waker;
-    use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+    use futures::{future, task::waker};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
@@ -739,9 +745,6 @@ mod tests {
 
     #[test_traced]
     fn test_count_running_tasks() {
-        use crate::{Metrics, Runner, Spawner};
-        use futures::future;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initially no tasks with "worker" prefix

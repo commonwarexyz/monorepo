@@ -310,13 +310,13 @@ stability_scope!(BETA {
     /// not all feed into the same sinks:
     ///
     /// - `name` (set by [`Metrics::with_label`]): prefix applied to metrics
-    ///   you [`register`](Metrics::register) on this context; also populates
+    ///   you [`register`](Metrics::register) on this context. It also populates
     ///   the `name` field of runtime-internal task metrics
     ///   (`runtime_tasks_spawned`, `runtime_tasks_running`).
     /// - `attributes` (set by [`Metrics::with_attribute`]): Prometheus label
-    ///   dimensions on metrics you `register` on this context; also emitted
-    ///   as OpenTelemetry attributes on the per-task tracing span when, and
-    ///   only when, [`Metrics::with_span`] is set on the spawn. Runtime
+    ///   dimensions on metrics you `register` on this context. They are also
+    ///   emitted as OpenTelemetry attributes on the per-task tracing span when,
+    ///   and only when, [`Metrics::with_span`] is set on the spawn. Runtime
     ///   task metrics intentionally ignore attributes to keep their
     ///   cardinality bounded.
     /// - `span` (set by [`Metrics::with_span`]): wraps the next spawned task
@@ -440,7 +440,7 @@ stability_scope!(BETA {
         /// or any of the `Spawner` builders: each such builder
         /// resets the flag so the caller must opt in again for the next spawn.
         ///
-        /// Enabling the span only affects tracing; it does not change which metrics
+        /// Enabling the span only affects tracing. It does not change which metrics
         /// are registered, nor does it widen the cardinality of runtime task metrics.
         fn with_span(&self) -> Self;
 
@@ -920,6 +920,9 @@ stability_scope!(BETA, cfg(feature = "external") {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{
+        Counter, EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, Family, LabelSetEncoder,
+    };
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
@@ -931,10 +934,6 @@ mod tests {
     use futures::{
         future::{pending, ready},
         join, pin_mut, FutureExt,
-    };
-    use prometheus_client::{
-        encoding::{EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, LabelSetEncoder},
-        metrics::{counter::Counter, family::Family},
     };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
