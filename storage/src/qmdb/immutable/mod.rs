@@ -517,10 +517,10 @@ where
     /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
     /// - [`Error::FloorRegressed`] if the batch's inactivity floor is below the
     ///   database's current floor.
-    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor is at or
-    ///   beyond its total operation count. The maximum valid floor is
-    ///   `total_size - 1` (the commit operation's location); a floor equal to
-    ///   `total_size` would permit pruning the commit itself.
+    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor exceeds its
+    ///   commit operation's location. The maximum valid floor is
+    ///   `total_size - 1` (the commit operation's location); a floor past the
+    ///   commit would permit pruning the commit itself.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Immutable::commit`] or
@@ -546,10 +546,11 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        if batch.new_inactivity_floor_loc >= Location::new(batch.total_size) {
+        let tip_commit_loc = Location::new(batch.total_size - 1);
+        if batch.new_inactivity_floor_loc > tip_commit_loc {
             return Err(Error::FloorBeyondSize(
                 batch.new_inactivity_floor_loc,
-                Location::new(batch.total_size),
+                tip_commit_loc,
             ));
         }
         let start_loc = Location::new(db_size);
@@ -2474,8 +2475,8 @@ pub(super) mod test {
                     .merkleize(&db, None, Location::new(100)),
             )
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, total))
-                if floor == Location::new(100) && total == Location::new(3)));
+        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
+                if floor == Location::new(100) && commit == Location::new(2)));
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -2489,8 +2490,8 @@ pub(super) mod test {
                     .merkleize(&db, None, Location::new(3)),
             )
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, total))
-                if floor == Location::new(3) && total == Location::new(3)));
+        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
+                if floor == Location::new(3) && commit == Location::new(2)));
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
         db.apply_batch(

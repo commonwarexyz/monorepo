@@ -782,7 +782,7 @@ pub(crate) mod harnesses {
     use super::*;
 
     type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256>;
-    type VariableOp = Operation<crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+    type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
 
     fn variable_config(
         suffix: &str,
@@ -812,7 +812,7 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn variable_create_ops_seeded(n: usize, seed: u64) -> Vec<VariableOp> {
+    fn variable_create_ops_seeded<F: Family>(n: usize, seed: u64) -> Vec<VariableOp<F>> {
         let mut rng = test_rng_seeded(seed);
         let mut ops = Vec::with_capacity(n);
         for _ in 0..n {
@@ -824,23 +824,30 @@ pub(crate) mod harnesses {
         ops
     }
 
+    /// Applies the given operations and commits the database, advancing the inactivity floor to
+    /// the new commit location so sync tests that exercise pruning can do so freely.
     async fn variable_apply_ops<F: Family>(
         mut db: VariableDb<F>,
-        ops: Vec<VariableOp>,
+        ops: Vec<VariableOp<F>>,
         metadata: Option<Vec<u8>>,
     ) -> VariableDb<F> {
+        let appends = ops
+            .iter()
+            .filter(|op| matches!(op, Operation::Append(_)))
+            .count() as u64;
+        let new_commit = Location::new(db.last_commit_loc().as_u64() + 1 + appends);
         let mut batch = db.new_batch();
         for op in ops {
             match op {
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(_) => {
+                Operation::Commit(_, _) => {
                     panic!("Commit operation not supported in apply_ops");
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata);
+        let merkleized = batch.merkleize(&db, metadata, new_commit);
         db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -857,11 +864,11 @@ pub(crate) mod harnesses {
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
-            variable_create_ops_seeded(n, 0)
+            variable_create_ops_seeded::<F>(n, 0)
         }
 
         fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>> {
-            variable_create_ops_seeded(n, seed)
+            variable_create_ops_seeded::<F>(n, seed)
         }
 
         fn sample_metadata() -> Self::Value {
@@ -920,7 +927,7 @@ pub(crate) mod harnesses {
         fn op_value(op: &OpOf<Self>) -> Option<&Self::Value> {
             match op {
                 Operation::Append(value) => Some(value),
-                Operation::Commit(_) => None,
+                Operation::Commit(_, _) => None,
             }
         }
     }

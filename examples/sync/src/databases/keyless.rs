@@ -1,9 +1,9 @@
 //! Keyless database types and helpers for the sync example.
 //!
 //! A `keyless` database is append-only: operations are stored by location rather than by key.
-//! It supports `Append(value)` and `Commit(metadata)` operations. For sync, the engine targets
-//! the Merkle root over all operations, and the client reconstructs the same state by replaying
-//! the fetched operations.
+//! It supports `Append(value)` and `Commit(metadata, floor)` operations. For sync, the engine
+//! targets the Merkle root over all operations, and the client reconstructs the same state by
+//! replaying the fetched operations.
 
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
@@ -28,7 +28,7 @@ use tracing::error;
 pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher>;
 
 /// Operation type alias.
-pub type Operation = fixed::Operation<Value>;
+pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
 pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)) -> fixed::Config {
@@ -56,10 +56,22 @@ pub fn create_config(context: &(impl BufferPooler + commonware_runtime::Metrics)
 }
 
 /// Create deterministic test operations for demonstration purposes.
-/// Generates Append operations and periodic Commit operations.
+///
+/// Generates Append operations and periodic Commit operations, advancing the inactivity
+/// floor at each commit to the *previous* commit's location. This models a realistic
+/// application that declares older commits inactive over time (enabling pruning) while
+/// always keeping the most recent commit readable.
 pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
+
+    // The DB's initial commit lands at location 0 before any of these ops are applied.
+    // `op_count` tracks the total ops that will exist on disk (including this initial commit
+    // and everything we push below). `prev_commit_loc` tracks the last commit's location
+    // and is used as the next commit's floor — always <= the next commit's own location, so
+    // the per-commit floor bound is satisfied.
+    let mut op_count: u64 = 1;
+    let mut prev_commit_loc: u64 = 0;
 
     for i in 0..count {
         let value = {
@@ -69,14 +81,20 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         };
 
         operations.push(Operation::Append(value));
+        op_count += 1;
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            operations.push(Operation::Commit(None, Location::new(prev_commit_loc)));
+            prev_commit_loc = op_count;
+            op_count += 1;
         }
     }
 
-    // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
+    // Always end with a commit, floor set to the previous commit's location.
+    operations.push(Operation::Commit(
+        Some(Sha256::fill(1)),
+        Location::new(prev_commit_loc),
+    ));
     operations
 }
 
@@ -107,8 +125,8 @@ where
                 Operation::Append(value) => {
                     batch = batch.append(value);
                 }
-                Operation::Commit(metadata) => {
-                    let merkleized = batch.merkleize(self, metadata);
+                Operation::Commit(metadata, floor) => {
+                    let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
@@ -127,7 +145,7 @@ where
     }
 
     async fn sync_boundary(&self) -> Location {
-        self.sync_boundary().await
+        self.sync_boundary()
     }
 
     async fn historical_proof(
@@ -161,7 +179,7 @@ mod tests {
         let ops = <KeylessDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::Commit(Some(_)) = &ops[5] {
+        if let Operation::Commit(Some(_), _) = &ops[5] {
             // ok
         } else {
             panic!("last operation should be a commit with metadata");

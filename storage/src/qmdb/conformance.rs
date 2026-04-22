@@ -250,11 +250,12 @@ macro_rules! apply_sets {
 /// Apply a batch of keyless appends to the database.
 macro_rules! apply_appends {
     ($db:ident, $vals:expr) => {{
+        let floor = $db.inactivity_floor_loc();
         let mut batch = $db.new_batch();
         for v in $vals {
             batch = batch.append(v);
         }
-        let merkleized = batch.merkleize(&$db, None);
+        let merkleized = batch.merkleize(&$db, None, floor);
         $db.apply_batch(merkleized).await.unwrap();
     }};
 }
