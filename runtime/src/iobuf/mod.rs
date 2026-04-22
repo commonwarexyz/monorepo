@@ -2366,8 +2366,9 @@ mod tests {
                 let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
-        let mut registry = prometheus_client::registry::Registry::default();
-        BufferPool::new(pool_config, &mut registry)
+        let mut registry = crate::utils::Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test");
+        BufferPool::new(pool_config, &mut scope)
     }
 
     fn assert_encode_with_pool_matches_encode<T: Encode + EncodeExt>(value: &T) {

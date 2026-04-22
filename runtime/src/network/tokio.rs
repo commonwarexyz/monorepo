@@ -306,14 +306,16 @@ impl crate::Network for Network {
 mod tests {
     use crate::{
         network::{tests, tokio as TokioNetwork},
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        utils::Registry, BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _,
+        Stream as _,
     };
     use commonware_macros::test_group;
-    use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+        let mut registry = Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test");
+        BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
     }
 
     #[tokio::test]

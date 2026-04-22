@@ -932,7 +932,7 @@ mod tests {
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
-    use prometheus_client::registry::Registry;
+    use crate::utils::Registry;
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -1401,11 +1401,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let mut registry = Registry::default();
+            let mut scope = registry.sub_registry_with_prefix("test");
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
                     .with_max_per_class(NZUsize!(2)),
-                &mut registry,
+                &mut scope,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
 

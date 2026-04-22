@@ -357,8 +357,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig,
-        IoBuf, IoBufMut, Storage as _,
+        storage::tests::run_storage_tests, utils::{thread, Registry}, Blob as _, BufferPool,
+        BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
     };
     use std::{
         env,
@@ -372,6 +372,12 @@ mod tests {
 
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
+    fn test_pool() -> BufferPool {
+        let mut registry = Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
+    }
+
     /// Build a fresh storage instance rooted in a unique temporary directory.
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = env::temp_dir().join(format!(
@@ -381,7 +387,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&storage_directory);
 
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
@@ -706,7 +712,7 @@ mod tests {
 
         // Start storage against the invalid root so `open` reaches the
         // filesystem setup path under realistic wrapper code.
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
@@ -740,7 +746,7 @@ mod tests {
         // fails once the wrapper reaches the open call.
         std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
@@ -802,7 +808,7 @@ mod tests {
         // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
@@ -852,7 +858,7 @@ mod tests {
         // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
@@ -886,7 +892,7 @@ mod tests {
         // `set_len` on a socket-backed file descriptor should fail in the
         // kernel, letting the wrapper expose `BlobResizeFailed`.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
@@ -915,7 +921,7 @@ mod tests {
         // Run a real loop so the request reaches the kernel and fails there
         // rather than through the wrapper's disconnected-submit path.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         let handle = std::thread::spawn(move || io_loop.run());

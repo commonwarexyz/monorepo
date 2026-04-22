@@ -660,22 +660,6 @@ impl MetricScope<'_> {
     }
 }
 
-pub(crate) trait MetricRegister {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric);
-}
-
-impl MetricRegister for MetricScope<'_> {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric) {
-        self.register(name, help, metric);
-    }
-}
-
-impl MetricRegister for crate::metrics::registry::Registry {
-    fn register_metric(&mut self, name: &str, help: &str, metric: impl Metric) {
-        self.register(name.to_string(), help.to_string(), metric);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

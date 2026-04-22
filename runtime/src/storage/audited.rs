@@ -140,16 +140,16 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
+        utils::Registry, Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs,
+        IoBufsMut, Storage as _,
     };
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(
-            BufferPoolConfig::for_storage(),
-            &mut prometheus_client::registry::Registry::default(),
-        )
+        let mut registry = Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test");
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
 
     #[tokio::test]

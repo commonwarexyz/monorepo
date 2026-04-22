@@ -265,12 +265,17 @@ impl AsRef<[u8]> for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus_client::registry::Registry;
+    use crate::utils::Registry;
+
+    fn test_pool() -> crate::BufferPool {
+        let mut registry = Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test");
+        crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut scope)
+    }
 
     #[test]
     fn test_tip_append() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
@@ -304,8 +309,7 @@ mod tests {
 
     #[test]
     fn test_tip_resize() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::new(50, 100, pool);
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
@@ -342,8 +346,7 @@ mod tests {
 
     #[test]
     fn test_tip_first_merge_from_empty() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
         assert!(buffer.data.is_empty());
 
@@ -353,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_tip_slice_uses_resolved_bounds() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
 
         buffer.append(b"stale");
@@ -366,8 +368,7 @@ mod tests {
 
     #[test]
     fn test_tip_writable_copies_when_slice_is_live() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
 
         assert!(!buffer.append(b"abc"));
@@ -386,8 +387,7 @@ mod tests {
 
     #[test]
     fn test_tip_from_preserves_seed_bytes_until_mutated() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, pool);
 
         assert_eq!(buffer.offset, 7);

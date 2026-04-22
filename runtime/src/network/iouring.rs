@@ -488,7 +488,7 @@ mod tests {
         Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
-    use prometheus_client::registry::Registry;
+    use crate::utils::Registry;
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -497,7 +497,9 @@ mod tests {
     };
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+        let mut registry = Registry::default();
+        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
     }
 
     #[test]
