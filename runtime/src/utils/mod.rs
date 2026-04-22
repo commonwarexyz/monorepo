@@ -406,6 +406,9 @@ impl Registry {
         attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
         metric: impl Metric,
     ) -> u64 {
+        // Match upstream prometheus-client's `Descriptor::new` normalization,
+        // which unconditionally appends `.` to the help text.
+        let help = help + ".";
         let metric_type = metric.metric_type();
         if let Some(family) = self.families.get(&name) {
             assert_eq!(
@@ -470,6 +473,9 @@ impl Registry {
             .into_iter()
             .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
             .collect::<Vec<_>>();
+        // Match upstream prometheus-client's `Descriptor::new` normalization,
+        // which unconditionally appends `.` to the help text.
+        let help = help + ".";
         let metric_type = metric.metric_type();
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
@@ -980,6 +986,58 @@ mod tests {
         assert!(!encoded.contains("votes"), "empty family leaked: {encoded}");
         assert!(encoded.contains("ticks_total 1"), "populated metric missing: {encoded}");
         assert_eq!(encoded.matches("# EOF").count(), 1);
+    }
+
+    #[test]
+    fn test_encode_matches_upstream_registry() {
+        // Byte-for-byte parity between our `Registry::encode` and upstream
+        // prometheus-client's `registry::Registry::encode` on an equivalent
+        // metric set. Covers HELP normalization (trailing `.`), TYPE lines,
+        // counter `_total` suffix, histogram `_bucket`/`_sum`/`_count`, and
+        // the single final `# EOF`. Our registry emits families in sorted
+        // order (see `test_encode_is_deterministic`); upstream preserves
+        // registration order. Register here in sorted order so the parity
+        // assertion only flags real format divergences.
+        let counter = Counter::<u64>::default();
+        counter.inc_by(7);
+        let gauge = Gauge::<i64>::default();
+        gauge.set(-3);
+        let histogram = Histogram::new([0.1, 1.0].into_iter());
+        histogram.observe(0.5);
+
+        let mut ours = Registry::default();
+        ours.register_permanent(
+            "latency".to_string(),
+            "request latency seconds".to_string(),
+            Vec::new(),
+            histogram.clone(),
+        );
+        ours.register_permanent(
+            "level".to_string(),
+            "current level".to_string(),
+            Vec::new(),
+            gauge.clone(),
+        );
+        ours.register_permanent(
+            "votes".to_string(),
+            "number of votes".to_string(),
+            Vec::new(),
+            counter.clone(),
+        );
+        let ours_encoded = ours.encode();
+
+        let mut theirs = crate::metrics::registry::Registry::default();
+        theirs.register("latency", "request latency seconds", histogram);
+        theirs.register("level", "current level", gauge);
+        theirs.register("votes", "number of votes", counter);
+        let mut theirs_encoded = String::new();
+        crate::metrics::encoding::text::encode(&mut theirs_encoded, &theirs)
+            .expect("upstream encode failed");
+
+        assert_eq!(
+            ours_encoded, theirs_encoded,
+            "output diverged from upstream prometheus-client registry"
+        );
     }
 
     #[test]
