@@ -391,6 +391,14 @@ impl Registry {
         }
     }
 
+    #[cfg(any(test, feature = "iouring-storage", feature = "iouring-network"))]
+    pub fn scope(&mut self) -> MetricScope<'_> {
+        MetricScope {
+            registry: self,
+            prefix: String::new(),
+        }
+    }
+
     fn insert_metric(
         &mut self,
         name: String,
@@ -672,7 +680,7 @@ mod tests {
     use super::*;
     use crate::{
         deterministic,
-        metrics::{Counter, Gauge},
+        metrics::{Counter, Gauge, Histogram},
         Metrics, Runner, Spawner,
     };
     use commonware_macros::test_traced;
@@ -846,5 +854,93 @@ mod tests {
             let gauge = Gauge::<i64>::default();
             let _metric_b = context.with_label("a").register("test", "help", gauge);
         });
+    }
+
+    fn register_permanent_counter(registry: &mut Registry, name: &str, help: &str, value: u64) {
+        let counter = Counter::<u64>::default();
+        counter.inc_by(value);
+        registry.register_permanent(name.to_string(), help.to_string(), Vec::new(), counter);
+    }
+
+    #[test]
+    fn test_encode_is_deterministic() {
+        let mut registry = Registry::default();
+        register_permanent_counter(&mut registry, "beta", "beta counter", 2);
+        register_permanent_counter(&mut registry, "alpha", "alpha counter", 1);
+        let first = registry.encode();
+        let second = registry.encode();
+        assert_eq!(first, second);
+        let alpha = first.find("# TYPE alpha").expect("alpha family header present");
+        let beta = first.find("# TYPE beta").expect("beta family header present");
+        assert!(alpha < beta, "families emitted in sorted order: {first}");
+    }
+
+    #[test]
+    fn test_encode_emits_single_eof() {
+        let mut registry = Registry::default();
+        register_permanent_counter(&mut registry, "a", "help", 1);
+        register_permanent_counter(&mut registry, "b", "help", 2);
+        let encoded = registry.encode();
+        assert_eq!(encoded.matches("# EOF").count(), 1);
+        assert!(encoded.ends_with("# EOF\n"), "must terminate with EOF: {encoded}");
+    }
+
+    #[test]
+    fn test_encode_type_aware_suffixes() {
+        let mut registry = Registry::default();
+        register_permanent_counter(&mut registry, "requests", "request count", 3);
+        let histogram = Histogram::new([0.1, 1.0, 10.0].into_iter());
+        histogram.observe(0.5);
+        registry.register_permanent(
+            "latency".to_string(),
+            "latency seconds".to_string(),
+            Vec::new(),
+            histogram,
+        );
+        let encoded = registry.encode();
+        assert!(encoded.contains("requests_total 3"), "counter _total suffix: {encoded}");
+        assert!(encoded.contains("latency_bucket"), "histogram _bucket suffix: {encoded}");
+        assert!(encoded.contains("latency_sum"), "histogram _sum suffix: {encoded}");
+        assert!(encoded.contains("latency_count"), "histogram _count suffix: {encoded}");
+    }
+
+    #[test]
+    fn test_encode_shares_family_header_across_attributes() {
+        let mut registry = Registry::default();
+        let c1 = Counter::<u64>::default();
+        c1.inc();
+        registry.register_permanent(
+            "votes".to_string(),
+            "vote count".to_string(),
+            vec![("epoch".to_string(), "1".to_string())],
+            c1,
+        );
+        let c2 = Counter::<u64>::default();
+        c2.inc_by(2);
+        registry.register_permanent(
+            "votes".to_string(),
+            "vote count".to_string(),
+            vec![("epoch".to_string(), "2".to_string())],
+            c2,
+        );
+        let encoded = registry.encode();
+        assert_eq!(encoded.matches("# HELP votes").count(), 1, "single HELP: {encoded}");
+        assert_eq!(encoded.matches("# TYPE votes").count(), 1, "single TYPE: {encoded}");
+        assert!(encoded.contains("votes_total{epoch=\"1\"} 1"));
+        assert!(encoded.contains("votes_total{epoch=\"2\"} 2"));
+    }
+
+    #[test]
+    fn test_encode_scope_registers_without_prefix() {
+        let mut registry = Registry::default();
+        {
+            let mut scope = registry.scope();
+            let counter = Counter::<u64>::default();
+            counter.inc();
+            scope.register("votes", "vote count", counter);
+        }
+        let encoded = registry.encode();
+        assert!(encoded.contains("votes_total 1"), "no prefix applied: {encoded}");
+        assert!(encoded.starts_with("# HELP votes"), "family header at start: {encoded}");
     }
 }

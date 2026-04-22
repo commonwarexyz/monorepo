@@ -75,7 +75,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(cfg: Config, registry: &mut MetricScope<'_>, pool: BufferPool) -> Self {
+    pub(crate) fn start(cfg: Config, registry: &mut MetricScope<'_>, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
             mut iouring_config,
@@ -375,6 +375,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let mut scope = registry.sub_registry_with_prefix("test_pool");
         BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
@@ -389,13 +390,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
 
         let pool = test_pool();
+        let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut registry,
             pool,
         );
         (storage, storage_directory)
@@ -720,7 +723,7 @@ mod tests {
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut Registry::default().sub_registry_with_prefix("test"),
             pool,
         );
 
@@ -754,7 +757,7 @@ mod tests {
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default(),
+            &mut Registry::default().sub_registry_with_prefix("test"),
             pool,
         );
 
@@ -809,6 +812,7 @@ mod tests {
         // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
@@ -859,6 +863,7 @@ mod tests {
         // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
@@ -893,6 +898,7 @@ mod tests {
         // `set_len` on a socket-backed file descriptor should fail in the
         // kernel, letting the wrapper expose `BlobResizeFailed`.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
@@ -922,6 +928,7 @@ mod tests {
         // Run a real loop so the request reaches the kernel and fails there
         // rather than through the wrapper's disconnected-submit path.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);

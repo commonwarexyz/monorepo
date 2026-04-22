@@ -1103,7 +1103,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{metrics::registry::Registry, IoBuf, IoBufMut};
+    use crate::{utils::Registry, IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
     use request::{RecvRequest, SendRequest, SyncRequest};
@@ -1223,6 +1223,7 @@ mod tests {
     fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let cfg = Config {
             size: 1_000,
             ..Default::default()
@@ -1247,6 +1248,7 @@ mod tests {
         // request channel size must therefore stay at or below
         // `MAX_RING_SIZE`.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let cfg = Config {
             size: MAX_RING_SIZE + 1,
             ..Default::default()
@@ -1259,6 +1261,7 @@ mod tests {
         // Verify `submit_and_wait` only treats `ETIME` as the bounded-wait timeout case.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1299,6 +1302,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1342,6 +1346,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1390,6 +1395,7 @@ mod tests {
                 ..Default::default()
             };
             let mut registry = Registry::default();
+            let mut registry = registry.scope();
             let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
             let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1473,6 +1479,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1513,6 +1520,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1547,6 +1555,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1583,6 +1592,7 @@ mod tests {
         // has an operation SQE in flight.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1622,6 +1632,7 @@ mod tests {
         // Verify already-expired requests are completed locally instead of being staged.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1662,6 +1673,7 @@ mod tests {
         // before it can enqueue a malformed request.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (handle, io_loop) = IoUringLoop::new(cfg, &mut registry);
         drop(io_loop);
 
@@ -1705,6 +1717,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -1758,6 +1771,7 @@ mod tests {
         // remove and reuse that slot before the queue entry is revisited.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -1818,6 +1832,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
 
         // Schedule an old waiter at tick 1, then complete it early so the wheel
@@ -1882,6 +1897,7 @@ mod tests {
         // Verify a successful operation CQE still wins if it races with a timeout cancel.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
 
         let (left, right) = UnixStream::pair().unwrap();
@@ -1954,6 +1970,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -2034,6 +2051,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let eventfd_waker = iouring.waker.clone();
         let handle = std::thread::spawn(move || iouring.run());
@@ -2125,6 +2143,7 @@ mod tests {
                 ..Default::default()
             };
             let mut registry = Registry::default();
+            let mut registry = registry.scope();
             let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
             let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -2159,6 +2178,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
         let idle_waker = iouring.waker.clone();
         let eventfd_waker = iouring.waker.clone();
@@ -2256,6 +2276,7 @@ mod tests {
         for scenario in [Scenario::DropOnly, Scenario::PublishThenDrop] {
             let cfg = Config::default();
             let mut registry = Registry::default();
+            let mut registry = registry.scope();
             let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
             let idle_waker = iouring.waker.clone();
             let handle = std::thread::spawn(move || iouring.run());
@@ -2313,6 +2334,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2345,6 +2367,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2381,6 +2404,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2420,6 +2444,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2468,6 +2493,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let eventfd_waker = iouring.waker.clone();
         let handle = std::thread::spawn(move || iouring.run());
@@ -2521,6 +2547,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let eventfd_waker = iouring.waker.clone();
         let handle = std::thread::spawn(move || iouring.run());
@@ -2603,6 +2630,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2645,6 +2673,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2690,6 +2719,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2738,6 +2768,7 @@ mod tests {
         // data and the loop must requeue for a follow-up SQE.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2782,6 +2813,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2849,6 +2881,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
@@ -2892,6 +2925,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
 
         let (left, _right) = UnixStream::pair().unwrap();
@@ -2941,6 +2975,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
         iouring.wake_rearm_needed = false;
@@ -2976,6 +3011,7 @@ mod tests {
         // immediately with timeout instead of restaging another SQE.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -3012,6 +3048,7 @@ mod tests {
         // any I/O.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -3074,6 +3111,7 @@ mod tests {
         // locally instead of staging another SQE.
         let cfg = Config::default();
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (_handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
@@ -3117,6 +3155,7 @@ mod tests {
         };
 
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (sender, iouring) = IoUringLoop::new(cfg, &mut registry);
         let uring_thread = std::thread::spawn(move || iouring.run());
 
