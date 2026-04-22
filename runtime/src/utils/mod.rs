@@ -16,6 +16,7 @@ commonware_macros::stability_mod!(BETA, pub mod buffer);
 pub mod signal;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod thread;
+#[cfg(not(target_arch = "wasm32"))]
 pub use thread::available_cpus;
 
 mod handle;
