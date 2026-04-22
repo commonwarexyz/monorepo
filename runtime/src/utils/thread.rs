@@ -171,7 +171,7 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
                 words = words.checked_mul(2)?;
                 words
                     .checked_mul(word_bits)
-                    .map(|bits| bits > MAX_AFFINITY_CPUS)?;
+                    .filter(|bits| *bits <= MAX_AFFINITY_CPUS)?;
             }
             _ => return None,
         }
@@ -200,12 +200,15 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
 }
 
 /// Sets the current thread's affinity mask to the given logical CPU ids.
+///
+/// Returns an error if `cpus` is empty, contains an unreasonably large CPU id,
+/// or if the operating system rejects the affinity change.
 #[cfg(target_os = "linux")]
 pub(crate) fn set_cpu_affinity(cpus: &[usize]) -> Result<(), std::io::Error> {
-    let Some(max_cpu) = cpus.iter().copied().max() else {
+    let Some(max_cpu) = cpus.iter().max() else {
         return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     };
-    if max_cpu >= MAX_AFFINITY_CPUS {
+    if *max_cpu >= MAX_AFFINITY_CPUS {
         return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
 
@@ -236,16 +239,21 @@ pub(crate) fn set_cpu_affinity(cpus: &[usize]) -> Result<(), std::io::Error> {
     }
 }
 
+/// Sets the current thread's affinity mask to the given logical CPU ids.
+///
+/// Always returns an error since setting CPU affinity is not available on this platform.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn set_cpu_affinity(_cpus: &[usize]) -> Result<(), std::io::Error> {
     Err(std::io::Error::other(
-        "cpu pinning is not available on this platform",
+        "cpu affinity is not available on this platform",
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use commonware_utils::vec::NonEmptyVec;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -261,18 +269,22 @@ mod tests {
     fn test_set_cpu_affinity_linux() {
         std::thread::spawn(|| {
             let cpus = available_cpus().unwrap();
-
             let cpu = *cpus.first();
-            set_cpu_affinity(&[cpu]).unwrap();
-            assert_eq!(available_cpus().unwrap().into_vec(), vec![cpu]);
+            let pinned = NonEmptyVec::new(cpu);
+            set_cpu_affinity(&pinned).unwrap();
+            assert_eq!(available_cpus(), Some(pinned));
 
-            let invalid_cpu = (0..=MAX_AFFINITY_CPUS)
-                .find(|candidate| !cpus.contains(candidate))
-                .unwrap();
+            let invalid_cpu = cpus.last().checked_add(1).unwrap();
             assert!(
                 set_cpu_affinity(&[invalid_cpu]).is_err(),
-                "expected pinning to a disallowed CPU to fail",
+                "expected affinity to a disallowed CPU to fail",
             );
+
+            let err = set_cpu_affinity(&[]).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+
+            let err = set_cpu_affinity(&[MAX_AFFINITY_CPUS]).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
         })
         .join()
         .unwrap();
@@ -287,8 +299,6 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_set_cpu_affinity_non_linux() {
-        for cpus in [vec![0], vec![1], vec![usize::MAX]] {
-            assert!(set_cpu_affinity(&cpus).is_err());
-        }
+        assert!(set_cpu_affinity(&[0]).is_err());
     }
 }
