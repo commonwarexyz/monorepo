@@ -26,7 +26,7 @@
 //! ```
 
 pub mod certificate;
-pub mod ed25519_consensus;
+pub mod core;
 mod scheme;
 
 #[cfg(feature = "std")]
