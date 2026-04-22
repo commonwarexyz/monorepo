@@ -1,7 +1,7 @@
 #[cfg(feature = "std")]
 use crate::BatchVerifier;
 use crate::{
-    ed25519::ed25519_consensus::{self, VerificationKey},
+    ed25519::core::{self as ed_core, VerificationKey},
     Secret,
 };
 #[cfg(not(feature = "std"))]
@@ -28,7 +28,7 @@ const SIGNATURE_LENGTH: usize = 64;
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    key: Secret<ed25519_consensus::SigningKey>,
+    key: Secret<ed_core::SigningKey>,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -60,7 +60,7 @@ impl PrivateKey {
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
-        let key = ed25519_consensus::SigningKey::new(rng);
+        let key = ed_core::SigningKey::new(rng);
         Self {
             key: Secret::new(key),
         }
@@ -78,7 +78,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = ed25519_consensus::SigningKey::from(*raw);
+        let key = ed_core::SigningKey::from(*raw);
         Ok(Self {
             key: Secret::new(key),
         })
@@ -89,8 +89,8 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl From<ed25519_consensus::SigningKey> for PrivateKey {
-    fn from(key: ed25519_consensus::SigningKey) -> Self {
+impl From<ed_core::SigningKey> for PrivateKey {
+    fn from(key: ed_core::SigningKey) -> Self {
         Self {
             key: Secret::new(key),
         }
@@ -124,7 +124,7 @@ impl PartialEq for PrivateKey {
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
-    key: ed25519_consensus::VerificationKey,
+    key: ed_core::VerificationKey,
 }
 
 impl From<PrivateKey> for PublicKey {
@@ -152,7 +152,7 @@ impl PublicKey {
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
         self.key
-            .verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
+            .verify(&ed_core::Signature::from(sig.raw), &payload)
             .is_ok()
     }
 }
@@ -305,8 +305,8 @@ impl Deref for Signature {
     }
 }
 
-impl From<ed25519_consensus::Signature> for Signature {
-    fn from(value: ed25519_consensus::Signature) -> Self {
+impl From<ed_core::Signature> for Signature {
+    fn from(value: ed_core::Signature) -> Self {
         let raw = value.to_bytes();
         Self { raw }
     }
@@ -346,7 +346,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 /// Ed25519 Batch Verifier.
 #[cfg(feature = "std")]
 pub struct Batch {
-    verifier: ed25519_consensus::batch::Verifier,
+    verifier: ed_core::batch::Verifier,
 }
 
 #[cfg(feature = "std")]
@@ -355,7 +355,7 @@ impl BatchVerifier for Batch {
 
     fn new() -> Self {
         Self {
-            verifier: ed25519_consensus::batch::Verifier::new(),
+            verifier: ed_core::batch::Verifier::new(),
         }
     }
 
@@ -387,9 +387,9 @@ impl Batch {
         let payload = namespace
             .map(|ns| Cow::Owned(union_unique(ns, message)))
             .unwrap_or_else(|| Cow::Borrowed(message));
-        let item = ed25519_consensus::batch::Item::from((
+        let item = ed_core::batch::Item::from((
             public_key.key.into(),
-            ed25519_consensus::Signature::from(signature.raw),
+            ed_core::Signature::from(signature.raw),
             &payload,
         ));
         self.verifier.queue(item);
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_from_signing_key() {
-        let signing_key = ed25519_consensus::SigningKey::new(test_rng());
+        let signing_key = ed_core::SigningKey::new(test_rng());
         let expected_public = signing_key.verification_key();
         let private_key = PrivateKey::from(signing_key);
         assert_eq!(private_key.public_key().key, expected_public);
