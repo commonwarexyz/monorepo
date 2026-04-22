@@ -282,7 +282,7 @@ crate::qmdb::any::traits::impl_provable! {
 mod test {
     use super::*;
     use crate::{
-        merkle::mmr,
+        merkle::Family,
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -291,7 +291,8 @@ mod test {
     use core::{future::Future, pin::Pin};
 
     pub(crate) async fn test_ordered_any_db_empty<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         mut db: D,
@@ -341,7 +342,8 @@ mod test {
     }
 
     pub(crate) async fn test_ordered_any_db_basic<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         mut db: D,
@@ -543,7 +545,8 @@ mod test {
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
-        D: DbAny<mmr::Family, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        F: Family,
+        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         mut db: D,
     ) {

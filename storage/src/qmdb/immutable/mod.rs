@@ -84,7 +84,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{journaled::Config as MmrConfig, Family, Location, Proof},
+    merkle::{journaled::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
@@ -111,7 +111,7 @@ pub use operation::Operation;
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MmrConfig,
+    pub merkle_config: MerkleConfig,
 
     /// Configuration for the operations log journal.
     pub log: J,
