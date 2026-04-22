@@ -12,7 +12,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    merkle::{mmb, mmr, Graftable},
+    merkle::{mmb, mmr, Family, Graftable},
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
@@ -25,7 +25,7 @@ const COMMITS_PER_ITERATION: u64 = 100;
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
-async fn bench_db<F: Graftable, C: DbAny<F, Key = Digest>>(
+async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,
     operations: u64,
@@ -135,7 +135,7 @@ fn bench_var_value_generate(c: &mut Criterion) {
 const KEYLESS_OPS: u64 = 10_000;
 const KEYLESS_COMMIT_FREQ: u32 = 25;
 
-fn bench_keyless_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
+fn bench_keyless_generate_family<F: Family>(c: &mut Criterion, family: &str) {
     let runner = tokio::Runner::new(Config::default());
     for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
         c.bench_function(

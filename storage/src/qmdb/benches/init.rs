@@ -15,7 +15,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::{
-    merkle::{mmb, mmr, Graftable},
+    merkle::{mmb, mmr, Family, Graftable},
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
@@ -36,7 +36,7 @@ cfg_if::cfg_if! {
 }
 
 /// Populate, prune, and sync a database (used in setup phase).
-async fn populate_and_sync<F: Graftable, C: DbAny<F, Key = Digest>>(
+async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     db: &mut C,
     elements: u64,
     operations: u64,
