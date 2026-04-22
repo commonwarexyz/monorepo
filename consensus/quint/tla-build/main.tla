@@ -45,7 +45,7 @@ main_replica_INVALID_PAYLOADS == { "inval_0", "inval_1" }
 
 VARIABLE
   (*
-    @type: (Str -> { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+    @type: (Str -> { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
   *)
   main_replica_replica_state
 
@@ -67,8 +67,8 @@ main_replica_None == Variant("None", [tag |-> "UNIT"])
 (*
   @type: ((b) => None({ tag: Str }) | Some(b));
 *)
-main_replica_Some(main_replica___SomeParam_5767) ==
-  Variant("Some", main_replica___SomeParam_5767)
+main_replica_Some(main_replica___SomeParam_5780) ==
+  Variant("Some", main_replica___SomeParam_5780)
 
 VARIABLE
   (*
@@ -145,21 +145,21 @@ VARIABLE
 (*
   @type: ((None({ tag: Str }) | Some(d)) => Bool);
 *)
-main_replica_is_some(main_replica_opt_5788) ==
-  CASE VariantTag(main_replica_opt_5788) = "Some"
+main_replica_is_some(main_replica_opt_5801) ==
+  CASE VariantTag(main_replica_opt_5801) = "Some"
       -> LET (*
         @type: ((d) => Bool);
       *)
-      __QUINT_LAMBDA0(main_replica___5783) == TRUE
+      __QUINT_LAMBDA0(main_replica___5796) == TRUE
       IN
-      __QUINT_LAMBDA0(VariantGetUnsafe("Some", main_replica_opt_5788))
-    [] VariantTag(main_replica_opt_5788) = "None"
+      __QUINT_LAMBDA0(VariantGetUnsafe("Some", main_replica_opt_5801))
+    [] VariantTag(main_replica_opt_5801) = "None"
       -> LET (*
         @type: (({ tag: Str }) => Bool);
       *)
-      __QUINT_LAMBDA1(main_replica___5786) == FALSE
+      __QUINT_LAMBDA1(main_replica___5799) == FALSE
       IN
-      __QUINT_LAMBDA1(VariantGetUnsafe("None", main_replica_opt_5788))
+      __QUINT_LAMBDA1(VariantGetUnsafe("None", main_replica_opt_5801))
 
 (*
   @type: ((Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })) => Bool);
@@ -234,7 +234,7 @@ main_replica_REPLICA_KEYS ==
   SetAsFun({ <<"n0", "n0">>, <<"n1", "n1">>, <<"n2", "n2">>, <<"n3", "n3">> })
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, Str) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, Str) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_remember_timeout_reason(main_replica_self_1065, main_replica_view_1065,
 main_replica_reason_1065) ==
@@ -258,22 +258,22 @@ main_replica_NullifyKind == "NULLIFY_KIND"
 (*
   @type: ((None({ tag: Str }) | Some(h), ((h) => Bool)) => Bool);
 *)
-main_replica_option_has(main_replica_opt_5839, main_replica_pred_5839(_)) ==
-  CASE VariantTag(main_replica_opt_5839) = "None"
+main_replica_option_has(main_replica_opt_5852, main_replica_pred_5852(_)) ==
+  CASE VariantTag(main_replica_opt_5852) = "None"
       -> LET (*
         @type: (({ tag: Str }) => Bool);
       *)
-      __QUINT_LAMBDA22(main_replica___5834) == FALSE
+      __QUINT_LAMBDA22(main_replica___5847) == FALSE
       IN
-      __QUINT_LAMBDA22(VariantGetUnsafe("None", main_replica_opt_5839))
-    [] VariantTag(main_replica_opt_5839) = "Some"
+      __QUINT_LAMBDA22(VariantGetUnsafe("None", main_replica_opt_5852))
+    [] VariantTag(main_replica_opt_5852) = "Some"
       -> LET (*
         @type: ((h) => Bool);
       *)
-      __QUINT_LAMBDA23(main_replica_e_5837) ==
-        main_replica_pred_5839(main_replica_e_5837)
+      __QUINT_LAMBDA23(main_replica_e_5850) ==
+        main_replica_pred_5852(main_replica_e_5850)
       IN
-      __QUINT_LAMBDA23(VariantGetUnsafe("Some", main_replica_opt_5839))
+      __QUINT_LAMBDA23(VariantGetUnsafe("Some", main_replica_opt_5852))
 
 (*
   @type: (() => Str);
@@ -344,8 +344,8 @@ main_replica_FinalizationKind == "FINALIZATION_KIND"
 (*
   @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_Notarization(main_replica___NotarizationParam_5627) ==
-  Variant("Notarization", main_replica___NotarizationParam_5627)
+main_replica_Notarization(main_replica___NotarizationParam_5637) ==
+  Variant("Notarization", main_replica___NotarizationParam_5637)
 
 (*
   @type: (() => Str);
@@ -384,14 +384,14 @@ main_replica_ACTIVITY_TIMEOUT == 10
 (*
   @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_Finalization(main_replica___FinalizationParam_5639) ==
-  Variant("Finalization", main_replica___FinalizationParam_5639)
+main_replica_Finalization(main_replica___FinalizationParam_5649) ==
+  Variant("Finalization", main_replica___FinalizationParam_5649)
 
 (*
   @type: (({ ghost_sender: Str, signatures: Set(Str), view: Int }) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_Nullification(main_replica___NullificationParam_5633) ==
-  Variant("Nullification", main_replica___NullificationParam_5633)
+main_replica_Nullification(main_replica___NullificationParam_5643) ==
+  Variant("Nullification", main_replica___NullificationParam_5643)
 
 (*
   @type: ((Seq({ parent: Int, payload: Str, view: Int }), { parent: Int, payload: Str, view: Int }) => Bool);
@@ -527,10 +527,10 @@ main_replica_AllPayloads ==
 (*
   @type: (((Int -> Str), (Str -> Set(Str))) => Bool);
 *)
-main_replica_initWithLeaderAndCertify(main_replica_l_2271, main_replica_certify_2271) ==
+main_replica_initWithLeaderAndCertify(main_replica_l_2277, main_replica_certify_2277) ==
   main_replica_replica_state
       = [
-        main_replica_id_2210 \in main_replica_CORRECT |->
+        main_replica_id_2216 \in main_replica_CORRECT |->
           [view |-> main_replica_FIRST_VIEW,
             ghost_last_seen_notarization |-> main_replica_GENESIS_VIEW,
             last_finalized |-> main_replica_GENESIS_VIEW,
@@ -560,24 +560,26 @@ main_replica_initWithLeaderAndCertify(main_replica_l_2271, main_replica_certify_
               [
                 main_replica___2206 \in main_replica_VIEWS |->
                   main_replica_Some(FALSE)
-              ]]
+              ],
+            locally_built |->
+              [ main_replica___2212 \in main_replica_VIEWS |-> FALSE ]]
       ]
     /\ main_replica_sent_notarize_votes = {}
     /\ main_replica_sent_nullify_votes = {}
     /\ main_replica_sent_finalize_votes = {}
     /\ main_replica_sent_certificates = {}
     /\ main_replica_store_notarize_votes
-      = [ main_replica___2229 \in main_replica_CORRECT |-> {} ]
+      = [ main_replica___2235 \in main_replica_CORRECT |-> {} ]
     /\ main_replica_store_nullify_votes
-      = [ main_replica___2236 \in main_replica_CORRECT |-> {} ]
+      = [ main_replica___2242 \in main_replica_CORRECT |-> {} ]
     /\ main_replica_store_finalize_votes
-      = [ main_replica___2243 \in main_replica_CORRECT |-> {} ]
+      = [ main_replica___2249 \in main_replica_CORRECT |-> {} ]
     /\ main_replica_store_certificates
-      = [ main_replica___2250 \in main_replica_CORRECT |-> {} ]
+      = [ main_replica___2256 \in main_replica_CORRECT |-> {} ]
     /\ main_replica_ghost_committed_blocks
-      = [ main_replica___2257 \in main_replica_CORRECT |-> <<>> ]
-    /\ main_replica_leader = main_replica_l_2271
-    /\ main_replica_certify_policy = main_replica_certify_2271
+      = [ main_replica___2263 \in main_replica_CORRECT |-> <<>> ]
+    /\ main_replica_leader = main_replica_l_2277
+    /\ main_replica_certify_policy = main_replica_certify_2277
     /\ main_replica_lastAction = "init"
 
 (*
@@ -626,11 +628,11 @@ main_replica_sig_of(main_replica_id_94) ==
 (*
   @type: ((None({ tag: Str }) | Some(c)) => Bool);
 *)
-main_replica_is_none(main_replica_opt_5798) ==
-  ~(main_replica_is_some(main_replica_opt_5798))
+main_replica_is_none(main_replica_opt_5811) ==
+  ~(main_replica_is_some(main_replica_opt_5811))
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_observe_leader_proposal(main_replica_self_933, main_replica_proposal_933) ==
   LET (*
@@ -702,7 +704,7 @@ main_replica_observe_leader_proposal(main_replica_self_933, main_replica_proposa
   ]
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_record_local_proposal(main_replica_self_963, main_replica_proposal_963) ==
   IF main_replica_self_963["proposal"][main_replica_proposal_963["view"]]
@@ -731,7 +733,7 @@ main_replica_timeout_fired(main_replica_timers_1568, main_replica_view_1568) ==
   main_replica_timers_1568[main_replica_view_1568] = main_replica_Some(TRUE)
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => Bool);
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }) => Bool);
 *)
 main_replica_has_leader_proposal_conflict(main_replica_self_1055, main_replica_proposal_1055) ==
   main_replica_self_1055["leader_proposal_conflicted"][
@@ -748,7 +750,7 @@ main_replica_has_leader_proposal_conflict(main_replica_self_1055, main_replica_p
     ], __QUINT_LAMBDA27)
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }, Bool) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, { parent: Int, payload: Str, view: Int }, Bool) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_observe_round_proposal(main_replica_self_1027, main_replica_proposal_1027,
 main_replica_recovered_1027) ==
@@ -761,7 +763,7 @@ main_replica_recovered_1027) ==
     ])
       = "None"
       -> LET (*
-        @type: (({ tag: Str }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+        @type: (({ tag: Str }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
       *)
       __QUINT_LAMBDA28(main_replica___1021) ==
         [
@@ -784,7 +786,7 @@ main_replica_recovered_1027) ==
     ])
       = "Some"
       -> LET (*
-        @type: (({ parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+        @type: (({ parent: Int, payload: Str, view: Int }) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
       *)
       __QUINT_LAMBDA29(main_replica_existing_1024) ==
         IF main_replica_existing_1024 = main_replica_proposal_1027
@@ -806,13 +808,6 @@ main_replica_recovered_1027) ==
       ][
         main_replica_proposal_1027["view"]
       ]))
-
-(*
-  @type: ((Str, Str) => Bool);
-*)
-main_replica_can_certify(main_replica_id_1501, main_replica_payload_1501) ==
-  main_replica_payload_1501
-    \in main_replica_certify_policy[main_replica_id_1501]
 
 (*
   @type: ((Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })) => Str);
@@ -841,7 +836,14 @@ main_replica_cert_kind(main_replica_c_319) ==
       __QUINT_LAMBDA35(VariantGetUnsafe("Finalization", main_replica_c_319))
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: ((Str, Str) => Bool);
+*)
+main_replica_can_certify(main_replica_id_1501, main_replica_payload_1501) ==
+  main_replica_payload_1501
+    \in main_replica_certify_policy[main_replica_id_1501]
+
+(*
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_enter_view(main_replica_self_1534, main_replica_new_view_1534) ==
   IF ~(main_replica_new_view_1534 \in main_replica_VIEWS)
@@ -911,7 +913,7 @@ main_replica_cert_with_sender(main_replica_cert_1182, main_replica_sender_1182) 
       __QUINT_LAMBDA54(VariantGetUnsafe("Finalization", main_replica_cert_1182))
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_cancel_all_timers(main_replica_self_1618, main_replica_view_1618) ==
   [
@@ -931,7 +933,7 @@ main_replica_cancel_all_timers(main_replica_self_1618, main_replica_view_1618) =
   ]
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
 *)
 main_replica_fire_all_timers(main_replica_self_1594, main_replica_view_1594) ==
   [
@@ -953,9 +955,9 @@ main_replica_fire_all_timers(main_replica_self_1594, main_replica_view_1594) ==
 (*
   @type: (({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }) => Bool);
 *)
-main_replica_send_notarize_vote(main_replica_vote_5000) ==
+main_replica_send_notarize_vote(main_replica_vote_5010) ==
   main_replica_sent_notarize_votes'
-      := (main_replica_sent_notarize_votes \union {main_replica_vote_5000})
+      := (main_replica_sent_notarize_votes \union {main_replica_vote_5010})
     /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
     /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
     /\ main_replica_sent_certificates' := main_replica_sent_certificates
@@ -973,11 +975,11 @@ main_replica_send_notarize_vote(main_replica_vote_5000) ==
 (*
   @type: (({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }) => Bool);
 *)
-main_replica_send_finalize_vote(main_replica_vote_5048) ==
+main_replica_send_finalize_vote(main_replica_vote_5058) ==
   main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
     /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
     /\ main_replica_sent_finalize_votes'
-      := (main_replica_sent_finalize_votes \union {main_replica_vote_5048})
+      := (main_replica_sent_finalize_votes \union {main_replica_vote_5058})
     /\ main_replica_sent_certificates' := main_replica_sent_certificates
     /\ main_replica_store_notarize_votes' := main_replica_store_notarize_votes
     /\ main_replica_store_nullify_votes' := main_replica_store_nullify_votes
@@ -993,10 +995,10 @@ main_replica_send_finalize_vote(main_replica_vote_5048) ==
 (*
   @type: (({ sig: Str, view: Int }) => Bool);
 *)
-main_replica_send_nullify_vote(main_replica_vote_5096) ==
+main_replica_send_nullify_vote(main_replica_vote_5106) ==
   main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
     /\ main_replica_sent_nullify_votes'
-      := (main_replica_sent_nullify_votes \union {main_replica_vote_5096})
+      := (main_replica_sent_nullify_votes \union {main_replica_vote_5106})
     /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
     /\ main_replica_sent_certificates' := main_replica_sent_certificates
     /\ main_replica_store_notarize_votes' := main_replica_store_notarize_votes
@@ -1013,29 +1015,29 @@ main_replica_send_nullify_vote(main_replica_vote_5096) ==
 (*
   @type: (({ parent: Int, payload: Str, view: Int }, Set(Str), Str) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_notarization(main_replica_proposal_5657, main_replica_signatures_5657,
-main_replica_ghost_sender_5657) ==
-  main_replica_Notarization([proposal |-> main_replica_proposal_5657,
-    signatures |-> main_replica_signatures_5657,
-    ghost_sender |-> main_replica_ghost_sender_5657])
+main_replica_notarization(main_replica_proposal_5667, main_replica_signatures_5667,
+main_replica_ghost_sender_5667) ==
+  main_replica_Notarization([proposal |-> main_replica_proposal_5667,
+    signatures |-> main_replica_signatures_5667,
+    ghost_sender |-> main_replica_ghost_sender_5667])
 
 (*
   @type: (({ parent: Int, payload: Str, view: Int }, Set(Str), Str) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_finalization(main_replica_proposal_5693, main_replica_signatures_5693,
-main_replica_ghost_sender_5693) ==
-  main_replica_Finalization([proposal |-> main_replica_proposal_5693,
-    signatures |-> main_replica_signatures_5693,
-    ghost_sender |-> main_replica_ghost_sender_5693])
+main_replica_finalization(main_replica_proposal_5703, main_replica_signatures_5703,
+main_replica_ghost_sender_5703) ==
+  main_replica_Finalization([proposal |-> main_replica_proposal_5703,
+    signatures |-> main_replica_signatures_5703,
+    ghost_sender |-> main_replica_ghost_sender_5703])
 
 (*
   @type: ((Int, Set(Str), Str) => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
 *)
-main_replica_nullification(main_replica_view_5675, main_replica_signatures_5675,
-main_replica_ghost_sender_5675) ==
-  main_replica_Nullification([view |-> main_replica_view_5675,
-    signatures |-> main_replica_signatures_5675,
-    ghost_sender |-> main_replica_ghost_sender_5675])
+main_replica_nullification(main_replica_view_5685, main_replica_signatures_5685,
+main_replica_ghost_sender_5685) ==
+  main_replica_Nullification([view |-> main_replica_view_5685,
+    signatures |-> main_replica_signatures_5685,
+    ghost_sender |-> main_replica_ghost_sender_5685])
 
 (*
   @type: (((Int -> Str)) => Bool);
@@ -1273,26 +1275,26 @@ main_replica_CorrectSigs ==
 (*
   @type: ((Int, Int, Str, Str, Set(Str)) => Bool);
 *)
-main_replica_send_notarization_cert(main_replica_cert_view_5222, main_replica_cert_parent_5222,
-main_replica_cert_payload_5222, main_replica_ghost_sender_5222, main_replica_signers_5222) ==
+main_replica_send_notarization_cert(main_replica_cert_view_5232, main_replica_cert_parent_5232,
+main_replica_cert_payload_5232, main_replica_ghost_sender_5232, main_replica_signers_5232) ==
   LET (*
     @type: (() => { parent: Int, payload: Str, view: Int });
   *)
   main_replica_proposal ==
-    [view |-> main_replica_cert_view_5222,
-      parent |-> main_replica_cert_parent_5222,
-      payload |-> main_replica_cert_payload_5222]
+    [view |-> main_replica_cert_view_5232,
+      parent |-> main_replica_cert_parent_5232,
+      payload |-> main_replica_cert_payload_5232]
   IN
   LET (*
     @type: (() => Set(Str));
   *)
   main_replica_have_sigs ==
     {
-      main_replica_v_5132["sig"]:
-        main_replica_v_5132 \in
+      main_replica_v_5142["sig"]:
+        main_replica_v_5142 \in
           {
-            main_replica_v_5126 \in main_replica_sent_notarize_votes:
-              main_replica_v_5126["proposal"] = main_replica_proposal
+            main_replica_v_5136 \in main_replica_sent_notarize_votes:
+              main_replica_v_5136["proposal"] = main_replica_proposal
           }
     }
   IN
@@ -1300,33 +1302,33 @@ main_replica_cert_payload_5222, main_replica_ghost_sender_5222, main_replica_sig
     @type: (() => Bool);
   *)
   main_replica_no_duplicate ==
-    \A main_replica_c_5158 \in main_replica_sent_certificates:
-      CASE VariantTag(main_replica_c_5158) = "Notarization"
+    \A main_replica_c_5168 \in main_replica_sent_certificates:
+      CASE VariantTag(main_replica_c_5168) = "Notarization"
           -> LET (*
             @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Bool);
           *)
-          __QUINT_LAMBDA89(main_replica_n_5153) ==
-            ~(main_replica_n_5153["proposal"] = main_replica_proposal
-              /\ main_replica_n_5153["ghost_sender"]
-                = main_replica_ghost_sender_5222)
+          __QUINT_LAMBDA89(main_replica_n_5163) ==
+            ~(main_replica_n_5163["proposal"] = main_replica_proposal
+              /\ main_replica_n_5163["ghost_sender"]
+                = main_replica_ghost_sender_5232)
           IN
-          __QUINT_LAMBDA89(VariantGetUnsafe("Notarization", main_replica_c_5158))
+          __QUINT_LAMBDA89(VariantGetUnsafe("Notarization", main_replica_c_5168))
         [] OTHER
           -> (LET (*
             @type: ((r) => Bool);
           *)
-          __QUINT_LAMBDA90(main_replica___5156) == TRUE
+          __QUINT_LAMBDA90(main_replica___5166) == TRUE
           IN
           __QUINT_LAMBDA90({}))
   IN
-  Cardinality(main_replica_signers_5222) >= main_replica_Q
-    /\ (\A main_replica_s_5170 \in main_replica_signers_5222:
-      main_replica_s_5170 \in main_replica_have_sigs)
+  Cardinality(main_replica_signers_5232) >= main_replica_Q
+    /\ (\A main_replica_s_5180 \in main_replica_signers_5232:
+      main_replica_s_5180 \in main_replica_have_sigs)
     /\ main_replica_no_duplicate
     /\ main_replica_sent_certificates'
       := (main_replica_sent_certificates
-        \union {(main_replica_notarization((main_replica_proposal), main_replica_signers_5222,
-        main_replica_ghost_sender_5222))})
+        \union {(main_replica_notarization((main_replica_proposal), main_replica_signers_5232,
+        main_replica_ghost_sender_5232))})
     /\ main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
     /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
     /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
@@ -1344,26 +1346,26 @@ main_replica_cert_payload_5222, main_replica_ghost_sender_5222, main_replica_sig
 (*
   @type: ((Int, Int, Str, Str, Set(Str)) => Bool);
 *)
-main_replica_send_finalization_cert(main_replica_cert_view_5348, main_replica_cert_parent_5348,
-main_replica_cert_payload_5348, main_replica_ghost_sender_5348, main_replica_signers_5348) ==
+main_replica_send_finalization_cert(main_replica_cert_view_5358, main_replica_cert_parent_5358,
+main_replica_cert_payload_5358, main_replica_ghost_sender_5358, main_replica_signers_5358) ==
   LET (*
     @type: (() => { parent: Int, payload: Str, view: Int });
   *)
   main_replica_proposal ==
-    [view |-> main_replica_cert_view_5348,
-      parent |-> main_replica_cert_parent_5348,
-      payload |-> main_replica_cert_payload_5348]
+    [view |-> main_replica_cert_view_5358,
+      parent |-> main_replica_cert_parent_5358,
+      payload |-> main_replica_cert_payload_5358]
   IN
   LET (*
     @type: (() => Set(Str));
   *)
   main_replica_have_sigs ==
     {
-      main_replica_v_5258["sig"]:
-        main_replica_v_5258 \in
+      main_replica_v_5268["sig"]:
+        main_replica_v_5268 \in
           {
-            main_replica_v_5252 \in main_replica_sent_finalize_votes:
-              main_replica_v_5252["proposal"] = main_replica_proposal
+            main_replica_v_5262 \in main_replica_sent_finalize_votes:
+              main_replica_v_5262["proposal"] = main_replica_proposal
           }
     }
   IN
@@ -1371,33 +1373,33 @@ main_replica_cert_payload_5348, main_replica_ghost_sender_5348, main_replica_sig
     @type: (() => Bool);
   *)
   main_replica_no_duplicate ==
-    \A main_replica_c_5284 \in main_replica_sent_certificates:
-      CASE VariantTag(main_replica_c_5284) = "Finalization"
+    \A main_replica_c_5294 \in main_replica_sent_certificates:
+      CASE VariantTag(main_replica_c_5294) = "Finalization"
           -> LET (*
             @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Bool);
           *)
-          __QUINT_LAMBDA91(main_replica_f_5279) ==
-            ~(main_replica_f_5279["proposal"] = main_replica_proposal
-              /\ main_replica_f_5279["ghost_sender"]
-                = main_replica_ghost_sender_5348)
+          __QUINT_LAMBDA91(main_replica_f_5289) ==
+            ~(main_replica_f_5289["proposal"] = main_replica_proposal
+              /\ main_replica_f_5289["ghost_sender"]
+                = main_replica_ghost_sender_5358)
           IN
-          __QUINT_LAMBDA91(VariantGetUnsafe("Finalization", main_replica_c_5284))
+          __QUINT_LAMBDA91(VariantGetUnsafe("Finalization", main_replica_c_5294))
         [] OTHER
           -> (LET (*
             @type: ((s) => Bool);
           *)
-          __QUINT_LAMBDA92(main_replica___5282) == TRUE
+          __QUINT_LAMBDA92(main_replica___5292) == TRUE
           IN
           __QUINT_LAMBDA92({}))
   IN
-  Cardinality(main_replica_signers_5348) >= main_replica_Q
-    /\ (\A main_replica_s_5296 \in main_replica_signers_5348:
-      main_replica_s_5296 \in main_replica_have_sigs)
+  Cardinality(main_replica_signers_5358) >= main_replica_Q
+    /\ (\A main_replica_s_5306 \in main_replica_signers_5358:
+      main_replica_s_5306 \in main_replica_have_sigs)
     /\ main_replica_no_duplicate
     /\ main_replica_sent_certificates'
       := (main_replica_sent_certificates
-        \union {(main_replica_finalization((main_replica_proposal), main_replica_signers_5348,
-        main_replica_ghost_sender_5348))})
+        \union {(main_replica_finalization((main_replica_proposal), main_replica_signers_5358,
+        main_replica_ghost_sender_5358))})
     /\ main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
     /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
     /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
@@ -1415,18 +1417,18 @@ main_replica_cert_payload_5348, main_replica_ghost_sender_5348, main_replica_sig
 (*
   @type: ((Int, Str, Set(Str)) => Bool);
 *)
-main_replica_send_nullification_cert(main_replica_cert_view_5460, main_replica_ghost_sender_5460,
-main_replica_signers_5460) ==
+main_replica_send_nullification_cert(main_replica_cert_view_5470, main_replica_ghost_sender_5470,
+main_replica_signers_5470) ==
   LET (*
     @type: (() => Set(Str));
   *)
   main_replica_have_sigs ==
     {
-      main_replica_v_5371["sig"]:
-        main_replica_v_5371 \in
+      main_replica_v_5381["sig"]:
+        main_replica_v_5381 \in
           {
-            main_replica_v_5365 \in main_replica_sent_nullify_votes:
-              main_replica_v_5365["view"] = main_replica_cert_view_5460
+            main_replica_v_5375 \in main_replica_sent_nullify_votes:
+              main_replica_v_5375["view"] = main_replica_cert_view_5470
           }
     }
   IN
@@ -1434,33 +1436,33 @@ main_replica_signers_5460) ==
     @type: (() => Bool);
   *)
   main_replica_no_duplicate ==
-    \A main_replica_c_5397 \in main_replica_sent_certificates:
-      CASE VariantTag(main_replica_c_5397) = "Nullification"
+    \A main_replica_c_5407 \in main_replica_sent_certificates:
+      CASE VariantTag(main_replica_c_5407) = "Nullification"
           -> LET (*
             @type: (({ ghost_sender: Str, signatures: Set(Str), view: Int }) => Bool);
           *)
-          __QUINT_LAMBDA93(main_replica_n_5392) ==
-            ~(main_replica_n_5392["view"] = main_replica_cert_view_5460
-              /\ main_replica_n_5392["ghost_sender"]
-                = main_replica_ghost_sender_5460)
+          __QUINT_LAMBDA93(main_replica_n_5402) ==
+            ~(main_replica_n_5402["view"] = main_replica_cert_view_5470
+              /\ main_replica_n_5402["ghost_sender"]
+                = main_replica_ghost_sender_5470)
           IN
-          __QUINT_LAMBDA93(VariantGetUnsafe("Nullification", main_replica_c_5397))
+          __QUINT_LAMBDA93(VariantGetUnsafe("Nullification", main_replica_c_5407))
         [] OTHER
           -> (LET (*
             @type: ((t) => Bool);
           *)
-          __QUINT_LAMBDA94(main_replica___5395) == TRUE
+          __QUINT_LAMBDA94(main_replica___5405) == TRUE
           IN
           __QUINT_LAMBDA94({}))
   IN
-  Cardinality(main_replica_signers_5460) >= main_replica_Q
-    /\ (\A main_replica_s_5409 \in main_replica_signers_5460:
-      main_replica_s_5409 \in main_replica_have_sigs)
+  Cardinality(main_replica_signers_5470) >= main_replica_Q
+    /\ (\A main_replica_s_5419 \in main_replica_signers_5470:
+      main_replica_s_5419 \in main_replica_have_sigs)
     /\ main_replica_no_duplicate
     /\ main_replica_sent_certificates'
       := (main_replica_sent_certificates
-        \union {(main_replica_nullification(main_replica_cert_view_5460, main_replica_signers_5460,
-        main_replica_ghost_sender_5460))})
+        \union {(main_replica_nullification(main_replica_cert_view_5470, main_replica_signers_5470,
+        main_replica_ghost_sender_5470))})
     /\ main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
     /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
     /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
@@ -1519,7 +1521,7 @@ main_replica_finalized_payload_at(main_replica_view_1280, main_replica_certifica
       main_replica_certificates_1280))))
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Str, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Str, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
 *)
 main_replica_forced_timeout_expired(main_replica_self_1883, main_replica_id_1883,
 main_replica_view_1883, main_replica_reason_1883, main_replica_sent_nullify_1883,
@@ -1584,7 +1586,7 @@ main_replica_broadcast_nullify(main_replica_id_455, main_replica_view_455) ==
   main_replica_has_sent_vote(main_replica_id_455, main_replica_view_455, (main_replica_NullifyKind))
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Str, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Str, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
 *)
 main_replica_timer_expired(main_replica_self_1778, main_replica_id_1778, main_replica_view_1778,
 main_replica_expired_1778, main_replica_sent_nullify_1778, main_replica_sent_finalize_1778,
@@ -1732,7 +1734,7 @@ main_replica_next_committable_proposal(main_replica_parent_view_1350, main_repli
   ELSE main_replica_None
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, Int, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
 *)
 main_replica_leader_nullify_expired(main_replica_self_1958, main_replica_id_1958,
 main_replica_view_1958, main_replica_sent_nullify_1958, main_replica_sent_finalize_1958,
@@ -1769,7 +1771,7 @@ main_replica_stored_nullify_1958) ==
 q_init == main_replica_init
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, Int, Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => None({ tag: Str }) | Some(Str));
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, Int, Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => None({ tag: Str }) | Some(Str));
 *)
 main_replica_parent_payload(main_replica_self_1489, main_replica_view_1489, main_replica_parent_view_1489,
 main_replica_certificates_1489) ==
@@ -1840,17 +1842,17 @@ main_replica_certificates_1489) ==
 (*
   @type: ((Str, Str) => Bool);
 *)
-main_replica_on_timeout(main_replica_id_4952, main_replica_expired_4952) ==
+main_replica_on_timeout(main_replica_id_4962, main_replica_expired_4962) ==
   (LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
-    main_replica_self == main_replica_replica_state[main_replica_id_4952]
+    main_replica_self == main_replica_replica_state[main_replica_id_4962]
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_leader_mode ==
-      main_replica_expired_4952 = main_replica_LeaderTimeoutKind
+      main_replica_expired_4962 = main_replica_LeaderTimeoutKind
         /\ main_replica_timeout_pending((main_replica_self)["leader_timeout"], (main_replica_self)[
           "view"
         ])
@@ -1859,7 +1861,7 @@ main_replica_on_timeout(main_replica_id_4952, main_replica_expired_4952) ==
       @type: (() => Bool);
     *)
     main_replica_advance_mode ==
-      main_replica_expired_4952 = main_replica_CertificationTimeoutKind
+      main_replica_expired_4962 = main_replica_CertificationTimeoutKind
         /\ main_replica_timeout_fired((main_replica_self)["leader_timeout"], (main_replica_self)[
           "view"
         ])
@@ -1868,15 +1870,15 @@ main_replica_on_timeout(main_replica_id_4952, main_replica_expired_4952) ==
         ], (main_replica_self)["view"])
     IN
     LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_timer ==
-      main_replica_timer_expired((main_replica_self), main_replica_id_4952, (main_replica_self)[
+      main_replica_timer_expired((main_replica_self), main_replica_id_4962, (main_replica_self)[
         "view"
-      ], main_replica_expired_4952, main_replica_sent_nullify_votes, main_replica_sent_finalize_votes,
-      main_replica_store_nullify_votes[main_replica_id_4952])
+      ], main_replica_expired_4962, main_replica_sent_nullify_votes, main_replica_sent_finalize_votes,
+      main_replica_store_nullify_votes[main_replica_id_4962])
     IN
-    ~(main_replica_broadcast_nullify(main_replica_id_4952, (main_replica_self)[
+    ~(main_replica_broadcast_nullify(main_replica_id_4962, (main_replica_self)[
         "view"
       ]))
       /\ (main_replica_leader_mode \/ main_replica_advance_mode)
@@ -1888,14 +1890,14 @@ main_replica_on_timeout(main_replica_id_4952, main_replica_expired_4952) ==
       /\ main_replica_store_nullify_votes'
         := [
           main_replica_store_nullify_votes EXCEPT
-            ![main_replica_id_4952] =
+            ![main_replica_id_4962] =
               (main_replica_timer)["next_stored_nullify"]
         ]
       /\ main_replica_store_finalize_votes' := main_replica_store_finalize_votes
       /\ main_replica_replica_state'
         := [
           main_replica_replica_state EXCEPT
-            ![main_replica_id_4952] = (main_replica_timer)["next_self"]
+            ![main_replica_id_4962] = (main_replica_timer)["next_self"]
         ]
       /\ main_replica_sent_certificates' := main_replica_sent_certificates
       /\ main_replica_store_certificates' := main_replica_store_certificates
@@ -1906,7 +1908,7 @@ main_replica_on_timeout(main_replica_id_4952, main_replica_expired_4952) ==
       /\ main_replica_lastAction' := "timeout")
 
 (*
-  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, { parent: Int, payload: Str, view: Int }, Bool) => None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int }));
+  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, { parent: Int, payload: Str, view: Int }, Bool) => None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int }));
 *)
 main_replica_construct_notarize(main_replica_id_697, main_replica_self_697, main_replica_view_697,
 main_replica_proposal_697, main_replica_is_verified_697) ==
@@ -1918,7 +1920,7 @@ main_replica_proposal_697, main_replica_is_verified_697) ==
   ELSE main_replica_Some(main_replica_proposal_697)
 
 (*
-  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, { parent: Int, payload: Str, view: Int }, Bool, Bool) => None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int }));
+  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int, { parent: Int, payload: Str, view: Int }, Bool, Bool) => None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int }));
 *)
 main_replica_construct_finalize(main_replica_id_745, main_replica_self_745, main_replica_view_745,
 main_replica_proposal_745, main_replica_proposal_conflicted_745, main_replica_is_certified_745) ==
@@ -1932,7 +1934,7 @@ main_replica_proposal_745, main_replica_proposal_conflicted_745, main_replica_is
   ELSE main_replica_Some(main_replica_proposal_745)
 
 (*
-  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => Bool);
+  @type: ((Str, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Int) => Bool);
 *)
 main_replica_construct_nullify(main_replica_id_710, main_replica_self_710, main_replica_view_710) ==
   ~(main_replica_broadcast_finalize(main_replica_id_710, main_replica_view_710))
@@ -1976,88 +1978,95 @@ main_replica_extend_committed_chain_once(main_replica_chain_1395, main_replica_c
 (*
   @type: ((Str, Str, Int) => Bool);
 *)
-main_replica_propose(main_replica_id_2865, main_replica_new_payload_2865, main_replica_parent_view_2865) ==
+main_replica_propose(main_replica_id_2881, main_replica_new_payload_2881, main_replica_parent_view_2881) ==
   (LET (*
       @type: (() => Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }));
     *)
     main_replica_store_notarize ==
-      main_replica_store_notarize_votes[main_replica_id_2865]
+      main_replica_store_notarize_votes[main_replica_id_2881]
     IN
     LET (*
       @type: (() => Set({ sig: Str, view: Int }));
     *)
     main_replica_store_nullify ==
-      main_replica_store_nullify_votes[main_replica_id_2865]
+      main_replica_store_nullify_votes[main_replica_id_2881]
     IN
     LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
-    main_replica_self == main_replica_replica_state[main_replica_id_2865]
+    main_replica_self == main_replica_replica_state[main_replica_id_2881]
     IN
     LET (*
       @type: (() => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
     *)
-    main_replica_certs == main_replica_store_certificates[main_replica_id_2865]
+    main_replica_certs == main_replica_store_certificates[main_replica_id_2881]
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_proposal_ok ==
-      main_replica_new_payload_2865 \in main_replica_VALID_PAYLOADS
+      main_replica_new_payload_2881 \in main_replica_VALID_PAYLOADS
         /\ main_replica_is_some((main_replica_parent_payload((main_replica_self),
-        (main_replica_self)["view"], main_replica_parent_view_2865, (main_replica_certs))))
+        (main_replica_self)["view"], main_replica_parent_view_2881, (main_replica_certs))))
     IN
     LET (*
       @type: (() => { parent: Int, payload: Str, view: Int });
     *)
     main_replica_proposal ==
       [view |-> (main_replica_self)["view"],
-        parent |-> main_replica_parent_view_2865,
-        payload |-> main_replica_new_payload_2865]
+        parent |-> main_replica_parent_view_2881,
+        payload |-> main_replica_new_payload_2881]
     IN
     LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_timer ==
-      main_replica_forced_timeout_expired((main_replica_self), main_replica_id_2865,
+      main_replica_forced_timeout_expired((main_replica_self), main_replica_id_2881,
       (main_replica_self)["view"], (main_replica_InvalidProposalReason), main_replica_sent_nullify_votes,
       main_replica_sent_finalize_votes, (main_replica_store_nullify))
     IN
-    main_replica_id_2865 = main_replica_leader[(main_replica_self)["view"]]
+    main_replica_id_2881 = main_replica_leader[(main_replica_self)["view"]]
       /\ main_replica_is_none((main_replica_self)["proposal"][
         (main_replica_self)["view"]
       ])
-      /\ ~(main_replica_broadcast_nullify(main_replica_id_2865, (main_replica_self)[
+      /\ ~(main_replica_broadcast_nullify(main_replica_id_2881, (main_replica_self)[
         "view"
       ]))
       /\ main_replica_proposal_ok
       /\ main_replica_sent_notarize_votes'
         := (main_replica_sent_notarize_votes
           \union {[proposal |-> main_replica_proposal,
-            sig |-> main_replica_sig_of(main_replica_id_2865)]})
+            sig |-> main_replica_sig_of(main_replica_id_2881)]})
       /\ main_replica_sent_nullify_votes' := main_replica_sent_nullify_votes
       /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
       /\ main_replica_store_notarize_votes'
         := [
           main_replica_store_notarize_votes EXCEPT
-            ![main_replica_id_2865] =
+            ![main_replica_id_2881] =
               main_replica_store_notarize
                 \union {[proposal |-> main_replica_proposal,
-                  sig |-> main_replica_sig_of(main_replica_id_2865)]}
+                  sig |-> main_replica_sig_of(main_replica_id_2881)]}
         ]
       /\ main_replica_store_nullify_votes' := main_replica_store_nullify_votes
       /\ main_replica_store_finalize_votes' := main_replica_store_finalize_votes
       /\ main_replica_replica_state'
         := [
           main_replica_replica_state EXCEPT
-            ![main_replica_id_2865] =
+            ![main_replica_id_2881] =
               [
-                (main_replica_observe_leader_proposal((main_replica_record_local_proposal((main_replica_self),
-                (main_replica_proposal))), (main_replica_proposal))) EXCEPT
-                  !["leader_timeout"] =
+                [
+                  (main_replica_observe_leader_proposal((main_replica_record_local_proposal((main_replica_self),
+                  (main_replica_proposal))), (main_replica_proposal))) EXCEPT
+                    !["leader_timeout"] =
+                      [
+                        (main_replica_self)["leader_timeout"] EXCEPT
+                          ![(main_replica_self)["view"]] = main_replica_None
+                      ]
+                ] EXCEPT
+                  !["locally_built"] =
                     [
-                      (main_replica_self)["leader_timeout"] EXCEPT
-                        ![(main_replica_self)["view"]] = main_replica_None
+                      (main_replica_self)["locally_built"] EXCEPT
+                        ![(main_replica_self)["view"]] = TRUE
                     ]
               ]
         ]
@@ -2070,69 +2079,85 @@ main_replica_propose(main_replica_id_2865, main_replica_new_payload_2865, main_r
       /\ main_replica_lastAction' := "propose")
 
 (*
-  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, { ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }, Bool, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+  @type: (({ certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, Str, { ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }, Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), Set({ sig: Str, view: Int }), Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str })) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
 *)
-main_replica_notarize_effect(main_replica_self_4411, main_replica_id_4411, main_replica_notarization_4411,
-main_replica_can_cert_4411, main_replica_sent_nullify_votes_4411, main_replica_sent_finalize_votes_4411,
-main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
+main_replica_notarize_effect(main_replica_self_4428, main_replica_id_4428, main_replica_notarization_4428,
+main_replica_sent_nullify_votes_4428, main_replica_sent_finalize_votes_4428, main_replica_stored_nullify_4428,
+main_replica_stored_finalize_4428) ==
   LET (*
     @type: (() => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
   *)
-  main_replica_cert == main_replica_Notarization(main_replica_notarization_4411)
+  main_replica_cert == main_replica_Notarization(main_replica_notarization_4428)
   IN
   LET (*
     @type: (() => Int);
   *)
   main_replica_cert_view_num ==
-    main_replica_notarization_4411["proposal"]["view"]
+    main_replica_notarization_4428["proposal"]["view"]
   IN
   LET (*
     @type: (() => Int);
   *)
   main_replica_seen_notarization ==
-    IF main_replica_self_4411["ghost_last_seen_notarization"]
+    IF main_replica_self_4428["ghost_last_seen_notarization"]
       < main_replica_cert_view_num
     THEN main_replica_cert_view_num
-    ELSE main_replica_self_4411["ghost_last_seen_notarization"]
+    ELSE main_replica_self_4428["ghost_last_seen_notarization"]
   IN
   LET (*
     @type: (() => { parent: Int, payload: Str, view: Int });
   *)
-  main_replica_cert_prop == main_replica_notarization_4411["proposal"]
+  main_replica_cert_prop == main_replica_notarization_4428["proposal"]
   IN
   LET (*
     @type: (() => Bool);
   *)
   main_replica_proposal_conflicted ==
-    main_replica_has_leader_proposal_conflict(main_replica_self_4411, (main_replica_cert_prop))
+    main_replica_has_leader_proposal_conflict(main_replica_self_4428, (main_replica_cert_prop))
   IN
   LET (*
     @type: (() => Bool);
   *)
   main_replica_should_broadcast ==
-    ~(main_replica_broadcast_notarization(main_replica_id_4411, (main_replica_cert_view_num)))
+    ~(main_replica_broadcast_notarization(main_replica_id_4428, (main_replica_cert_view_num)))
   IN
   LET (*
-    @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+    @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
   *)
   main_replica_timer ==
-    main_replica_forced_timeout_expired(main_replica_self_4411, main_replica_id_4411,
-    (main_replica_cert_view_num), (main_replica_FailedCertificationReason), main_replica_sent_nullify_votes_4411,
-    main_replica_sent_finalize_votes_4411, main_replica_stored_nullify_4411)
+    main_replica_forced_timeout_expired(main_replica_self_4428, main_replica_id_4428,
+    (main_replica_cert_view_num), (main_replica_FailedCertificationReason), main_replica_sent_nullify_votes_4428,
+    main_replica_sent_finalize_votes_4428, main_replica_stored_nullify_4428)
+  IN
+  LET (*
+    @type: (() => Bool);
+  *)
+  main_replica_local_auto_cert ==
+    main_replica_self_4428["locally_built"][(main_replica_cert_view_num)]
+      /\ ~main_replica_proposal_conflicted
+  IN
+  LET (*
+    @type: (() => Bool);
+  *)
+  main_replica_cert_succeeds ==
+    main_replica_local_auto_cert
+      \/ main_replica_can_certify(main_replica_id_4428, (main_replica_cert_prop)[
+        "payload"
+      ])
   IN
   LET (*
     @type: (() => Bool);
   *)
   main_replica_is_certified ==
-    main_replica_can_cert_4411
-      /\ main_replica_self_4411["certified"][(main_replica_cert_view_num)]
+    main_replica_cert_succeeds
+      /\ main_replica_self_4428["certified"][(main_replica_cert_view_num)]
         = main_replica_None
   IN
   LET (*
     @type: (() => None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int }));
   *)
   main_replica_finalize_result ==
-    main_replica_construct_finalize(main_replica_id_4411, main_replica_self_4411,
+    main_replica_construct_finalize(main_replica_id_4428, main_replica_self_4428,
     (main_replica_cert_view_num), (main_replica_cert_prop), (main_replica_proposal_conflicted),
     (main_replica_is_certified))
   IN
@@ -2140,17 +2165,17 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
     @type: (() => Bool);
   *)
   main_replica_can_send_nullify ==
-    ~main_replica_can_cert_4411
-      /\ main_replica_self_4411["view"] = main_replica_cert_view_num
-      /\ main_replica_construct_nullify(main_replica_id_4411, main_replica_self_4411,
+    ~main_replica_cert_succeeds
+      /\ main_replica_self_4428["view"] = main_replica_cert_view_num
+      /\ main_replica_construct_nullify(main_replica_id_4428, main_replica_self_4428,
       (main_replica_cert_view_num))
-      /\ ~(main_replica_broadcast_nullify(main_replica_id_4411, (main_replica_cert_view_num)))
+      /\ ~(main_replica_broadcast_nullify(main_replica_id_4428, (main_replica_cert_view_num)))
   IN
   LET (*
-    @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+    @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
   *)
   main_replica_observed ==
-    main_replica_observe_leader_proposal((main_replica_observe_round_proposal(main_replica_self_4411,
+    main_replica_observe_leader_proposal((main_replica_observe_round_proposal(main_replica_self_4428,
     (main_replica_cert_prop), TRUE)), (main_replica_cert_prop))
   IN
   IF main_replica_is_some((main_replica_finalize_result))
@@ -2162,13 +2187,13 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
               (main_replica_observed) EXCEPT
                 !["leader_timeout"] =
                   [
-                    main_replica_self_4411["leader_timeout"] EXCEPT
+                    main_replica_self_4428["leader_timeout"] EXCEPT
                       ![main_replica_cert_view_num] = main_replica_None
                   ]
             ] EXCEPT
               !["certification_timeout"] =
                 [
-                  main_replica_self_4411["certification_timeout"] EXCEPT
+                  main_replica_self_4428["certification_timeout"] EXCEPT
                     ![main_replica_cert_view_num] = main_replica_None
                 ]
           ] EXCEPT
@@ -2178,7 +2203,7 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
             LET (*
               @type: (() => (Int -> None({ tag: Str }) | Some(Bool)));
             *)
-            __quint_var6 == main_replica_self_4411["certified"]
+            __quint_var6 == main_replica_self_4428["certified"]
             IN
             LET (*
               @type: (() => Set(Int));
@@ -2193,16 +2218,16 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
                 ELSE (__quint_var6)[__quint_var8]
             ]
       ], (main_replica_cert_view_num + 1)),
-    next_sent_nullify |-> main_replica_sent_nullify_votes_4411,
+    next_sent_nullify |-> main_replica_sent_nullify_votes_4428,
     next_sent_finalize |->
-      main_replica_sent_finalize_votes_4411
+      main_replica_sent_finalize_votes_4428
         \union {[proposal |-> main_replica_cert_prop,
-          sig |-> main_replica_sig_of(main_replica_id_4411)]},
-    next_stored_nullify |-> main_replica_stored_nullify_4411,
+          sig |-> main_replica_sig_of(main_replica_id_4428)]},
+    next_stored_nullify |-> main_replica_stored_nullify_4428,
     next_stored_finalize |->
-      main_replica_stored_finalize_4411
+      main_replica_stored_finalize_4428
         \union {[proposal |-> main_replica_cert_prop,
-          sig |-> main_replica_sig_of(main_replica_id_4411)]}]
+          sig |-> main_replica_sig_of(main_replica_id_4428)]}]
   ELSE IF main_replica_is_certified
   THEN [next_self |->
       main_replica_enter_view([
@@ -2212,13 +2237,13 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
               (main_replica_observed) EXCEPT
                 !["leader_timeout"] =
                   [
-                    main_replica_self_4411["leader_timeout"] EXCEPT
+                    main_replica_self_4428["leader_timeout"] EXCEPT
                       ![main_replica_cert_view_num] = main_replica_None
                   ]
             ] EXCEPT
               !["certification_timeout"] =
                 [
-                  main_replica_self_4411["certification_timeout"] EXCEPT
+                  main_replica_self_4428["certification_timeout"] EXCEPT
                     ![main_replica_cert_view_num] = main_replica_None
                 ]
           ] EXCEPT
@@ -2228,7 +2253,7 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
             LET (*
               @type: (() => (Int -> None({ tag: Str }) | Some(Bool)));
             *)
-            __quint_var9 == main_replica_self_4411["certified"]
+            __quint_var9 == main_replica_self_4428["certified"]
             IN
             LET (*
               @type: (() => Set(Int));
@@ -2243,10 +2268,10 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
                 ELSE (__quint_var9)[__quint_var11]
             ]
       ], (main_replica_cert_view_num + 1)),
-    next_sent_nullify |-> main_replica_sent_nullify_votes_4411,
-    next_sent_finalize |-> main_replica_sent_finalize_votes_4411,
-    next_stored_nullify |-> main_replica_stored_nullify_4411,
-    next_stored_finalize |-> main_replica_stored_finalize_4411]
+    next_sent_nullify |-> main_replica_sent_nullify_votes_4428,
+    next_sent_finalize |-> main_replica_sent_finalize_votes_4428,
+    next_stored_nullify |-> main_replica_stored_nullify_4428,
+    next_stored_finalize |-> main_replica_stored_finalize_4428]
   ELSE IF main_replica_can_send_nullify
   THEN [next_self |->
       [
@@ -2263,18 +2288,18 @@ main_replica_stored_nullify_4411, main_replica_stored_finalize_4411) ==
           !["ghost_last_seen_notarization"] = main_replica_seen_notarization
       ],
     next_sent_nullify |-> (main_replica_timer)["next_sent_nullify"],
-    next_sent_finalize |-> main_replica_sent_finalize_votes_4411,
+    next_sent_finalize |-> main_replica_sent_finalize_votes_4428,
     next_stored_nullify |-> (main_replica_timer)["next_stored_nullify"],
-    next_stored_finalize |-> main_replica_stored_finalize_4411]
+    next_stored_finalize |-> main_replica_stored_finalize_4428]
   ELSE [next_self |->
       [
         (main_replica_observed) EXCEPT
           !["ghost_last_seen_notarization"] = main_replica_seen_notarization
       ],
-    next_sent_nullify |-> main_replica_sent_nullify_votes_4411,
-    next_sent_finalize |-> main_replica_sent_finalize_votes_4411,
-    next_stored_nullify |-> main_replica_stored_nullify_4411,
-    next_stored_finalize |-> main_replica_stored_finalize_4411]
+    next_sent_nullify |-> main_replica_sent_nullify_votes_4428,
+    next_sent_finalize |-> main_replica_sent_finalize_votes_4428,
+    next_stored_nullify |-> main_replica_stored_nullify_4428,
+    next_stored_finalize |-> main_replica_stored_finalize_4428]
 
 (*
   @type: ((Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => Seq({ parent: Int, payload: Str, view: Int }));
@@ -2312,7 +2337,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
       main_replica_store_finalize_votes[main_replica_id_3478]
     IN
     LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
     main_replica_self == main_replica_replica_state[main_replica_id_3478]
     IN
@@ -2391,7 +2416,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
       /\ main_replica_lastAction' := "on_notarize"
     ELSE IF main_replica_can_process_as_proposal
     THEN LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_timer ==
       main_replica_forced_timeout_expired((main_replica_self), main_replica_id_3478,
@@ -2418,7 +2443,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
       ELSE main_replica_store_notarize
     IN
     LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
     main_replica_proposal_self ==
       IF main_replica_notarize_ok
@@ -2447,38 +2472,30 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
     LET (*
       @type: (() => Bool);
     *)
-    main_replica_can_cert_p ==
-      main_replica_can_certify(main_replica_id_3478, (main_replica_proposal)[
-        "payload"
-      ])
-    IN
-    LET (*
-      @type: (() => Bool);
-    *)
     main_replica_should_broadcast_not_p ==
       ~(main_replica_broadcast_notarization(main_replica_id_3478, (main_replica_view)))
     IN
     LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_effect_p ==
       CASE VariantTag((main_replica_maybe_not_cert_p)) = "Some"
           -> LET (*
-            @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+            @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
           *)
-          __QUINT_LAMBDA38(main_replica_cert_3105) ==
+          __QUINT_LAMBDA38(main_replica_cert_3114) ==
             main_replica_notarize_effect((main_replica_proposal_self), main_replica_id_3478,
-            main_replica_cert_3105, (main_replica_can_cert_p), main_replica_sent_nullify_votes,
-            main_replica_sent_finalize_votes, main_replica_store_nullify_votes[
+            main_replica_cert_3114, main_replica_sent_nullify_votes, main_replica_sent_finalize_votes,
+            main_replica_store_nullify_votes[main_replica_id_3478], main_replica_store_finalize_votes[
               main_replica_id_3478
-            ], main_replica_store_finalize_votes[main_replica_id_3478])
+            ])
           IN
           __QUINT_LAMBDA38(VariantGetUnsafe("Some", (main_replica_maybe_not_cert_p)))
         [] VariantTag((main_replica_maybe_not_cert_p)) = "None"
           -> LET (*
-            @type: (({ tag: Str }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+            @type: (({ tag: Str }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
           *)
-          __QUINT_LAMBDA39(main_replica___3108) ==
+          __QUINT_LAMBDA39(main_replica___3117) ==
             [next_self |-> main_replica_proposal_self,
               next_sent_nullify |-> main_replica_sent_nullify_votes,
               next_sent_finalize |-> main_replica_sent_finalize_votes,
@@ -2529,7 +2546,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
             *)
-            __QUINT_LAMBDA41(main_replica_cert_3184) ==
+            __QUINT_LAMBDA41(main_replica_cert_3193) ==
               LET (*
                 @type: (() => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
               *)
@@ -2541,9 +2558,9 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
                     LET (*
                       @type: ((Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
                     *)
-                    __QUINT_LAMBDA40(main_replica_old_3179) ==
-                      main_replica_old_3179
-                        \union {(main_replica_Notarization(main_replica_cert_3184))}
+                    __QUINT_LAMBDA40(main_replica_old_3188) ==
+                      main_replica_old_3188
+                        \union {(main_replica_Notarization(main_replica_cert_3193))}
                     IN
                     __QUINT_LAMBDA40((__quint_var12)[main_replica_id_3478])
               ]
@@ -2553,7 +2570,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ tag: Str }) => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
             *)
-            __QUINT_LAMBDA42(main_replica___3187) ==
+            __QUINT_LAMBDA42(main_replica___3196) ==
               main_replica_store_certificates
             IN
             __QUINT_LAMBDA42(VariantGetUnsafe("None", (main_replica_maybe_not_cert_p))))
@@ -2562,10 +2579,10 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
             *)
-            __QUINT_LAMBDA43(main_replica_cert_3203) ==
+            __QUINT_LAMBDA43(main_replica_cert_3212) ==
               IF main_replica_should_broadcast_not_p
               THEN main_replica_sent_certificates
-                \union {(main_replica_Notarization(main_replica_cert_3203))}
+                \union {(main_replica_Notarization(main_replica_cert_3212))}
               ELSE main_replica_sent_certificates
             IN
             __QUINT_LAMBDA43(VariantGetUnsafe("Some", (main_replica_maybe_not_cert_p)))
@@ -2573,7 +2590,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ tag: Str }) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
             *)
-            __QUINT_LAMBDA44(main_replica___3206) ==
+            __QUINT_LAMBDA44(main_replica___3215) ==
               main_replica_sent_certificates
             IN
             __QUINT_LAMBDA44(VariantGetUnsafe("None", (main_replica_maybe_not_cert_p))))
@@ -2597,9 +2614,9 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
       @type: (() => Bool);
     *)
     main_replica_had_notarization ==
-      \E main_replica_c_3254 \in main_replica_certs:
-        main_replica_is_notarization_cert(main_replica_c_3254)
-          /\ main_replica_cert_proposal(main_replica_c_3254)
+      \E main_replica_c_3262 \in main_replica_certs:
+        main_replica_is_notarization_cert(main_replica_c_3262)
+          /\ main_replica_cert_proposal(main_replica_c_3262)
             = main_replica_Some((main_replica_proposal))
     IN
     LET (*
@@ -2620,14 +2637,6 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
     LET (*
       @type: (() => Bool);
     *)
-    main_replica_can_cert ==
-      main_replica_can_certify(main_replica_id_3478, (main_replica_proposal)[
-        "payload"
-      ])
-    IN
-    LET (*
-      @type: (() => Bool);
-    *)
     main_replica_is_new_cert == ~main_replica_had_notarization
     IN
     LET (*
@@ -2637,26 +2646,26 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
       ~(main_replica_broadcast_notarization(main_replica_id_3478, (main_replica_view)))
     IN
     LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_effect ==
       CASE VariantTag((main_replica_maybe_not_cert)) = "Some"
           -> LET (*
-            @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+            @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
           *)
-          __QUINT_LAMBDA45(main_replica_cert_3314) ==
+          __QUINT_LAMBDA45(main_replica_cert_3315) ==
             main_replica_notarize_effect((main_replica_self), main_replica_id_3478,
-            main_replica_cert_3314, (main_replica_can_cert), main_replica_sent_nullify_votes,
-            main_replica_sent_finalize_votes, main_replica_store_nullify_votes[
+            main_replica_cert_3315, main_replica_sent_nullify_votes, main_replica_sent_finalize_votes,
+            main_replica_store_nullify_votes[main_replica_id_3478], main_replica_store_finalize_votes[
               main_replica_id_3478
-            ], main_replica_store_finalize_votes[main_replica_id_3478])
+            ])
           IN
           __QUINT_LAMBDA45(VariantGetUnsafe("Some", (main_replica_maybe_not_cert)))
         [] VariantTag((main_replica_maybe_not_cert)) = "None"
           -> LET (*
-            @type: (({ tag: Str }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+            @type: (({ tag: Str }) => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
           *)
-          __QUINT_LAMBDA46(main_replica___3317) ==
+          __QUINT_LAMBDA46(main_replica___3318) ==
             [next_self |-> main_replica_self,
               next_sent_nullify |-> main_replica_sent_nullify_votes,
               next_sent_finalize |-> main_replica_sent_finalize_votes,
@@ -2698,7 +2707,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
             *)
-            __QUINT_LAMBDA48(main_replica_cert_3370) ==
+            __QUINT_LAMBDA48(main_replica_cert_3371) ==
               LET (*
                 @type: (() => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
               *)
@@ -2710,9 +2719,9 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
                     LET (*
                       @type: ((Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
                     *)
-                    __QUINT_LAMBDA47(main_replica_old_3365) ==
-                      main_replica_old_3365
-                        \union {(main_replica_Notarization(main_replica_cert_3370))}
+                    __QUINT_LAMBDA47(main_replica_old_3366) ==
+                      main_replica_old_3366
+                        \union {(main_replica_Notarization(main_replica_cert_3371))}
                     IN
                     __QUINT_LAMBDA47((__quint_var13)[main_replica_id_3478])
               ]
@@ -2722,7 +2731,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ tag: Str }) => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
             *)
-            __QUINT_LAMBDA49(main_replica___3373) ==
+            __QUINT_LAMBDA49(main_replica___3374) ==
               main_replica_store_certificates
             IN
             __QUINT_LAMBDA49(VariantGetUnsafe("None", (main_replica_maybe_not_cert))))
@@ -2731,10 +2740,10 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
             *)
-            __QUINT_LAMBDA50(main_replica_cert_3389) ==
+            __QUINT_LAMBDA50(main_replica_cert_3390) ==
               IF main_replica_should_broadcast_not
               THEN main_replica_sent_certificates
-                \union {(main_replica_Notarization(main_replica_cert_3389))}
+                \union {(main_replica_Notarization(main_replica_cert_3390))}
               ELSE main_replica_sent_certificates
             IN
             __QUINT_LAMBDA50(VariantGetUnsafe("Some", (main_replica_maybe_not_cert)))
@@ -2742,7 +2751,7 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
             -> LET (*
               @type: (({ tag: Str }) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
             *)
-            __QUINT_LAMBDA51(main_replica___3392) ==
+            __QUINT_LAMBDA51(main_replica___3393) ==
               main_replica_sent_certificates
             IN
             __QUINT_LAMBDA51(VariantGetUnsafe("None", (main_replica_maybe_not_cert))))
@@ -2781,24 +2790,24 @@ main_replica_on_notarize(main_replica_id_3478, main_replica_vote_3478) ==
 (*
   @type: ((Str, { ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }, Bool) => Bool);
 *)
-main_replica__add_finalization(main_replica_id_4831, main_replica_finalization_4831,
-main_replica_is_new_cert_4831) ==
+main_replica__add_finalization(main_replica_id_4841, main_replica_finalization_4841,
+main_replica_is_new_cert_4841) ==
   (LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
-    main_replica_self == main_replica_replica_state[main_replica_id_4831]
+    main_replica_self == main_replica_replica_state[main_replica_id_4841]
     IN
     LET (*
       @type: (() => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
     *)
     main_replica_cert ==
-      main_replica_Finalization(main_replica_finalization_4831)
+      main_replica_Finalization(main_replica_finalization_4841)
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_should_broadcast_finalization ==
-      ~(main_replica_broadcast_finalization(main_replica_id_4831, main_replica_finalization_4831[
+      ~(main_replica_broadcast_finalization(main_replica_id_4841, main_replica_finalization_4841[
         "proposal"
       ][
         "view"
@@ -2808,12 +2817,12 @@ main_replica_is_new_cert_4831) ==
       @type: (() => Int);
     *)
     main_replica_cert_view_num ==
-      main_replica_finalization_4831["proposal"]["view"]
+      main_replica_finalization_4841["proposal"]["view"]
     IN
     LET (*
       @type: (() => { parent: Int, payload: Str, view: Int });
     *)
-    main_replica_cert_prop == main_replica_finalization_4831["proposal"]
+    main_replica_cert_prop == main_replica_finalization_4841["proposal"]
     IN
     LET (*
       @type: (() => Int);
@@ -2834,29 +2843,29 @@ main_replica_is_new_cert_4831) ==
       @type: (() => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
     *)
     main_replica_next_certs ==
-      IF main_replica_is_new_cert_4831
-      THEN main_replica_store_certificates[main_replica_id_4831]
+      IF main_replica_is_new_cert_4841
+      THEN main_replica_store_certificates[main_replica_id_4841]
         \union {(main_replica_cert)}
-      ELSE main_replica_store_certificates[main_replica_id_4831]
+      ELSE main_replica_store_certificates[main_replica_id_4841]
     IN
-    Cardinality(main_replica_finalization_4831["signatures"]) >= main_replica_Q
+    Cardinality(main_replica_finalization_4841["signatures"]) >= main_replica_Q
       /\ main_replica_store_certificates'
-        := (IF main_replica_is_new_cert_4831
+        := (IF main_replica_is_new_cert_4841
         THEN [
           main_replica_store_certificates EXCEPT
-            ![main_replica_id_4831] = main_replica_next_certs
+            ![main_replica_id_4841] = main_replica_next_certs
         ]
         ELSE main_replica_store_certificates)
       /\ main_replica_sent_certificates'
         := (IF main_replica_should_broadcast_finalization
         THEN main_replica_sent_certificates
-          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4831))))}
+          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4841))))}
         ELSE main_replica_sent_certificates)
       /\ main_replica_ghost_committed_blocks'
-        := (IF main_replica_is_new_cert_4831
+        := (IF main_replica_is_new_cert_4841
         THEN [
           main_replica_ghost_committed_blocks EXCEPT
-            ![main_replica_id_4831] =
+            ![main_replica_id_4841] =
               main_replica_rebuild_committed_chain((main_replica_next_certs))
         ]
         ELSE main_replica_ghost_committed_blocks)
@@ -2866,7 +2875,7 @@ main_replica_is_new_cert_4831) ==
       /\ main_replica_replica_state'
         := [
           main_replica_replica_state EXCEPT
-            ![main_replica_id_4831] =
+            ![main_replica_id_4841] =
               main_replica_enter_view([
                 [
                   (main_replica_observe_leader_proposal((main_replica_observe_round_proposal((main_replica_cancel_all_timers((main_replica_self),
@@ -2883,63 +2892,63 @@ main_replica_is_new_cert_4831) ==
         ])
 
 (*
-  @type: ((Str, { ghost_sender: Str, signatures: Set(Str), view: Int }, Bool, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }) => Bool);
+  @type: ((Str, { ghost_sender: Str, signatures: Set(Str), view: Int }, Bool, { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }) => Bool);
 *)
-main_replica__add_nullification(main_replica_id_4682, main_replica_nullification_4682,
-main_replica_is_new_cert_4682, main_replica_base_self_4682) ==
+main_replica__add_nullification(main_replica_id_4692, main_replica_nullification_4692,
+main_replica_is_new_cert_4692, main_replica_base_self_4692) ==
   (LET (*
       @type: (() => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
     *)
     main_replica_cert ==
-      main_replica_Nullification(main_replica_nullification_4682)
+      main_replica_Nullification(main_replica_nullification_4692)
     IN
     LET (*
       @type: (() => Int);
     *)
-    main_replica_cert_view_num == main_replica_nullification_4682["view"]
+    main_replica_cert_view_num == main_replica_nullification_4692["view"]
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_should_broadcast_nullification ==
-      ~(main_replica_broadcast_nullification(main_replica_id_4682, (main_replica_cert_view_num)))
+      ~(main_replica_broadcast_nullification(main_replica_id_4692, (main_replica_cert_view_num)))
     IN
     LET (*
       @type: (() => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
     *)
     main_replica_next_certs ==
-      IF main_replica_is_new_cert_4682
-      THEN main_replica_store_certificates[main_replica_id_4682]
+      IF main_replica_is_new_cert_4692
+      THEN main_replica_store_certificates[main_replica_id_4692]
         \union {(main_replica_cert)}
-      ELSE main_replica_store_certificates[main_replica_id_4682]
+      ELSE main_replica_store_certificates[main_replica_id_4692]
     IN
-    Cardinality(main_replica_nullification_4682["signatures"]) >= main_replica_Q
+    Cardinality(main_replica_nullification_4692["signatures"]) >= main_replica_Q
       /\ main_replica_store_certificates'
-        := (IF main_replica_is_new_cert_4682
+        := (IF main_replica_is_new_cert_4692
         THEN [
           main_replica_store_certificates EXCEPT
-            ![main_replica_id_4682] = main_replica_next_certs
+            ![main_replica_id_4692] = main_replica_next_certs
         ]
         ELSE main_replica_store_certificates)
       /\ main_replica_sent_certificates'
         := (IF main_replica_should_broadcast_nullification
         THEN main_replica_sent_certificates
-          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4682))))}
+          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4692))))}
         ELSE main_replica_sent_certificates)
       /\ main_replica_sent_notarize_votes' := main_replica_sent_notarize_votes
       /\ main_replica_sent_finalize_votes' := main_replica_sent_finalize_votes
       /\ main_replica_replica_state'
         := [
           main_replica_replica_state EXCEPT
-            ![main_replica_id_4682] =
-              main_replica_enter_view((main_replica_cancel_all_timers(main_replica_base_self_4682,
+            ![main_replica_id_4692] =
+              main_replica_enter_view((main_replica_cancel_all_timers(main_replica_base_self_4692,
               (main_replica_cert_view_num))), (main_replica_cert_view_num + 1))
         ]
       /\ main_replica_ghost_committed_blocks'
-        := (IF main_replica_is_new_cert_4682
+        := (IF main_replica_is_new_cert_4692
         THEN [
           main_replica_ghost_committed_blocks EXCEPT
-            ![main_replica_id_4682] =
+            ![main_replica_id_4692] =
               main_replica_rebuild_committed_chain((main_replica_next_certs))
         ]
         ELSE main_replica_ghost_committed_blocks))
@@ -2947,52 +2956,48 @@ main_replica_is_new_cert_4682, main_replica_base_self_4682) ==
 (*
   @type: ((Str, { ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }, Bool) => Bool);
 *)
-main_replica__add_notarization(main_replica_id_4585, main_replica_notarization_4585,
-main_replica_is_new_cert_4585) ==
+main_replica__add_notarization(main_replica_id_4595, main_replica_notarization_4595,
+main_replica_is_new_cert_4595) ==
   (LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
-    main_replica_self == main_replica_replica_state[main_replica_id_4585]
+    main_replica_self == main_replica_replica_state[main_replica_id_4595]
     IN
     LET (*
       @type: (() => Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }));
     *)
     main_replica_cert ==
-      main_replica_Notarization(main_replica_notarization_4585)
+      main_replica_Notarization(main_replica_notarization_4595)
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_should_broadcast_notarization ==
-      ~(main_replica_broadcast_notarization(main_replica_id_4585, main_replica_notarization_4585[
+      ~(main_replica_broadcast_notarization(main_replica_id_4595, main_replica_notarization_4595[
         "proposal"
       ][
         "view"
       ]))
     IN
     LET (*
-      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+      @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_finalize: Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }), next_stored_nullify: Set({ sig: Str, view: Int }) });
     *)
     main_replica_effect ==
-      main_replica_notarize_effect((main_replica_self), main_replica_id_4585, main_replica_notarization_4585,
-      (main_replica_can_certify(main_replica_id_4585, main_replica_notarization_4585[
-        "proposal"
-      ][
-        "payload"
-      ])), main_replica_sent_nullify_votes, main_replica_sent_finalize_votes, main_replica_store_nullify_votes[
-        main_replica_id_4585
-      ], main_replica_store_finalize_votes[main_replica_id_4585])
+      main_replica_notarize_effect((main_replica_self), main_replica_id_4595, main_replica_notarization_4595,
+      main_replica_sent_nullify_votes, main_replica_sent_finalize_votes, main_replica_store_nullify_votes[
+        main_replica_id_4595
+      ], main_replica_store_finalize_votes[main_replica_id_4595])
     IN
     LET (*
       @type: (() => Bool);
     *)
     main_replica_can_self_notarize ==
-      ~(main_replica_broadcast_notarize(main_replica_id_4585, main_replica_notarization_4585[
+      ~(main_replica_broadcast_notarize(main_replica_id_4595, main_replica_notarization_4595[
           "proposal"
         ][
           "view"
         ]))
-        /\ ~(main_replica_broadcast_nullify(main_replica_id_4585, main_replica_notarization_4585[
+        /\ ~(main_replica_broadcast_nullify(main_replica_id_4595, main_replica_notarization_4595[
           "proposal"
         ][
           "view"
@@ -3002,12 +3007,12 @@ main_replica_is_new_cert_4585) ==
       @type: (() => { proposal: { parent: Int, payload: Str, view: Int }, sig: Str });
     *)
     main_replica_self_vote ==
-      [proposal |-> main_replica_notarization_4585["proposal"],
-        sig |-> main_replica_sig_of(main_replica_id_4585)]
+      [proposal |-> main_replica_notarization_4595["proposal"],
+        sig |-> main_replica_sig_of(main_replica_id_4595)]
     IN
-    Cardinality(main_replica_notarization_4585["signatures"]) >= main_replica_Q
+    Cardinality(main_replica_notarization_4595["signatures"]) >= main_replica_Q
       /\ main_replica_store_certificates'
-        := (IF main_replica_is_new_cert_4585
+        := (IF main_replica_is_new_cert_4595
         THEN LET (*
           @type: (() => (Str -> Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))));
         *)
@@ -3015,20 +3020,20 @@ main_replica_is_new_cert_4585) ==
         IN
         [
           (__quint_var15) EXCEPT
-            ![main_replica_id_4585] =
+            ![main_replica_id_4595] =
               LET (*
                 @type: ((Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int }))) => Set(Finalization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Notarization({ ghost_sender: Str, proposal: { parent: Int, payload: Str, view: Int }, signatures: Set(Str) }) | Nullification({ ghost_sender: Str, signatures: Set(Str), view: Int })));
               *)
-              __QUINT_LAMBDA78(main_replica_old_4499) ==
-                main_replica_old_4499 \union {(main_replica_cert)}
+              __QUINT_LAMBDA78(main_replica_old_4509) ==
+                main_replica_old_4509 \union {(main_replica_cert)}
               IN
-              __QUINT_LAMBDA78((__quint_var15)[main_replica_id_4585])
+              __QUINT_LAMBDA78((__quint_var15)[main_replica_id_4595])
         ]
         ELSE main_replica_store_certificates)
       /\ main_replica_sent_certificates'
         := (IF main_replica_should_broadcast_notarization
         THEN main_replica_sent_certificates
-          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4585))))}
+          \union {(main_replica_cert_with_sender((main_replica_cert), (main_replica_sig_of(main_replica_id_4595))))}
         ELSE main_replica_sent_certificates)
       /\ main_replica_sent_notarize_votes'
         := (IF main_replica_can_self_notarize
@@ -3047,32 +3052,32 @@ main_replica_is_new_cert_4585) ==
         IN
         [
           (__quint_var16) EXCEPT
-            ![main_replica_id_4585] =
+            ![main_replica_id_4595] =
               LET (*
                 @type: ((Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str })) => Set({ proposal: { parent: Int, payload: Str, view: Int }, sig: Str }));
               *)
-              __QUINT_LAMBDA79(main_replica_old_4544) ==
-                main_replica_old_4544 \union {(main_replica_self_vote)}
+              __QUINT_LAMBDA79(main_replica_old_4554) ==
+                main_replica_old_4554 \union {(main_replica_self_vote)}
               IN
-              __QUINT_LAMBDA79((__quint_var16)[main_replica_id_4585])
+              __QUINT_LAMBDA79((__quint_var16)[main_replica_id_4595])
         ]
         ELSE main_replica_store_notarize_votes)
       /\ main_replica_store_nullify_votes'
         := [
           main_replica_store_nullify_votes EXCEPT
-            ![main_replica_id_4585] =
+            ![main_replica_id_4595] =
               (main_replica_effect)["next_stored_nullify"]
         ]
       /\ main_replica_store_finalize_votes'
         := [
           main_replica_store_finalize_votes EXCEPT
-            ![main_replica_id_4585] =
+            ![main_replica_id_4595] =
               (main_replica_effect)["next_stored_finalize"]
         ]
       /\ main_replica_replica_state'
         := [
           main_replica_replica_state EXCEPT
-            ![main_replica_id_4585] = (main_replica_effect)["next_self"]
+            ![main_replica_id_4595] = (main_replica_effect)["next_self"]
         ]
       /\ main_replica_ghost_committed_blocks'
         := main_replica_ghost_committed_blocks)
@@ -3089,7 +3094,7 @@ main_replica_on_finalize(main_replica_id_3634, main_replica_vote_3634) ==
       main_replica_store_finalize_votes[main_replica_id_3634]
     IN
     LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
     main_replica_self == main_replica_replica_state[main_replica_id_3634]
     IN
@@ -3200,7 +3205,7 @@ main_replica_on_nullify(main_replica_id_3844, main_replica_vote_3844) ==
       main_replica_store_nullify_votes[main_replica_id_3844]
     IN
     LET (*
-      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
+      @type: (() => { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int });
     *)
     main_replica_self == main_replica_replica_state[main_replica_id_3844]
     IN
@@ -3228,7 +3233,7 @@ main_replica_on_nullify(main_replica_id_3844, main_replica_vote_3844) ==
             ])
       IN
       LET (*
-        @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
+        @type: (() => { next_self: { certification_timeout: (Int -> None({ tag: Str }) | Some(Bool)), certified: (Int -> None({ tag: Str }) | Some(Bool)), ghost_last_seen_notarization: Int, last_finalized: Int, leader_proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), leader_proposal_conflicted: (Int -> Bool), leader_timeout: (Int -> None({ tag: Str }) | Some(Bool)), locally_built: (Int -> Bool), proposal: (Int -> None({ tag: Str }) | Some({ parent: Int, payload: Str, view: Int })), view: Int }, next_sent_nullify: Set({ sig: Str, view: Int }), next_stored_nullify: Set({ sig: Str, view: Int }) });
       *)
       main_replica_timer ==
         IF main_replica_leader_nullify_trigger
@@ -3544,8 +3549,8 @@ main_replica_step ==
             \union {(main_replica_GENESIS_VIEW)}:
             \E main_replica_vote_payload \in main_replica_VALID_PAYLOADS:
               \E main_replica_vote_sig \in {
-                main_replica_sig_of(main_replica_r_2328):
-                  main_replica_r_2328 \in main_replica_Replicas
+                main_replica_sig_of(main_replica_r_2334):
+                  main_replica_r_2334 \in main_replica_Replicas
               }:
                 main_replica_on_notarize(main_replica_id, [proposal |->
                     [view |-> main_replica_vote_view,
@@ -3558,8 +3563,8 @@ main_replica_step ==
             \union {(main_replica_GENESIS_VIEW)}:
             \E main_replica_vote_payload \in main_replica_VALID_PAYLOADS:
               \E main_replica_vote_sig \in {
-                main_replica_sig_of(main_replica_r_2370):
-                  main_replica_r_2370 \in main_replica_Replicas
+                main_replica_sig_of(main_replica_r_2376):
+                  main_replica_r_2376 \in main_replica_Replicas
               }:
                 main_replica_on_finalize(main_replica_id, [proposal |->
                     [view |-> main_replica_vote_view,
@@ -3569,49 +3574,49 @@ main_replica_step ==
     \/ ((\E main_replica_id \in main_replica_CORRECT:
         \E main_replica_vote_view \in main_replica_VIEWS:
           \E main_replica_vote_sig \in {
-            main_replica_sig_of(main_replica_r_2403):
-              main_replica_r_2403 \in main_replica_Replicas
+            main_replica_sig_of(main_replica_r_2409):
+              main_replica_r_2409 \in main_replica_Replicas
           }:
             main_replica_on_nullify(main_replica_id, [view |->
                 main_replica_vote_view,
               sig |-> main_replica_vote_sig])))
     \/ ((\E main_replica_id \in main_replica_CORRECT:
-        \E main_replica_cert_view_2450 \in main_replica_VIEWS:
+        \E main_replica_cert_view_2456 \in main_replica_VIEWS:
           \E main_replica_cert_parent \in main_replica_VIEWS
             \union {(main_replica_GENESIS_VIEW)}:
-            \E main_replica_cert_payload_2448 \in main_replica_VALID_PAYLOADS:
+            \E main_replica_cert_payload_2454 \in main_replica_VALID_PAYLOADS:
               \E main_replica_cert_sender \in {
-                main_replica_sig_of(main_replica_r_2437):
-                  main_replica_r_2437 \in main_replica_Replicas
+                main_replica_sig_of(main_replica_r_2443):
+                  main_replica_r_2443 \in main_replica_Replicas
               }:
-                main_replica_on_notarization_cert(main_replica_id, main_replica_cert_view_2450,
-                main_replica_cert_parent, main_replica_cert_payload_2448, main_replica_cert_sender)))
+                main_replica_on_notarization_cert(main_replica_id, main_replica_cert_view_2456,
+                main_replica_cert_parent, main_replica_cert_payload_2454, main_replica_cert_sender)))
     \/ ((\E main_replica_id \in main_replica_CORRECT:
-        \E main_replica_cert_view_2485 \in main_replica_VIEWS:
+        \E main_replica_cert_view_2491 \in main_replica_VIEWS:
           \E main_replica_cert_parent \in main_replica_VIEWS
             \union {(main_replica_GENESIS_VIEW)}:
-            \E main_replica_cert_payload_2483 \in main_replica_VALID_PAYLOADS:
+            \E main_replica_cert_payload_2489 \in main_replica_VALID_PAYLOADS:
               \E main_replica_cert_sender \in {
-                main_replica_sig_of(main_replica_r_2472):
-                  main_replica_r_2472 \in main_replica_Replicas
+                main_replica_sig_of(main_replica_r_2478):
+                  main_replica_r_2478 \in main_replica_Replicas
               }:
-                main_replica_on_finalization_cert(main_replica_id, main_replica_cert_view_2485,
-                main_replica_cert_parent, main_replica_cert_payload_2483, main_replica_cert_sender)))
+                main_replica_on_finalization_cert(main_replica_id, main_replica_cert_view_2491,
+                main_replica_cert_parent, main_replica_cert_payload_2489, main_replica_cert_sender)))
     \/ ((\E main_replica_id \in main_replica_CORRECT:
-        \E main_replica_cert_view_2507 \in main_replica_VIEWS:
+        \E main_replica_cert_view_2513 \in main_replica_VIEWS:
           \E main_replica_cert_sender \in {
-            main_replica_sig_of(main_replica_r_2498):
-              main_replica_r_2498 \in main_replica_Replicas
+            main_replica_sig_of(main_replica_r_2504):
+              main_replica_r_2504 \in main_replica_Replicas
           }:
-            main_replica_on_nullification_cert(main_replica_id, main_replica_cert_view_2507,
+            main_replica_on_nullification_cert(main_replica_id, main_replica_cert_view_2513,
             main_replica_cert_sender)))
     \/ ((\E main_replica_vote_view \in main_replica_VIEWS:
         \E main_replica_vote_parent \in main_replica_VIEWS
           \union {(main_replica_GENESIS_VIEW)}:
           \E main_replica_vote_payload \in main_replica_VALID_PAYLOADS:
             \E main_replica_vote_sig \in {
-              main_replica_sig_of(main_replica_r_2526):
-                main_replica_r_2526 \in main_replica_Replicas
+              main_replica_sig_of(main_replica_r_2532):
+                main_replica_r_2532 \in main_replica_Replicas
             }:
               main_replica_send_notarize_vote([proposal |->
                   [view |-> main_replica_vote_view,
@@ -3623,8 +3628,8 @@ main_replica_step ==
           \union {(main_replica_GENESIS_VIEW)}:
           \E main_replica_vote_payload \in main_replica_VALID_PAYLOADS:
             \E main_replica_vote_sig \in {
-              main_replica_sig_of(main_replica_r_2563):
-                main_replica_r_2563 \in main_replica_Replicas
+              main_replica_sig_of(main_replica_r_2569):
+                main_replica_r_2569 \in main_replica_Replicas
             }:
               main_replica_send_finalize_vote([proposal |->
                   [view |-> main_replica_vote_view,
@@ -3633,42 +3638,42 @@ main_replica_step ==
                 sig |-> main_replica_vote_sig])))
     \/ ((\E main_replica_vote_view \in main_replica_VIEWS:
         \E main_replica_vote_sig \in {
-          main_replica_sig_of(main_replica_r_2591):
-            main_replica_r_2591 \in main_replica_Replicas
+          main_replica_sig_of(main_replica_r_2597):
+            main_replica_r_2597 \in main_replica_Replicas
         }:
           main_replica_send_nullify_vote([view |-> main_replica_vote_view,
             sig |-> main_replica_vote_sig])))
-    \/ ((\E main_replica_cert_view_2638 \in main_replica_VIEWS:
+    \/ ((\E main_replica_cert_view_2644 \in main_replica_VIEWS:
         \E main_replica_cert_parent \in main_replica_VIEWS
           \union {(main_replica_GENESIS_VIEW)}:
-          \E main_replica_cert_payload_2636 \in main_replica_VALID_PAYLOADS:
+          \E main_replica_cert_payload_2642 \in main_replica_VALID_PAYLOADS:
             \E main_replica_ghost_sender \in {
-              main_replica_sig_of(main_replica_r_2620):
-                main_replica_r_2620 \in main_replica_Replicas
+              main_replica_sig_of(main_replica_r_2626):
+                main_replica_r_2626 \in main_replica_Replicas
             }:
               \E main_replica_signers \in SUBSET main_replica_CorrectSigs:
-                main_replica_send_notarization_cert(main_replica_cert_view_2638,
-                main_replica_cert_parent, main_replica_cert_payload_2636, main_replica_ghost_sender,
+                main_replica_send_notarization_cert(main_replica_cert_view_2644,
+                main_replica_cert_parent, main_replica_cert_payload_2642, main_replica_ghost_sender,
                 main_replica_signers)))
-    \/ ((\E main_replica_cert_view_2674 \in main_replica_VIEWS:
+    \/ ((\E main_replica_cert_view_2680 \in main_replica_VIEWS:
         \E main_replica_cert_parent \in main_replica_VIEWS
           \union {(main_replica_GENESIS_VIEW)}:
-          \E main_replica_cert_payload_2672 \in main_replica_VALID_PAYLOADS:
+          \E main_replica_cert_payload_2678 \in main_replica_VALID_PAYLOADS:
             \E main_replica_ghost_sender \in {
-              main_replica_sig_of(main_replica_r_2656):
-                main_replica_r_2656 \in main_replica_Replicas
+              main_replica_sig_of(main_replica_r_2662):
+                main_replica_r_2662 \in main_replica_Replicas
             }:
               \E main_replica_signers \in SUBSET main_replica_CorrectSigs:
-                main_replica_send_finalization_cert(main_replica_cert_view_2674,
-                main_replica_cert_parent, main_replica_cert_payload_2672, main_replica_ghost_sender,
+                main_replica_send_finalization_cert(main_replica_cert_view_2680,
+                main_replica_cert_parent, main_replica_cert_payload_2678, main_replica_ghost_sender,
                 main_replica_signers)))
-    \/ ((\E main_replica_cert_view_2697 \in main_replica_VIEWS:
+    \/ ((\E main_replica_cert_view_2703 \in main_replica_VIEWS:
         \E main_replica_ghost_sender \in {
-          main_replica_sig_of(main_replica_r_2683):
-            main_replica_r_2683 \in main_replica_Replicas
+          main_replica_sig_of(main_replica_r_2689):
+            main_replica_r_2689 \in main_replica_Replicas
         }:
           \E main_replica_signers \in SUBSET main_replica_CorrectSigs:
-            main_replica_send_nullification_cert(main_replica_cert_view_2697, main_replica_ghost_sender,
+            main_replica_send_nullification_cert(main_replica_cert_view_2703, main_replica_ghost_sender,
             main_replica_signers)))
 
 (*
