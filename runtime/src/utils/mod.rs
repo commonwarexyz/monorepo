@@ -473,28 +473,31 @@ impl Registry {
         let metric_type = metric.metric_type();
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
-            if let Some(family) = self.families.get(&name) {
-                assert_eq!(
-                    family.help, help,
-                    "metric family `{}` registered with inconsistent help text",
-                    name
-                );
-            }
             let entry = self.metric_ref(existing_id);
-            let existing_metric = Arc::clone(&entry.metric_any)
-                .downcast::<M>()
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "duplicate metric `{}` with attributes {:?} registered with different type",
-                        key.0, key.1
-                    )
-                });
-            let registration = entry
-                .registration
-                .upgrade()
-                .map(MetricRegistration::from_inner)
-                .expect("registration missing for live metric");
-            return Registered::new(existing_metric, registration);
+            if let Some(inner) = entry.registration.upgrade() {
+                if let Some(family) = self.families.get(&name) {
+                    assert_eq!(
+                        family.help, help,
+                        "metric family `{}` registered with inconsistent help text",
+                        name
+                    );
+                }
+                let existing_metric = Arc::clone(&entry.metric_any)
+                    .downcast::<M>()
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "duplicate metric `{}` with attributes {:?} registered with different type",
+                            key.0, key.1
+                        )
+                    });
+                return Registered::new(existing_metric, MetricRegistration::from_inner(inner));
+            }
+            // The existing entry's last handle is mid-drop: its Weak no longer
+            // upgrades, but the pending `unregister` call has not yet run.
+            // Detach the stale key so we can insert fresh; the in-flight
+            // `unregister` will still clean up its own metric slot and skip the
+            // key removal (see the id check in `unregister`).
+            self.keys.remove(&key);
         }
         if let Some(family) = self.families.get(&name) {
             assert_eq!(
@@ -607,7 +610,13 @@ impl Registry {
             ..
         } = metric;
         let key = (family_name, attributes);
-        self.keys.remove(&key);
+        // Only remove the key mapping if it still points to our id. A
+        // concurrent re-registration may have replaced it after our Weak died
+        // but before this unregister ran; in that case the new entry owns the
+        // key mapping and we must leave it alone.
+        if self.keys.get(&key).copied() == Some(id) {
+            self.keys.remove(&key);
+        }
         let (family_name, _) = key;
         let (swapped_metric_id, remove_family) = {
             let family = self
@@ -630,12 +639,13 @@ impl Registry {
 
     pub fn encode(&self) -> String {
         let mut output = String::new();
+        let mut samples = String::new();
         for (name, family) in &self.families {
-            output.push_str(&family.descriptor);
+            samples.clear();
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
                 encode_metric_samples(
-                    &mut output,
+                    &mut samples,
                     name,
                     &metric.attributes,
                     None,
@@ -643,6 +653,14 @@ impl Registry {
                 )
                 .expect("encoding live metric samples failed");
             }
+            // Suppress the HELP/TYPE descriptor when the family produced no
+            // samples (e.g. a `Family<S, M>` with no child entries). Matches
+            // upstream prometheus-client's empty-metric filtering.
+            if samples.is_empty() {
+                continue;
+            }
+            output.push_str(&family.descriptor);
+            output.push_str(&samples);
         }
 
         encode_eof(&mut output).expect("encoding EOF failed");
@@ -942,5 +960,64 @@ mod tests {
         let encoded = registry.encode();
         assert!(encoded.contains("votes_total 1"), "no prefix applied: {encoded}");
         assert!(encoded.starts_with("# HELP votes"), "family header at start: {encoded}");
+    }
+
+    #[test]
+    fn test_encode_suppresses_empty_family() {
+        // A Family registered with no child entries should not emit its HELP/TYPE
+        // descriptor on scrape. This matches upstream prometheus-client's
+        // `encode_omit_empty` behavior.
+        let mut registry = Registry::default();
+        let empty_family = crate::metrics::Family::<Vec<(String, String)>, Counter>::default();
+        registry.register_permanent(
+            "votes".to_string(),
+            "vote count".to_string(),
+            Vec::new(),
+            empty_family,
+        );
+        register_permanent_counter(&mut registry, "ticks", "tick count", 1);
+        let encoded = registry.encode();
+        assert!(!encoded.contains("votes"), "empty family leaked: {encoded}");
+        assert!(encoded.contains("ticks_total 1"), "populated metric missing: {encoded}");
+        assert_eq!(encoded.matches("# EOF").count(), 1);
+    }
+
+    #[test]
+    fn test_register_drop_race_does_not_panic() {
+        // Concurrently re-registers and drops the same metric key from multiple
+        // threads. Before the fix, a register call could see the key present
+        // with a Weak that no longer upgrades (last handle mid-drop), and panic
+        // with "registration missing for live metric".
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let weak = Arc::downgrade(&registry);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                let weak = weak.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        let handle = registry.lock().register(
+                            weak.clone(),
+                            "votes".to_string(),
+                            "vote count".to_string(),
+                            Vec::new(),
+                            Arc::new(Counter::<u64>::default()),
+                        );
+                        drop(handle);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        // Registry ends clean after the stress loop.
+        let registry = registry.lock();
+        assert!(registry.keys.is_empty(), "keys left behind: {:?}", registry.keys);
+        assert!(
+            registry.families.is_empty(),
+            "families left behind: {:?}",
+            registry.families
+        );
     }
 }

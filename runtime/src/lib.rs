@@ -412,11 +412,12 @@ stability_scope!(BETA {
         ///
         /// # Querying The Latest Attribute
         ///
-        /// To query the latest attribute value dynamically, create a gauge to track the current value:
+        /// To query the latest attribute value dynamically, create a gauge to track the current value.
+        /// The returned [`Registered`] handle must be retained on the long-lived owner: dropping it
+        /// unregisters the metric.
         /// ```ignore
-        /// // Create a gauge to track the current epoch
-        /// let latest_epoch = Gauge::<i64>::default();
-        /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
+        /// // Create a gauge to track the current epoch. Hold the handle on `self`.
+        /// let latest_epoch = context.with_label("orchestrator").gauge("latest_epoch", "current epoch");
         /// latest_epoch.set(current_epoch);
         /// // Produces: orchestrator_latest_epoch 5
         /// ```
