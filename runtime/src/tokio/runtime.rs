@@ -954,11 +954,11 @@ where
     match startup_rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            // Pinning failed before the task future started running.
+            // Affinity setup failed before the task future started running.
             handle.abort();
             match cpu {
                 Some(cpu) => panic!("failed to pin task to cpu {cpu}: {err}"),
-                None => unreachable!(),
+                None => panic!("failed to restore dedicated task affinity: {err}"),
             }
         }
         Err(_) => {
