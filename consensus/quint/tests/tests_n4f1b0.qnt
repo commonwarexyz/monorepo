@@ -122,6 +122,160 @@ module tests {
         .expect(test_invariants)
     }
 
+    // PR #3543: a leader auto-certifies a proposal it built locally, even when
+    // its own certify_policy would reject that payload. This mirrors the Rust
+    // `is_local=true` shortcut in `try_certify`/`actor::run`: a `Verified(true)`
+    // slot bypasses `CertifiableAutomaton::certify` on notarization.
+    //
+    // Setup: n0 leads view 1 and proposes `val_b3_part`. The certify policy
+    // for n0 rejects `val_b3_part` (and accepts everything else); all other
+    // replicas certify everything. Under the old semantics, n0 would nullify
+    // view 1 because `can_certify("n0", "val_b3_part") = false`. Under the
+    // new semantics, `locally_built[1] = true` for n0 shortcuts certification
+    // and n0 finalizes view 1.
+    run leaderLocalAutoCertifyTest = {
+        val proposal = {
+            payload: "val_b3_part",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        // n0 rejects `val_b3_part` via the application; other replicas accept
+        // everything. Use AllPayloads (not app::certify_always_true, which is
+        // restricted to CERTIFY_DOMAIN and omits `val_b3_part`).
+        val CERTIFY_N0_REJECTS_VAL_B3_PART = Replicas.mapBy(id =>
+            if (id == "n0")
+                Set(GENESIS_PAYLOAD, "val_b0", "val_b1", "val_b2", "inv_b3")
+            else
+                AllPayloads
+        )
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_N0_REJECTS_VAL_B3_PART
+        )
+            // Sanity: n0's policy really rejects the payload it is about to build.
+            .then(all {
+                assert(not(can_certify("n0", "val_b3_part"))),
+                assert(can_certify("n1", "val_b3_part")),
+                unchanged_all,
+            })
+            // n0 proposes. This sets locally_built["n0"][1] = true.
+            .then(propose("n0", proposal.payload, proposal.parent))
+            .then(all {
+                assert(replica_state.get("n0").locally_built.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n1").locally_built.get(FIRST_VIEW) == false),
+                unchanged_all,
+            })
+            // n1 and n2 process the leader vote and cast their own notarize votes.
+            .then(replica_receives_notarize_vote("n1", "val_b3_part", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b3_part", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            // n0 collects n1 and n2's votes; the third vote completes the quorum
+            // and triggers notarize_effect on n0.
+            .then(replica_receives_notarize_vote("n0", "val_b3_part", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b3_part", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(all {
+                // Notarization cert assembled at n0.
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+                )),
+                // The local shortcut certified view 1 on n0 despite the
+                // restrictive certify_policy.
+                assert(replica_state.get("n0").certified.get(FIRST_VIEW) == Some(true)),
+                // Finalize vote from n0 was broadcast.
+                assert(sent_finalize_votes.exists(v =>
+                    v.sig == "n0"
+                    and v.proposal.view == FIRST_VIEW
+                    and v.proposal.payload == "val_b3_part"
+                )),
+                // n0 did NOT nullify view 1.
+                assert(not(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW))),
+                // n0 advanced to view 2.
+                assert(replica_state.get("n0").view == 2),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    // Sibling of `leaderLocalAutoCertifyTest` that enters §7.3 via the
+    // received-certificate path (`on_certificate` -> `_add_notarization`)
+    // instead of the vote-aggregation path. Both entry points share
+    // `notarize_effect`, so both must honor the `locally_built` shortcut.
+    //
+    // Setup: n0 leads view 1 and locally proposes `val_b3_part`. Instead of
+    // letting n0 aggregate peer votes, we inject n1's and n2's notarize votes
+    // into `sent_notarize_votes`, build a notarization certificate from
+    // {n0, n1, n2}, broadcast it (ghost_sender = n1), and have n0 receive it
+    // via `on_certificate`. n0's certify_policy rejects `val_b3_part`; under
+    // the old semantics n0 would nullify on cert receipt. Under the new
+    // semantics, `locally_built[1] = true` and the proposal is not
+    // equivocated, so `local_auto_cert` fires and n0 finalizes.
+    run leaderLocalAutoCertifyFromCertificateTest = {
+        val proposal = {
+            payload: "val_b3_part",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        val CERTIFY_N0_REJECTS_VAL_B3_PART = Replicas.mapBy(id =>
+            if (id == "n0")
+                Set(GENESIS_PAYLOAD, "val_b0", "val_b1", "val_b2", "inv_b3")
+            else
+                AllPayloads
+        )
+
+        val foreign_notarization_cert = notarization(
+            proposal,
+            Set("n0", "n1", "n2"),
+            "n1"
+        )
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_N0_REJECTS_VAL_B3_PART
+        )
+            // n0 proposes locally. Sets locally_built["n0"][1] = true and
+            // records n0's own notarize vote in sent_notarize_votes.
+            .then(propose("n0", proposal.payload, proposal.parent))
+            // Inject peer notarize votes so the synthesized certificate has
+            // a valid {n0, n1, n2} signer set.
+            .then(send_notarize_vote({ proposal: proposal, sig: "n1" }))
+            .then(send_notarize_vote({ proposal: proposal, sig: "n2" }))
+            // Broadcast the notarization cert (assembled by a peer, not n0).
+            .then(send_certificate(foreign_notarization_cert))
+            // n0 receives the cert. This drives _add_notarization -> notarize_effect
+            // without n0 ever having aggregated the peer votes locally.
+            .then(on_certificate("n0", foreign_notarization_cert))
+            .then(all {
+                // n0 stored the cert.
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c)
+                    and cert_view(c) == FIRST_VIEW
+                    and cert_proposal(c) == Some(proposal)
+                )),
+                // locally_built must still hold — receiving the cert does
+                // not disturb the fact that n0 built the proposal.
+                assert(replica_state.get("n0").locally_built.get(FIRST_VIEW) == true),
+                // The local shortcut certified view 1 on n0 despite the
+                // restrictive certify_policy, on the certificate-receipt path.
+                assert(replica_state.get("n0").certified.get(FIRST_VIEW) == Some(true)),
+                // Finalize vote from n0 was broadcast.
+                assert(sent_finalize_votes.exists(v =>
+                    v.sig == "n0"
+                    and v.proposal.view == FIRST_VIEW
+                    and v.proposal.payload == "val_b3_part"
+                )),
+                // n0 did NOT nullify view 1.
+                assert(not(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW))),
+                // n0 advanced to view 2.
+                assert(replica_state.get("n0").view == 2),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
     run leaderNullifyTest = {
         initWithLeaderAndCertify(
             Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),

@@ -758,7 +758,8 @@ module replica {
                 leader_proposal_conflicted: VIEWS.mapBy(_ => false),
                 certified: VIEWS.mapBy(_ => None),
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
-                certification_timeout: VIEWS.mapBy(_ => Some(false))
+                certification_timeout: VIEWS.mapBy(_ => Some(false)),
+                locally_built: VIEWS.mapBy(_ => false)
             }),
             sent_notarize_votes' = Set(),
             sent_nullify_votes' = Set(),
@@ -961,7 +962,10 @@ module replica {
                         record_local_proposal(self, proposal),
                         proposal
                     ),
-                    leader_timeout: self.leader_timeout.set(self.view, None)
+                    leader_timeout: self.leader_timeout.set(self.view, None),
+                    // Mark this view's slot as locally built so notarize_effect
+                    // auto-certifies without consulting certify_policy.
+                    locally_built: self.locally_built.set(self.view, true)
                }
             ),
             // unchanged
@@ -1047,10 +1051,9 @@ module replica {
             // is reached the cert includes every verified notarize,
             // not just the first Q. Cardinality ≥ Q, not exactly Q.
             val maybe_not_cert_p = if (notarize_ok) create_notarization(id, proposal, new_store_notarize_p) else None
-            val can_cert_p = can_certify(id, proposal.payload)
             val should_broadcast_not_p = not(broadcast_notarization(id, view))
             val effect_p = match maybe_not_cert_p {
-                | Some(cert) => notarize_effect(proposal_self, id, cert, can_cert_p,
+                | Some(cert) => notarize_effect(proposal_self, id, cert,
                     sent_nullify_votes, sent_finalize_votes,
                     store_nullify_votes.get(id), store_finalize_votes.get(id))
                 | None => {
@@ -1109,11 +1112,10 @@ module replica {
             // `src/simplex/actors/batcher/round.rs:422`.
             val maybe_not_cert = if (had_notarization) None
                 else create_notarization(id, proposal, new_store_notarize)
-            val can_cert = can_certify(id, proposal.payload)
             val is_new_cert = not(had_notarization)
             val should_broadcast_not = not(broadcast_notarization(id, view))
             val effect = match maybe_not_cert {
-                | Some(cert) => notarize_effect(self, id, cert, can_cert,
+                | Some(cert) => notarize_effect(self, id, cert,
                     sent_nullify_votes, sent_finalize_votes,
                     store_nullify_votes.get(id), store_finalize_votes.get(id))
                 | None => {
@@ -1393,7 +1395,6 @@ module replica {
         self: ReplicaState,
         id: ReplicaId,
         notarization: NotarizationCert,
-        can_cert: bool,
         sent_nullify_votes: Set[NullifyVote],
         sent_finalize_votes: Set[FinalizeVote],
         stored_nullify: Set[NullifyVote],
@@ -1414,13 +1415,24 @@ module replica {
             sent_finalize_votes,
             stored_nullify
         )
+        // Auto-certify locally built proposals (PR #3543): if this replica is the
+        // leader for `cert_view_num` and built the notarized proposal itself
+        // (locally_built[v]==true), and the slot is not equivocated, certification
+        // succeeds without consulting the application's certify_policy. Otherwise
+        // fall back to the policy. The dynamic `not(proposal_conflicted)` guard
+        // mirrors `Status::Equivocated` => `is_local() == false` in slot.rs.
+        val local_auto_cert = and {
+            self.locally_built.get(cert_view_num),
+            not(proposal_conflicted),
+        }
+        val cert_succeeds = local_auto_cert or can_certify(id, cert_prop.payload)
         val is_certified = and {
-            can_cert,
+            cert_succeeds,
             self.certified.get(cert_view_num) == None,
         }
         val finalize_result = construct_finalize(id, self, cert_view_num, cert_prop, proposal_conflicted, is_certified)
         val can_send_nullify = and {
-            not(can_cert),
+            not(cert_succeeds),
             self.view == cert_view_num,
             construct_nullify(id, self, cert_view_num),
             // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
@@ -1500,7 +1512,6 @@ module replica {
         val should_broadcast_notarization = not(broadcast_notarization(id, notarization.proposal.view))
         val effect = notarize_effect(
             self, id, notarization,
-            can_certify(id, notarization.proposal.payload),
             sent_nullify_votes, sent_finalize_votes,
             store_nullify_votes.get(id), store_finalize_votes.get(id)
         )

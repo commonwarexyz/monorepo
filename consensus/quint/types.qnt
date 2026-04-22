@@ -186,6 +186,14 @@ module types {
         leader_proposal_conflicted: ViewNumber -> bool,
         // local certification result for a view:
         // Some(true) = certified, Some(false) = certification failed, None = no result yet
-        certified: ViewNumber -> Option[bool]
+        certified: ViewNumber -> Option[bool],
+        // true iff this replica produced the slot's proposal itself via a local
+        // `propose(v, parent)` call as leader of view `v`. Set in the `propose`
+        // action only. Mirrors `Status::Verified(true)` in the Rust slot. Used
+        // by `notarize_effect` to auto-certify locally built proposals without
+        // consulting the application (see simplex/mod.rs §7.3). The dynamic
+        // guard `not(proposal_conflicted)` at the use site reproduces
+        // `Status::Equivocated` => `is_local() == false`.
+        locally_built: ViewNumber -> bool
     }
 }

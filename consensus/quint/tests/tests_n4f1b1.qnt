@@ -297,6 +297,15 @@ module tests {
 
     // When certification fails on notarization, the replica sends a nullify
     // vote but does NOT advance to the next view (no enter_view).
+    //
+    // PR #3543 adds a local auto-certify shortcut for locally built proposals,
+    // which would mask a certify_policy rejection if the replica were the
+    // leader. This test must therefore use a non-local proposal from the
+    // rejecting replica's perspective: n1 is the leader of view 1 and
+    // proposes; n0 only observes, so `locally_built["n0"][1] == false` and
+    // the shortcut does not fire. n0's restrictive `CERTIFY_NO_FALSE` policy
+    // then determines the outcome, exercising the original
+    // certification-failure path.
     run certificationFailureDoesNotAdvanceViewTest = {
         val proposal_1 = {
             payload: "val_b0",
@@ -310,17 +319,21 @@ module tests {
         )
 
         initWithLeaderAndCertify(
-            Map(0 -> "n1", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            // Leader of view 1 is n1, not n0, so the view-1 proposal is
+            // non-local from n0's perspective.
+            Map(0 -> "n2", 1 -> "n1", 2 -> "n0", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
             CERTIFY_NO_FALSE
         )
-            .then(propose("n0", proposal_1.payload, proposal_1.parent))
-            // n1 and n2 process the leader vote, adding their votes to sent_notarize_votes.
-            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
-            // n0 collects votes; the third vote forms a notarization.
+            .then(propose("n1", proposal_1.payload, proposal_1.parent))
+            // n0 and n2 process the leader vote, casting their own notarize votes.
             .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n1"))
+            // n0 collects the remaining vote; the third vote forms the
+            // notarization quorum and triggers notarize_effect on n0.
             .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
             .then(all {
+                // Non-local on n0: shortcut must not apply.
+                assert(replica_state.get("n0").locally_built.get(1) == false),
                 // Certification failed: replica stays in view 1.
                 assert(replica_state.get("n0").view == 1),
                 // Nullify vote was sent.
