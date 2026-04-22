@@ -918,26 +918,29 @@ where
 {
     // Ensure the task can access the tokio runtime.
     let runtime_handle = executor.runtime.handle().clone();
-    let available_cpus = executor.available_cpus.clone();
+    let thread_stack_size = executor.thread_stack_size;
+    let available_cpus = if cpu.is_none() {
+        executor.available_cpus.clone()
+    } else {
+        None
+    };
 
     // The dedicated thread reports whether startup succeeded before it begins
     // polling the task future.
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
-    if let Err(err) = utils::thread::try_spawn(executor.thread_stack_size, move || {
-        let result = cpu.map_or_else(
-            || {
-                available_cpus.as_ref().map_or(Ok(()), |available_cpus| {
-                    utils::thread::set_cpu_affinity(available_cpus)
-                })
-            },
-            |cpu| utils::thread::set_cpu_affinity(&[cpu]),
-        );
-        let started = result.is_ok();
+    if let Err(err) = utils::thread::try_spawn(thread_stack_size, move || {
+        let cpu = cpu.map(|cpu| [cpu]);
+        let cpus = cpu
+            .as_ref()
+            .map(|cpu| cpu.as_slice())
+            .or(available_cpus.as_deref());
+        let result = cpus.map_or(Ok(()), utils::thread::set_cpu_affinity);
+        let is_ok = result.is_ok();
         startup_tx
             .send(result)
             .expect("startup receiver dropped unexpectedly");
-        if started {
+        if is_ok {
             runtime_handle.block_on(future);
         }
     }) {
