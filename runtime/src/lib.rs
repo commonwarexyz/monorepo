@@ -76,11 +76,6 @@ stability_scope!(BETA {
         pub use family::Family;
         pub use gauge::Gauge;
         pub use histogram::Histogram;
-
-        /// Raw Prometheus counter family.
-        pub type CounterFamily<S> = family::Family<S, counter::Counter>;
-        /// Raw Prometheus gauge family.
-        pub type GaugeFamily<S> = family::Family<S, gauge::Gauge>;
     }
 
     pub mod iobuf;
@@ -496,42 +491,16 @@ stability_scope!(BETA {
             self.register(name, help, metrics::Histogram::new(buckets))
         }
 
-        /// Register a counter family with the runtime.
-        fn counter_family<N: Into<String>, H: Into<String>, S>(
-            &self,
-            name: N,
-            help: H,
-        ) -> Registered<metrics::CounterFamily<S>>
+        /// Register a metric family with the runtime.
+        fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<metrics::Family<S, M>>
         where
-            S: Clone
-                + std::fmt::Debug
-                + std::hash::Hash
-                + Eq
-                + metrics::EncodeLabelSet
-                + Send
-                + Sync
-                + 'static,
+            N: Into<String>,
+            H: Into<String>,
+            S: Clone + std::hash::Hash + Eq,
+            M: Default,
+            metrics::Family<S, M>: metrics::Metric,
         {
-            self.register(name, help, metrics::CounterFamily::<S>::default())
-        }
-
-        /// Register a gauge family with the runtime.
-        fn gauge_family<N: Into<String>, H: Into<String>, S>(
-            &self,
-            name: N,
-            help: H,
-        ) -> Registered<metrics::GaugeFamily<S>>
-        where
-            S: Clone
-                + std::fmt::Debug
-                + std::hash::Hash
-                + Eq
-                + metrics::EncodeLabelSet
-                + Send
-                + Sync
-                + 'static,
-        {
-            self.register(name, help, metrics::GaugeFamily::<S>::default())
+            self.register(name, help, metrics::Family::<S, M>::default())
         }
 
         /// Encode all metrics into a buffer.
@@ -3183,7 +3152,7 @@ mod tests {
         test_encode_single_eof(runner);
     }
 
-    fn test_register_family_with_attributes<R: Runner>(runner: R)
+    fn test_family_with_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -3238,15 +3207,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_register_family_with_attributes() {
+    fn test_deterministic_family_with_attributes() {
         let executor = deterministic::Runner::default();
-        test_register_family_with_attributes(executor);
+        test_family_with_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_register_family_with_attributes() {
+    fn test_tokio_family_with_attributes() {
         let runner = tokio::Runner::default();
-        test_register_family_with_attributes(runner);
+        test_family_with_attributes(runner);
     }
 
     #[test]

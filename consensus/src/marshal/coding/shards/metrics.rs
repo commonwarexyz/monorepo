@@ -1,7 +1,7 @@
 //! Metrics for the shard engine.
 
 use commonware_runtime::{
-    metrics::{Counter, CounterFamily, EncodeLabelSet, Gauge, Histogram},
+    metrics::{Counter, EncodeLabelSet, Family, Gauge, Histogram},
     telemetry::metrics::histogram::Buckets,
     Metrics as MetricsTrait, Registered,
 };
@@ -30,7 +30,7 @@ pub struct ShardMetrics {
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Registered<Gauge>,
     /// Number of shards received per peer.
-    pub shards_received: Registered<CounterFamily<Peer>>,
+    pub shards_received: Registered<Family<Peer, Counter>>,
     /// Total number of blocks successfully reconstructed.
     pub blocks_reconstructed_total: Registered<Counter>,
     /// Total number of block reconstruction failures.
@@ -54,7 +54,7 @@ impl ShardMetrics {
             "Number of active reconstruction states",
         );
         let shards_received =
-            context.counter_family("shards_received", "Number of shards received per peer");
+            context.family("shards_received", "Number of shards received per peer");
         let blocks_reconstructed_total = context.counter(
             "blocks_reconstructed_total",
             "Total number of blocks successfully reconstructed",

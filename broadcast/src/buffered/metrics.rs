@@ -1,6 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{CounterFamily, EncodeLabelSet, Gauge},
+    metrics::{Counter, EncodeLabelSet, Family, Gauge},
     telemetry::metrics::status,
     Metrics as RuntimeMetrics, Registered,
 };
@@ -24,7 +24,7 @@ impl SequencerLabel {
 /// Metrics for the [super::Engine]
 pub struct Metrics {
     /// Number of broadcasts received by peer
-    pub peer: Registered<CounterFamily<SequencerLabel>>,
+    pub peer: Registered<Family<SequencerLabel, Counter>>,
     /// Number of received messages by status
     pub receive: Registered<status::Counter>,
     /// Number of `subscribe` requests by status
@@ -40,7 +40,7 @@ impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         Self {
-            peer: context.counter_family("peer", "Number of broadcasts received by peer"),
+            peer: context.family("peer", "Number of broadcasts received by peer"),
             receive: context.register(
                 "receive",
                 "Number of received messages by status",

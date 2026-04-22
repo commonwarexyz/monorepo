@@ -2,7 +2,7 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{EncodeLabelSet, GaugeFamily, Histogram},
+    metrics::{EncodeLabelSet, Family, Gauge, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, CounterExt, Status},
@@ -132,7 +132,7 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Registered<GaugeFamily<Peer>>,
+    performance: Registered<Family<Peer, Gauge>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
     requests_created: Registered<status::Counter>,
@@ -156,7 +156,7 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = context.gauge_family(
+        let performance = context.family(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
         );

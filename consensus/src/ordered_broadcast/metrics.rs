@@ -1,6 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, GaugeFamily},
+    metrics::{Counter, EncodeLabelSet, Family, Gauge},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
@@ -25,7 +25,7 @@ impl SequencerLabel {
 /// Metrics for the [super::Engine]
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Height per sequencer
-    pub sequencer_heights: Registered<GaugeFamily<SequencerLabel>>,
+    pub sequencer_heights: Registered<Family<SequencerLabel, Gauge>>,
     /// Number of acks processed by status
     pub acks: Registered<status::Counter>,
     /// Number of nodes processed by status
@@ -47,8 +47,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let sequencer_heights =
-            context.gauge_family("sequencer_heights", "Height per sequencer tracked");
+        let sequencer_heights = context.family("sequencer_heights", "Height per sequencer tracked");
         let acks = context.register(
             "acks",
             "Number of acks processed by status",

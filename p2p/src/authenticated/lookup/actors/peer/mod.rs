@@ -2,7 +2,10 @@
 
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
-use commonware_runtime::{metrics::CounterFamily, Registered};
+use commonware_runtime::{
+    metrics::{Counter, Family},
+    Registered,
+};
 use std::num::NonZeroUsize;
 use thiserror::Error;
 
@@ -16,10 +19,10 @@ pub struct Config {
     pub mailbox_size: usize,
     pub send_batch_size: NonZeroUsize,
     pub ping_frequency: std::time::Duration,
-    pub sent_messages: Registered<CounterFamily<metrics::Message>>,
-    pub received_messages: Registered<CounterFamily<metrics::Message>>,
-    pub dropped_messages: Registered<CounterFamily<metrics::Message>>,
-    pub rate_limited: Registered<CounterFamily<metrics::Message>>,
+    pub sent_messages: Registered<Family<metrics::Message, Counter>>,
+    pub received_messages: Registered<Family<metrics::Message, Counter>>,
+    pub dropped_messages: Registered<Family<metrics::Message, Counter>>,
+    pub rate_limited: Registered<Family<metrics::Message, Counter>>,
 }
 
 #[derive(Error, Debug)]

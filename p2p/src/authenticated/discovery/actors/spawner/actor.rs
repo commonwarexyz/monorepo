@@ -14,8 +14,9 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Registered, Sink, Spawner, Stream,
+    metrics::{Counter, Family},
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Sink, Spawner,
+    Stream,
 };
 use commonware_utils::channel::mpsc;
 use rand_core::CryptoRngCore;
@@ -39,10 +40,10 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
-    sent_messages: Registered<CounterFamily<metrics::Message>>,
-    received_messages: Registered<CounterFamily<metrics::Message>>,
-    dropped_messages: Registered<CounterFamily<metrics::Message>>,
-    rate_limited: Registered<CounterFamily<metrics::Message>>,
+    sent_messages: Registered<Family<metrics::Message, Counter>>,
+    received_messages: Registered<Family<metrics::Message, Counter>>,
+    dropped_messages: Registered<Family<metrics::Message, Counter>>,
+    rate_limited: Registered<Family<metrics::Message, Counter>>,
 }
 
 impl<
@@ -54,13 +55,13 @@ impl<
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
-        let sent_messages = context.counter_family("messages_sent", "messages sent");
-        let received_messages = context.counter_family("messages_received", "messages received");
-        let dropped_messages = context.counter_family(
+        let sent_messages = context.family("messages_sent", "messages sent");
+        let received_messages = context.family("messages_received", "messages received");
+        let dropped_messages = context.family(
             "messages_dropped",
             "messages dropped due to full application buffer",
         );
-        let rate_limited = context.counter_family("messages_rate_limited", "messages rate limited");
+        let rate_limited = context.family("messages_rate_limited", "messages rate limited");
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (

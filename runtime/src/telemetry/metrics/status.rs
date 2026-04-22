@@ -1,6 +1,6 @@
 //! Recording metrics with a status.
 
-use crate::metrics::{EncodeLabelSet, EncodeLabelValue};
+use crate::metrics::{self, EncodeLabelSet, EncodeLabelValue};
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -26,7 +26,7 @@ pub enum Status {
 }
 
 /// A counter metric with a status label.
-pub type Counter = crate::metrics::CounterFamily<Label>;
+pub type Counter = metrics::Family<Label, metrics::Counter>;
 
 /// Trait providing convenience methods for `Counter`.
 pub trait CounterExt {

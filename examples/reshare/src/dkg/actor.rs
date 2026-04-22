@@ -28,7 +28,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, GaugeFamily},
+    metrics::{Counter, EncodeLabelSet, Family, Gauge},
     spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
     Spawner, Storage as RuntimeStorage,
 };
@@ -132,8 +132,8 @@ where
     failed_epochs: Registered<Counter>,
     our_reveals: Registered<Counter>,
     all_reveals: Registered<Counter>,
-    latest_share: Registered<GaugeFamily<Peer>>,
-    latest_ack: Registered<GaugeFamily<Peer>>,
+    latest_share: Registered<Family<Peer, Gauge>>,
+    latest_ack: Registered<Family<Peer, Gauge>>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -155,11 +155,11 @@ where
         let failed_epochs = context.counter("failed_epochs", "failed epochs");
         let our_reveals = context.counter("our_reveals", "our share was revealed");
         let all_reveals = context.counter("all_reveals", "all share reveals");
-        let latest_share = context.gauge_family(
+        let latest_share = context.family(
             "latest_share",
             "epoch of latest valid share received per dealer",
         );
-        let latest_ack = context.gauge_family(
+        let latest_ack = context.family(
             "latest_ack",
             "epoch of latest valid ack received per player",
         );

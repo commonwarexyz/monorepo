@@ -17,7 +17,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    metrics::{Counter, CounterFamily, GaugeFamily, Histogram},
+    metrics::{Counter, Family, Gauge, Histogram},
     spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Registered, Spawner,
@@ -67,8 +67,8 @@ where
 
     added: Registered<Counter>,
     verified: Registered<Counter>,
-    inbound_messages: Registered<CounterFamily<Inbound>>,
-    latest_vote: Registered<GaugeFamily<Peer>>,
+    inbound_messages: Registered<Family<Inbound, Counter>>,
+    latest_vote: Registered<Family<Peer, Gauge>>,
     latest_seen: Vec<View>,
     batch_size: Registered<Histogram>,
     verify_latency: histogram::Timed<E>,
@@ -90,10 +90,9 @@ where
         let participant_count = participants.len();
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
-        let inbound_messages =
-            context.counter_family("inbound_messages", "number of inbound messages");
-        let latest_vote =
-            context.gauge_family("latest_vote", "view of latest vote received per peer");
+        let inbound_messages = context.family("inbound_messages", "number of inbound messages");
+        let latest_vote: Registered<Family<Peer, Gauge>> =
+            context.family("latest_vote", "view of latest vote received per peer");
         for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }

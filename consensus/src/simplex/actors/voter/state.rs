@@ -16,7 +16,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{
-    metrics::{CounterFamily, Gauge},
+    metrics::{Counter, Family, Gauge},
     Clock, Metrics, Registered,
 };
 use commonware_utils::futures::Aborter;
@@ -108,8 +108,8 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Registered<Gauge>,
     tracked_views: Registered<Gauge>,
-    timeouts: Registered<CounterFamily<Timeout>>,
-    nullifications: Registered<CounterFamily<Leader>>,
+    timeouts: Registered<Family<Timeout, Counter>>,
+    nullifications: Registered<Family<Leader, Counter>>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -118,8 +118,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = context.gauge("current_view", "current view");
         let tracked_views = context.gauge("tracked_views", "tracked views");
-        let timeouts = context.counter_family("timeouts", "timed out views");
-        let nullifications = context.counter_family("nullifications", "nullifications");
+        let timeouts = context.family("timeouts", "timed out views");
+        let nullifications = context.family("nullifications", "nullifications");
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());

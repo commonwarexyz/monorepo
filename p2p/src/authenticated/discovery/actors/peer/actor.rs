@@ -15,8 +15,10 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
-    RateLimiter, Registered, Sink, Spawner, Stream,
+    iobuf::EncodeExt,
+    metrics::{Counter, Family},
+    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Registered, Sink, Spawner,
+    Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -42,10 +44,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
-    sent_messages: Registered<CounterFamily<metrics::Message>>,
-    received_messages: Registered<CounterFamily<metrics::Message>>,
-    dropped_messages: Registered<CounterFamily<metrics::Message>>,
-    rate_limited: Registered<CounterFamily<metrics::Message>>,
+    sent_messages: Registered<Family<metrics::Message, Counter>>,
+    received_messages: Registered<Family<metrics::Message, Counter>>,
+    dropped_messages: Registered<Family<metrics::Message, Counter>>,
+    rate_limited: Registered<Family<metrics::Message, Counter>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
@@ -111,7 +113,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     /// Records the send metric and appends the payload to the batch.
     fn push_batched(
-        sent_messages: &CounterFamily<metrics::Message>,
+        sent_messages: &Family<metrics::Message, Counter>,
         batch: &mut Vec<IoBufs>,
         metric: metrics::Message,
         payload: IoBufs,
@@ -135,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-        sent_messages: &CounterFamily<metrics::Message>,
+        sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
@@ -453,11 +455,10 @@ mod tests {
                 Duration::from_secs(60),
                 IP_NAMESPACE.to_vec(),
             ),
-            sent_messages: context.counter_family("sent_messages", "test sent messages"),
-            received_messages: context
-                .counter_family("received_messages", "test received messages"),
-            dropped_messages: context.counter_family("dropped_messages", "test dropped messages"),
-            rate_limited: context.counter_family("rate_limited", "test rate limited messages"),
+            sent_messages: context.family("sent_messages", "test sent messages"),
+            received_messages: context.family("received_messages", "test received messages"),
+            dropped_messages: context.family("dropped_messages", "test dropped messages"),
+            rate_limited: context.family("rate_limited", "test rate limited messages"),
         }
     }
 
@@ -838,7 +839,7 @@ mod tests {
 
             // Create dropped_messages metric to track drops
             let dropped_messages =
-                context.counter_family("dropped_messages_override", "test dropped messages");
+                context.family("dropped_messages_override", "test dropped messages");
 
             // Create peer config with our metric
             let config = Config {
@@ -853,13 +854,13 @@ mod tests {
                     Duration::from_secs(60),
                     IP_NAMESPACE.to_vec(),
                 ),
-                sent_messages: context.counter_family("sent_messages_override", "test sent messages"),
-                received_messages: context.counter_family(
+                sent_messages: context.family("sent_messages_override", "test sent messages"),
+                received_messages: context.family(
                     "received_messages_override",
                     "test received messages",
                 ),
                 dropped_messages: dropped_messages.clone(),
-                rate_limited: context.counter_family(
+                rate_limited: context.family(
                     "rate_limited_override",
                     "test rate limited messages",
                 ),
@@ -992,7 +993,7 @@ mod tests {
 
             // Clone the received_messages family so we can inspect it after
             // the actor finishes.
-            let received_messages = context.counter_family(
+            let received_messages = context.family(
                 "received_messages_override",
                 "test received messages override",
             );

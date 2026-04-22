@@ -1,6 +1,6 @@
 use crate::authenticated::lookup::metrics;
 use commonware_runtime::{
-    metrics::{CounterFamily, Gauge, GaugeFamily},
+    metrics::{Counter, Family, Gauge},
     Metrics as RuntimeMetrics, Registered,
 };
 
@@ -11,19 +11,19 @@ pub struct Metrics {
     pub tracked: Registered<Gauge>,
 
     /// Blocked peers (value = expiry time as epoch millis).
-    pub blocked: Registered<GaugeFamily<metrics::Peer>>,
+    pub blocked: Registered<Family<metrics::Peer, Gauge>>,
 
     /// The total number of outstanding reservations.
     pub reserved: Registered<Gauge>,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connected: Registered<GaugeFamily<metrics::Peer>>,
+    pub connected: Registered<Family<metrics::Peer, Gauge>>,
 
     /// A count of the number of rate-limited reservation events for each peer.
-    pub limits: Registered<CounterFamily<metrics::Peer>>,
+    pub limits: Registered<Family<metrics::Peer, Counter>>,
 
     /// A count of the number of updates for each peer.
-    pub updates: Registered<CounterFamily<metrics::Peer>>,
+    pub updates: Registered<Family<metrics::Peer, Counter>>,
 }
 
 impl Metrics {
@@ -34,21 +34,20 @@ impl Metrics {
                 "tracked",
                 "Total number of unique peers in all peer sets being tracked",
             ),
-            blocked: context.gauge_family(
+            blocked: context.family(
                 "blocked",
                 "Blocked peers (value = expiry time as epoch millis)",
             ),
             reserved: context.gauge("reserved", "Total number of outstanding reservations"),
-            connected: context.gauge_family(
+            connected: context.family(
                 "connected",
                 "Unix timestamp in milliseconds when each connected peer became active",
             ),
-            limits: context.counter_family(
+            limits: context.family(
                 "limits",
                 "Count of the number of rate-limited reservation events for each peer",
             ),
-            updates: context
-                .counter_family("updates", "Count of the number of updates for each peer"),
+            updates: context.family("updates", "Count of the number of updates for each peer"),
         }
     }
 }
