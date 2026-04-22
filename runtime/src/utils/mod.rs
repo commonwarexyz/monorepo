@@ -247,7 +247,7 @@ impl MetricRegistration {
         }
     }
 
-    fn from_inner(inner: Arc<MetricRegistrationInner>) -> Self {
+    const fn from_inner(inner: Arc<MetricRegistrationInner>) -> Self {
         Self { _inner: inner }
     }
 
@@ -287,7 +287,7 @@ impl<M> Clone for Registered<M> {
 }
 
 impl<M> Registered<M> {
-    pub(crate) fn new(metric: Arc<M>, registration: MetricRegistration) -> Self {
+    pub(crate) const fn new(metric: Arc<M>, registration: MetricRegistration) -> Self {
         Self {
             metric,
             _registration: registration,
@@ -449,7 +449,7 @@ impl Registry {
 
     pub fn register<M>(
         &mut self,
-        registry: Weak<Mutex<Registry>>,
+        registry: Weak<Mutex<Self>>,
         name: String,
         help: String,
         attributes: Vec<(String, String)>,
