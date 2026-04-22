@@ -570,13 +570,13 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
+    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
+        self.executor.available_cpus.as_ref()
+    }
+
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated(None);
         self
-    }
-
-    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
-        self.executor.available_cpus.as_ref()
     }
 
     fn pinned(mut self, cpu: usize) -> Self {
