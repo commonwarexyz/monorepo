@@ -485,7 +485,7 @@ pub fn play<M: Faults>(
         .dealings
         .iter()
         .map(|(dealer, dealing)| {
-            let mask = me.vrf(&dealing.nonce, dealer);
+            let mask = me.vrf::<false>(&dealing.nonce, dealer);
             let masked_share = dealing
                 .masked_shares
                 .get_value(&me_pub)

@@ -10,7 +10,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_math::algebra::{CryptoGroup, Random};
+use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::{hex, ordered::Map, Array, Span, TryCollect};
 use core::{
     fmt::{Debug, Display},
@@ -18,10 +18,28 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::LazyLock};
 use zeroize::Zeroizing;
 
 const SCHNORR_NS: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BANDERSNATCH_SCHNORR";
+
+const POINT_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_POINT_HASH";
+
+static GOLDEN_BETA: LazyLock<Scalar> =
+    LazyLock::new(|| Scalar::map(b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BETA", b""));
+
+fn point_hash(pk1: &PublicKey, pk2: &PublicKey, msg: &[u8]) -> (G, G) {
+    let msg0 = [pk1, pk2, msg, &[0]].concat();
+    let t0 = G::hash_to_group(POINT_DST, &msg0);
+    let msg1 = {
+        let mut out = msg0;
+        out.pop();
+        out.push(1);
+        out
+    };
+    let t1 = G::hash_to_group(POINT_DST, &msg1);
+    (t0, t1)
+}
 
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
@@ -87,19 +105,35 @@ impl PrivateKey {
         transcript.commit(shared.encode_fixed::<{ G::SIZE }>().as_slice());
     }
 
-    /// Compute the VRF output between ourselves and the receiver, for a given message.
+    /// Compute the VRF output between ourselves and the other party, for a given message.
     ///
-    /// If our receiver calls this method using their [`PrivateKey`] and our [`PublicKey`],
-    /// then the result will be the same.
+    /// `SENDER` indicates whether we are the sender (dealer) or receiver. Both
+    /// sides derive the same value because the ECDH secret is symmetric, and
+    /// `SENDER` ensures `point_hash` receives the keys in a canonical order
+    /// (sender first, receiver second).
     ///
     /// Changing the message in any way will produce a completely different output.
     ///
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
-    pub(super) fn vrf(&self, msg: &Summary, receiver: &PublicKey) -> Scalar {
-        let mut transcript = Transcript::resume(*msg);
-        self.diffie_hellman(receiver, &mut transcript);
-        Scalar::random(&mut transcript.noise(b"vrf"))
+    pub(super) fn vrf<const SENDER: bool>(
+        &self,
+        msg: &Summary,
+        other: &PublicKey,
+    ) -> Scalar {
+        let me = self.public();
+        let (sender, receiver) = if SENDER {
+            (&me, other)
+        } else {
+            (other, &me)
+        };
+        let (t0, t1) = point_hash(sender, receiver, msg);
+        let s = self.inner.expose(|x| {
+            let raw = other.point.clone() * x;
+            raw.clear_cofactor()
+        });
+        let k = s.x_as_f();
+        GOLDEN_BETA.clone() * &(t0 * &k).x_as_scalar() + &(t1 * &k).x_as_scalar()
     }
 
     /// Compute several [`Self::vrf`] outputs, along with commitments to these outputs.
@@ -119,7 +153,7 @@ impl PrivateKey {
         let scalars: Map<PublicKey, Scalar> = receivers
             .into_iter()
             .map(|receiver| {
-                let s = self.vrf(msg, &receiver);
+                let s = self.vrf::<true>(msg, &receiver);
                 (receiver, s)
             })
             .try_collect()
@@ -376,7 +410,7 @@ impl Proof {
             return false;
         }
         commitments.iter_pairs().all(|(receiver, commitment)| {
-            let expected = G1::generator() * &self.key.vrf(msg, receiver);
+            let expected = G1::generator() * &self.key.vrf::<true>(msg, receiver);
             *commitment == expected
         })
     }

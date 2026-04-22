@@ -4,6 +4,7 @@
 //! field. This module wraps the arkworks implementation to conform to the
 //! codebase's algebra trait hierarchy.
 
+use crate::bls12381::primitives::group::Scalar;
 use ark_ec::{
     hashing::{
         curve_maps::elligator2::Elligator2Map, map_to_curve_hasher::MapToCurveBasedHasher,
@@ -13,9 +14,10 @@ use ark_ec::{
     AdditiveGroup, CurveGroup, PrimeGroup, VariableBaseMSM,
 };
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Fr};
-#[cfg(any(test, feature = "arbitrary"))]
-use ark_ff::PrimeField;
-use ark_ff::{field_hashers::DefaultFieldHasher, Field as ArkField, UniformRand, Zero as ArkZero};
+use ark_ff::{
+    field_hashers::DefaultFieldHasher, BigInteger, Field as ArkField, PrimeField, UniformRand,
+    Zero as ArkZero,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -174,6 +176,17 @@ impl arbitrary::Arbitrary<'_> for F {
 pub struct G(Projective<BandersnatchConfig>);
 
 impl G {
+    /// Returns the affine x-coordinate as the shared BLS12-381 scalar type.
+    pub fn x_as_scalar(&self) -> Scalar {
+        Scalar::from_limbs(self.0.into_affine().x.into_bigint().0)
+    }
+
+    /// Returns the affine x-coordinate as a Bandersnatch scalar.
+    pub fn x_as_f(&self) -> F {
+        let bytes = self.0.into_affine().x.into_bigint().to_bytes_le();
+        F(Fr::from_le_bytes_mod_order(&bytes))
+    }
+
     /// Map this point into the prime-order subgroup by multiplying by the cofactor (4).
     pub fn clear_cofactor(&self) -> Self {
         let mut out = self.clone();
@@ -356,5 +369,13 @@ mod tests {
     #[test]
     fn test_hash_to_group() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G>);
+    }
+
+    #[test]
+    fn test_point_x_as_bls_scalar() {
+        assert_eq!(G::zero().x_as_scalar(), Scalar::from_u64(0));
+
+        let point = G::generator() * &F(Fr::from(7u64));
+        assert_ne!(point.x_as_scalar(), Scalar::from_u64(0));
     }
 }
