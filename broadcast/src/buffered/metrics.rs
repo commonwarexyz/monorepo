@@ -1,30 +1,21 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, Family, Gauge},
+    metrics::{Counter, EncodeStruct, Family, Gauge},
     telemetry::metrics::status,
     Metrics as RuntimeMetrics, Registered,
 };
 
 /// Label for sequencer height metrics
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SequencerLabel {
-    /// Hex representation of the sequencer's public key
-    pub sequencer: String,
-}
-
-impl SequencerLabel {
-    /// Create a new sequencer label from a public key
-    pub fn from<P: PublicKey>(sequencer: &P) -> Self {
-        Self {
-            sequencer: sequencer.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Sequencer<P: PublicKey> {
+    /// The sequencer's public key
+    pub sequencer: P,
 }
 
 /// Metrics for the [super::Engine]
-pub struct Metrics {
+pub struct Metrics<P: PublicKey> {
     /// Number of broadcasts received by peer
-    pub peer: Registered<Family<SequencerLabel, Counter>>,
+    pub peer: Registered<Family<Sequencer<P>, Counter>>,
     /// Number of received messages by status
     pub receive: Registered<status::Counter>,
     /// Number of `subscribe` requests by status
@@ -36,7 +27,7 @@ pub struct Metrics {
     pub waiters: Registered<Gauge>,
 }
 
-impl Metrics {
+impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         Self {

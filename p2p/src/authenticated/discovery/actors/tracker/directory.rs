@@ -4,7 +4,6 @@ use crate::{
         dialing::{earliest, DialStatus, Dialable, ReserveResult},
         discovery::{
             actors::tracker::ingress::Releaser,
-            metrics,
             types::{self, Info},
         },
     },
@@ -92,7 +91,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     // ---------- Metrics ----------
     /// The metrics for the records.
-    metrics: Metrics,
+    metrics: Metrics<C>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
@@ -144,7 +143,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        self.metrics.connected.remove(&metrics::Peer::new(peer));
+        self.metrics.connected.remove_by(peer);
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
@@ -175,7 +174,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let _ = self
             .metrics
             .connected
-            .get_or_create(&metrics::Peer::new(peer))
+            .get_or_create_by(peer)
             .try_set(self.context.current().epoch_millis());
 
         // We may have to update the primary sets.
@@ -202,7 +201,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
             self.metrics
                 .updates
-                .get_or_create(&metrics::Peer::new(&peer))
+                .get_or_create_by(&peer)
                 .inc();
 
             // We may have to update the primary sets.
@@ -364,7 +363,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let _ = self
             .metrics
             .blocked
-            .get_or_create(&metrics::Peer::new(peer))
+            .get_or_create_by(peer)
             .try_set(blocked_until.epoch_millis());
     }
 
@@ -483,7 +482,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
             let (peer, _) = self.blocked.pop().unwrap();
             debug!(?peer, "unblocked peer");
-            self.metrics.blocked.remove(&metrics::Peer::new(&peer));
+            self.metrics.blocked.remove_by(&peer);
 
             // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
             if let Some(record) = self.peers.get(&peer) {
@@ -534,7 +533,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             ReserveResult::RateLimited => {
                 self.metrics
                     .limits
-                    .get_or_create(&metrics::Peer::new(peer))
+                    .get_or_create_by(peer)
                     .inc();
                 None
             }
@@ -627,7 +626,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&my_pk))
+                    .get_by(&my_pk)
                     .is_none(),
                 "Blocking myself should not create metric entry"
             );
@@ -907,7 +906,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&unknown_pk))
+                    .get_by(&unknown_pk)
                     .is_some(),
                 "Blocking nonexistent peer should create metric entry"
             );
@@ -952,7 +951,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&unknown_pk))
+                    .get_by(&unknown_pk)
                     .is_none(),
                 "Blocked metric should be removed after unblock"
             );
@@ -1037,7 +1036,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&registered_pk))
+                    .get_by(&registered_pk)
                     .is_none(),
                 "Peer should not be blocked initially"
             );
@@ -1048,7 +1047,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&registered_pk))
+                    .get_by(&registered_pk)
                     .is_some(),
                 "Tracked peer should be marked blocked"
             );
@@ -1058,7 +1057,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&registered_pk))
+                    .get_by(&registered_pk)
                     .is_some(),
                 "Blocking same tracked peer twice should not change metric"
             );
@@ -1068,7 +1067,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&registered_pk))
+                    .get_by(&registered_pk)
                     .is_some(),
                 "Blocking same tracked peer thrice should not change metric"
             );
@@ -1079,7 +1078,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&unknown_pk))
+                    .get_by(&unknown_pk)
                     .is_some(),
                 "Unknown peer should be marked blocked"
             );
@@ -1089,7 +1088,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&unknown_pk))
+                    .get_by(&unknown_pk)
                     .is_some(),
                 "Blocking same nonexistent peer twice should not change metric"
             );
@@ -1099,7 +1098,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&unknown_pk))
+                    .get_by(&unknown_pk)
                     .is_some(),
                 "Blocking same nonexistent peer thrice should not change metric"
             );
@@ -1274,7 +1273,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&pk_1))
+                    .get_by(&pk_1)
                     .is_none(),
                 "pk_1 should not be blocked initially"
             );
@@ -1288,7 +1287,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&pk_1))
+                    .get_by(&pk_1)
                     .is_some(),
                 "pk_1 should be marked blocked"
             );
@@ -1305,7 +1304,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&pk_1))
+                    .get_by(&pk_1)
                     .is_some(),
                 "blocked metric should persist after peer removal"
             );
@@ -1321,7 +1320,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&pk_1))
+                    .get_by(&pk_1)
                     .is_some(),
                 "blocked metric should persist after re-add"
             );
@@ -1339,7 +1338,7 @@ mod tests {
                 directory
                     .metrics
                     .blocked
-                    .get(&metrics::Peer::new(&pk_1))
+                    .get_by(&pk_1)
                     .is_none(),
                 "blocked metric should be removed after unblock"
             );
@@ -1382,19 +1381,19 @@ mod tests {
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_1))
+                .get_by(&pk_1)
                 .is_some());
             directory.block(&pk_2);
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_2))
+                .get_by(&pk_2)
                 .is_some());
             directory.block(&pk_3);
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_3))
+                .get_by(&pk_3)
                 .is_some());
             assert_eq!(directory.blocked(), 3);
 
@@ -1403,7 +1402,7 @@ mod tests {
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_1))
+                .get_by(&pk_1)
                 .is_some());
 
             // Advance time and unblock all
@@ -1412,17 +1411,17 @@ mod tests {
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_1))
+                .get_by(&pk_1)
                 .is_none());
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_2))
+                .get_by(&pk_2)
                 .is_none());
             assert!(directory
                 .metrics
                 .blocked
-                .get(&metrics::Peer::new(&pk_3))
+                .get_by(&pk_3)
                 .is_none());
             assert_eq!(directory.blocked(), 0);
         });

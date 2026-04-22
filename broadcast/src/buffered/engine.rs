@@ -1,5 +1,4 @@
 use super::{metrics, Config, Mailbox, Message};
-use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -104,7 +103,7 @@ where
     // Metrics
     ////////////////////////////////////////
     /// Metrics
-    metrics: metrics::Metrics,
+    metrics: metrics::Metrics<P>,
 }
 
 impl<E, P, M, D> Engine<E, P, M, D>
@@ -223,10 +222,7 @@ where
                 };
 
                 trace!(?peer, "network");
-                self.metrics
-                    .peer
-                    .get_or_create(&SequencerLabel::from(&peer))
-                    .inc();
+                self.metrics.peer.get_or_create_by(&peer).inc();
                 self.handle_network(peer, msg);
             },
         }

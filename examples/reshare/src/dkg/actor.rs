@@ -28,7 +28,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, Family, Gauge},
+    metrics::{Counter, EncodeStruct, Family, Gauge},
     spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
     Spawner, Storage as RuntimeStorage,
 };
@@ -37,17 +37,9 @@ use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Peer {
-    peer: String,
-}
-
-impl Peer {
-    fn new<P: PublicKey>(pk: &P) -> Self {
-        Self {
-            peer: pk.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+struct Peer<P: PublicKey> {
+    peer: P,
 }
 
 /// Wire message type for DKG protocol communication.
@@ -132,8 +124,8 @@ where
     failed_epochs: Registered<Counter>,
     our_reveals: Registered<Counter>,
     all_reveals: Registered<Counter>,
-    latest_share: Registered<Family<Peer, Gauge>>,
-    latest_ack: Registered<Family<Peer, Gauge>>,
+    latest_share: Registered<Family<Peer<C::PublicKey>, Gauge>>,
+    latest_ack: Registered<Family<Peer<C::PublicKey>, Gauge>>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -385,7 +377,7 @@ where
                                         if let Some(ack) = response {
                                             let _ = self
                                                 .latest_share
-                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .get_or_create_by(&sender_pk)
                                                 .try_set_max(epoch.get());
 
                                             let payload =
@@ -411,7 +403,7 @@ where
                                         if added {
                                             let _ = self
                                                 .latest_ack
-                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .get_or_create_by(&sender_pk)
                                                 .try_set_max(epoch.get());
                                         }
                                     }

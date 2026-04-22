@@ -1,28 +1,20 @@
 //! Metrics for the shard engine.
 
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, Family, Gauge, Histogram},
+    metrics::{Counter, EncodeStruct, Family, Gauge, Histogram},
     telemetry::metrics::histogram::Buckets,
     Metrics as MetricsTrait, Registered,
 };
-use commonware_utils::Array;
 
 /// Label for per-peer metrics.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
-    pub peer: String,
-}
-
-impl Peer {
-    pub fn new(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Peer<P: PublicKey> {
+    pub peer: P,
 }
 
 /// Metrics for the shard engine.
-pub struct ShardMetrics {
+pub struct ShardMetrics<P: PublicKey> {
     /// Histogram of erasure decoding duration in seconds.
     pub erasure_decode_duration: Registered<Histogram>,
     /// Number of blocks in the reconstructed blocks cache.
@@ -30,14 +22,14 @@ pub struct ShardMetrics {
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Registered<Gauge>,
     /// Number of shards received per peer.
-    pub shards_received: Registered<Family<Peer, Counter>>,
+    pub shards_received: Registered<Family<Peer<P>, Counter>>,
     /// Total number of blocks successfully reconstructed.
     pub blocks_reconstructed_total: Registered<Counter>,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Registered<Counter>,
 }
 
-impl ShardMetrics {
+impl<P: PublicKey> ShardMetrics<P> {
     /// Create and register metrics with the given context.
     pub fn new(context: &impl MetricsTrait) -> Self {
         let erasure_decode_duration = context.histogram(

@@ -138,7 +138,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    metrics::{Peer, ShardMetrics},
+    metrics::ShardMetrics,
 };
 use crate::{
     marshal::coding::{
@@ -349,7 +349,7 @@ where
         BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Metrics for the shard engine.
-    metrics: ShardMetrics,
+    metrics: ShardMetrics<P>,
 }
 
 impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
@@ -517,7 +517,7 @@ where
                 // Track shard receipt per peer.
                 self.metrics
                     .shards_received
-                    .get_or_create(&Peer::new(&peer))
+                    .get_or_create_by(&peer)
                     .inc();
 
                 let commitment = shard.commitment();

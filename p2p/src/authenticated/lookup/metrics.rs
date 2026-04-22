@@ -1,19 +1,12 @@
 use crate::Channel;
-use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use commonware_cryptography::PublicKey;
+use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct, LabelValueEncoder};
 use commonware_utils::Array;
 use std::fmt::Write;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
-    pub peer: String,
-}
-
-impl Peer {
-    pub fn new(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Peer<P: PublicKey> {
+    pub peer: P,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

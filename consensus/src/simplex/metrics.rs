@@ -1,17 +1,10 @@
-use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue};
+use commonware_cryptography::PublicKey;
+use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 use commonware_utils::Array;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
-    pub peer: String,
-}
-
-impl Peer {
-    pub fn new(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Peer<P: PublicKey> {
+    pub peer: P,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -41,17 +34,9 @@ impl Timeout {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Leader {
-    pub leader: String,
-}
-
-impl Leader {
-    pub fn new(leader: &impl Array) -> Self {
-        Self {
-            leader: leader.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Leader<P: PublicKey> {
+    pub leader: P,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]

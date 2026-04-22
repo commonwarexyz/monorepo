@@ -1,31 +1,22 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeLabelSet, Family, Gauge},
+    metrics::{Counter, EncodeStruct, Family, Gauge},
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics, Registered,
 };
 use std::sync::Arc;
 
 /// Label for sequencer height metrics
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SequencerLabel {
-    /// Hex representation of the sequencer's public key
-    pub sequencer: String,
-}
-
-impl SequencerLabel {
-    /// Create a new sequencer label from a public key
-    pub fn from<P: PublicKey>(sequencer: &P) -> Self {
-        Self {
-            sequencer: sequencer.to_string(),
-        }
-    }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Sequencer<P: PublicKey> {
+    /// The sequencer's public key
+    pub sequencer: P,
 }
 
 /// Metrics for the [super::Engine]
-pub struct Metrics<E: RuntimeMetrics + Clock> {
+pub struct Metrics<E: RuntimeMetrics + Clock, P: PublicKey> {
     /// Height per sequencer
-    pub sequencer_heights: Registered<Family<SequencerLabel, Gauge>>,
+    pub sequencer_heights: Registered<Family<Sequencer<P>, Gauge>>,
     /// Number of acks processed by status
     pub acks: Registered<status::Counter>,
     /// Number of nodes processed by status
@@ -44,7 +35,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub e2e_duration: histogram::Timed<E>,
 }
 
-impl<E: RuntimeMetrics + Clock> Metrics<E> {
+impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
         let sequencer_heights = context.family("sequencer_heights", "Height per sequencer tracked");

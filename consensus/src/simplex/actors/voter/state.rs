@@ -109,7 +109,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     current_view: Registered<Gauge>,
     tracked_views: Registered<Gauge>,
     timeouts: Registered<Family<Timeout, Counter>>,
-    nullifications: Registered<Family<Leader, Counter>>,
+    nullifications: Registered<Family<Leader<S::PublicKey>, Counter>>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -330,7 +330,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
             self.nullifications
-                .get_or_create(&Leader::new(&leader.key))
+                .get_or_create_by(&leader.key)
                 .inc();
         }
 

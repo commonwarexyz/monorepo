@@ -68,7 +68,7 @@ where
     added: Registered<Counter>,
     verified: Registered<Counter>,
     inbound_messages: Registered<Family<Inbound, Counter>>,
-    latest_vote: Registered<Family<Peer, Gauge>>,
+    latest_vote: Registered<Family<Peer<S::PublicKey>, Gauge>>,
     latest_seen: Vec<View>,
     batch_size: Registered<Histogram>,
     verify_latency: histogram::Timed<E>,
@@ -91,10 +91,10 @@ where
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
-        let latest_vote: Registered<Family<Peer, Gauge>> =
+        let latest_vote: Registered<Family<Peer<S::PublicKey>, Gauge>> =
             context.family("latest_vote", "view of latest vote received per peer");
         for participant in participants.iter() {
-            latest_vote.get_or_create(&Peer::new(participant)).set(0);
+            latest_vote.get_or_create_by(participant).set(0);
         }
         let batch_size = context.histogram(
             "batch_size",
@@ -494,11 +494,10 @@ where
                 self.record_activity(&sender, view);
 
                 // Add the vote to the verifier
-                let peer = Peer::new(&sender);
                 if work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
-                    .add_network(sender, message)
+                    .add_network(sender.clone(), message)
                     .await
                 {
                     self.added.inc();
@@ -506,7 +505,7 @@ where
                     // Update per-peer latest vote metric (only if higher than current)
                     let _ = self
                         .latest_vote
-                        .get_or_create(&peer)
+                        .get_or_create_by(&sender)
                         .try_set_max(view.get());
 
                     // If the current leader explicitly nullifies the current view, signal

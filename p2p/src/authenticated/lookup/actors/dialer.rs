@@ -65,7 +65,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: Registered<Family<metrics::Peer, Counter>>,
+    attempts: Registered<Family<metrics::Peer<C::PublicKey>, Counter>>,
 }
 
 impl<
@@ -100,7 +100,7 @@ impl<
 
         // Increment metrics.
         self.attempts
-            .get_or_create(&metrics::Peer::new(&peer))
+            .get_or_create_by(&peer)
             .inc();
 
         // Spawn dialer to connect to peer

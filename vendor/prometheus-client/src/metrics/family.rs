@@ -281,6 +281,34 @@ impl<S: Clone + std::hash::Hash + Eq, M, C: MetricConstructor<M>> Family<S, M, C
         })
     }
 
+    /// Access a metric by a borrowed form of its label set. Avoids constructing the
+    /// full label set on the common hit path; clones only when inserting on the miss
+    /// path, using the `From<&Q>` impl.
+    pub fn get_or_create_by<Q>(&self, key: &Q) -> MappedRwLockReadGuard<'_, M>
+    where
+        Q: std::hash::Hash + Eq + ?Sized,
+        S: std::borrow::Borrow<Q>,
+        for<'a> S: From<&'a Q>,
+    {
+        {
+            let read_guard = self.metrics.read();
+            if read_guard.contains_key(key) {
+                return RwLockReadGuard::map(read_guard, |metrics| {
+                    metrics.get(key).expect("metric to exist after contains check")
+                });
+            }
+        }
+
+        let mut write_guard = self.metrics.write();
+        write_guard
+            .entry(S::from(key))
+            .or_insert_with(|| self.constructor.new_metric());
+        let read_guard = RwLockWriteGuard::downgrade(write_guard);
+        RwLockReadGuard::map(read_guard, |metrics| {
+            metrics.get(key).expect("metric to exist after insert")
+        })
+    }
+
     /// Access a metric with the given label set, returning None if one
     /// does not yet exist.
     ///
@@ -296,6 +324,16 @@ impl<S: Clone + std::hash::Hash + Eq, M, C: MetricConstructor<M>> Family<S, M, C
     /// ```
     pub fn get(&self, label_set: &S) -> Option<MappedRwLockReadGuard<'_, M>> {
         RwLockReadGuard::try_map(self.metrics.read(), |metrics| metrics.get(label_set)).ok()
+    }
+
+    /// Access a metric by a borrowed form of its label set. Mirrors [`Family::get`]
+    /// but avoids constructing the full label set when looking up.
+    pub fn get_by<Q>(&self, key: &Q) -> Option<MappedRwLockReadGuard<'_, M>>
+    where
+        Q: std::hash::Hash + Eq + ?Sized,
+        S: std::borrow::Borrow<Q>,
+    {
+        RwLockReadGuard::try_map(self.metrics.read(), |metrics| metrics.get(key)).ok()
     }
 
     /// Remove a label set from the metric family.
@@ -318,6 +356,15 @@ impl<S: Clone + std::hash::Hash + Eq, M, C: MetricConstructor<M>> Family<S, M, C
     /// ```
     pub fn remove(&self, label_set: &S) -> bool {
         self.metrics.write().remove(label_set).is_some()
+    }
+
+    /// Remove a metric by a borrowed form of its label set.
+    pub fn remove_by<Q>(&self, key: &Q) -> bool
+    where
+        Q: std::hash::Hash + Eq + ?Sized,
+        S: std::borrow::Borrow<Q>,
+    {
+        self.metrics.write().remove(key).is_some()
     }
 
     /// Clear all label sets from the metric family.

@@ -2,7 +2,7 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{EncodeLabelSet, Family, Gauge, Histogram},
+    metrics::{EncodeStruct, Family, Gauge, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, CounterExt, Status},
@@ -18,9 +18,9 @@ use std::{
 };
 use tracing::debug;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Peer {
-    peer: String,
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+struct Peer<P: PublicKey> {
+    peer: P,
 }
 
 /// Unique identifier for a request.
@@ -132,7 +132,7 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Registered<Family<Peer, Gauge>>,
+    performance: Registered<Family<Peer<P>, Gauge>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
     requests_created: Registered<status::Counter>,
@@ -213,10 +213,7 @@ where
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
         self.participants.put(participant.clone(), next);
-        let label = Peer {
-            peer: participant.to_string(),
-        };
-        let _ = self.performance.get_or_create(&label).try_set(next);
+        let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
     /// Get eligible peers for a key in priority order.
