@@ -5,10 +5,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{
-        self,
-        mmr::{journaled::Config as MmrConfig, Family},
-    },
+    merkle::{self, journaled::Config as MerkleConfig, Family},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -42,35 +39,33 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
-pub type AnyUFixDb = UFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOFixDb = OFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUFixDb = UCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOFixDb = OCFixed<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap>;
+pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Fixed value (Digest), variable storage layout --
 // Measures overhead of variable-capable storage when values are fixed-size.
 
-pub type AnyUVarDigestDb = UVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOVarDigestDb = OVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
-pub type CurUVarDigestDb =
-    UCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarDigestDb =
-    OCVariable<Family, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarDigestDb<F> = UVariable<F, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOVarDigestDb<F> = OVariable<F, Context, Digest, Digest, Sha256, EightCap>;
+pub type CurUVarDigestDb<F> = UCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarDigestDb<F> = OCVariable<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Variable value (Vec<u8>), variable storage layout --
 
-pub type AnyUVarVecDb = UVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type AnyOVarVecDb = OVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type CurUVarVecDb = UCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-pub type CurOVarVecDb = OCVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarVecDb<F> = UVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyOVarVecDb<F> = OVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type CurUVarVecDb<F> = UCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarVecDb<F> = OCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Keyless --
 
-pub type KeylessDb = Keyless<Family, Context, Vec<u8>, Sha256>;
+pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256>;
 
-pub async fn open_keyless_db(ctx: Context) -> KeylessDb {
+pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
-    KeylessDb::init(ctx, cfg).await.unwrap()
+    KeylessDb::<F>::init(ctx, cfg).await.unwrap()
 }
 
 // -- Variant enums --
@@ -145,12 +140,12 @@ const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 
-fn mmr_cfg(
+fn merkle_cfg(
     suffix: &str,
     ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
-) -> MmrConfig {
-    MmrConfig {
+) -> MerkleConfig {
+    MerkleConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob: ITEMS_PER_BLOB,
@@ -183,7 +178,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
@@ -192,9 +187,9 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
 }
@@ -204,7 +199,7 @@ pub fn any_var_digest_cfg(
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
@@ -215,9 +210,9 @@ pub fn cur_var_digest_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -227,7 +222,7 @@ pub fn any_var_vec_cfg(
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }
@@ -238,9 +233,9 @@ pub fn cur_var_vec_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
-        grafted_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -250,7 +245,7 @@ pub fn keyless_cfg(
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
+        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
         log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
@@ -270,63 +265,63 @@ macro_rules! dispatch_arm {
 
 /// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
 macro_rules! with_fixed_value_db {
-    ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+    ($ctx:expr, $F:ty, $variant:expr, |mut $db:ident| $body:expr) => {{
         use $crate::common::FixedValueVariant::*;
         match $variant {
             AnyUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUFixDb,
+                $crate::common::AnyUFixDb<$F>,
                 any_fix_cfg
             ),
             AnyOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOFixDb,
+                $crate::common::AnyOFixDb<$F>,
                 any_fix_cfg
             ),
             AnyUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUVarDigestDb,
+                $crate::common::AnyUVarDigestDb<$F>,
                 any_var_digest_cfg
             ),
             AnyOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOVarDigestDb,
+                $crate::common::AnyOVarDigestDb<$F>,
                 any_var_digest_cfg
             ),
             CurrentUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUFixDb,
+                $crate::common::CurUFixDb<$F>,
                 cur_fix_cfg
             ),
             CurrentOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOFixDb,
+                $crate::common::CurOFixDb<$F>,
                 cur_fix_cfg
             ),
             CurrentUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUVarDigestDb,
+                $crate::common::CurUVarDigestDb<$F>,
                 cur_var_digest_cfg
             ),
             CurrentOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOVarDigestDb,
+                $crate::common::CurOVarDigestDb<$F>,
                 cur_var_digest_cfg
             ),
         }
@@ -336,35 +331,35 @@ macro_rules! with_fixed_value_db {
 /// Construct a variable-value (Vec<u8>) database for the given variant, bind it as `$db`,
 /// execute `$body`.
 macro_rules! with_var_value_db {
-    ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
+    ($ctx:expr, $F:ty, $variant:expr, |mut $db:ident| $body:expr) => {{
         use $crate::common::VarValueVariant::*;
         match $variant {
             AnyUnordered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUVarVecDb,
+                $crate::common::AnyUVarVecDb<$F>,
                 any_var_vec_cfg
             ),
             AnyOrdered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOVarVecDb,
+                $crate::common::AnyOVarVecDb<$F>,
                 any_var_vec_cfg
             ),
             CurrentUnordered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUVarVecDb,
+                $crate::common::CurUVarVecDb<$F>,
                 cur_var_vec_cfg
             ),
             CurrentOrdered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOVarVecDb,
+                $crate::common::CurOVarVecDb<$F>,
                 cur_var_vec_cfg
             ),
         }
@@ -386,7 +381,7 @@ macro_rules! dispatch_arm_with_cfg {
 
 /// Like `with_fixed_value_db!` but takes pre-built configs to avoid rebuilding them each call.
 macro_rules! with_fixed_value_db_cfg {
-    ($ctx:expr, $variant:expr, $any_fixed:expr, $current_fixed:expr,
+    ($ctx:expr, $F:ty, $variant:expr, $any_fixed:expr, $current_fixed:expr,
      $any_var:expr, $current_var:expr, |mut $db:ident| $body:expr) => {{
         use $crate::common::FixedValueVariant::*;
         match $variant {
@@ -394,56 +389,56 @@ macro_rules! with_fixed_value_db_cfg {
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUFixDb,
+                $crate::common::AnyUFixDb<$F>,
                 $any_fixed
             ),
             AnyOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOFixDb,
+                $crate::common::AnyOFixDb<$F>,
                 $any_fixed
             ),
             AnyUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUVarDigestDb,
+                $crate::common::AnyUVarDigestDb<$F>,
                 $any_var
             ),
             AnyOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOVarDigestDb,
+                $crate::common::AnyOVarDigestDb<$F>,
                 $any_var
             ),
             CurrentUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUFixDb,
+                $crate::common::CurUFixDb<$F>,
                 $current_fixed
             ),
             CurrentOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOFixDb,
+                $crate::common::CurOFixDb<$F>,
                 $current_fixed
             ),
             CurrentUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUVarDigestDb,
+                $crate::common::CurUVarDigestDb<$F>,
                 $current_var
             ),
             CurrentOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOVarDigestDb,
+                $crate::common::CurOVarDigestDb<$F>,
                 $current_var
             ),
         }
@@ -452,7 +447,7 @@ macro_rules! with_fixed_value_db_cfg {
 
 /// Like `with_var_value_db!` but takes pre-built configs to avoid rebuilding them each call.
 macro_rules! with_var_value_db_cfg {
-    ($ctx:expr, $variant:expr, $any_var:expr, $current_var:expr,
+    ($ctx:expr, $F:ty, $variant:expr, $any_var:expr, $current_var:expr,
      |mut $db:ident| $body:expr) => {{
         use $crate::common::VarValueVariant::*;
         match $variant {
@@ -460,28 +455,28 @@ macro_rules! with_var_value_db_cfg {
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyUVarVecDb,
+                $crate::common::AnyUVarVecDb<$F>,
                 $any_var
             ),
             AnyOrdered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::AnyOVarVecDb,
+                $crate::common::AnyOVarVecDb<$F>,
                 $any_var
             ),
             CurrentUnordered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurUVarVecDb,
+                $crate::common::CurUVarVecDb<$F>,
                 $current_var
             ),
             CurrentOrdered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::CurOVarVecDb,
+                $crate::common::CurOVarVecDb<$F>,
                 $current_var
             ),
         }
@@ -496,14 +491,15 @@ pub(crate) use with_var_value_db_cfg;
 
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
 /// updates/deletes. Commits periodically when `commit_frequency` is `Some`.
-pub async fn gen_random_kv<M>(
+pub async fn gen_random_kv<F, M>(
     db: &mut M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
     make_value: impl Fn(&mut StdRng) -> M::Value,
 ) where
-    M: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>,
+    F: Family,
+    M: DbAny<F, Key = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 

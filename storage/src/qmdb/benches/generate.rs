@@ -11,7 +11,10 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::qmdb::any::traits::DbAny;
+use commonware_storage::{
+    merkle::{mmb, mmr, Graftable},
+    qmdb::any::traits::DbAny,
+};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::{Duration, Instant};
@@ -22,7 +25,7 @@ const COMMITS_PER_ITERATION: u64 = 100;
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
-async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>>(
+async fn bench_db<F: Graftable, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,
     operations: u64,
@@ -30,7 +33,7 @@ async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest
     make_value: impl Fn(&mut StdRng) -> C::Value,
 ) -> Duration {
     let start = Instant::now();
-    gen_random_kv(
+    gen_random_kv::<F, _>(
         &mut db,
         elements,
         operations,
@@ -45,14 +48,14 @@ async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest
     elapsed
 }
 
-fn bench_fixed_value_generate(c: &mut Criterion) {
+fn bench_fixed_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in FIXED_VALUE_VARIANTS {
                 c.bench_function(
                     &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
+                        "{}/variant={} family={family} elements={elements} operations={operations}",
                         module_path!(),
                         variant.name(),
                     ),
@@ -62,8 +65,8 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_fixed_value_db!(ctx, variant, |mut db| {
-                                    bench_db(
+                                total += with_fixed_value_db!(ctx, F, variant, |mut db| {
+                                    bench_db::<F, _>(
                                         db,
                                         elements,
                                         operations,
@@ -82,14 +85,19 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
     }
 }
 
-fn bench_var_value_generate(c: &mut Criterion) {
+fn bench_fixed_value_generate(c: &mut Criterion) {
+    bench_fixed_value_generate_family::<mmr::Family>(c, "mmr");
+    bench_fixed_value_generate_family::<mmb::Family>(c, "mmb");
+}
+
+fn bench_var_value_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VAR_VALUE_VARIANTS {
                 c.bench_function(
                     &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
+                        "{}/variant={} family={family} elements={elements} operations={operations}",
                         module_path!(),
                         variant.name(),
                     ),
@@ -99,9 +107,15 @@ fn bench_var_value_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_var_value_db!(ctx, variant, |mut db| {
-                                    bench_db(db, elements, operations, commit_freq, make_var_value)
-                                        .await
+                                total += with_var_value_db!(ctx, F, variant, |mut db| {
+                                    bench_db::<F, _>(
+                                        db,
+                                        elements,
+                                        operations,
+                                        commit_freq,
+                                        make_var_value,
+                                    )
+                                    .await
                                 });
                             }
                             total
@@ -113,14 +127,22 @@ fn bench_var_value_generate(c: &mut Criterion) {
     }
 }
 
+fn bench_var_value_generate(c: &mut Criterion) {
+    bench_var_value_generate_family::<mmr::Family>(c, "mmr");
+    bench_var_value_generate_family::<mmb::Family>(c, "mmb");
+}
+
 const KEYLESS_OPS: u64 = 10_000;
 const KEYLESS_COMMIT_FREQ: u32 = 25;
 
-fn bench_keyless_generate(c: &mut Criterion) {
+fn bench_keyless_generate_family<F: Graftable>(c: &mut Criterion, family: &str) {
     let runner = tokio::Runner::new(Config::default());
     for operations in [KEYLESS_OPS, KEYLESS_OPS * 2] {
         c.bench_function(
-            &format!("{}/variant=keyless operations={operations}", module_path!()),
+            &format!(
+                "{}/variant=keyless family={family} operations={operations}",
+                module_path!()
+            ),
             |b| {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     let ctx = context::get::<Context>();
@@ -128,7 +150,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     for _ in 0..iters {
                         let start = Instant::now();
 
-                        let mut db = open_keyless_db(ctx.clone()).await;
+                        let mut db = open_keyless_db::<F>(ctx.clone()).await;
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {
@@ -153,6 +175,11 @@ fn bench_keyless_generate(c: &mut Criterion) {
             },
         );
     }
+}
+
+fn bench_keyless_generate(c: &mut Criterion) {
+    bench_keyless_generate_family::<mmr::Family>(c, "mmr");
+    bench_keyless_generate_family::<mmb::Family>(c, "mmb");
 }
 
 criterion_group! {
