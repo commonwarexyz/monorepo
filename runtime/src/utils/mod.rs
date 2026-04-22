@@ -330,16 +330,18 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
 
 #[derive(Debug)]
 struct MetricEntry {
-    name: String,
-    help: String,
+    family_name: String,
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     metric: Box<dyn PrometheusMetric>,
+    family_index: usize,
 }
 
-struct LiveMetricFamily<'a> {
-    help: &'a str,
+#[derive(Debug)]
+struct MetricFamily {
+    help: String,
     metric_type: MetricType,
-    metrics: Vec<&'a MetricEntry>,
+    descriptor: String,
+    metric_ids: Vec<u64>,
 }
 
 /// Manages runtime-internal metrics plus user-registered metrics with explicit lifetimes.
@@ -348,7 +350,9 @@ struct LiveMetricFamily<'a> {
 /// registered through a prefixed scope. User metrics additionally get a drop-based
 /// registration handle so they can be unregistered when the owning handle drops.
 pub(crate) struct Registry {
-    metrics: BTreeMap<u64, Arc<MetricEntry>>,
+    metrics: Vec<Option<MetricEntry>>,
+    free_metric_ids: Vec<u64>,
+    families: BTreeMap<String, MetricFamily>,
     keys: HashMap<MetricKey, u64>,
     next_metric_id: u64,
 }
@@ -356,7 +360,9 @@ pub(crate) struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            metrics: BTreeMap::new(),
+            metrics: Vec::new(),
+            free_metric_ids: Vec::new(),
+            families: BTreeMap::new(),
             keys: HashMap::new(),
             next_metric_id: 0,
         }
@@ -377,28 +383,88 @@ impl Registry {
         attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
         metric: impl PrometheusMetric,
     ) -> u64 {
+        let metric_type = metric.metric_type();
+        if let Some(family) = self.families.get(&name) {
+            assert_eq!(
+                family.help, help,
+                "metric family `{}` registered with inconsistent help text",
+                name
+            );
+            assert_eq!(
+                family.metric_type, metric_type,
+                "metric family `{}` registered with inconsistent metric type",
+                name
+            );
+        }
+        let key = (name.clone(), attributes.clone());
+        assert!(
+            !self.keys.contains_key(&key),
+            "duplicate metric: {} with attributes {:?}",
+            key.0,
+            key.1
+        );
+        let id = self.allocate_metric_id();
+        self.keys.insert(key, id);
+        let family = match self.families.entry(name.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut descriptor = String::new();
+                encode_descriptor(&mut descriptor, &name, &help, None, metric_type)
+                    .expect("encoding cached descriptor failed");
+                entry.insert(MetricFamily {
+                    help,
+                    metric_type,
+                    descriptor,
+                    metric_ids: Vec::new(),
+                })
+            }
+        };
+        let family_index = family.metric_ids.len();
+        family.metric_ids.push(id);
+        self.metric_slot_mut(id).replace(MetricEntry {
+            family_name: name,
+            attributes,
+            metric: Box::new(metric),
+            family_index,
+        });
+        id
+    }
+
+    fn metric_index(id: u64) -> usize {
+        usize::try_from(id).expect("metric id overflowed usize")
+    }
+
+    fn metric_slot_mut(&mut self, id: u64) -> &mut Option<MetricEntry> {
+        let index = Self::metric_index(id);
+        if index == self.metrics.len() {
+            self.metrics.push(None);
+        }
+        &mut self.metrics[index]
+    }
+
+    fn metric_ref(&self, id: u64) -> &MetricEntry {
+        self.metrics
+            .get(Self::metric_index(id))
+            .and_then(Option::as_ref)
+            .expect("metric id missing from registry")
+    }
+
+    fn metric_mut(&mut self, id: u64) -> &mut MetricEntry {
+        self.metrics
+            .get_mut(Self::metric_index(id))
+            .and_then(Option::as_mut)
+            .expect("metric id missing from registry")
+    }
+
+    fn allocate_metric_id(&mut self) -> u64 {
+        if let Some(id) = self.free_metric_ids.pop() {
+            return id;
+        }
         let id = self.next_metric_id;
         self.next_metric_id = self
             .next_metric_id
             .checked_add(1)
             .expect("metric id overflow");
-        let key = (name.clone(), attributes.clone());
-        let prior = self.keys.insert(key.clone(), id);
-        assert!(
-            prior.is_none(),
-            "duplicate metric: {} with attributes {:?}",
-            key.0,
-            key.1
-        );
-        self.metrics.insert(
-            id,
-            Arc::new(MetricEntry {
-                name,
-                help,
-                attributes,
-                metric: Box::new(metric),
-            }),
-        );
         id
     }
 
@@ -431,43 +497,40 @@ impl Registry {
     }
 
     pub fn unregister(&mut self, id: u64) {
-        let Some(metric) = self.metrics.remove(&id) else {
+        let Some(metric) = self
+            .metrics
+            .get_mut(Self::metric_index(id))
+            .and_then(Option::take)
+        else {
             return;
         };
         self.keys
-            .remove(&(metric.name.clone(), metric.attributes.clone()));
+            .remove(&(metric.family_name.clone(), metric.attributes.clone()));
+        let (swapped_metric_id, remove_family) = {
+            let family = self
+                .families
+                .get_mut(&metric.family_name)
+                .expect("family missing during unregister");
+            let removed = family.metric_ids.swap_remove(metric.family_index);
+            debug_assert_eq!(removed, id, "family index mismatch during unregister");
+            let swapped = family.metric_ids.get(metric.family_index).copied();
+            (swapped, family.metric_ids.is_empty())
+        };
+        if let Some(swapped_metric_id) = swapped_metric_id {
+            self.metric_mut(swapped_metric_id).family_index = metric.family_index;
+        }
+        if remove_family {
+            self.families.remove(&metric.family_name);
+        }
+        self.free_metric_ids.push(id);
     }
 
     pub fn encode(&self) -> String {
         let mut output = String::new();
-        let mut families = BTreeMap::<&str, LiveMetricFamily<'_>>::new();
-        for metric in self.metrics.values() {
-            let metric = metric.as_ref();
-            let metric_type = metric.metric.metric_type();
-            let family = families
-                .entry(metric.name.as_str())
-                .or_insert_with(|| LiveMetricFamily {
-                    help: metric.help.as_str(),
-                    metric_type,
-                    metrics: Vec::new(),
-                });
-            assert_eq!(
-                family.help, metric.help,
-                "metric family `{}` registered with inconsistent help text",
-                metric.name
-            );
-            assert_eq!(
-                family.metric_type, metric_type,
-                "metric family `{}` registered with inconsistent metric type",
-                metric.name
-            );
-            family.metrics.push(metric);
-        }
-
-        for (name, family) in families {
-            encode_descriptor(&mut output, name, family.help, None, family.metric_type)
-                .expect("encoding live descriptor failed");
-            for metric in family.metrics {
+        for (name, family) in &self.families {
+            output.push_str(&family.descriptor);
+            for metric_id in &family.metric_ids {
+                let metric = self.metric_ref(*metric_id);
                 encode_metric_samples(
                     &mut output,
                     name,
