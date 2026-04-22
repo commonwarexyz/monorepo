@@ -20,13 +20,14 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
-pub type Operation<K, V> = BaseOperation<K, FixedEncoding<V>>;
+pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
 pub type Db<F, E, K, V, H, T> =
-    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<K, V>>, H, T>;
+    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T>;
 
-type Journal<F, E, K, V, H> = authenticated::Journal<F, E, fixed::Journal<E, Operation<K, V>>, H>;
+type Journal<F, E, K, V, H> =
+    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H>;
 
 /// Configuration for a fixed-size immutable authenticated db.
 pub type Config<T> = BaseConfig<T, JournalConfig>;
@@ -47,7 +48,7 @@ impl<
             context.clone(),
             cfg.merkle_config,
             cfg.log,
-            Operation::<K, V>::is_commit,
+            Operation::<F, K, V>::is_commit,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator).await
@@ -225,10 +226,10 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_fixed_prune_beyond_commit() {
+    fn test_fixed_prune_beyond_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_prune_beyond_commit(ctx, open::<mmr::Family>).await;
+            test::test_immutable_prune_beyond_floor(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -486,10 +487,10 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_fixed_prune_beyond_commit_mmb() {
+    fn test_fixed_prune_beyond_floor_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_prune_beyond_commit(ctx, open::<mmb::Family>).await;
+            test::test_immutable_prune_beyond_floor(ctx, open::<mmb::Family>).await;
         });
     }
 
@@ -669,6 +670,138 @@ mod tests {
                 open_small_sections::<mmb::Family>,
             )
             .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_inactivity_floor_tracking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_inactivity_floor_tracking(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_monotonicity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_monotonicity(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_monotonicity_violation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_monotonicity_violation(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_beyond_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_beyond_size(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_restores_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_restores_floor(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_inactivity_floor_tracking_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_inactivity_floor_tracking(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_monotonicity_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_monotonicity(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_monotonicity_violation_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_monotonicity_violation(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_floor_beyond_size_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_floor_beyond_size(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_restores_floor_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_restores_floor(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_single_commit_live_set() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_single_commit_live_set(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_single_commit_live_set_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_single_commit_live_set(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_after_reopen_with_floor_change() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_after_reopen_with_floor_change(ctx, open::<mmr::Family>)
+                .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_after_reopen_with_floor_change_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_after_reopen_with_floor_change(ctx, open::<mmb::Family>)
+                .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_after_reopen_partial_floor_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_after_reopen_partial_floor_gap(ctx, open::<mmr::Family>)
+                .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_rewind_after_reopen_partial_floor_gap_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_after_reopen_partial_floor_gap(ctx, open::<mmb::Family>)
+                .await;
         });
     }
 }
