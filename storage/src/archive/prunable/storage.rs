@@ -9,8 +9,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Registered,
-    Storage,
+    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Registered, Storage,
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
@@ -205,8 +204,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Initialize metrics
         let items_tracked =
             context.register("items_tracked", "Number of items tracked", Gauge::default());
-        let indices_pruned =
-            context.register("indices_pruned", "Number of indices pruned", Counter::default());
+        let indices_pruned = context.register(
+            "indices_pruned",
+            "Number of indices pruned",
+            Counter::default(),
+        );
         let unnecessary_reads = context.register(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",

@@ -108,7 +108,7 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Registered, Spawner, Storage,
 };
 use commonware_utils::{
     channel::{
@@ -184,10 +184,10 @@ where
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
-    build_duration: Timed<E>,
-    verify_duration: Timed<E>,
-    proposal_parent_fetch_duration: Timed<E>,
-    erasure_encode_duration: Timed<E>,
+    build_duration: Timed<E, Registered<Histogram>>,
+    verify_duration: Timed<E, Registered<Histogram>>,
+    proposal_parent_fetch_duration: Timed<E, Registered<Histogram>>,
+    erasure_encode_duration: Timed<E, Registered<Histogram>>,
 }
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
@@ -223,35 +223,31 @@ where
 
         let clock = Arc::new(context.clone());
 
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let build_duration = Timed::new(build_histogram, clock.clone());
 
-        let verify_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let verify_histogram = context.register(
             "verify_duration",
             "Histogram of time taken for the application to verify a block, in seconds",
-            verify_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let verify_duration = Timed::new(verify_histogram, clock.clone());
 
-        let parent_fetch_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let parent_fetch_histogram = context.register(
             "parent_fetch_duration",
             "Histogram of time taken to fetch a parent block in proposal, in seconds",
-            parent_fetch_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram, clock.clone());
 
-        let erasure_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let erasure_histogram = context.register(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",
-            erasure_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let erasure_encode_duration = Timed::new(erasure_histogram, clock);
 

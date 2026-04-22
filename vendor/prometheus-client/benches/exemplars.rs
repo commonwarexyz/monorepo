@@ -1,8 +1,6 @@
-use std::time::SystemTime;
-
 use criterion::{criterion_group, criterion_main, Criterion};
-use prometheus_client::metrics::exemplar::HistogramWithExemplars;
-use prometheus_client::metrics::histogram::Histogram;
+use prometheus_client::metrics::{exemplar::HistogramWithExemplars, histogram::Histogram};
+use std::time::SystemTime;
 
 type Exemplar = Vec<(String, String)>;
 

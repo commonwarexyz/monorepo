@@ -5,8 +5,7 @@ use futures::task::ArcWake;
 use prometheus_client::{
     encoding::{
         text::{encode_descriptor, encode_eof, encode_metric_samples, encode_registry},
-        EncodeMetric,
-        MetricEncoder as PromMetricEncoder,
+        EncodeMetric, MetricEncoder as PromMetricEncoder,
     },
     metrics::MetricType,
     registry::{Metric as PrometheusMetric, Registry as PrometheusRegistry},

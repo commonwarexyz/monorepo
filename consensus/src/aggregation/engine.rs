@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -66,7 +66,7 @@ struct DigestRequest<D: Digest, E: Clock> {
     result: Result<D, Error>,
 
     /// Records the time taken to get the digest.
-    timer: histogram::Timer<E>,
+    timer: histogram::Timer<E, Registered<prometheus_client::metrics::histogram::Histogram>>,
 }
 
 /// Instance of the engine.
@@ -582,30 +582,39 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
-            // The height may already be confirmed; continue silently if so
-            return Ok(());
-        };
+        let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
+        let result = async {
+            let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
+                // The height may already be confirmed; continue silently if so.
+                return Ok(());
+            };
 
-        // Get our signature
-        let scheme = self.scheme(self.epoch)?;
-        let Some(signer) = scheme.me() else {
-            return Err(Error::NotSigner(self.epoch));
-        };
-        let ack = acks
-            .get(&self.epoch)
-            .and_then(|acks| acks.get(&signer).cloned());
-        let ack = match ack {
-            Some(ack) => ack,
-            None => self.sign_ack(height, *digest).await?,
-        };
+            // Get our signature.
+            let scheme = self.scheme(self.epoch)?;
+            let Some(signer) = scheme.me() else {
+                return Err(Error::NotSigner(self.epoch));
+            };
+            let ack = acks
+                .get(&self.epoch)
+                .and_then(|acks| acks.get(&signer).cloned());
+            let ack = match ack {
+                Some(ack) => ack,
+                None => self.sign_ack(height, *digest).await?,
+            };
 
-        // Reinsert the height with a new deadline
-        self.rebroadcast_deadlines
-            .put(height, self.context.current() + self.rebroadcast_timeout);
+            // Reinsert the height with a new deadline.
+            self.rebroadcast_deadlines
+                .put(height, self.context.current() + self.rebroadcast_timeout);
 
-        // Broadcast the ack to all peers
-        self.broadcast(ack, sender).await
+            // Broadcast the ack to all peers.
+            self.broadcast(ack, sender).await
+        }
+        .await;
+        guard.set(match result {
+            Ok(()) => Status::Success,
+            Err(_) => Status::Failure,
+        });
+        result
     }
 
     // ---------- Validation ----------

@@ -2,12 +2,13 @@
 //!
 //! See [`Histogram`] for details.
 
-use crate::encoding::{EncodeMetric, MetricEncoder, NoLabelSet};
-
 use super::{MetricType, TypedMetric};
+use crate::encoding::{EncodeMetric, MetricEncoder, NoLabelSet};
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
-use std::iter::{self, once};
-use std::sync::Arc;
+use std::{
+    iter::{self, once},
+    sync::Arc,
+};
 
 /// Open Metrics [`Histogram`] to measure distributions of discrete events.
 ///

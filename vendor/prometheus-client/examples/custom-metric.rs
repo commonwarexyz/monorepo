@@ -1,6 +1,8 @@
-use prometheus_client::encoding::{text::encode, EncodeMetric, MetricEncoder, NoLabelSet};
-use prometheus_client::metrics::MetricType;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::{text::encode, EncodeMetric, MetricEncoder, NoLabelSet},
+    metrics::MetricType,
+    registry::Registry,
+};
 
 /// Showcasing encoding of custom metrics.
 ///

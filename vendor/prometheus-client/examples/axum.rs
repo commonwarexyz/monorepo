@@ -1,14 +1,16 @@
-use axum::body::Body;
-use axum::extract::State;
-use axum::http::header::CONTENT_TYPE;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
-use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
+use axum::{
+    body::Body,
+    extract::State,
+    http::{header::CONTENT_TYPE, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
+use prometheus_client::{
+    encoding::text::encode,
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use prometheus_client_derive_encode::{EncodeLabelSet, EncodeLabelValue};
 use std::sync::Arc;
 use tokio::sync::Mutex;

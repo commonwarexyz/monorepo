@@ -28,7 +28,7 @@ use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    Metrics, Registered, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -260,9 +260,9 @@ where
 
     // ---------- Metrics ----------
     // Latest height metric
-    finalized_height: Gauge,
+    finalized_height: Registered<Gauge>,
     // Latest processed height
-    processed_height: Gauge,
+    processed_height: Registered<Gauge>,
 }
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
@@ -319,17 +319,15 @@ where
             .unwrap_or(Height::zero());
 
         // Create metrics
-        let finalized_height = Gauge::default();
-        context.register(
+        let finalized_height = context.register(
             "finalized_height",
             "Finalized height of application",
-            finalized_height.clone(),
+            Gauge::default(),
         );
-        let processed_height = Gauge::default();
-        context.register(
+        let processed_height = context.register(
             "processed_height",
             "Processed height of application",
-            processed_height.clone(),
+            Gauge::default(),
         );
         let _ = processed_height.try_set(last_processed_height.get());
 

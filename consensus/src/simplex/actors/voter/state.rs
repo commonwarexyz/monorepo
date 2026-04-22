@@ -15,7 +15,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate, Digest};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Registered};
 use commonware_utils::futures::Aborter;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
@@ -105,24 +105,36 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
-    current_view: Gauge,
-    tracked_views: Gauge,
-    timeouts: Family<Timeout, Counter>,
-    nullifications: Family<Leader, Counter>,
+    current_view: Registered<Gauge>,
+    tracked_views: Registered<Gauge>,
+    timeouts: Registered<Family<Timeout, Counter>>,
+    nullifications: Registered<Family<Leader, Counter>>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        let current_view = Gauge::<i64, AtomicI64>::default();
-        let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let timeouts = Family::<Timeout, Counter>::default();
-        let nullifications = Family::<Leader, Counter>::default();
-        context.register("current_view", "current view", current_view.clone());
-        context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("timeouts", "timed out views", timeouts.clone());
-        context.register("nullifications", "nullifications", nullifications.clone());
+        let current_view = context.register(
+            "current_view",
+            "current view",
+            Gauge::<i64, AtomicI64>::default(),
+        );
+        let tracked_views = context.register(
+            "tracked_views",
+            "tracked views",
+            Gauge::<i64, AtomicI64>::default(),
+        );
+        let timeouts = context.register(
+            "timeouts",
+            "timed out views",
+            Family::<Timeout, Counter>::default(),
+        );
+        let nullifications = context.register(
+            "nullifications",
+            "nullifications",
+            Family::<Leader, Counter>::default(),
+        );
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());

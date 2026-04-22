@@ -37,16 +37,12 @@
 //! assert_eq!(expected_msg, buffer);
 //! ```
 
-use crate::encoding::{
-    EncodeExemplarTime, EncodeExemplarValue, EncodeLabelSet, EncodeMetric, NoLabelSet,
+use crate::{
+    encoding::{EncodeExemplarTime, EncodeExemplarValue, EncodeLabelSet, EncodeMetric, NoLabelSet},
+    metrics::{exemplar::Exemplar, MetricType},
+    registry::{Prefix, Registry, Unit},
 };
-use crate::metrics::exemplar::Exemplar;
-use crate::metrics::MetricType;
-use crate::registry::{Prefix, Registry, Unit};
-
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::fmt::Write;
+use std::{borrow::Cow, collections::HashMap, fmt::Write};
 
 /// Encode both the metrics registered with the provided [`Registry`] and the
 /// EOF marker into the provided [`Write`]r using the OpenMetrics text format.
@@ -801,17 +797,21 @@ impl std::fmt::Write for LabelValueEncoder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::exemplar::HistogramWithExemplars;
-    use crate::metrics::family::Family;
-    use crate::metrics::gauge::Gauge;
-    use crate::metrics::histogram::{exponential_buckets, Histogram};
-    use crate::metrics::info::Info;
-    use crate::metrics::{counter::Counter, exemplar::CounterWithExemplar};
+    use crate::metrics::{
+        counter::Counter,
+        exemplar::{CounterWithExemplar, HistogramWithExemplars},
+        family::Family,
+        gauge::Gauge,
+        histogram::{exponential_buckets, Histogram},
+        info::Info,
+    };
     use pyo3::{prelude::*, types::PyModule};
-    use std::borrow::Cow;
-    use std::fmt::Error;
-    use std::sync::atomic::{AtomicI32, AtomicU32};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        borrow::Cow,
+        fmt::Error,
+        sync::atomic::{AtomicI32, AtomicU32},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn encode_counter() {

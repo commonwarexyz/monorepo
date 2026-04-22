@@ -2,8 +2,7 @@
 
 use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{sync::Arc, time::SystemTime};
 
 /// Holds constants for bucket sizes for histograms.
 ///
@@ -109,7 +108,9 @@ where
         let start = self.clock.current();
         let result = f();
         if result.is_some() {
-            self.histogram.histogram().observe_between(start, self.clock.current());
+            self.histogram
+                .histogram()
+                .observe_between(start, self.clock.current());
         }
         result
     }

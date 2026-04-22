@@ -2,14 +2,17 @@
 //!
 //! See [`Counter`] for details.
 
-use crate::encoding::{EncodeMetric, MetricEncoder, NoLabelSet};
-
 use super::{MetricType, TypedMetric};
-use std::marker::PhantomData;
+use crate::encoding::{EncodeMetric, MetricEncoder, NoLabelSet};
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::{
+    marker::PhantomData,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+};
 
 /// Open Metrics [`Counter`] to measure discrete events.
 ///

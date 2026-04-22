@@ -17,8 +17,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Registered, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Registered, Resolver,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use prometheus_client::metrics::{counter::Counter, family::Family};

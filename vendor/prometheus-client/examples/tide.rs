@@ -1,11 +1,9 @@
-use prometheus_client::encoding::EncodeLabelValue;
-use prometheus_client::encoding::{text::encode, EncodeLabelSet};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
-
+use prometheus_client::{
+    encoding::{text::encode, EncodeLabelSet, EncodeLabelValue},
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use std::sync::Arc;
-
 use tide::{Middleware, Next, Request, Result};
 
 #[async_std::main]

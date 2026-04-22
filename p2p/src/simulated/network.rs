@@ -183,8 +183,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
-        let sent_messages =
-            context.register("messages_sent", "messages sent", Family::<metrics::Message, Counter>::default());
+        let sent_messages = context.register(
+            "messages_sent",
+            "messages sent",
+            Family::<metrics::Message, Counter>::default(),
+        );
         let received_messages = context.register(
             "messages_received",
             "messages received",

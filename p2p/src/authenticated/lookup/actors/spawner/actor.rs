@@ -10,8 +10,8 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
-    Registered,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Sink, Spawner,
+    Stream,
 };
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family};

@@ -2,21 +2,20 @@
 //!
 //! See [`CounterWithExemplar`] and [`HistogramWithExemplars`] for details.
 
+use super::{
+    counter::{self, Counter},
+    histogram::Histogram,
+    MetricType, TypedMetric,
+};
 use crate::encoding::{
     EncodeCounterValue, EncodeExemplarValue, EncodeLabelSet, EncodeMetric, MetricEncoder,
 };
-
-use super::counter::{self, Counter};
-use super::histogram::Histogram;
-use super::{MetricType, TypedMetric};
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
-use std::collections::HashMap;
 #[cfg(not(target_has_atomic = "64"))]
 use std::sync::atomic::AtomicU32;
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 /// An OpenMetrics exemplar.
 #[derive(Debug)]

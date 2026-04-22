@@ -1,12 +1,10 @@
+use actix_web::{middleware::Compress, web, App, HttpResponse, HttpServer, Responder, Result};
+use prometheus_client::{
+    encoding::{text::encode, EncodeLabelSet, EncodeLabelValue},
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use std::sync::Mutex;
-
-use actix_web::middleware::Compress;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder, Result};
-use prometheus_client::encoding::text::encode;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Method {

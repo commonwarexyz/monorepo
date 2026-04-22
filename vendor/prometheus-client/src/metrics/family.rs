@@ -2,12 +2,10 @@
 //!
 //! See [`Family`] for details.
 
-use crate::encoding::{EncodeLabelSet, EncodeMetric, MetricEncoder};
-
 use super::{MetricType, TypedMetric};
+use crate::encoding::{EncodeLabelSet, EncodeMetric, MetricEncoder};
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Representation of the OpenMetrics *MetricFamily* data type.
 ///
@@ -382,8 +380,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::counter::Counter;
-    use crate::metrics::histogram::{exponential_buckets, Histogram};
+    use crate::metrics::{
+        counter::Counter,
+        histogram::{exponential_buckets, Histogram},
+    };
 
     #[test]
     fn counter_family() {

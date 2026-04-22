@@ -50,15 +50,21 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Current number of blocked peers",
             Gauge::default(),
         );
-        let fetch =
-            context.register("fetch", "Number of fetches by status", status::Counter::default());
+        let fetch = context.register(
+            "fetch",
+            "Number of fetches by status",
+            status::Counter::default(),
+        );
         let cancel = context.register(
             "cancel",
             "Number of canceled fetches by status",
             status::Counter::default(),
         );
-        let serve =
-            context.register("serve", "Number of serves by status", status::Counter::default());
+        let serve = context.register(
+            "serve",
+            "Number of serves by status",
+            status::Counter::default(),
+        );
         let serve_duration_registered = context.register(
             "serve_duration",
             "Histogram of successful serves",

@@ -2,10 +2,11 @@
 //!
 //! See [`Registry`] for details.
 
+use crate::{
+    collector::Collector,
+    encoding::{DescriptorEncoder, EncodeMetric},
+};
 use std::borrow::Cow;
-
-use crate::collector::Collector;
-use crate::encoding::{DescriptorEncoder, EncodeMetric};
 
 /// A metric registry.
 ///

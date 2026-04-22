@@ -5,8 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf,
+    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Registered, Runner,
+    SinkOf, Spawner, Storage, StreamOf,
 };
 use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -63,11 +63,11 @@ struct State<DB> {
     /// The database wrapped in async rwlock.
     database: AsyncRwLock<DB>,
     /// Request counter for metrics.
-    request_counter: Counter,
+    request_counter: Registered<Counter>,
     /// Error counter for metrics.
-    error_counter: Counter,
+    error_counter: Registered<Counter>,
     /// Counter for operations added.
-    ops_counter: Counter,
+    ops_counter: Registered<Counter>,
     /// Last time we added operations.
     last_operation_time: Mutex<SystemTime>,
 }
@@ -77,25 +77,21 @@ impl<DB> State<DB> {
     where
         E: Metrics,
     {
-        let state = Self {
+        Self {
             database: AsyncRwLock::new(database),
-            request_counter: Counter::default(),
-            error_counter: Counter::default(),
-            ops_counter: Counter::default(),
+            request_counter: context.register(
+                "requests",
+                "Number of requests received",
+                Counter::default(),
+            ),
+            error_counter: context.register("error", "Number of errors", Counter::default()),
+            ops_counter: context.register(
+                "ops_added",
+                "Number of operations added since server start, not including the initial operations",
+                Counter::default(),
+            ),
             last_operation_time: Mutex::new(SystemTime::now()),
-        };
-        context.register(
-            "requests",
-            "Number of requests received",
-            state.request_counter.clone(),
-        );
-        context.register("error", "Number of errors", state.error_counter.clone());
-        context.register(
-            "ops_added",
-            "Number of operations added since server start, not including the initial operations",
-            state.ops_counter.clone(),
-        );
-        state
+        }
     }
 }
 

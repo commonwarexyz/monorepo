@@ -2832,10 +2832,11 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let counter =
-                context
-                    .with_label("engine")
-                    .register("votes", "vote count", Counter::<u64>::default());
+            let counter = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             counter.inc();
 
             let buffer = context.encode();
@@ -2870,10 +2871,11 @@ mod tests {
             );
             permanent.inc();
 
-            let counter =
-                context
-                    .with_label("engine")
-                    .register("votes", "vote count", Counter::<u64>::default());
+            let counter = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             counter.inc();
 
             let buffer = context.encode();
@@ -2911,18 +2913,16 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let epoch1 = context.with_label("engine").with_attribute("epoch", 1).register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let epoch1 = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
             epoch1.inc();
 
-            let epoch2 = context.with_label("engine").with_attribute("epoch", 2).register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let epoch2 = context
+                .with_label("engine")
+                .with_attribute("epoch", 2)
+                .register("votes", "vote count", Counter::<u64>::default());
             epoch2.inc();
             epoch2.inc();
 
@@ -2975,18 +2975,16 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let votes = context.with_label("engine").with_attribute("epoch", 1).register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let votes = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
             drop(votes);
 
-            let replacement = context.with_label("engine").with_attribute("epoch", 1).register(
-                "votes",
-                "vote count",
-                Counter::<u64>::default(),
-            );
+            let replacement = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .register("votes", "vote count", Counter::<u64>::default());
             drop(replacement);
         });
     }
@@ -3008,10 +3006,11 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let registered =
-                context
-                    .with_label("engine")
-                    .register("votes", "vote count", Counter::<u64>::default());
+            let registered = context.with_label("engine").register(
+                "votes",
+                "vote count",
+                Counter::<u64>::default(),
+            );
             registered.inc();
             let clone = registered.clone();
 
@@ -3057,9 +3056,11 @@ mod tests {
             let root_counter = context.register("root", "root metric", Counter::<u64>::default());
             root_counter.inc();
 
-            let child = context
-                .with_label("engine")
-                .register("ops", "child metric", Counter::<u64>::default());
+            let child = context.with_label("engine").register(
+                "ops",
+                "child metric",
+                Counter::<u64>::default(),
+            );
             child.inc();
 
             let buffer = context.encode();
@@ -3121,7 +3122,11 @@ mod tests {
             let family = context
                 .with_label("batcher")
                 .with_attribute("epoch", 1)
-                .register("votes", "votes per peer", Family::<Peer, Counter>::default());
+                .register(
+                    "votes",
+                    "votes per peer",
+                    Family::<Peer, Counter>::default(),
+                );
             family
                 .get_or_create(&Peer {
                     name: "alice".into(),

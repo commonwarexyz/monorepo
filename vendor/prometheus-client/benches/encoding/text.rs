@@ -1,11 +1,15 @@
 // Benchmark inspired by https://github.com/tikv/rust-prometheus/blob/ab1ca7285d3463504381a5025ae1951e020d6796/benches/text_encoder.rs
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use prometheus_client::encoding::{self, EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::{self, EncodeLabelSet, EncodeLabelValue, LabelValueEncoder},
+    metrics::{
+        counter::Counter,
+        family::Family,
+        histogram::{exponential_buckets, Histogram},
+    },
+    registry::Registry,
+};
 use std::fmt::Write;
 
 pub fn text(c: &mut Criterion) {

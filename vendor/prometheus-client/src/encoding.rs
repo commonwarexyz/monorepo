@@ -1,17 +1,19 @@
 //! Exposition format implementations.
 
+use crate::{
+    metrics::{exemplar::Exemplar, MetricType},
+    registry::{Prefix, Unit},
+};
 pub use prometheus_client_derive_encode::*;
-
-use crate::metrics::exemplar::Exemplar;
-use crate::metrics::MetricType;
-use crate::registry::{Prefix, Unit};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::fmt::Write;
-use std::ops::Deref;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt::Write,
+    ops::Deref,
+    rc::Rc,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(feature = "protobuf")]
 #[cfg_attr(docsrs, doc(cfg(feature = "protobuf")))]

@@ -24,7 +24,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Spawner, Storage,
+    Registered, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -119,9 +119,9 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    outbound_messages: Family<Outbound, Counter>,
-    notarization_latency: Histogram,
-    finalization_latency: Histogram,
+    outbound_messages: Registered<Family<Outbound, Counter>>,
+    notarization_latency: Registered<Histogram>,
+    finalization_latency: Registered<Histogram>,
 }
 
 impl<
@@ -142,23 +142,20 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
+        let outbound_messages = context.register(
             "outbound_messages",
             "number of outbound messages",
-            outbound_messages.clone(),
+            Family::<Outbound, Counter>::default(),
         );
-        context.register(
+        let notarization_latency = context.register(
             "notarization_latency",
             "notarization latency",
-            notarization_latency.clone(),
+            Histogram::new(LATENCY),
         );
-        context.register(
+        let finalization_latency = context.register(
             "finalization_latency",
             "finalization latency",
-            finalization_latency.clone(),
+            Histogram::new(LATENCY),
         );
 
         // Initialize store

@@ -1,6 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::{counter::Counter, family::Family};
 
 pub fn family(c: &mut Criterion) {
     c.bench_function(

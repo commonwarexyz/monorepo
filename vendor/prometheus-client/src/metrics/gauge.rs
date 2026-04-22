@@ -2,14 +2,17 @@
 //!
 //! See [`Gauge`] for details.
 
-use crate::encoding::{EncodeGaugeValue, EncodeMetric, MetricEncoder};
-
 use super::{MetricType, TypedMetric};
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use crate::encoding::{EncodeGaugeValue, EncodeMetric, MetricEncoder};
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::{AtomicI64, AtomicU64};
-use std::sync::Arc;
+use std::{
+    marker::PhantomData,
+    sync::{
+        atomic::{AtomicI32, AtomicU32, Ordering},
+        Arc,
+    },
+};
 
 /// Open Metrics [`Gauge`] to record current measurements.
 ///

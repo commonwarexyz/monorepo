@@ -30,13 +30,12 @@ pub mod openmetrics_data_model {
     include!(concat!(env!("OUT_DIR"), "/openmetrics.rs"));
 }
 
-use std::{borrow::Cow, collections::HashMap};
-
-use crate::metrics::MetricType;
-use crate::registry::{Registry, Unit};
-use crate::{metrics::exemplar::Exemplar, registry::Prefix};
-
 use super::{EncodeCounterValue, EncodeExemplarValue, EncodeGaugeValue, EncodeLabelSet};
+use crate::{
+    metrics::{exemplar::Exemplar, MetricType},
+    registry::{Prefix, Registry, Unit},
+};
+use std::{borrow::Cow, collections::HashMap};
 
 /// Encode the metrics registered with the provided [`Registry`] into MetricSet
 /// using the OpenMetrics protobuf format.
@@ -442,21 +441,25 @@ impl std::fmt::Write for LabelValueEncoder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use prost_types::Timestamp;
-
     use super::*;
-    use crate::metrics::counter::Counter;
-    use crate::metrics::exemplar::{CounterWithExemplar, HistogramWithExemplars};
-    use crate::metrics::family::Family;
-    use crate::metrics::gauge::Gauge;
-    use crate::metrics::histogram::{exponential_buckets, Histogram};
-    use crate::metrics::info::Info;
-    use crate::registry::Unit;
-    use std::borrow::Cow;
-    use std::collections::HashSet;
-    use std::sync::atomic::AtomicI64;
-    use std::sync::atomic::AtomicU64;
-    use std::time::SystemTime;
+    use crate::{
+        metrics::{
+            counter::Counter,
+            exemplar::{CounterWithExemplar, HistogramWithExemplars},
+            family::Family,
+            gauge::Gauge,
+            histogram::{exponential_buckets, Histogram},
+            info::Info,
+        },
+        registry::Unit,
+    };
+    use prost_types::Timestamp;
+    use std::{
+        borrow::Cow,
+        collections::HashSet,
+        sync::atomic::{AtomicI64, AtomicU64},
+        time::SystemTime,
+    };
 
     #[test]
     fn encode_counter_int() {

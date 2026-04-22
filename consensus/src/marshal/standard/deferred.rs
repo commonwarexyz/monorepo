@@ -96,7 +96,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Spawner,
+    Clock, Metrics, Registered, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
@@ -146,7 +146,7 @@ where
     epocher: ES,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
-    build_duration: Timed<E>,
+    build_duration: Timed<E, Registered<prometheus_client::metrics::histogram::Histogram>>,
 }
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
@@ -166,11 +166,10 @@ where
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
-        let build_histogram = Histogram::new(Buckets::LOCAL);
-        context.register(
+        let build_histogram = context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
-            build_histogram.clone(),
+            Histogram::new(Buckets::LOCAL),
         );
         let build_duration = Timed::new(build_histogram, Arc::new(context.clone()));
 
