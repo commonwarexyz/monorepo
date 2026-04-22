@@ -1,4 +1,4 @@
-//! Helpers for resolving the configured thread stack size.
+//! Helpers for managing runtime-owned threads.
 
 use commonware_utils::vec::NonEmptyVec;
 use std::{env, sync::OnceLock, thread};
@@ -131,12 +131,15 @@ where
     try_spawn(stack_size, f).expect("failed to spawn thread")
 }
 
-/// Returns the logical CPU ids currently allowed for the calling thread.
+/// Returns the logical CPU ids enabled in `pid`'s affinity mask.
 ///
-/// This queries the calling thread's affinity mask via `sched_getaffinity` and
-/// returns `None` if that query fails.
+/// `pid` uses the Linux `sched_getaffinity` semantics, so `0` targets the
+/// calling thread and any other value names a specific thread id.
+///
+/// Returns `None` if the affinity mask cannot be queried or would require an
+/// unreasonably large probe buffer.
 #[cfg(target_os = "linux")]
-pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
+fn affinity_cpus(pid: libc::pid_t) -> Option<NonEmptyVec<usize>> {
     let word_bits = libc::c_ulong::BITS as usize;
     let mut words = 1;
 
@@ -147,11 +150,11 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
         let cpusetsize = std::mem::size_of_val(mask.as_slice());
 
         // SAFETY: `mask` points to writable storage for `cpusetsize` bytes, and
-        // `pid == 0` targets the calling thread as documented by the syscall.
+        // `pid` names the thread whose affinity mask should be queried.
         let result = unsafe {
             libc::syscall(
                 libc::SYS_sched_getaffinity,
-                0,
+                pid,
                 cpusetsize,
                 mask.as_mut_ptr(),
             )
@@ -191,11 +194,31 @@ pub(crate) fn available_cpus() -> Option<NonEmptyVec<usize>> {
     cpus.try_into().ok()
 }
 
-/// Returns the logical CPU ids currently allowed for the calling thread.
+/// Returns the logical CPU ids available for [`crate::Spawner::pinned`] placements.
 ///
-/// Always returns `None` on non-Linux platforms.
+/// Returns `None` if the process affinity mask cannot be queried.
+#[cfg(target_os = "linux")]
+pub fn available_cpus() -> Option<NonEmptyVec<usize>> {
+    // SAFETY: `getpid` has no preconditions and returns the process leader's
+    // pid, which `sched_getaffinity` uses to query that thread's baseline mask.
+    let pid = unsafe { libc::getpid() };
+    affinity_cpus(pid)
+}
+
+/// Returns `None` because CPU pinning is not available on this platform.
 #[cfg(not(target_os = "linux"))]
-pub(crate) const fn available_cpus() -> Option<NonEmptyVec<usize>> {
+#[commonware_macros::stability(BETA)]
+pub const fn available_cpus() -> Option<NonEmptyVec<usize>> {
+    None
+}
+
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn current_affinity_cpus() -> Option<NonEmptyVec<usize>> {
+    affinity_cpus(0)
+}
+
+#[cfg(all(not(target_os = "linux"), test))]
+pub(crate) const fn current_affinity_cpus() -> Option<NonEmptyVec<usize>> {
     None
 }
 
@@ -249,6 +272,22 @@ pub(crate) fn set_cpu_affinity(_cpus: &[usize]) -> Result<(), std::io::Error> {
     ))
 }
 
+/// Resets the current thread's affinity mask to [`available_cpus`].
+///
+/// Returns `Ok(())` if the baseline CPU set cannot be queried.
+#[cfg(target_os = "linux")]
+pub(crate) fn reset_cpu_affinity() -> Result<(), std::io::Error> {
+    available_cpus().map_or(Ok(()), |cpus| set_cpu_affinity(&cpus))
+}
+
+/// Resets the current thread's affinity mask to [`available_cpus`].
+///
+/// Always returns `Ok(())` since CPU affinity is not available on this platform.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn reset_cpu_affinity() -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +311,10 @@ mod tests {
             let cpu = *cpus.first();
             let pinned = NonEmptyVec::new(cpu);
             set_cpu_affinity(&pinned).unwrap();
-            assert_eq!(available_cpus(), Some(pinned));
+            assert_eq!(current_affinity_cpus(), Some(pinned));
+
+            reset_cpu_affinity().unwrap();
+            assert_eq!(current_affinity_cpus(), Some(cpus.clone()));
 
             let invalid_cpu = cpus.last().checked_add(1).unwrap();
             assert!(
@@ -300,5 +342,6 @@ mod tests {
     #[test]
     fn test_set_cpu_affinity_non_linux() {
         assert!(set_cpu_affinity(&[0]).is_err());
+        assert!(reset_cpu_affinity().is_ok());
     }
 }

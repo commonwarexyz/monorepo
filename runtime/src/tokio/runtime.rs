@@ -26,7 +26,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, vec::NonEmptyVec, NZUsize};
+use commonware_utils::{sync::Mutex, NZUsize};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -335,7 +335,6 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
-    available_cpus: Option<NonEmptyVec<usize>>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -481,7 +480,6 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
-            available_cpus: utils::thread::available_cpus(),
         });
 
         // Get metrics
@@ -570,10 +568,6 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
-        self.executor.available_cpus.as_ref()
-    }
-
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated(None);
         self
@@ -918,23 +912,15 @@ where
 {
     // Ensure the task can access the tokio runtime.
     let runtime_handle = executor.runtime.handle().clone();
-    let available_cpus = if cpu.is_none() {
-        executor.available_cpus.clone()
-    } else {
-        None
-    };
 
     // The dedicated thread reports whether startup succeeded before it begins
     // polling the task future.
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
     if let Err(err) = utils::thread::try_spawn(executor.thread_stack_size, move || {
-        let cpu = cpu.map(|cpu| [cpu]);
-        let cpus = cpu
-            .as_ref()
-            .map(|cpu| cpu.as_slice())
-            .or(available_cpus.as_deref());
-        let result = cpus.map_or(Ok(()), utils::thread::set_cpu_affinity);
+        let result = cpu.map_or_else(utils::thread::reset_cpu_affinity, |cpu| {
+            utils::thread::set_cpu_affinity(&[cpu])
+        });
         let is_ok = result.is_ok();
         startup_tx
             .send(result)

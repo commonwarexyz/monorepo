@@ -46,7 +46,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
-    use commonware_utils::vec::NonEmptyVec;
     use iobuf::PoolError;
     use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
@@ -162,11 +161,6 @@ stability_scope!(BETA {
 
     /// Interface that any task scheduler must implement to spawn tasks.
     pub trait Spawner: Clone + Send + Sync + 'static {
-        /// Return the logical CPU ids this runtime makes available for [`Spawner::pinned`] placements.
-        ///
-        /// Returns `None` if the runtime does not support CPU pinning.
-        fn available_cpus(&self) -> Option<&NonEmptyVec<usize>>;
-
         /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
         ///
         /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
@@ -191,7 +185,7 @@ stability_scope!(BETA {
 
         /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given CPU.
         ///
-        /// Use [`Spawner::available_cpus`] to query the runtime's CPU ids for placement decisions.
+        /// Use [`crate::utils::thread::available_cpus`] to query valid CPU ids for placement decisions.
         ///
         /// Runtimes that implement CPU pinning perform validation and the pinning attempt when
         /// [`Spawner::spawn`] starts that task.
@@ -900,6 +894,7 @@ mod tests {
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
+        vec::NonEmptyVec,
         NZUsize, SystemTimeExt,
     };
     use futures::{
@@ -1766,8 +1761,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async {
-            let cpu = context
-                .available_cpus()
+            let cpu = utils::thread::available_cpus()
                 .map(|cpus| *cpus.first())
                 .unwrap_or(0);
             let handle = context.pinned(cpu).spawn(|_| async { 42 });
@@ -3966,7 +3960,7 @@ mod tests {
         // Verify that pinned implies dedicated.
         let executor = tokio::Runner::default();
         executor.start(|context| async {
-            let cpu = *context.available_cpus().unwrap().first();
+            let cpu = *utils::thread::available_cpus().unwrap().first();
             let root_thread = std::thread::current().id();
             let task_thread = context
                 .pinned(cpu)
@@ -3985,7 +3979,7 @@ mod tests {
         // for every allowed CPU id.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            for cpu in context.available_cpus().cloned().unwrap() {
+            for cpu in utils::thread::available_cpus().unwrap() {
                 let actual = context
                     .clone()
                     .pinned(cpu)
@@ -4008,7 +4002,7 @@ mod tests {
         // different threads but report the same CPU.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let cpu = *context.available_cpus().unwrap().last();
+            let cpu = *utils::thread::available_cpus().unwrap().last();
             let t1 = context.clone().pinned(cpu).spawn(|_| async {
                 // SAFETY: `sched_getcpu` is a read-only query with no
                 // preconditions.
@@ -4032,21 +4026,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_tokio_available_cpus_stable_inside_pinned_task() {
-        // `Spawner::available_cpus` should keep reporting the runtime's
-        // placement set even when the current task narrows its own thread
-        // affinity with `.pinned(...)`.
+        // The runtime placement set should stay stable even when the current
+        // task narrows its own thread affinity with `.pinned(...)`.
         let executor = tokio::Runner::default();
         executor.start(|context| async {
-            let available = context.available_cpus().cloned().unwrap();
+            let available = utils::thread::available_cpus().unwrap();
             let cpu = *available.first();
 
             context
                 .pinned(cpu)
-                .spawn(move |context| async move {
-                    // The public runtime API stays stable, while the
-                    // thread-local helper reflects the live pinned mask.
-                    assert_eq!(context.available_cpus(), Some(&available));
-                    assert_eq!(utils::thread::available_cpus(), Some(NonEmptyVec::new(cpu)));
+                .spawn(move |_| async move {
+                    // Placement queries stay stable, while the test-only helper
+                    // reflects the live pinned mask.
+                    assert_eq!(utils::thread::available_cpus(), Some(available));
+                    assert_eq!(
+                        utils::thread::current_affinity_cpus(),
+                        Some(NonEmptyVec::new(cpu))
+                    );
                 })
                 .await
                 .unwrap();
@@ -4061,7 +4057,7 @@ mod tests {
         // parent thread's narrowed affinity mask.
         let executor = tokio::Runner::default();
         executor.start(|context| async {
-            let available = context.available_cpus().cloned().unwrap();
+            let available = utils::thread::available_cpus().unwrap();
             if available.len().get() < 2 {
                 return;
             }
@@ -4071,8 +4067,8 @@ mod tests {
                 .pinned(pinned_cpu)
                 .spawn(move |context| async move {
                     assert_eq!(
-                        utils::thread::available_cpus(),
-                        Some(NonEmptyVec::new(pinned_cpu)),
+                        utils::thread::current_affinity_cpus(),
+                        Some(NonEmptyVec::new(pinned_cpu))
                     );
 
                     // The dedicated child is unpinned, so it should restore the
@@ -4080,7 +4076,7 @@ mod tests {
                     context
                         .dedicated()
                         .spawn(|_| async {
-                            assert_eq!(utils::thread::available_cpus(), Some(available));
+                            assert_eq!(utils::thread::current_affinity_cpus(), Some(available));
                         })
                         .await
                         .unwrap();
@@ -4098,8 +4094,7 @@ mod tests {
         // cleaning up the task's metrics and supervision state.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let invalid_cpu = context
-                .available_cpus()
+            let invalid_cpu = utils::thread::available_cpus()
                 .as_ref()
                 .map(|cpus| *cpus.last())
                 .map(|cpu| cpu + 1)

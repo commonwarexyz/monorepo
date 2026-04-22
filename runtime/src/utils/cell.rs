@@ -1,5 +1,4 @@
 use crate::{signal, Error, Handle};
-use commonware_utils::vec::NonEmptyVec;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
@@ -107,10 +106,6 @@ impl<C> crate::Spawner for Cell<C>
 where
     C: crate::Spawner,
 {
-    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
-        self.as_present().available_cpus()
-    }
-
     fn dedicated(self) -> Self {
         Self::Present(self.into_present().dedicated())
     }
