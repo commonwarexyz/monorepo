@@ -499,6 +499,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let mut scope = registry.sub_registry_with_prefix("test_pool");
         BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
     }
@@ -515,7 +516,7 @@ mod tests {
     async fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default(), test_pool())
+            Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
                 .expect("Failed to start io_uring")
         })
         .await;
@@ -534,7 +535,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                &mut Registry::default(),
+                &mut Registry::default().scope(),
                 test_pool(),
             )
             .expect("Failed to start io_uring")
@@ -545,7 +546,7 @@ mod tests {
     #[tokio::test]
     async fn test_small_send_read_quickly() {
         // Verify a small message is delivered promptly through the buffered recv path.
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+        let network = Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
             .expect("Failed to start io_uring");
 
         // Bind a listener
@@ -582,7 +583,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -625,7 +626,7 @@ mod tests {
                 read_buffer_size: 0,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -679,7 +680,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -717,7 +718,7 @@ mod tests {
     async fn test_peek_with_buffered_data() {
         // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+        let network = Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
             .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -764,6 +765,7 @@ mod tests {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         let handle = std::thread::spawn(move || io_loop.run());
@@ -801,6 +803,7 @@ mod tests {
     async fn test_vectored_send_path() {
         // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         let handle = std::thread::spawn(move || io_loop.run());
@@ -832,6 +835,7 @@ mod tests {
     async fn test_zero_length_send_short_circuits_before_submit() {
         // Verify empty sends return locally without depending on a live io_uring loop.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
@@ -855,7 +859,7 @@ mod tests {
                 read_buffer_size: 8,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -888,7 +892,7 @@ mod tests {
                 zero_linger: true,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -915,7 +919,7 @@ mod tests {
                 zero_linger: false,
                 ..Default::default()
             },
-            &mut Registry::default(),
+            &mut Registry::default().scope(),
             test_pool(),
         )
         .expect("Failed to start io_uring");
@@ -935,6 +939,7 @@ mod tests {
     async fn test_channel_close_fallbacks() {
         // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
         let mut registry = Registry::default();
+        let mut registry = registry.scope();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         let recv_handle = submitter.clone();

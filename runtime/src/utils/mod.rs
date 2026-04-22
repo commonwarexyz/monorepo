@@ -391,7 +391,7 @@ impl Registry {
         }
     }
 
-    #[cfg(any(test, feature = "iouring-storage", feature = "iouring-network"))]
+    #[cfg(test)]
     pub fn scope(&mut self) -> MetricScope<'_> {
         MetricScope {
             registry: self,
