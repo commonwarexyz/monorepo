@@ -107,7 +107,7 @@ impl<C> crate::Spawner for Cell<C>
 where
     C: crate::Spawner,
 {
-    fn available_cpus(&self) -> Option<NonEmptyVec<usize>> {
+    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
         self.as_present().available_cpus()
     }
 

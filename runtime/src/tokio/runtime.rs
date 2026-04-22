@@ -575,8 +575,8 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn available_cpus(&self) -> Option<NonEmptyVec<usize>> {
-        self.executor.available_cpus.clone()
+    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
+        self.executor.available_cpus.as_ref()
     }
 
     fn pinned(mut self, cpu: usize) -> Self {

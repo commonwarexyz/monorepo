@@ -165,7 +165,7 @@ stability_scope!(BETA {
         /// Return the logical CPU ids this runtime makes available for [`Spawner::pinned`] placements.
         ///
         /// Returns `None` if the runtime does not support CPU pinning.
-        fn available_cpus(&self) -> Option<NonEmptyVec<usize>>;
+        fn available_cpus(&self) -> Option<&NonEmptyVec<usize>>;
 
         /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
         ///
@@ -3985,7 +3985,7 @@ mod tests {
         // for every allowed CPU id.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            for cpu in context.available_cpus().unwrap() {
+            for cpu in context.available_cpus().cloned().unwrap() {
                 let actual = context
                     .clone()
                     .pinned(cpu)
@@ -4037,7 +4037,7 @@ mod tests {
         // affinity with `.pinned(...)`.
         let executor = tokio::Runner::default();
         executor.start(|context| async {
-            let available = context.available_cpus().unwrap();
+            let available = context.available_cpus().cloned().unwrap();
             let cpu = *available.first();
 
             context
@@ -4045,7 +4045,7 @@ mod tests {
                 .spawn(move |context| async move {
                     // The public runtime API stays stable, while the
                     // thread-local helper reflects the live pinned mask.
-                    assert_eq!(context.available_cpus(), Some(available));
+                    assert_eq!(context.available_cpus(), Some(&available));
                     assert_eq!(utils::thread::available_cpus(), Some(NonEmptyVec::new(cpu)));
                 })
                 .await
@@ -4061,7 +4061,7 @@ mod tests {
         // parent thread's narrowed affinity mask.
         let executor = tokio::Runner::default();
         executor.start(|context| async {
-            let available = context.available_cpus().unwrap();
+            let available = context.available_cpus().cloned().unwrap();
             if available.len().get() < 2 {
                 return;
             }

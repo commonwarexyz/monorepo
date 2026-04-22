@@ -1134,7 +1134,7 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn available_cpus(&self) -> Option<NonEmptyVec<usize>> {
+    fn available_cpus(&self) -> Option<&NonEmptyVec<usize>> {
         None
     }
 
