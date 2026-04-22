@@ -891,10 +891,11 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
+    #[cfg(target_os = "linux")]
+    use commonware_utils::vec::NonEmptyVec;
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
-        vec::NonEmptyVec,
         NZUsize, SystemTimeExt,
     };
     use futures::{
@@ -4040,7 +4041,7 @@ mod tests {
                     // reflects the live pinned mask.
                     assert_eq!(utils::thread::available_cpus(), Some(available));
                     assert_eq!(
-                        utils::thread::current_affinity_cpus(),
+                        utils::thread::tests::current_affinity_cpus(),
                         Some(NonEmptyVec::new(cpu))
                     );
                 })
@@ -4067,7 +4068,7 @@ mod tests {
                 .pinned(pinned_cpu)
                 .spawn(move |context| async move {
                     assert_eq!(
-                        utils::thread::current_affinity_cpus(),
+                        utils::thread::tests::current_affinity_cpus(),
                         Some(NonEmptyVec::new(pinned_cpu))
                     );
 
@@ -4076,7 +4077,10 @@ mod tests {
                     context
                         .dedicated()
                         .spawn(|_| async {
-                            assert_eq!(utils::thread::current_affinity_cpus(), Some(available));
+                            assert_eq!(
+                                utils::thread::tests::current_affinity_cpus(),
+                                Some(available)
+                            );
                         })
                         .await
                         .unwrap();

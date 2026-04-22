@@ -207,18 +207,7 @@ pub fn available_cpus() -> Option<NonEmptyVec<usize>> {
 
 /// Returns `None` because CPU pinning is not available on this platform.
 #[cfg(not(target_os = "linux"))]
-#[commonware_macros::stability(BETA)]
 pub const fn available_cpus() -> Option<NonEmptyVec<usize>> {
-    None
-}
-
-#[cfg(all(target_os = "linux", test))]
-pub(crate) fn current_affinity_cpus() -> Option<NonEmptyVec<usize>> {
-    affinity_cpus(0)
-}
-
-#[cfg(all(not(target_os = "linux"), test))]
-pub(crate) const fn current_affinity_cpus() -> Option<NonEmptyVec<usize>> {
     None
 }
 
@@ -289,10 +278,15 @@ pub(crate) fn reset_cpu_affinity() -> Result<(), std::io::Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use commonware_utils::vec::NonEmptyVec;
+
+    #[cfg(target_os = "linux")]
+    pub fn current_affinity_cpus() -> Option<NonEmptyVec<usize>> {
+        affinity_cpus(0)
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
