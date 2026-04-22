@@ -670,7 +670,11 @@ impl MetricScope<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, metrics::Counter, metrics::Gauge, Metrics, Runner, Spawner};
+    use crate::{
+        deterministic,
+        metrics::{Counter, Gauge},
+        Metrics, Runner, Spawner,
+    };
     use commonware_macros::test_traced;
     use futures::{future, task::waker};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

@@ -484,11 +484,12 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
-        Network as _, Sink as _, Stream as _,
+        thread,
+        utils::Registry,
+        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
+        Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
-    use crate::utils::Registry;
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,

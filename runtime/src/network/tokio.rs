@@ -306,8 +306,8 @@ impl crate::Network for Network {
 mod tests {
     use crate::{
         network::{tests, tokio as TokioNetwork},
-        utils::Registry, BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _,
-        Stream as _,
+        utils::Registry,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};

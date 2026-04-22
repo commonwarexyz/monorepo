@@ -1103,10 +1103,9 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IoBuf, IoBufMut};
+    use crate::{metrics::registry::Registry, IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
-    use crate::metrics::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
         io::Write,

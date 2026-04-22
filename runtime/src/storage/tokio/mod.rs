@@ -249,7 +249,9 @@ impl crate::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _};
+    use crate::{
+        storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _,
+    };
     use rand::{Rng as _, SeedableRng};
     use std::env;
 

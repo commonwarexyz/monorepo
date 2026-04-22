@@ -234,7 +234,9 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _};
+    use crate::{
+        storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _,
+    };
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();

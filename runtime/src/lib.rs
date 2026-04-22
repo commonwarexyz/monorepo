@@ -920,10 +920,12 @@ stability_scope!(BETA, cfg(feature = "external") {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{
-        Counter, EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, Family, LabelSetEncoder,
+    use crate::{
+        metrics::{
+            Counter, EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, Family, LabelSetEncoder,
+        },
+        telemetry::traces::collector::TraceStorage,
     };
-    use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::{

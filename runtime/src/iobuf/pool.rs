@@ -1046,9 +1046,8 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::IoBuf;
+    use crate::{iobuf::IoBuf, utils::Registry};
     use bytes::{Buf, BufMut};
-    use crate::utils::Registry;
     use std::{
         sync::{mpsc, Arc},
         thread,
@@ -1254,17 +1253,15 @@ mod tests {
 
     #[test]
     fn test_requests_smaller_than_pool_min_size_bypass_pool() {
-        let pool = test_pool(
-            BufferPoolConfig {
-                pool_min_size: 512,
-                min_size: NZUsize!(512),
-                max_size: NZUsize!(1024),
-                max_per_class: NZUsize!(2),
-                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
-                prefill: false,
-                alignment: NZUsize!(128),
-            },
-        );
+        let pool = test_pool(BufferPoolConfig {
+            pool_min_size: 512,
+            min_size: NZUsize!(512),
+            max_size: NZUsize!(1024),
+            max_per_class: NZUsize!(2),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            prefill: false,
+            alignment: NZUsize!(128),
+        });
 
         let buf = pool.try_alloc(200).unwrap();
         assert!(!buf.is_pooled());
@@ -1300,17 +1297,15 @@ mod tests {
     #[test]
     fn test_prefill() {
         let page = NZUsize!(page_size());
-        let pool = test_pool(
-            BufferPoolConfig {
-                pool_min_size: 0,
-                min_size: page,
-                max_size: page,
-                max_per_class: NZUsize!(5),
-                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
-                prefill: true,
-                alignment: page,
-            },
-        );
+        let pool = test_pool(BufferPoolConfig {
+            pool_min_size: 0,
+            min_size: page,
+            max_size: page,
+            max_per_class: NZUsize!(5),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            prefill: true,
+            alignment: page,
+        });
 
         // Should be able to allocate max_per_class buffers immediately
         let mut bufs = Vec::new();
@@ -1405,9 +1400,8 @@ mod tests {
     #[test]
     fn test_parallelism_policy_resolves_thread_cache_capacity() {
         let page = page_size();
-        let pool = test_pool(test_config(page, page, 64).with_thread_cache_for_parallelism(
-            NZUsize!(8),
-        ));
+        let pool =
+            test_pool(test_config(page, page, 64).with_thread_cache_for_parallelism(NZUsize!(8)));
         let class_index = pool.inner.config.class_index(page).unwrap();
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 4);
     }

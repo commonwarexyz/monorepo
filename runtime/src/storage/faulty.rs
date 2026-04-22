@@ -361,7 +361,8 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
-        utils::Registry, Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        utils::Registry,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use rand::{rngs::StdRng, SeedableRng};
 
