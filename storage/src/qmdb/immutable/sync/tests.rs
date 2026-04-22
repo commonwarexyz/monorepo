@@ -76,6 +76,14 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         ops: Vec<OpOf<Self>>,
         metadata: Option<Self::Metadata>,
     ) -> impl Future<Output = Self::Db> + Send;
+    fn apply_ops_with_floor(
+        db: Self::Db,
+        ops: Vec<OpOf<Self>>,
+        metadata: Option<Self::Metadata>,
+        floor: Location<Self::Family>,
+    ) -> impl Future<Output = Self::Db> + Send;
+    fn commit(db: &mut Self::Db) -> impl Future<Output = ()> + Send;
+    fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
     fn prune(db: &mut Self::Db, loc: Location<Self::Family>) -> impl Future<Output = ()> + Send;
 
     fn bounds(
@@ -709,6 +717,84 @@ where
     });
 }
 
+pub(crate) fn test_sync_nonzero_floor<H: SyncTestHarness>()
+where
+    OpOf<H>: Encode + Clone + Send + Sync,
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let target_db = H::init_db(context.with_label("target")).await;
+
+        // First batch with floor=0.
+        let early_ops = H::create_ops(50);
+        let mut target_db = H::apply_ops(target_db, early_ops.clone(), None).await;
+        H::commit(&mut target_db).await;
+        let first_commit_end = H::bounds(&target_db).await.end;
+
+        // Second batch with floor = first_commit_end, declaring the first batch inactive.
+        let late_ops = H::create_ops_seeded(50, 1);
+        let mut target_db = H::apply_ops_with_floor(
+            target_db,
+            late_ops.clone(),
+            Some(H::sample_metadata()),
+            first_commit_end,
+        )
+        .await;
+        H::commit(&mut target_db).await;
+
+        assert_eq!(H::inactivity_floor_loc(&target_db), first_commit_end);
+
+        let bounds = H::bounds(&target_db).await;
+        let target_root = H::db_root(&target_db);
+
+        let target_db = Arc::new(target_db);
+        let db_config = H::config(&format!("floor_sync_{}", context.next_u64()), &context);
+        let config = Config {
+            db_config,
+            fetch_batch_size: NZU64!(100),
+            target: Target {
+                root: target_root,
+                range: non_empty_range!(bounds.start, bounds.end),
+            },
+            context: context.with_label("client"),
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        };
+        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+
+        assert_eq!(H::db_root(&synced_db), target_root);
+        assert_eq!(H::inactivity_floor_loc(&synced_db), first_commit_end);
+
+        // Keys from the second batch (after the floor) should be findable.
+        for op in &late_ops {
+            if let Some((key, value)) = H::op_kv(op) {
+                assert_eq!(H::lookup(&synced_db, key).await, Some(value.clone()));
+            }
+        }
+
+        // Keys from the first batch (before the floor) should NOT be in the snapshot.
+        for op in &early_ops {
+            if let Some((key, _)) = H::op_kv(op) {
+                assert_eq!(
+                    H::lookup(&synced_db, key).await,
+                    None,
+                    "key from before floor should not be in synced snapshot"
+                );
+            }
+        }
+
+        H::destroy(synced_db).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
+            .await;
+    });
+}
+
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
@@ -808,10 +894,10 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn variable_create_ops_seeded(
+    fn variable_create_ops_seeded<F: Family>(
         n: usize,
         seed: u64,
-    ) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
+    ) -> Vec<Operation<F, sha256::Digest, sha256::Digest>> {
         let mut rng = test_rng_seeded(seed);
         let mut ops = Vec::new();
         for _ in 0..n {
@@ -823,9 +909,22 @@ pub(crate) mod harnesses {
     }
 
     async fn variable_apply_ops<F: Family>(
-        mut db: VariableDb<F>,
-        ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
+        db: VariableDb<F>,
+        ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
+    ) -> VariableDb<F>
+    where
+        VariableDb<F>: qmdb::sync::Database,
+    {
+        let floor = db.inactivity_floor_loc();
+        variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
+    }
+
+    async fn variable_apply_ops_with_floor<F: Family>(
+        mut db: VariableDb<F>,
+        ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
+        metadata: Option<sha256::Digest>,
+        floor: Location<F>,
     ) -> VariableDb<F>
     where
         VariableDb<F>: qmdb::sync::Database,
@@ -836,12 +935,12 @@ pub(crate) mod harnesses {
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(_) => {
+                Operation::Commit(_, _) => {
                     panic!("Commit operation not supported in apply_ops");
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata);
+        let merkleized = batch.merkleize(&db, metadata, floor);
         db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -860,11 +959,11 @@ pub(crate) mod harnesses {
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
-            variable_create_ops_seeded(n, 0)
+            variable_create_ops_seeded::<F>(n, 0)
         }
 
         fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>> {
-            variable_create_ops_seeded(n, seed)
+            variable_create_ops_seeded::<F>(n, seed)
         }
 
         fn sample_metadata() -> Self::Metadata {
@@ -900,7 +999,29 @@ pub(crate) mod harnesses {
             variable_apply_ops::<F>(db, ops, metadata).await
         }
 
+        async fn apply_ops_with_floor(
+            db: Self::Db,
+            ops: Vec<OpOf<Self>>,
+            metadata: Option<Self::Metadata>,
+            floor: Location<Self::Family>,
+        ) -> Self::Db {
+            variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
+        }
+
+        async fn commit(db: &mut Self::Db) {
+            db.commit().await.unwrap();
+        }
+
+        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor_loc()
+        }
+
         async fn prune(db: &mut Self::Db, loc: Location<Self::Family>) {
+            // Advance the inactivity floor to `loc` via a commit before pruning,
+            // since prune requires the floor to be at or beyond the prune target.
+            let merkleized = db.new_batch().merkleize(db, None, loc);
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db.prune(loc).await.unwrap();
         }
 
@@ -919,7 +1040,7 @@ pub(crate) mod harnesses {
         fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)> {
             match op {
                 Operation::Set(key, value) => Some((key, value)),
-                Operation::Commit(_) => None,
+                Operation::Commit(_, _) => None,
             }
         }
 
@@ -1006,6 +1127,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
                 super::test_target_update_on_done_client::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_sync_nonzero_floor() {
+                super::test_sync_nonzero_floor::<$harness>();
             }
         }
     };

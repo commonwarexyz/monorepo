@@ -115,6 +115,14 @@ pub enum Error<F: Family> {
         batch_db_size: u64,
         batch_base_size: u64,
     },
+
+    /// The batch's inactivity floor is lower than the database's current floor.
+    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    FloorRegressed(Location<F>, Location<F>),
+
+    /// The batch's inactivity floor exceeds its total operation count.
+    #[error("floor beyond size: floor {0} > total size {1}")]
+    FloorBeyondSize(Location<F>, Location<F>),
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {

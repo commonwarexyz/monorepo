@@ -222,8 +222,9 @@ impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 // Ordered Variable
 impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable types have a different Operation signature (no F parameter),
-// so we use a separate macro.
+// Immutable types need a separate macro because the key bound varies
+// (Array for fixed, Key for variable) unlike the other DB types which
+// always use Array.
 macro_rules! impl_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
@@ -238,7 +239,7 @@ macro_rules! impl_resolver_immutable {
         {
             type Family = F;
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<F, K, V>;
             type Error = qmdb::Error<F>;
 
             async fn get_operations(
@@ -277,7 +278,7 @@ macro_rules! impl_resolver_immutable {
         {
             type Family = F;
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<F, K, V>;
             type Error = qmdb::Error<F>;
 
             async fn get_operations(
@@ -316,7 +317,7 @@ macro_rules! impl_resolver_immutable {
         {
             type Family = F;
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<F, K, V>;
             type Error = qmdb::Error<F>;
 
             async fn get_operations(

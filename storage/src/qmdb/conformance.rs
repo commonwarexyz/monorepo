@@ -237,11 +237,12 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
 /// Apply a batch of immutable sets to the database.
 macro_rules! apply_sets {
     ($db:ident, $ops:expr) => {{
+        let floor = $db.inactivity_floor_loc();
         let mut batch = $db.new_batch();
         for (k, v) in $ops {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$db, None);
+        let merkleized = batch.merkleize(&$db, None, floor);
         $db.apply_batch(merkleized).await.unwrap();
     }};
 }
@@ -641,18 +642,20 @@ macro_rules! assert_immutable_order_independent {
             ops.push((colliding_digest(0xCD, i), to_val(i, 100)));
         }
 
+        let fwd_floor = $fwd.inactivity_floor_loc();
         let mut batch = $fwd.new_batch();
         for &(k, v) in &ops {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$fwd, None);
+        let merkleized = batch.merkleize(&$fwd, None, fwd_floor);
         $fwd.apply_batch(merkleized).await.unwrap();
 
+        let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
         for &(k, v) in ops.iter().rev() {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$rev, None);
+        let merkleized = batch.merkleize(&$rev, None, rev_floor);
         $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
