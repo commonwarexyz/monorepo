@@ -13,7 +13,7 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, Operation},
-        operation::Key,
+        operation::{Key, Operation as _},
         sync::{self},
         Error,
     },
@@ -32,16 +32,16 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>
+    C: Mutable<Item = Operation<F, K, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<F, Context = E, Op = Operation<K, V>>,
+        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
     type Family = F;
-    type Op = Operation<K, V>;
+    type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
     type Config = immutable::Config<T, C::Config>;
@@ -97,23 +97,35 @@ where
         let mut snapshot: Index<T, Location<F>> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
-        let last_commit_loc = {
-            // Get the start of the log.
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let start_loc = Location::<F>::new(bounds.start);
+            let last_commit_loc =
+                Location::<F>::new(bounds.end.checked_sub(1).expect("commit should exist"));
 
-            // Build snapshot from the log
-            build_snapshot_from_log::<F, _, _, _>(start_loc, &reader, &mut snapshot, |_, _| {})
-                .await?;
+            // Read the floor from the last commit operation.
+            let last_op = reader.read(*last_commit_loc).await?;
+            let inactivity_floor_loc = last_op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
 
-            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
+            // Replay the log from the inactivity floor to build the snapshot.
+            build_snapshot_from_log::<F, _, _, _>(
+                inactivity_floor_loc,
+                &reader,
+                &mut snapshot,
+                |_, _| {},
+            )
+            .await?;
+
+            (last_commit_loc, inactivity_floor_loc)
         };
 
         let db = Self {
             journal,
             snapshot,
             last_commit_loc,
+            inactivity_floor_loc,
         };
 
         db.sync().await?;
