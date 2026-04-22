@@ -100,16 +100,27 @@ const fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
-/// Spawns a thread with an explicit stack size.
+/// Attempts to spawn a thread with an explicit stack size.
+pub(crate) fn try_spawn<F, T>(stack_size: usize, f: F) -> std::io::Result<thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    thread::Builder::new().stack_size(stack_size).spawn(f)
+}
+
+/// Spawns a thread with an explicit stack size, panicking if thread creation fails.
+///
+/// # Panics
+///
+/// Panics if the thread cannot be created.
+#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 pub(crate) fn spawn<F, T>(stack_size: usize, f: F) -> thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    thread::Builder::new()
-        .stack_size(stack_size)
-        .spawn(f)
-        .expect("failed to spawn thread")
+    try_spawn(stack_size, f).expect("failed to spawn thread")
 }
 
 #[cfg(target_os = "linux")]
@@ -180,12 +191,8 @@ pub fn available_cpus() -> Vec<usize> {
 }
 
 /// Pins the current thread to the given logical CPU id.
-///
-/// # Panics
-///
-/// Panics if `sched_setaffinity` fails.
 #[cfg(target_os = "linux")]
-pub(crate) fn pin_to_cpu(cpu: usize) {
+pub(crate) fn pin_to_cpu(cpu: usize) -> Result<(), std::io::Error> {
     let word_bits = libc::c_ulong::BITS as usize;
     let words = (cpu / word_bits)
         .checked_add(1)
@@ -200,25 +207,23 @@ pub(crate) fn pin_to_cpu(cpu: usize) {
         let result =
             unsafe { libc::syscall(libc::SYS_sched_setaffinity, 0, cpusetsize, mask.as_ptr()) };
         if result == 0 {
-            return;
+            return Ok(());
         }
 
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            _ => panic!("sched_setaffinity failed for cpu {cpu}: {err}"),
+            _ => return Err(err),
         }
     }
 }
 
 /// Pins the current thread to the given logical CPU id.
-///
-/// # Panics
-///
-/// Always panics on non-Linux platforms, where CPU pinning is unavailable.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn pin_to_cpu(_cpu: usize) {
-    panic!("cpu pinning is not available on this platform")
+pub(crate) fn pin_to_cpu(_cpu: usize) -> Result<(), std::io::Error> {
+    Err(std::io::Error::other(
+        "cpu pinning is not available on this platform",
+    ))
 }
 
 #[cfg(test)]

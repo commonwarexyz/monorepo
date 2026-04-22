@@ -184,12 +184,15 @@ stability_scope!(BETA {
         /// The `cpu` value is a Linux logical CPU id used with `sched_setaffinity`.
         /// Use [`available_cpus`] to query the current thread's allowed CPU ids.
         ///
+        /// This only configures the next spawned task. Runtimes that implement CPU pinning
+        /// perform validation and the pinning attempt when [`Spawner::spawn`] starts that task.
+        ///
         /// Implies [`Spawner::dedicated`].
         ///
         /// # Panics
         ///
-        /// Panics if CPU pinning is unavailable, if `cpu` is not in the current affinity mask,
-        /// or if pinning fails.
+        /// [`Spawner::spawn`] may panic if CPU pinning is unavailable for the runtime, if `cpu`
+        /// is not in the current affinity mask, or if pinning fails when the task starts.
         fn pinned(self, cpu: usize) -> Self;
 
         /// Spawn a task with the current context.
@@ -225,6 +228,12 @@ stability_scope!(BETA {
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime cannot start a task configured with [`Spawner::dedicated`], or
+        /// if a task configured with [`Spawner::pinned`] cannot be pinned when it starts running.
+        /// These startup panics occur in the caller of [`Spawner::spawn`].
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             F: FnOnce(Self) -> Fut + Send + 'static,
@@ -3569,7 +3578,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cpu pinning is not available in deterministic runtime")]
     fn test_deterministic_spawn_pinned() {
         let executor = deterministic::Runner::default();
         test_spawn_pinned(executor);
@@ -4003,9 +4011,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[should_panic(expected = "not in the current affinity mask")]
+    #[should_panic(expected = "failed to pin task to cpu")]
     fn test_tokio_spawn_pinned_invalid_cpu() {
-        // Pinning to a CPU outside the current affinity mask panics eagerly.
+        // Pinning to a CPU outside the current affinity mask panics when the task starts.
         let invalid_cpu = crate::available_cpus()
             .into_iter()
             .last()
@@ -4017,9 +4025,31 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tokio_spawn_pinned_invalid_cpu_cleans_metrics() {
+        let invalid_cpu = crate::available_cpus()
+            .into_iter()
+            .last()
+            .map(|cpu| cpu + 1)
+            .unwrap();
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let context = context.with_label("pinned_invalid_cpu");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                context.clone().pinned(invalid_cpu).spawn(|_| async {});
+            }));
+            assert!(result.is_err(), "expected invalid pinned cpu to panic");
+
+            while utils::count_running_tasks(&context, "pinned_invalid_cpu") > 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+        });
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
-    #[should_panic(expected = "cpu pinning is not available")]
+    #[should_panic(expected = "cpu pinning is not available on this platform")]
     fn test_tokio_spawn_pinned_unavailable() {
         let executor = tokio::Runner::default();
         test_spawn_pinned(executor);
