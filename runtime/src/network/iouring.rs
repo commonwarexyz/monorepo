@@ -516,8 +516,12 @@ mod tests {
     async fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
-                .expect("Failed to start io_uring")
+            Network::start(
+                Config::default(),
+                &mut Registry::default().scope(),
+                test_pool(),
+            )
+            .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -546,8 +550,12 @@ mod tests {
     #[tokio::test]
     async fn test_small_send_read_quickly() {
         // Verify a small message is delivered promptly through the buffered recv path.
-        let network = Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = Network::start(
+            Config::default(),
+            &mut Registry::default().scope(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -718,8 +726,12 @@ mod tests {
     async fn test_peek_with_buffered_data() {
         // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
-        let network = Network::start(Config::default(), &mut Registry::default().scope(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = Network::start(
+            Config::default(),
+            &mut Registry::default().scope(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -12,19 +12,19 @@ pub struct Metrics<P: PublicKey> {
     pub tracked: Registered<Gauge>,
 
     /// Blocked peers (value = expiry time as epoch millis).
-    pub blocked: Registered<Family<metrics::Peer<P>,Gauge>>,
+    pub blocked: Registered<Family<metrics::Peer<P>, Gauge>>,
 
     /// The total number of outstanding reservations.
     pub reserved: Registered<Gauge>,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connected: Registered<Family<metrics::Peer<P>,Gauge>>,
+    pub connected: Registered<Family<metrics::Peer<P>, Gauge>>,
 
     /// A count of the number of rate-limited reservation events for each peer.
-    pub limits: Registered<Family<metrics::Peer<P>,Counter>>,
+    pub limits: Registered<Family<metrics::Peer<P>, Counter>>,
 
     /// A count of the number of updates for each peer.
-    pub updates: Registered<Family<metrics::Peer<P>,Counter>>,
+    pub updates: Registered<Family<metrics::Peer<P>, Counter>>,
 }
 
 impl<P: PublicKey> Metrics<P> {

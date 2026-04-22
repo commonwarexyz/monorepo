@@ -329,9 +329,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
-            self.nullifications
-                .get_or_create_by(&leader.key)
-                .inc();
+            self.nullifications.get_or_create_by(&leader.key).inc();
         }
 
         added

@@ -99,9 +99,7 @@ impl<
         };
 
         // Increment metrics.
-        self.attempts
-            .get_or_create_by(&peer)
-            .inc();
+        self.attempts.get_or_create_by(&peer).inc();
 
         // Spawn dialer to connect to peer
         self.context.with_label("dialer").spawn({

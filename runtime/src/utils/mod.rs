@@ -894,8 +894,12 @@ mod tests {
         let first = registry.encode();
         let second = registry.encode();
         assert_eq!(first, second);
-        let alpha = first.find("# TYPE alpha").expect("alpha family header present");
-        let beta = first.find("# TYPE beta").expect("beta family header present");
+        let alpha = first
+            .find("# TYPE alpha")
+            .expect("alpha family header present");
+        let beta = first
+            .find("# TYPE beta")
+            .expect("beta family header present");
         assert!(alpha < beta, "families emitted in sorted order: {first}");
     }
 
@@ -906,7 +910,10 @@ mod tests {
         register_permanent_counter(&mut registry, "b", "help", 2);
         let encoded = registry.encode();
         assert_eq!(encoded.matches("# EOF").count(), 1);
-        assert!(encoded.ends_with("# EOF\n"), "must terminate with EOF: {encoded}");
+        assert!(
+            encoded.ends_with("# EOF\n"),
+            "must terminate with EOF: {encoded}"
+        );
     }
 
     #[test]
@@ -922,10 +929,22 @@ mod tests {
             histogram,
         );
         let encoded = registry.encode();
-        assert!(encoded.contains("requests_total 3"), "counter _total suffix: {encoded}");
-        assert!(encoded.contains("latency_bucket"), "histogram _bucket suffix: {encoded}");
-        assert!(encoded.contains("latency_sum"), "histogram _sum suffix: {encoded}");
-        assert!(encoded.contains("latency_count"), "histogram _count suffix: {encoded}");
+        assert!(
+            encoded.contains("requests_total 3"),
+            "counter _total suffix: {encoded}"
+        );
+        assert!(
+            encoded.contains("latency_bucket"),
+            "histogram _bucket suffix: {encoded}"
+        );
+        assert!(
+            encoded.contains("latency_sum"),
+            "histogram _sum suffix: {encoded}"
+        );
+        assert!(
+            encoded.contains("latency_count"),
+            "histogram _count suffix: {encoded}"
+        );
     }
 
     #[test]
@@ -948,8 +967,16 @@ mod tests {
             c2,
         );
         let encoded = registry.encode();
-        assert_eq!(encoded.matches("# HELP votes").count(), 1, "single HELP: {encoded}");
-        assert_eq!(encoded.matches("# TYPE votes").count(), 1, "single TYPE: {encoded}");
+        assert_eq!(
+            encoded.matches("# HELP votes").count(),
+            1,
+            "single HELP: {encoded}"
+        );
+        assert_eq!(
+            encoded.matches("# TYPE votes").count(),
+            1,
+            "single TYPE: {encoded}"
+        );
         assert!(encoded.contains("votes_total{epoch=\"1\"} 1"));
         assert!(encoded.contains("votes_total{epoch=\"2\"} 2"));
     }
@@ -964,8 +991,14 @@ mod tests {
             scope.register("votes", "vote count", counter);
         }
         let encoded = registry.encode();
-        assert!(encoded.contains("votes_total 1"), "no prefix applied: {encoded}");
-        assert!(encoded.starts_with("# HELP votes"), "family header at start: {encoded}");
+        assert!(
+            encoded.contains("votes_total 1"),
+            "no prefix applied: {encoded}"
+        );
+        assert!(
+            encoded.starts_with("# HELP votes"),
+            "family header at start: {encoded}"
+        );
     }
 
     #[test]
@@ -984,7 +1017,10 @@ mod tests {
         register_permanent_counter(&mut registry, "ticks", "tick count", 1);
         let encoded = registry.encode();
         assert!(!encoded.contains("votes"), "empty family leaked: {encoded}");
-        assert!(encoded.contains("ticks_total 1"), "populated metric missing: {encoded}");
+        assert!(
+            encoded.contains("ticks_total 1"),
+            "populated metric missing: {encoded}"
+        );
         assert_eq!(encoded.matches("# EOF").count(), 1);
     }
 
@@ -1071,7 +1107,11 @@ mod tests {
         }
         // Registry ends clean after the stress loop.
         let registry = registry.lock();
-        assert!(registry.keys.is_empty(), "keys left behind: {:?}", registry.keys);
+        assert!(
+            registry.keys.is_empty(),
+            "keys left behind: {:?}",
+            registry.keys
+        );
         assert!(
             registry.families.is_empty(),
             "families left behind: {:?}",
