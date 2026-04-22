@@ -7,6 +7,13 @@ use std::{env, sync::OnceLock, thread};
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
 const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 
+/// Upper bound for affinity-mask probing and construction.
+///
+/// This keeps bogus CPU ids from forcing arbitrarily large allocations while
+/// still leaving ample room beyond realistic machine sizes.
+#[cfg(target_os = "linux")]
+const MAX_AFFINITY_CPUS: usize = 1 << 20;
+
 /// Returns the value of the `RUST_MIN_STACK` environment variable, if set.
 fn rust_min_stack() -> Option<usize> {
     env::var_os("RUST_MIN_STACK").and_then(|s| s.to_str().and_then(|s| s.parse().ok()))
@@ -151,7 +158,7 @@ fn affinity_mask() -> Option<(Vec<libc::c_ulong>, usize)> {
             Some(libc::EINVAL) => {
                 // Kernels with larger affinity masks require probing with a larger buffer.
                 words = words.checked_mul(2)?;
-                if words.checked_mul(word_bits)? > 1 << 20 {
+                if words.checked_mul(word_bits)? > MAX_AFFINITY_CPUS {
                     return None;
                 }
             }
@@ -193,6 +200,10 @@ pub fn available_cpus() -> Vec<usize> {
 /// Pins the current thread to the given logical CPU id.
 #[cfg(target_os = "linux")]
 pub(crate) fn pin_to_cpu(cpu: usize) -> Result<(), std::io::Error> {
+    if cpu >= MAX_AFFINITY_CPUS {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+
     let word_bits = libc::c_ulong::BITS as usize;
     let words = (cpu / word_bits)
         .checked_add(1)

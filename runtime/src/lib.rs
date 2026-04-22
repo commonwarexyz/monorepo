@@ -224,7 +224,8 @@ stability_scope!(BETA {
         /// # Spawn Configuration
         ///
         /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
-        /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
+        /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`], [`Spawner::pinned`], or
+        /// [`Spawner::shared`] is reset.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
@@ -4022,6 +4023,16 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             context.pinned(invalid_cpu).spawn(|_| async {});
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[should_panic(expected = "failed to pin task to cpu")]
+    fn test_tokio_spawn_pinned_huge_cpu() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            context.pinned(usize::MAX).spawn(|_| async {});
         });
     }
 
