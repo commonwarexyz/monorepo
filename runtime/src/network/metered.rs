@@ -1,7 +1,4 @@
-use crate::{
-    utils::MetricRegister,
-    IoBufs, SinkOf, StreamOf,
-};
+use crate::{utils::MetricRegister, IoBufs, SinkOf, StreamOf};
 use prometheus_client::metrics::counter::Counter;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -187,10 +184,7 @@ mod tests {
         tests::test_network_trait(|| {
             let mut registry = crate::utils::Registry::new();
             let mut scope = registry.sub_registry_with_prefix("test");
-            MeteredNetwork::new(
-                DeterministicNetwork::default(),
-                &mut scope,
-            )
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
         })
         .await;
     }
@@ -201,10 +195,7 @@ mod tests {
         tests::stress_test_network_trait(|| {
             let mut registry = crate::utils::Registry::new();
             let mut scope = registry.sub_registry_with_prefix("test");
-            MeteredNetwork::new(
-                DeterministicNetwork::default(),
-                &mut scope,
-            )
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
         })
         .await;
     }

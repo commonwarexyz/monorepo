@@ -851,5 +851,4 @@ mod tests {
             let _metric_b = context.with_label("a").register("test", "help", gauge);
         });
     }
-
 }

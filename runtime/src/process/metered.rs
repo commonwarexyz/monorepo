@@ -1,9 +1,6 @@
 //! Process metrics collection.
 
-use crate::{
-    telemetry::metrics::status::GaugeExt,
-    utils::MetricRegister,
-};
+use crate::{telemetry::metrics::status::GaugeExt, utils::MetricRegister};
 use prometheus_client::metrics::gauge::Gauge;
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};

@@ -1,7 +1,4 @@
-use crate::{
-    utils::MetricRegister,
-    Buf, Error, IoBufs, IoBufsMut,
-};
+use crate::{utils::MetricRegister, Buf, Error, IoBufs, IoBufsMut};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     ops::{Deref, RangeInclusive},

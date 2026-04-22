@@ -18,8 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, MetricRegister, Panicker,
-        Registry,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricRegister, Panicker, Registry,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
     SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,

@@ -55,10 +55,9 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         add_attribute,
-        MetricRegister,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry,
+        MetricRegister, Panicker, Registry,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Registered, Spawner as _, METRICS_PREFIX,
