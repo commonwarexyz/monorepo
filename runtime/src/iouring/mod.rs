@@ -148,7 +148,7 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{utils::MetricScope, Error, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -160,7 +160,7 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
     IoUring,
 };
-use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
+use prometheus_client::metrics::gauge::Gauge;
 use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
     collections::VecDeque,
@@ -201,7 +201,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry) -> Self {
+    pub fn new(registry: &mut MetricScope<'_>) -> Self {
         let metrics = Self {
             pending_operations: Gauge::default(),
         };
@@ -513,7 +513,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Handle, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut MetricScope<'_>) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"

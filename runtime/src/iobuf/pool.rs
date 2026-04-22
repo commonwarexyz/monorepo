@@ -50,13 +50,15 @@
 //! batch back to the global freelist if needed.
 
 use super::IoBufMut;
-use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
+use crate::{
+    iobuf::aligned::{AlignedBuffer, PooledBufMut},
+    utils::MetricRegister,
+};
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
 };
 use std::{
     cell::UnsafeCell,
@@ -411,24 +413,24 @@ struct PoolMetrics {
 }
 
 impl PoolMetrics {
-    fn new(registry: &mut Registry) -> Self {
+    fn new(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             created: Family::default(),
             exhausted_total: Family::default(),
             oversized_total: Counter::default(),
         };
 
-        registry.register(
+        registry.register_metric(
             "buffer_pool_created",
             "Number of tracked buffers currently created for the pool",
             metrics.created.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "buffer_pool_exhausted_total",
             "Total number of failed allocations due to pool exhaustion",
             metrics.exhausted_total.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "buffer_pool_oversized_total",
             "Total number of allocation requests exceeding max buffer size",
             metrics.oversized_total.clone(),
@@ -832,7 +834,7 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
-    pub(crate) fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
+    pub(crate) fn new(config: BufferPoolConfig, registry: &mut impl MetricRegister) -> Self {
         config.validate();
         let metrics = PoolMetrics::new(registry);
         let mut classes = Vec::with_capacity(config.num_classes());
@@ -1049,6 +1051,7 @@ mod tests {
     use super::*;
     use crate::iobuf::IoBuf;
     use bytes::{Buf, BufMut};
+    use prometheus_client::registry::Registry;
     use std::{
         sync::{mpsc, Arc},
         thread,

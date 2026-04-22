@@ -23,11 +23,11 @@
 use super::Header;
 use crate::{
     iouring::{self},
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    utils::{self, MetricScope},
+    Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
-use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
@@ -75,7 +75,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
+    pub fn start(cfg: Config, registry: &mut MetricScope<'_>, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
             mut iouring_config,

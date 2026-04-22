@@ -4,11 +4,11 @@ use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
 use prometheus_client::{
     encoding::{
-        text::{encode_descriptor, encode_eof, encode_metric_samples, encode_registry},
+        text::{encode_descriptor, encode_eof, encode_metric_samples},
         EncodeMetric, MetricEncoder as PromMetricEncoder,
     },
     metrics::MetricType,
-    registry::{Metric as PrometheusMetric, Registry as PrometheusRegistry},
+    registry::Metric as PrometheusMetric,
 };
 use std::{
     any::Any,
@@ -84,6 +84,14 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
         },
         |s| s.to_string(),
     )
+}
+
+fn prefixed_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}_{name}")
+    }
 }
 
 /// Synchronization primitive that enables a thread to block until a waker delivers a signal.
@@ -336,11 +344,10 @@ struct LiveMetricFamily<'a> {
 
 /// Manages runtime-internal metrics plus user-registered metrics with explicit lifetimes.
 ///
-/// Runtime internals continue to use a normal `prometheus_client::Registry` rooted
-/// under `METRICS_PREFIX`. User metrics are stored in a live-entry table so they
-/// can be unregistered when the owning registration handle drops.
+/// Runtime internals are stored permanently in the same table as user metrics, but
+/// registered through a prefixed scope. User metrics additionally get a drop-based
+/// registration handle so they can be unregistered when the owning handle drops.
 pub(crate) struct Registry {
-    root: PrometheusRegistry,
     metrics: BTreeMap<u64, Arc<MetricEntry>>,
     keys: HashMap<MetricKey, u64>,
     next_metric_id: u64,
@@ -349,28 +356,27 @@ pub(crate) struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            root: PrometheusRegistry::default(),
             metrics: BTreeMap::new(),
             keys: HashMap::new(),
             next_metric_id: 0,
         }
     }
 
-    pub const fn root_mut(&mut self) -> &mut PrometheusRegistry {
-        &mut self.root
+    pub fn sub_registry_with_prefix(&mut self, prefix: &str) -> MetricScope<'_> {
+        validate_label(prefix);
+        MetricScope {
+            registry: self,
+            prefix: prefix.to_string(),
+        }
     }
 
-    pub fn register(
+    fn insert_metric(
         &mut self,
         name: String,
         help: String,
-        attributes: Vec<(String, String)>,
+        attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
         metric: impl PrometheusMetric,
     ) -> u64 {
-        let attributes = attributes
-            .into_iter()
-            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
-            .collect::<Vec<_>>();
         let id = self.next_metric_id;
         self.next_metric_id = self
             .next_metric_id
@@ -396,6 +402,34 @@ impl Registry {
         id
     }
 
+    pub fn register_permanent(
+        &mut self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: impl PrometheusMetric,
+    ) {
+        let attributes = attributes
+            .into_iter()
+            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
+            .collect::<Vec<_>>();
+        self.insert_metric(name, help, attributes, metric);
+    }
+
+    pub fn register(
+        &mut self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: impl PrometheusMetric,
+    ) -> u64 {
+        let attributes = attributes
+            .into_iter()
+            .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
+            .collect::<Vec<_>>();
+        self.insert_metric(name, help, attributes, metric)
+    }
+
     pub fn unregister(&mut self, id: u64) {
         let Some(metric) = self.metrics.remove(&id) else {
             return;
@@ -406,8 +440,6 @@ impl Registry {
 
     pub fn encode(&self) -> String {
         let mut output = String::new();
-        encode_registry(&mut output, &self.root).expect("encoding root failed");
-
         let mut families = BTreeMap::<&str, LiveMetricFamily<'_>>::new();
         for metric in self.metrics.values() {
             let metric = metric.as_ref();
@@ -449,6 +481,47 @@ impl Registry {
 
         encode_eof(&mut output).expect("encoding EOF failed");
         output
+    }
+}
+
+pub(crate) struct MetricScope<'a> {
+    registry: &'a mut Registry,
+    prefix: String,
+}
+
+impl MetricScope<'_> {
+    pub fn register(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+        validate_label(name);
+        self.registry.register_permanent(
+            prefixed_name(&self.prefix, name),
+            help.to_string(),
+            Vec::new(),
+            metric,
+        );
+    }
+
+    pub fn sub_registry_with_prefix(&mut self, prefix: &str) -> MetricScope<'_> {
+        validate_label(prefix);
+        MetricScope {
+            registry: &mut *self.registry,
+            prefix: prefixed_name(&self.prefix, prefix),
+        }
+    }
+}
+
+pub(crate) trait MetricRegister {
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric);
+}
+
+impl MetricRegister for MetricScope<'_> {
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+        self.register(name, help, metric);
+    }
+}
+
+impl MetricRegister for prometheus_client::registry::Registry {
+    fn register_metric(&mut self, name: &str, help: &str, metric: impl PrometheusMetric) {
+        self.register(name.to_string(), help.to_string(), metric);
     }
 }
 
@@ -615,4 +688,5 @@ mod tests {
             let _metric_b = context.with_label("a").register("test", "help", c2);
         });
     }
+
 }

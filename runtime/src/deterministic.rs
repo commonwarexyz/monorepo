@@ -55,6 +55,7 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         add_attribute,
+        MetricRegister,
         signal::{Signal, Stopper},
         supervision::Tree,
         Panicker, Registry, SharedMetric,
@@ -85,7 +86,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
+    registry::Metric,
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -116,7 +117,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut PrometheusRegistry) -> Self {
+    pub fn init(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -124,27 +125,27 @@ impl Metrics {
             tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
         };
-        registry.register(
+        registry.register_metric(
             "iterations",
             "Total number of iterations",
             metrics.iterations.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "tasks_spawned",
             "Total number of tasks spawned",
             metrics.tasks_spawned.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "task_polls",
             "Total number of task polls",
             metrics.task_polls.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "bandwidth",
             "Total amount of data sent over network",
             metrics.network_bandwidth.clone(),
@@ -919,10 +920,10 @@ impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
@@ -935,11 +936,11 @@ impl Context {
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             cfg.network_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             cfg.storage_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
         // Create storage fault config (default to disabled if None)
@@ -953,12 +954,12 @@ impl Context {
                 ),
                 auditor.clone(),
             ),
-            runtime_registry,
+            &mut runtime_registry,
         );
 
         // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        let network = MeteredNetwork::new(network, &mut runtime_registry);
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -1010,22 +1011,22 @@ impl Context {
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
 
         // Copy state
         let network =
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        let network = MeteredNetwork::new(network, &mut runtime_registry);
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             checkpoint.network_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             checkpoint.storage_buffer_pool_cfg.clone(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
         // Initialize panicker

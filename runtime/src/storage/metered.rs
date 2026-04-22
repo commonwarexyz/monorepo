@@ -1,8 +1,8 @@
-use crate::{Buf, Error, IoBufs, IoBufsMut};
-use prometheus_client::{
-    metrics::{counter::Counter, gauge::Gauge},
-    registry::Registry,
+use crate::{
+    utils::MetricRegister,
+    Buf, Error, IoBufs, IoBufsMut,
 };
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
@@ -18,7 +18,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    fn new(registry: &mut Registry) -> Self {
+    fn new(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
@@ -27,27 +27,27 @@ impl Metrics {
             storage_write_bytes: Counter::default(),
         };
 
-        registry.register(
+        registry.register_metric(
             "open_blobs",
             "Number of open blobs",
             metrics.open_blobs.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "storage_reads",
             "Total number of disk reads",
             metrics.storage_reads.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "storage_read_bytes",
             "Total amount of data read from disk",
             metrics.storage_read_bytes.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "storage_writes",
             "Total number of disk writes",
             metrics.storage_writes.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "storage_write_bytes",
             "Total amount of data written to disk",
             metrics.storage_write_bytes.clone(),
@@ -65,7 +65,7 @@ pub struct Storage<S> {
 }
 
 impl<S> Storage<S> {
-    pub fn new(inner: S, registry: &mut Registry) -> Self {
+    pub(crate) fn new(inner: S, registry: &mut impl MetricRegister) -> Self {
         Self {
             inner,
             metrics: Metrics::new(registry).into(),
@@ -184,14 +184,17 @@ mod tests {
     use prometheus_client::registry::Registry;
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default())
+        let mut registry = crate::utils::Registry::new();
+        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
 
     #[tokio::test]
     async fn test_metered_storage() {
-        let mut registry = Registry::default();
+        let mut registry = crate::utils::Registry::new();
+        let mut scope = registry.sub_registry_with_prefix("test");
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut scope);
 
         run_storage_tests(storage).await;
     }
@@ -199,9 +202,10 @@ mod tests {
     /// Test that metrics are updated correctly for basic operations.
     #[tokio::test]
     async fn test_metered_blob_metrics() {
-        let mut registry = Registry::default();
+        let mut registry = crate::utils::Registry::new();
+        let mut scope = registry.sub_registry_with_prefix("test");
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut scope);
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();

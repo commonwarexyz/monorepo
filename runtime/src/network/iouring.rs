@@ -23,9 +23,9 @@
 
 use crate::{
     iouring::{self},
-    utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
+    utils::{self, MetricScope},
+    Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
-use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
     os::fd::OwnedFd,
@@ -113,7 +113,7 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
-        registry: &mut Registry,
+        registry: &mut MetricScope<'_>,
         pool: BufferPool,
     ) -> Result<Self, Error> {
         // Optimize performance by hinting the kernel that a single task will
@@ -127,15 +127,15 @@ impl Network {
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
-        let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
+        let mut sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_handle, send_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
+            iouring::IoUringLoop::new(cfg.iouring_config.clone(), &mut sender_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
-        let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
+        let mut receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_handle, recv_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
+            iouring::IoUringLoop::new(cfg.iouring_config, &mut receiver_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {

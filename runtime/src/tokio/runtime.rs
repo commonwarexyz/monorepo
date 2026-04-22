@@ -18,7 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, SharedMetric,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricRegister, Panicker,
+        Registry, SharedMetric,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
     SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
@@ -31,7 +32,7 @@ use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry as PrometheusRegistry},
+    registry::Metric,
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
@@ -67,17 +68,17 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut PrometheusRegistry) -> Self {
+    pub fn init(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
         };
-        registry.register(
+        registry.register_metric(
             "tasks_spawned",
             "Total number of tasks spawned",
             metrics.tasks_spawned.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
@@ -364,10 +365,10 @@ impl crate::Runner for Runner {
     {
         // Create a new registry
         let mut registry = Registry::new();
-        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let mut builder = Builder::new_multi_thread();
         builder
             .worker_threads(self.cfg.worker_threads)
@@ -386,23 +387,23 @@ impl crate::Runner for Runner {
         //
         // We prefer to collect process metrics outside of `Context` because
         // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(runtime_registry);
+        let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             self.cfg.resolved_network_buffer_pool_config(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             self.cfg.resolved_storage_buffer_pool_config(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry =
+                let mut iouring_registry =
                     runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
@@ -411,10 +412,10 @@ impl crate::Runner for Runner {
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        iouring_registry,
+                        &mut iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let storage = MeteredStorage::new(
@@ -425,7 +426,7 @@ impl crate::Runner for Runner {
                         ),
                         storage_buffer_pool.clone(),
                     ),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }
@@ -433,7 +434,7 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let iouring_registry =
+                let mut iouring_registry =
                     runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
@@ -452,11 +453,11 @@ impl crate::Runner for Runner {
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(
                         config,
-                        iouring_registry,
+                        &mut iouring_registry,
                         network_buffer_pool.clone(),
                     )
                     .unwrap(),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             } else {
                 let config = TokioNetworkConfig::default()
@@ -466,7 +467,7 @@ impl crate::Runner for Runner {
                     .with_zero_linger(self.cfg.network_cfg.zero_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
-                    runtime_registry,
+                    &mut runtime_registry,
                 );
             }
         }

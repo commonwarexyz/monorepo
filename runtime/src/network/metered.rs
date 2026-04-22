@@ -1,5 +1,8 @@
-use crate::{IoBufs, SinkOf, StreamOf};
-use prometheus_client::{metrics::counter::Counter, registry::Registry};
+use crate::{
+    utils::MetricRegister,
+    IoBufs, SinkOf, StreamOf,
+};
+use prometheus_client::metrics::counter::Counter;
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -16,29 +19,29 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(registry: &mut Registry) -> Self {
+    fn new(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
             outbound_bandwidth: Counter::default(),
         };
-        registry.register(
+        registry.register_metric(
             "inbound_connections",
             "Number of connections created by dialing us",
             metrics.inbound_connections.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "outbound_connections",
             "Number of connections created by dialing others",
             metrics.outbound_connections.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "inbound_bandwidth",
             "Bandwidth used by receiving data from others",
             metrics.inbound_bandwidth.clone(),
         );
-        registry.register(
+        registry.register_metric(
             "outbound_bandwidth",
             "Bandwidth used by sending data to others",
             metrics.outbound_bandwidth.clone(),
@@ -128,7 +131,7 @@ pub struct Network<N: crate::Network> {
 impl<N: crate::Network> Network<N> {
     /// Wraps `inner` to make it metered.
     /// The `registry` is used to register the metrics.
-    pub fn new(inner: N, registry: &mut Registry) -> Self {
+    pub(crate) fn new(inner: N, registry: &mut impl MetricRegister) -> Self {
         let metrics = Metrics::new(registry);
         Self {
             inner,
@@ -177,15 +180,16 @@ mod tests {
         Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
-    use prometheus_client::registry::Registry;
     use std::net::SocketAddr;
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
+            let mut registry = crate::utils::Registry::new();
+            let mut scope = registry.sub_registry_with_prefix("test");
             MeteredNetwork::new(
                 DeterministicNetwork::default(),
-                &mut prometheus_client::registry::Registry::default(),
+                &mut scope,
             )
         })
         .await;
@@ -195,9 +199,11 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
+            let mut registry = crate::utils::Registry::new();
+            let mut scope = registry.sub_registry_with_prefix("test");
             MeteredNetwork::new(
                 DeterministicNetwork::default(),
-                &mut prometheus_client::registry::Registry::default(),
+                &mut scope,
             )
         })
         .await;
@@ -208,8 +214,9 @@ mod tests {
         const MSG_SIZE: usize = 100;
 
         // Create a registry and network
-        let mut registry = Registry::default();
-        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry);
+        let mut registry = crate::utils::Registry::new();
+        let mut scope = registry.sub_registry_with_prefix("test");
+        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut scope);
 
         // Set up server.
         // Note this is a deterministic network, so we can use any address
