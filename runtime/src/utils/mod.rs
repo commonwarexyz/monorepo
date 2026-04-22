@@ -68,7 +68,7 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
-fn extract_panic_message(err: &(dyn Any + Send)) -> String {
+pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     err.downcast_ref::<&str>().map_or_else(
         || {
             err.downcast_ref::<String>()
