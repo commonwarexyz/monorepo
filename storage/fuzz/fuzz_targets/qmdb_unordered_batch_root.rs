@@ -5,8 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::mmr::Family,
-    mmr::journaled::Config as MmrConfig,
+    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
     qmdb::any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
     translator::OneCap,
 };
@@ -16,7 +15,7 @@ use std::num::NonZeroU16;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type Db = AnyDb<Family, deterministic::Context, Key, Value, Sha256, OneCap>;
+type Db<F> = AnyDb<F, deterministic::Context, Key, Value, Sha256, OneCap>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(131);
 const COLLISION_GROUPS: u8 = 4;
@@ -77,8 +76,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MmrConfig {
-            journal_partition: format!("{name}-mmr"),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),
@@ -107,12 +106,12 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("fuzz-qmdb-unordered-pending-vs-committed-root", &context);
-        let mut db = Db::init(context.clone(), cfg)
+        let cfg = test_config(suffix, &context);
+        let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await
             .expect("init unordered any db");
 
@@ -188,5 +187,6 @@ fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-batch-root");
+    fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-batch-root");
 });
