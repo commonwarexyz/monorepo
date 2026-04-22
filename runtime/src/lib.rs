@@ -3954,7 +3954,7 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    #[should_panic(expected = "cpu pinning is not available on this platform")]
+    #[should_panic(expected = "failed to pin task to cpu")]
     fn test_tokio_spawn_pinned() {
         let executor = tokio::Runner::default();
         test_spawn_pinned(executor);
