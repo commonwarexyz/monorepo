@@ -228,7 +228,7 @@ where
 
     let current_db = db::Db {
         any,
-        status: crate::qmdb::current::batch::BitmapBatch::Base(Arc::new(status)),
+        status: Arc::new(crate::qmdb::current::batch::SharedBitmap::new(status)),
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
