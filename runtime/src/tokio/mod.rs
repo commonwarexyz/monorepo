@@ -22,6 +22,7 @@
 //! });
 //! ```
 
+mod dedicated;
 mod runtime;
 pub use runtime::*;
 pub mod telemetry;

@@ -1,3 +1,4 @@
+use super::dedicated::DedicatedExecutor;
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
@@ -500,7 +501,7 @@ impl crate::Runner for Runner {
             tree: Tree::root(),
             execution: Execution::default(),
             traced: false,
-            on_dedicated_thread: false,
+            dedicated: None,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -540,7 +541,7 @@ pub struct Context {
     tree: Arc<Tree>,
     execution: Execution,
     traced: bool,
-    on_dedicated_thread: bool,
+    dedicated: Option<Arc<DedicatedExecutor>>,
 }
 
 impl Clone for Context {
@@ -558,7 +559,7 @@ impl Clone for Context {
             tree: child,
             execution: Execution::default(),
             traced: false,
-            on_dedicated_thread: self.on_dedicated_thread,
+            dedicated: self.dedicated.clone(),
         }
     }
 }
@@ -599,16 +600,28 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         let traced = self.traced;
+        let inherited_dedicated = self.dedicated.clone();
         self.execution = Execution::default();
         self.traced = false;
-
-        // The child runs on a dedicated thread if it is spawned as dedicated
-        // (new thread) or colocated onto an existing dedicated thread.
-        let parent_on_dedicated = self.on_dedicated_thread;
-        self.on_dedicated_thread = match past {
-            Execution::Dedicated => true,
-            Execution::Colocated if parent_on_dedicated => true,
-            _ => false,
+        let child_dedicated = match past {
+            // Dedicated creates a new execution domain for the spawned child.
+            Execution::Dedicated => Some(DedicatedExecutor::start(
+                self.executor.runtime.handle().clone(),
+                self.executor.thread_stack_size,
+            )),
+            // Colocated reuses the closest dedicated ancestor already encoded
+            // in the context lineage. The ancestor must still be running.
+            Execution::Colocated => {
+                let dedicated = inherited_dedicated
+                    .expect("`colocated()` requires a running dedicated ancestor");
+                assert!(
+                    dedicated.is_running(),
+                    "`colocated()` requires a running dedicated ancestor"
+                );
+                Some(dedicated)
+            }
+            // Shared breaks the dedicated assignment for descendants.
+            Execution::Shared(_) => None,
         };
 
         let (child, aborted) = Tree::child(&parent);
@@ -616,6 +629,7 @@ impl crate::Spawner for Context {
             return Handle::closed(metric);
         }
         self.tree = child;
+        self.dedicated = child_dedicated.clone();
 
         // Spawn the task
         let executor = self.executor.clone();
@@ -636,16 +650,13 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            utils::thread::spawn(executor.thread_stack_size, {
-                // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
-                move || {
-                    let local = tokio::task::LocalSet::new();
-                    handle.block_on(local.run_until(f));
-                }
-            });
-        } else if matches!(past, Execution::Colocated) && parent_on_dedicated {
-            tokio::task::spawn_local(f);
+            child_dedicated
+                .expect("dedicated executor missing")
+                .spawn_root(f);
+        } else if matches!(past, Execution::Colocated) {
+            child_dedicated
+                .expect("dedicated executor missing")
+                .spawn(f);
         } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime

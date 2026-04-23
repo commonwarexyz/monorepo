@@ -180,10 +180,15 @@ stability_scope!(BETA {
         fn dedicated(self) -> Self;
 
         /// Return a [`Spawner`] that co-locates the next spawned task on the same thread
-        /// as its dedicated ancestor.
+        /// as the closest dedicated ancestor already assigned to this context lineage.
         ///
-        /// If the current context is not running inside a [`Spawner::dedicated`] task,
-        /// the task falls back to the shared executor.
+        /// [`Spawner::shared`] clears that assignment for descendants, and
+        /// [`Spawner::dedicated`] creates a new one for the spawned child.
+        ///
+        /// This configuration only applies to the next [`Spawner::spawn`] call.
+        /// It does not refer to a future dedicated child that has not been
+        /// spawned yet. If no running dedicated ancestor is assigned when
+        /// [`Spawner::spawn`] is called, the runtime panics.
         fn colocated(self) -> Self;
 
         /// Spawn a task with the current context.
@@ -214,8 +219,19 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
-        /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
+        /// Context lineage and spawn configuration are resolved at different times:
+        ///
+        /// - [`Clone::clone`] and [`Metrics::with_label`] eagerly create a new child context node and
+        ///   preserve any execution domain that is already assigned to the lineage.
+        /// - [`Spawner::dedicated`], [`Spawner::shared`], and [`Spawner::colocated`] only label the next
+        ///   spawn edge.
+        /// - [`Spawner::spawn`] materializes the child task, creates the child context passed to the
+        ///   closure, and resolves that pending execution label into the child's assigned execution domain.
+        ///
+        /// Because of that, cloning a context or providing one via [`Spawner::spawn`] preserves the
+        /// resolved execution domain already attached to the lineage, but resets any pending
+        /// configuration made via [`Spawner::dedicated`], [`Spawner::shared`], or
+        /// [`Spawner::colocated`].
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
@@ -889,6 +905,7 @@ mod tests {
     use std::{
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        panic::{catch_unwind, AssertUnwindSafe},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -1741,7 +1758,8 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            // Colocated child from a dedicated parent
+            // A dedicated parent assigns a dedicated execution domain to its
+            // child context, so a colocated child should resolve successfully.
             let handle = context.dedicated().spawn(|context| async move {
                 let handle = context.colocated().spawn(|_| async move { 42 });
                 handle.await.unwrap()
@@ -1755,7 +1773,8 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            // Colocated grandchild inherits dedicated ancestor
+            // Colocation is inherited through further colocated descendants as
+            // long as the lineage is not reset by `shared()` or `dedicated()`.
             let handle = context.dedicated().spawn(|context| async move {
                 let handle = context.colocated().spawn(|context| async move {
                     let handle = context.colocated().spawn(|_| async move { 7 });
@@ -1767,14 +1786,42 @@ mod tests {
         });
     }
 
-    fn test_spawn_colocated_fallback<R: Runner>(runner: R)
+    fn test_spawn_colocated_without_dedicated_ancestor_panics<R: Runner>(runner: R)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            // Colocated without a dedicated ancestor falls back to shared
-            let handle = context.colocated().spawn(|_| async move { 99 });
-            assert!(matches!(handle.await, Ok(99)));
+            // A root context has no assigned dedicated execution domain, so
+            // `colocated()` must reject the spawn immediately.
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                drop(context.colocated().spawn(|_| async move { 99 }));
+            }));
+            assert!(panic.is_err());
+        });
+    }
+
+    fn test_spawn_colocated_shared_breaks_assignment<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            // `shared()` clears the dedicated assignment for descendants, so a
+            // later colocated spawn from that branch must panic instead of
+            // walking back to an older dedicated ancestor.
+            let handle = context.dedicated().spawn(|context| async move {
+                let panic = context
+                    .shared(false)
+                    .spawn(|context| async move {
+                        catch_unwind(AssertUnwindSafe(|| {
+                            drop(context.colocated().spawn(|_| async move { 1 }));
+                        }))
+                        .is_err()
+                    })
+                    .await
+                    .unwrap();
+                assert!(panic);
+            });
+            assert!(handle.await.is_ok());
         });
     }
 
@@ -1796,6 +1843,32 @@ mod tests {
             assert!(parent_handle.await.is_ok());
             let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
+        });
+    }
+
+    fn test_spawn_colocated_stale_clone_after_ancestor_exit_panics<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let stale = Arc::new(Mutex::new(None));
+            let stale2 = stale.clone();
+
+            // Clone a context while the dedicated ancestor is still running so
+            // the clone inherits that assignment.
+            let handle = context.dedicated().spawn(move |context| async move {
+                *stale2.lock() = Some(context.clone());
+            });
+            assert!(handle.await.is_ok());
+
+            // Once the dedicated ancestor exits, the inherited assignment is
+            // stale and colocated spawns must panic instead of silently
+            // reviving the old dedicated branch.
+            let stale = stale.lock().take().unwrap();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                drop(stale.colocated().spawn(|_| async move { 5 }));
+            }));
+            assert!(panic.is_err());
         });
     }
 
@@ -3627,15 +3700,27 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_colocated_fallback() {
+    fn test_deterministic_spawn_colocated_without_dedicated_ancestor_panics() {
         let executor = deterministic::Runner::default();
-        test_spawn_colocated_fallback(executor);
+        test_spawn_colocated_without_dedicated_ancestor_panics(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_colocated_shared_breaks_assignment() {
+        let executor = deterministic::Runner::default();
+        test_spawn_colocated_shared_breaks_assignment(executor);
     }
 
     #[test]
     fn test_deterministic_spawn_colocated_abort_on_parent_completion() {
         let executor = deterministic::Runner::default();
         test_spawn_colocated_abort_on_parent_completion(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_colocated_stale_clone_after_ancestor_exit_panics() {
+        let executor = deterministic::Runner::default();
+        test_spawn_colocated_stale_clone_after_ancestor_exit_panics(executor);
     }
 
     #[test]
@@ -4000,9 +4085,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_colocated_fallback() {
+    fn test_tokio_spawn_colocated_without_dedicated_ancestor_panics() {
         let executor = tokio::Runner::default();
-        test_spawn_colocated_fallback(executor);
+        test_spawn_colocated_without_dedicated_ancestor_panics(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_colocated_shared_breaks_assignment() {
+        let executor = tokio::Runner::default();
+        test_spawn_colocated_shared_breaks_assignment(executor);
     }
 
     #[test]
@@ -4012,149 +4103,197 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_colocated_same_thread() {
-        // Verify that a colocated child runs on the same OS thread as its
-        // dedicated parent.
+    fn test_tokio_spawn_colocated_stale_clone_after_ancestor_exit_panics() {
+        let executor = tokio::Runner::default();
+        test_spawn_colocated_stale_clone_after_ancestor_exit_panics(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_colocated_full_assignment_tree() {
+        // Exercise the full assignment tree:
+        //
+        // - root colocated panics
+        // - dedicated -> colocated stays on thread 1
+        // - dedicated -> dedicated creates thread 2
+        // - dedicated -> shared clears the assignment
+        // - shared -> dedicated creates thread 3
+        // - shared -> colocated panics
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            // Without any dedicated ancestor in the lineage, the root cannot
+            // place a colocated child anywhere.
+            let root_panic = catch_unwind(AssertUnwindSafe(|| {
+                drop(
+                    context
+                        .clone()
+                        .colocated()
+                        .spawn(|_| async move { std::thread::current().id() }),
+                );
+            }));
+            assert!(root_panic.is_err());
+
             let handle = context.dedicated().spawn(|context| async move {
-                let parent_thread = std::thread::current().id();
-                let child_thread = context
+                let thread1 = std::thread::current().id();
+
+                // A colocated child from the dedicated root stays on thread 1.
+                let thread1_colocated = context
+                    .clone()
                     .colocated()
                     .spawn(|_| async move { std::thread::current().id() })
                     .await
                     .unwrap();
-                assert_eq!(parent_thread, child_thread);
-            });
-            handle.await.unwrap();
-        });
-    }
+                assert_eq!(thread1, thread1_colocated);
 
-    #[test]
-    fn test_tokio_spawn_colocated_nested_same_thread() {
-        // Verify that colocation chains: dedicated -> colocated -> colocated
-        // all stay on the same OS thread.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let handle = context.dedicated().spawn(|context| async move {
-                let root_thread = std::thread::current().id();
-
-                // Colocated child spawns another colocated grandchild
-                let grandchild_thread = context
-                    .colocated()
+                // A nested dedicated child creates thread 2, and colocated
+                // descendants inside that branch stay on thread 2.
+                let (thread2, thread2_colocated, thread2_nested) = context
+                    .clone()
+                    .dedicated()
                     .spawn(|context| async move {
-                        context
+                        let thread2 = std::thread::current().id();
+                        let (thread2_colocated, thread2_nested) = context
                             .colocated()
-                            .spawn(|_| async move { std::thread::current().id() })
-                            .await
-                            .unwrap()
-                    })
-                    .await
-                    .unwrap();
-
-                // All three levels share the same thread
-                assert_eq!(root_thread, grandchild_thread);
-            });
-            handle.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_tokio_spawn_colocated_new_dedicated_new_thread() {
-        // Verify that a dedicated child from a colocated context starts a new
-        // thread with its own colocation chain.
-        //
-        // dedicated (thread A)
-        //   +-- colocated (thread A)
-        //         +-- dedicated (thread B, new chain)
-        //               +-- colocated (thread B)
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let handle = context.dedicated().spawn(|context| async move {
-                let thread_a = std::thread::current().id();
-
-                let (thread_b_dedicated, thread_b_colocated) = context
-                    .colocated()
-                    .spawn(|context| async move {
-                        // New dedicated child starts on a different thread
-                        context
-                            .dedicated()
                             .spawn(|context| async move {
-                                let thread_b = std::thread::current().id();
-                                // Colocated from the new dedicated thread
-                                let colocated_thread = context
+                                let thread2_colocated = std::thread::current().id();
+                                let thread2_nested = context
                                     .colocated()
                                     .spawn(|_| async move { std::thread::current().id() })
                                     .await
                                     .unwrap();
-                                (thread_b, colocated_thread)
+                                (thread2_colocated, thread2_nested)
                             })
                             .await
-                            .unwrap()
+                            .unwrap();
+                        (thread2, thread2_colocated, thread2_nested)
                     })
                     .await
                     .unwrap();
+                assert_ne!(thread1, thread2);
+                assert_eq!(thread2, thread2_colocated);
+                assert_eq!(thread2, thread2_nested);
 
-                // New dedicated child is on a different thread
-                assert_ne!(thread_a, thread_b_dedicated);
-                // Its colocated child stays on that new thread
-                assert_eq!(thread_b_dedicated, thread_b_colocated);
+                // Returning to the original dedicated branch still targets
+                // thread 1. A shared hop then clears that assignment, so only a
+                // new dedicated child may reintroduce colocation.
+                let (thread1_again, shared_thread, thread3, thread3_colocated, shared_panic) =
+                    context
+                        .clone()
+                        .colocated()
+                        .spawn(|context| async move {
+                            let thread1_again = std::thread::current().id();
+                            let (shared_thread, thread3, thread3_colocated, shared_panic) = context
+                                .shared(false)
+                                .spawn(|context| async move {
+                                    let shared_thread = std::thread::current().id();
+                                    let (thread3, thread3_colocated) = context
+                                        .clone()
+                                        .dedicated()
+                                        .spawn(|context| async move {
+                                            let thread3 = std::thread::current().id();
+                                            let thread3_colocated = context
+                                                .colocated()
+                                                .spawn(
+                                                    |_| async move { std::thread::current().id() },
+                                                )
+                                                .await
+                                                .unwrap();
+                                            (thread3, thread3_colocated)
+                                        })
+                                        .await
+                                        .unwrap();
+
+                                    let shared_panic = catch_unwind(AssertUnwindSafe(|| {
+                                        drop(context.colocated().spawn(|_| async move { 0usize }));
+                                    }))
+                                    .is_err();
+
+                                    (shared_thread, thread3, thread3_colocated, shared_panic)
+                                })
+                                .await
+                                .unwrap();
+                            (
+                                thread1_again,
+                                shared_thread,
+                                thread3,
+                                thread3_colocated,
+                                shared_panic,
+                            )
+                        })
+                        .await
+                        .unwrap();
+                assert_eq!(thread1, thread1_again);
+                assert_ne!(thread1, shared_thread);
+                assert_ne!(thread1, thread3);
+                assert_eq!(thread3, thread3_colocated);
+                assert!(shared_panic);
             });
             handle.await.unwrap();
         });
     }
 
     #[test]
-    fn test_tokio_spawn_colocated_fallback_different_thread() {
-        // Verify that colocated without a dedicated ancestor falls back to the
-        // shared pool. The root task runs on the block_on thread (not a worker
-        // thread), so the spawned task is guaranteed to be on a different thread.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let root_thread = std::thread::current().id();
-            let child_thread = context
-                .colocated()
-                .spawn(|_| async move { std::thread::current().id() })
-                .await
-                .unwrap();
-            assert_ne!(root_thread, child_thread);
-        });
-    }
-
-    #[test]
-    fn test_tokio_spawn_colocated_breaks_on_shared() {
-        // Verify that a shared spawn breaks the colocation chain: a colocated
-        // grandchild spawned from a shared child must NOT land back on the
-        // dedicated thread.
-        //
-        // dedicated (thread A)
-        //   +-- shared child (thread B, leaves dedicated)
-        //         +-- colocated grandchild (no dedicated ancestor, stays on shared)
+    fn test_tokio_spawn_colocated_before_dedicated_child_starts_targets_new_thread() {
+        // The dedicated child context receives its new assignment before the
+        // closure returns, so a colocated spawn made during construction must
+        // already target that new dedicated thread.
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             let handle = context.dedicated().spawn(|context| async move {
-                let dedicated_thread = std::thread::current().id();
+                let thread1 = std::thread::current().id();
 
-                // Shared child leaves the dedicated thread
-                let (shared_thread, grandchild_thread) = context
-                    .clone()
-                    .spawn(|context| async move {
-                        // Colocated from here has no dedicated ancestor
-                        let grandchild_thread = context
+                let (thread2, thread2_colocated) = context
+                    .dedicated()
+                    .spawn(|context| {
+                        // This call happens on thread 1, before the new
+                        // dedicated child has started running.
+                        let child = context
                             .colocated()
-                            .spawn(|_| async move { std::thread::current().id() })
-                            .await
-                            .unwrap();
-                        (std::thread::current().id(), grandchild_thread)
+                            .spawn(|_| async move { std::thread::current().id() });
+
+                        async move {
+                            let thread2 = std::thread::current().id();
+                            let thread2_colocated = child.await.unwrap();
+                            (thread2, thread2_colocated)
+                        }
                     })
                     .await
                     .unwrap();
 
-                // Shared child is not on the dedicated thread
-                assert_ne!(dedicated_thread, shared_thread);
-                // Colocated grandchild did not return to the dedicated thread
-                assert_ne!(dedicated_thread, grandchild_thread);
+                assert_ne!(thread1, thread2);
+                assert_eq!(thread2, thread2_colocated);
             });
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_tokio_spawn_colocated_cloned_context_on_root_thread_targets_dedicated_ancestor() {
+        // Moving a context clone back to the root thread must still target the
+        // stored dedicated ancestor rather than whatever thread happens to call
+        // `spawn`.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let (clone_tx, clone_rx) = oneshot::channel();
+            let (done_tx, done_rx) = oneshot::channel();
+
+            let handle = context.dedicated().spawn(move |context| async move {
+                let dedicated_thread = std::thread::current().id();
+
+                // Hand a clone back to the root thread while the dedicated
+                // ancestor remains alive so the clone can spawn against it.
+                assert!(clone_tx.send((context.clone(), dedicated_thread)).is_ok());
+                done_rx.await.unwrap();
+            });
+
+            let (clone, dedicated_thread) = clone_rx.await.unwrap();
+            let child_thread = clone
+                .colocated()
+                .spawn(|_| async move { std::thread::current().id() })
+                .await
+                .unwrap();
+            assert_eq!(dedicated_thread, child_thread);
+
+            done_tx.send(()).unwrap();
             handle.await.unwrap();
         });
     }

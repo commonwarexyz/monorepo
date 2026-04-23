@@ -9,7 +9,8 @@ pub struct Label {
     name: String,
     /// The type of task (root, async, or blocking).
     kind: Kind,
-    /// Whether the task runs on a dedicated thread or the shared runtime.
+    /// Whether the task runs on a shared executor, a dedicated thread, or is
+    /// colocated with a dedicated ancestor.
     execution: Execution,
 }
 
@@ -66,7 +67,6 @@ pub enum Execution {
     SharedBlocking,
     /// Task runs on a dedicated thread.
     Dedicated,
-    /// Task is co-located on the same thread as its dedicated ancestor. Falls
-    /// back to the shared runtime if the ancestor is not dedicated.
+    /// Task is co-located on the same thread as its dedicated ancestor.
     Colocated,
 }

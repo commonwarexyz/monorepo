@@ -170,6 +170,11 @@ impl Tree {
         }
     }
 
+    /// Returns whether this node has already been aborted.
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.inner.lock().aborted
+    }
+
     /// Drops a strong ancestry chain iteratively to avoid recursive `Arc`
     /// teardown.
     fn drop_ancestry(parent: Arc<Self>) {
