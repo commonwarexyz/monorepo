@@ -214,8 +214,7 @@ where
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
         self.participants.put(participant.clone(), next);
-        let performance = self.performance.get_or_create_by(participant);
-        let _ = performance.try_set(next);
+        let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
     /// Get eligible peers for a key in priority order.

@@ -171,8 +171,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_success();
         }
         record.connect();
-        let connected = self.metrics.connected.get_or_create_by(peer);
-        let _ = connected.try_set(self.context.current().epoch_millis());
+        let _ = self
+            .metrics
+            .connected
+            .get_or_create_by(peer)
+            .try_set(self.context.current().epoch_millis());
 
         // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
@@ -354,8 +357,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         let blocked_until = self.context.current() + self.block_duration;
         self.blocked.put(peer.clone(), blocked_until);
-        let blocked = self.metrics.blocked.get_or_create_by(peer);
-        let _ = blocked.try_set(blocked_until.epoch_millis());
+        let _ = self
+            .metrics
+            .blocked
+            .get_or_create_by(peer)
+            .try_set(blocked_until.epoch_millis());
     }
 
     // ---------- Getters ----------
