@@ -77,7 +77,9 @@ use std::{
 pub mod any;
 pub mod current;
 pub mod immutable;
+pub mod immutable_unjournaled;
 pub mod keyless;
+pub mod keyless_unjournaled;
 pub mod p2p;
 
 mod sync_metrics;
