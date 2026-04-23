@@ -583,11 +583,11 @@ impl<
         >,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
-            // The height may already be confirmed; continue silently if so.
+            // The height may already be confirmed; continue silently if so
             return Ok(());
         };
 
-        // Get our signature.
+        // Get our signature
         let scheme = self.scheme(self.epoch)?;
         let Some(signer) = scheme.me() else {
             return Err(Error::NotSigner(self.epoch));
@@ -600,11 +600,11 @@ impl<
             None => self.sign_ack(height, *digest).await?,
         };
 
-        // Reinsert the height with a new deadline.
+        // Reinsert the height with a new deadline
         self.rebroadcast_deadlines
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
-        // Broadcast the ack to all peers.
+        // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
     }
 
