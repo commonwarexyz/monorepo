@@ -80,6 +80,7 @@ impl TlcMapper {
 /// the rest are the trajectory after running each accepted action.
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct ExecuteResponse {
+    #[serde(default)]
     pub states: Vec<String>,
     pub keys: Vec<i64>,
     #[serde(default)]
@@ -94,13 +95,24 @@ pub struct ExecuteResponse {
 pub struct TlcClient {
     client: reqwest::blocking::Client,
     url: String,
+    compact_url: String,
 }
+
+/// Per-request timeout for `/execute*` calls. Long traces with a large
+/// `max_view` scope can keep `tlc2.TLCServer.simulate` busy; this is a
+/// hard upper bound so a stuck request eventually fails instead of
+/// blocking the watcher forever.
+const DEFAULT_TLC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 impl TlcClient {
     pub fn new(url: &str) -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(DEFAULT_TLC_REQUEST_TIMEOUT)
+                .build()
+                .expect("build TLC HTTP client"),
             url: url.to_string(),
+            compact_url: compact_execute_url(url),
         }
     }
 
@@ -115,16 +127,43 @@ impl TlcClient {
     /// the parallel `keys[i]` fingerprint list. Callers that need the
     /// rejection signal must use this (see [`accepted_action_count`]).
     pub fn execute_full(&self, actions: &[Value]) -> Result<ExecuteResponse, reqwest::Error> {
+        self.execute_response(&self.url, actions)
+    }
+
+    /// Posts the action list to the compact `/execute_keys` endpoint and
+    /// returns only the fields needed by `tlc_watch` (keys plus counters).
+    pub fn execute_compact_full(
+        &self,
+        actions: &[Value],
+    ) -> Result<ExecuteResponse, reqwest::Error> {
+        self.execute_response(&self.compact_url, actions)
+    }
+
+    fn execute_response(
+        &self,
+        url: &str,
+        actions: &[Value],
+    ) -> Result<ExecuteResponse, reqwest::Error> {
         let body = serde_json::to_string(actions).expect("serialize actions");
         let response: ExecuteResponse = self
             .client
-            .post(&self.url)
+            .post(url)
             .header("Content-Type", "application/json")
             .body(body)
             .send()?
             .error_for_status()?
             .json()?;
         Ok(response)
+    }
+}
+
+fn compact_execute_url(url: &str) -> String {
+    if let Some(prefix) = url.strip_suffix("/execute") {
+        format!("{prefix}/execute_keys")
+    } else if url.ends_with("/execute_keys") {
+        url.to_string()
+    } else {
+        format!("{}/execute_keys", url.trim_end_matches('/'))
     }
 }
 

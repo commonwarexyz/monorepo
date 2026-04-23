@@ -10,6 +10,9 @@ TLC_TLA_LIB=${TLC_TLA_LIB:-"$QUINT_DIR/tla"}
 TLC_JAR=${TLC_JAR:-"$QUINT_DIR/tlc-controlled/dist/tla2tools_server.jar"}
 TLC_PORT=${TLC_PORT:-2023}
 TLC_MAPPER=${TLC_MAPPER:-simplex}
+TLC_JAVA_HEAP=${TLC_JAVA_HEAP:-8g}
+TLC_JAVA_STACK=${TLC_JAVA_STACK:-64m}
+TLC_DIAG_DIR=${TLC_DIAG_DIR:-"$QUINT_DIR/tlc-diagnostics"}
 TLA_MAX_VIEW=${TLA_MAX_VIEW:-64}
 TLA_MAX_PAYLOADS=${TLA_MAX_PAYLOADS:-$TLA_MAX_VIEW}
 TLA_EPOCH=${TLA_EPOCH:-0}
@@ -33,6 +36,9 @@ usage() {
     echo "  TLC_JAR        (default: $TLC_JAR)"
     echo "  TLC_PORT       (default: $TLC_PORT)"
     echo "  TLC_MAPPER     (default: $TLC_MAPPER)"
+    echo "  TLC_JAVA_HEAP  (default: $TLC_JAVA_HEAP)"
+    echo "  TLC_JAVA_STACK (default: $TLC_JAVA_STACK)"
+    echo "  TLC_DIAG_DIR   (default: $TLC_DIAG_DIR)"
     echo "  TLA_MAX_VIEW   (default: $TLA_MAX_VIEW)"
     echo "  TLA_MAX_PAYLOADS (default: $TLA_MAX_PAYLOADS)"
     echo "  TLA_EPOCH      (default: $TLA_EPOCH)"
@@ -215,8 +221,12 @@ run() {
     # -Xss64m: Quint compiles variant matches and let-bindings into deeply
     # nested TLA+ LET-INs; TLC recurses one JVM frame per sub-expression.
     # -Xmx4g: large state spaces need more heap than the JVM default.
+    mkdir -p "$TLC_DIAG_DIR"
     cd "$TLC_BUILD_DIR" && exec java \
-        -Xss64m -Xmx4g \
+        "-Xss$TLC_JAVA_STACK" "-Xmx$TLC_JAVA_HEAP" \
+        -XX:+HeapDumpOnOutOfMemoryError \
+        "-XX:HeapDumpPath=$TLC_DIAG_DIR" \
+        "-XX:ErrorFile=$TLC_DIAG_DIR/hs_err_pid%p.log" \
         "-DTLA-Library=$TLC_TLA_LIB" \
         -cp "$TLC_JAR" \
         tlc2.TLCServer \

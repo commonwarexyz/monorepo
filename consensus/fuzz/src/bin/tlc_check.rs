@@ -185,7 +185,7 @@ fn spawn_server() -> Result<(ServerGuard, String), String> {
         .arg("run")
         .env("TLC_PORT", port.to_string())
         .current_dir(&quint_dir)
-        .stdout(Stdio::null())
+        .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("spawn scripts/tlc.sh run: {e}"))?;

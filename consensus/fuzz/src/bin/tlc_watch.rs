@@ -208,15 +208,72 @@ fn process_trace(
 
     match process_trace_inner(config, client, keys_path, fingerprints, path, hash, &json) {
         Ok(()) => Ok(()),
-        Err(err) => {
-            // Anything past the file read is deterministic (parse, mapper,
-            // TLC, or local write failure). Archive the JSON plus the error
-            // and mark seen so the same trace doesn't spam every poll tick.
-            archive_errored(config, hash, &json, &err);
-            let _ = mark_seen(config, hash, &format!("errored: {err}"));
-            Err(err)
+        Err(ProcessTraceError::Transient(msg)) => Err(msg),
+        Err(ProcessTraceError::Permanent(msg)) => {
+            // Parse, mapper, non-transient TLC, or local write failure.
+            // Archive the JSON plus the error and mark seen so the same
+            // trace doesn't spam every poll tick.
+            archive_errored(config, hash, &json, &msg);
+            let _ = mark_seen(config, hash, &format!("errored: {msg}"));
+            Err(msg)
         }
     }
+}
+
+enum ProcessTraceError {
+    /// Retry on the next tick; do not archive or mark seen.
+    Transient(String),
+    /// Archive and mark seen; don't retry this trace.
+    Permanent(String),
+}
+
+/// Classify a reqwest error surfaced by `TlcClient::execute_*`. Only
+/// connection-level failures (server unreachable, timeout, closed mid-
+/// handshake) are transient; HTTP 4xx/5xx and body-decode failures mean
+/// the server rejected the trace and won't succeed on a retry.
+///
+/// The formatted message walks the error's `source()` chain so we capture
+/// the hyper/h2 cause (e.g. `ConnectionReset`, `BrokenPipe`) instead of
+/// just reqwest's top-level `error sending request` summary.
+fn classify_reqwest_error(err: &reqwest::Error) -> ProcessTraceError {
+    use std::error::Error;
+    let mut msg = format!("tlc execute failed: {err}");
+    let mut source: Option<&(dyn Error + 'static)> = err.source();
+    while let Some(cause) = source {
+        use std::fmt::Write;
+        let _ = write!(msg, " | caused by: {cause}");
+        source = cause.source();
+    }
+    if err.is_connect() {
+        ProcessTraceError::Transient(msg)
+    } else {
+        // `is_timeout()` lands here intentionally: if TLC consumed the
+        // full per-request budget without responding, resubmitting the
+        // same trace will just consume another budget, so archive and
+        // move on instead of retrying.
+        ProcessTraceError::Permanent(msg)
+    }
+}
+
+fn execute_tlc_with_retries(
+    client: &TlcClient,
+    actions: &[serde_json::Value],
+) -> Result<commonware_consensus_fuzz::tlc::ExecuteResponse, reqwest::Error> {
+    const MAX_ATTEMPTS: usize = 2;
+    const RETRY_DELAY_MS: u64 = 250;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match client.execute_compact_full(actions) {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                if attempt == MAX_ATTEMPTS || !err.is_connect() {
+                    return Err(err);
+                }
+                thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+            }
+        }
+    }
+    unreachable!("retry loop exits via return")
 }
 
 fn process_trace_inner(
@@ -227,22 +284,21 @@ fn process_trace_inner(
     path: &Path,
     hash: &str,
     json: &str,
-) -> Result<(), String> {
-    let trace: TraceData =
-        serde_json::from_str(json).map_err(|e| format!("parse trace JSON: {e}"))?;
+) -> Result<(), ProcessTraceError> {
+    let trace: TraceData = serde_json::from_str(json)
+        .map_err(|e| ProcessTraceError::Permanent(format!("parse trace JSON: {e}")))?;
     let actions = TlcMapper::map_trace(&trace);
     let sent = non_reset_action_count(&actions);
     if actions.is_empty() {
-        archive_rejected(config, hash, json)?;
-        reject(config, hash, "empty action list")?;
-        mark_seen(config, hash, "rejected: empty action list")?;
+        archive_rejected(config, hash, json).map_err(ProcessTraceError::Permanent)?;
+        reject(config, hash, "empty action list").map_err(ProcessTraceError::Permanent)?;
+        mark_seen(config, hash, "rejected: empty action list")
+            .map_err(ProcessTraceError::Permanent)?;
         println!("[tlc-watch] skip {hash}: empty action list");
         return Ok(());
     }
 
-    let response = client
-        .execute_full(&actions)
-        .map_err(|e| format!("tlc execute failed: {e}"))?;
+    let response = execute_tlc_with_retries(client, &actions).map_err(|e| classify_reqwest_error(&e))?;
     let accepted = accepted_action_count(&response);
 
     // Follow the ModelFuzz paper (arXiv:2410.02307): the feedback signal is
@@ -261,9 +317,10 @@ fn process_trace_inner(
             "no new TLC states: sent={sent} accepted={accepted} keys={}",
             response.keys.len()
         );
-        archive_rejected(config, hash, json)?;
-        reject(config, hash, &reason)?;
-        mark_seen(config, hash, &format!("rejected: {reason}"))?;
+        archive_rejected(config, hash, json).map_err(ProcessTraceError::Permanent)?;
+        reject(config, hash, &reason).map_err(ProcessTraceError::Permanent)?;
+        mark_seen(config, hash, &format!("rejected: {reason}"))
+            .map_err(ProcessTraceError::Permanent)?;
         println!("[tlc-watch] skip {hash}: {reason}");
         return Ok(());
     }
@@ -273,24 +330,33 @@ fn process_trace_inner(
         Ok(bytes) => bytes,
         Err(e) => {
             let reason = format!("missing corpus bytes {}: {e}", bytes_path.display());
-            archive_rejected(config, hash, json)?;
-            reject(config, hash, &reason)?;
-            mark_seen(config, hash, &format!("rejected: {reason}"))?;
+            archive_rejected(config, hash, json).map_err(ProcessTraceError::Permanent)?;
+            reject(config, hash, &reason).map_err(ProcessTraceError::Permanent)?;
+            mark_seen(config, hash, &format!("rejected: {reason}"))
+                .map_err(ProcessTraceError::Permanent)?;
             println!("[tlc-watch] skip {hash}: {reason}");
             return Ok(());
         }
     };
     let corpus_path = config.approved_dir.join(hash);
-    fs::write(&corpus_path, &corpus_bytes)
-        .map_err(|e| format!("write approved corpus {}: {e}", corpus_path.display()))?;
+    fs::write(&corpus_path, &corpus_bytes).map_err(|e| {
+        ProcessTraceError::Permanent(format!(
+            "write approved corpus {}: {e}",
+            corpus_path.display()
+        ))
+    })?;
     let trace_copy_path = accepted_traces_dir(config).join(format!("{hash}.json"));
-    fs::write(&trace_copy_path, json)
-        .map_err(|e| format!("write approved trace {}: {e}", trace_copy_path.display()))?;
+    fs::write(&trace_copy_path, json).map_err(|e| {
+        ProcessTraceError::Permanent(format!(
+            "write approved trace {}: {e}",
+            trace_copy_path.display()
+        ))
+    })?;
 
     for key in &new_keys {
         fingerprints.insert(*key);
     }
-    append_fingerprints(keys_path, &new_keys)?;
+    append_fingerprints(keys_path, &new_keys).map_err(ProcessTraceError::Permanent)?;
     mark_seen(
         config,
         hash,
@@ -299,7 +365,8 @@ fn process_trace_inner(
             response.keys.len(),
             new_keys.len()
         ),
-    )?;
+    )
+    .map_err(ProcessTraceError::Permanent)?;
     println!(
         "[tlc-watch] accept {hash}: sent={sent} accepted={accepted} keys={} new={} -> {}",
         response.keys.len(),
