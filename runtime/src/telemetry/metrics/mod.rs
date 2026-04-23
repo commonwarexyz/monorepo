@@ -182,7 +182,6 @@ pub fn add_attribute(
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 /// Count the number of running tasks whose name starts with the given prefix.
 ///
 /// This function encodes metrics and counts tasks that are currently running
@@ -223,6 +222,7 @@ pub fn add_attribute(
 ///     assert_eq!(count, 0, "worker task should be stopped");
 /// });
 /// ```
+#[cfg(any(test, feature = "test-utils"))]
 pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize {
     let encoded = metrics.encode();
     encoded
