@@ -335,6 +335,7 @@ pub use commonware_macros_impl::test_group;
 /// }
 /// ```
 pub use commonware_macros_impl::test_traced;
+pub use commonware_macros_impl::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 
 #[doc(hidden)]
 #[cfg(feature = "std")]

@@ -1,6 +1,9 @@
 //! Process metrics collection.
 
-use crate::{metrics::raw::Gauge, utils::MetricScope};
+use crate::{
+    metrics::{self, raw::Gauge},
+    utils::MetricScope,
+};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -57,8 +60,8 @@ impl Metrics {
 
         // If the process exists, update the metrics
         if let Some(process) = self.system.process(self.pid) {
-            let _ = self.rss.try_set(process.memory());
-            let _ = self.virtual_memory.try_set(process.virtual_memory());
+            let _ = metrics::try_set(&self.rss, process.memory());
+            let _ = metrics::try_set(&self.virtual_memory, process.virtual_memory());
         }
     }
 

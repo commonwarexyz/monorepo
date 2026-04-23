@@ -2,10 +2,10 @@
 
 use crate::metrics::{
     encoding::{
-        text::{encode_descriptor, encode_eof, encode_metric_samples},
+        text::{encode, encode_eof},
         EncodeMetric, MetricEncoder as PromMetricEncoder,
     },
-    Metric, MetricType,
+    Metric, MetricType, Unit,
 };
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
@@ -73,6 +73,47 @@ pub async fn reschedule() {
     }
 
     Reschedule { yielded: false }.await
+}
+
+fn encode_descriptor<W>(
+    writer: &mut W,
+    name: &str,
+    help: &str,
+    unit: Option<&Unit>,
+    metric_type: MetricType,
+) -> Result<(), std::fmt::Error>
+where
+    W: std::fmt::Write,
+{
+    writer.write_str("# HELP ")?;
+    writer.write_str(name)?;
+    if let Some(unit) = unit {
+        writer.write_str("_")?;
+        writer.write_str(unit.as_str())?;
+    }
+    writer.write_str(" ")?;
+    writer.write_str(help)?;
+    writer.write_str("\n# TYPE ")?;
+    writer.write_str(name)?;
+    if let Some(unit) = unit {
+        writer.write_str("_")?;
+        writer.write_str(unit.as_str())?;
+    }
+    writer.write_str(" ")?;
+    writer.write_str(metric_type.as_str())?;
+    writer.write_str("\n")?;
+
+    if let Some(unit) = unit {
+        writer.write_str("# UNIT ")?;
+        writer.write_str(name)?;
+        writer.write_str("_")?;
+        writer.write_str(unit.as_str())?;
+        writer.write_str(" ")?;
+        writer.write_str(unit.as_str())?;
+        writer.write_str("\n")?;
+    }
+
+    Ok(())
 }
 
 fn extract_panic_message(err: &(dyn Any + Send)) -> String {
@@ -342,6 +383,56 @@ impl<M> Registered<M> {
     }
 }
 
+#[cfg(target_has_atomic = "64")]
+impl Registered<crate::metrics::raw::Gauge> {
+    pub fn try_set<T: TryInto<i64>>(&self, value: T) -> Result<i64, T::Error> {
+        crate::metrics::try_set(self.metric(), value)
+    }
+
+    pub fn try_set_max<T: TryInto<i64> + Copy>(&self, value: T) -> Result<i64, T::Error> {
+        crate::metrics::try_set_max(self.metric(), value)
+    }
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+impl Registered<crate::metrics::raw::Gauge> {
+    pub fn try_set<T: TryInto<i32>>(&self, value: T) -> Result<i32, T::Error> {
+        crate::metrics::try_set(self.metric(), value)
+    }
+
+    pub fn try_set_max<T: TryInto<i32> + Copy>(&self, value: T) -> Result<i32, T::Error> {
+        crate::metrics::try_set_max(self.metric(), value)
+    }
+}
+
+impl Registered<crate::metrics::raw::Histogram> {
+    pub fn observe_between(&self, start: std::time::SystemTime, end: std::time::SystemTime) {
+        crate::metrics::observe_between(self.metric(), start, end);
+    }
+}
+
+impl<S, M, C> Registered<crate::metrics::raw::Family<S, M, C>>
+where
+    S: Clone + std::hash::Hash + Eq,
+    C: crate::metrics::family::MetricConstructor<M>,
+{
+    pub fn get_or_create_by<Q>(&self, label_set: &Q) -> impl Deref<Target = M> + '_
+    where
+        for<'a> S: From<&'a Q>,
+    {
+        let label_set = S::from(label_set);
+        self.get_or_create(&label_set)
+    }
+
+    pub fn remove_by<Q>(&self, label_set: &Q) -> bool
+    where
+        for<'a> S: From<&'a Q>,
+    {
+        let label_set = S::from(label_set);
+        self.remove(&label_set)
+    }
+}
+
 impl<M> Deref for Registered<M> {
     type Target = M;
 
@@ -359,6 +450,9 @@ impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
 }
 
 type MetricKey = (String, Vec<(Cow<'static, str>, Cow<'static, str>)>);
+type SampleEncoder = dyn Fn(&mut String, &str, &[(Cow<'static, str>, Cow<'static, str>)]) -> Result<(), std::fmt::Error>
+    + Send
+    + Sync;
 
 pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
 
@@ -378,11 +472,31 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     }
 }
 
-#[derive(Debug)]
+fn create_sample_encoder<M>(metric: Arc<M>) -> Box<SampleEncoder>
+where
+    M: Metric,
+{
+    Box::new(move |samples, name, labels| {
+        let mut registry = crate::metrics::registry::Registry::with_labels(labels.iter().cloned());
+        registry.register(name, "", SharedMetric(metric.clone()));
+
+        let mut encoded = String::new();
+        encode(&mut encoded, &registry).expect("encoding temporary metric registry failed");
+        for line in encoded.lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            samples.push_str(line);
+            samples.push('\n');
+        }
+        Ok(())
+    })
+}
+
 struct MetricEntry {
     family_name: String,
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
-    metric: Box<dyn Metric>,
+    encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
     registration: Option<Weak<dyn RegistrationGuard>>,
     family_index: usize,
@@ -442,13 +556,18 @@ impl Registry {
         }
     }
 
-    fn insert_metric(
+    fn insert_metric<M>(
         &mut self,
         name: String,
         help: String,
         attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
-        metric: impl Metric,
-    ) -> u64 {
+        metric: M,
+    ) -> u64
+    where
+        M: Metric,
+    {
+        let metric = Arc::new(metric);
+        let encode_samples = create_sample_encoder(metric.clone());
         // Match upstream prometheus-client's `Descriptor::new` normalization,
         // which unconditionally appends `.` to the help text.
         let help = help + ".";
@@ -460,7 +579,8 @@ impl Registry {
                 name
             );
             assert_eq!(
-                family.metric_type, metric_type,
+                family.metric_type.as_str(),
+                metric_type.as_str(),
                 "metric family `{}` registered with inconsistent metric type",
                 name
             );
@@ -490,8 +610,8 @@ impl Registry {
         self.metric_slot_mut(id).replace(MetricEntry {
             family_name: name,
             attributes,
-            metric: Box::new(metric),
-            metric_any: Arc::new(()),
+            encode_samples,
+            metric_any: metric,
             registration: None,
             family_index,
         });
@@ -517,6 +637,7 @@ impl Registry {
         // which unconditionally appends `.` to the help text.
         let help = help + ".";
         let metric_type = metric.metric_type();
+        let encode_samples = create_sample_encoder(metric.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
@@ -552,7 +673,8 @@ impl Registry {
                 name
             );
             assert_eq!(
-                family.metric_type, metric_type,
+                family.metric_type.as_str(),
+                metric_type.as_str(),
                 "metric family `{}` registered with inconsistent metric type",
                 name
             );
@@ -581,7 +703,7 @@ impl Registry {
         self.metric_slot_mut(id).replace(MetricEntry {
             family_name: name,
             attributes,
-            metric: Box::new(SharedMetric(metric.clone())),
+            encode_samples,
             metric_any,
             registration: Some(registration.downgrade()),
             family_index,
@@ -690,14 +812,8 @@ impl Registry {
             samples.clear();
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
-                encode_metric_samples(
-                    &mut samples,
-                    name,
-                    &metric.attributes,
-                    None,
-                    metric.metric.as_ref(),
-                )
-                .expect("encoding live metric samples failed");
+                (metric.encode_samples)(&mut samples, name, &metric.attributes)
+                    .expect("encoding live metric samples failed");
             }
             // Suppress the HELP/TYPE descriptor when the family produced no
             // samples (e.g. a `Family<S, M>` with no child entries). Matches

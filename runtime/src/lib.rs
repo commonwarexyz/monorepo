@@ -72,11 +72,19 @@ stability_scope!(BETA {
     /// field types on metrics structs. Use [`metrics::raw`] when constructing a
     /// metric to pass to [`Metrics::register`].
     pub mod metrics {
+        pub use commonware_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
         pub use prometheus_client::{collector, encoding, registry};
-
-        pub use prometheus_client::encoding::*;
         pub use prometheus_client::metrics::*;
         pub use prometheus_client::registry::*;
+        pub use prometheus_client::encoding::{
+            CounterValueEncoder, DescriptorEncoder, EncodeCounterValue, EncodeExemplarTime,
+            EncodeExemplarValue, EncodeGaugeValue, EncodeLabel, EncodeLabelKey, EncodeMetric,
+            ExemplarValueEncoder, GaugeValueEncoder, LabelEncoder, LabelKeyEncoder,
+            LabelSetEncoder, LabelValueEncoder, MetricEncoder, NoLabelSet,
+        };
+        pub use prometheus_client::encoding::EncodeLabelSet as EncodeLabelSetTrait;
+        pub use prometheus_client::encoding::EncodeLabelValue as EncodeLabelValueTrait;
+        use std::{sync::atomic::Ordering, time::SystemTime};
 
         /// Underlying Prometheus metric types. Used when constructing a metric
         /// to pass to [`crate::Metrics::register`](super::Metrics::register).
@@ -97,6 +105,54 @@ stability_scope!(BETA {
         pub type CounterFamily<L> = crate::Registered<raw::Family<L, raw::Counter>>;
         /// A registered family of gauges keyed by `L`.
         pub type GaugeFamily<L> = crate::Registered<raw::Family<L, raw::Gauge>>;
+
+        /// Set a gauge from a lossless integer conversion.
+        #[cfg(target_has_atomic = "64")]
+        pub fn try_set<T>(gauge: &raw::Gauge, value: T) -> Result<i64, T::Error>
+        where
+            T: TryInto<i64>,
+        {
+            let value = value.try_into()?;
+            Ok(gauge.set(value))
+        }
+
+        /// Set a gauge from a lossless integer conversion.
+        #[cfg(not(target_has_atomic = "64"))]
+        pub fn try_set<T>(gauge: &raw::Gauge, value: T) -> Result<i32, T::Error>
+        where
+            T: TryInto<i32>,
+        {
+            let value = value.try_into()?;
+            Ok(gauge.set(value))
+        }
+
+        /// Atomically raise a gauge to at least the provided value.
+        #[cfg(target_has_atomic = "64")]
+        pub fn try_set_max<T>(gauge: &raw::Gauge, value: T) -> Result<i64, T::Error>
+        where
+            T: TryInto<i64> + Copy,
+        {
+            let value = value.try_into()?;
+            Ok(gauge.inner().fetch_max(value, Ordering::Relaxed))
+        }
+
+        /// Atomically raise a gauge to at least the provided value.
+        #[cfg(not(target_has_atomic = "64"))]
+        pub fn try_set_max<T>(gauge: &raw::Gauge, value: T) -> Result<i32, T::Error>
+        where
+            T: TryInto<i32> + Copy,
+        {
+            let value = value.try_into()?;
+            Ok(gauge.inner().fetch_max(value, Ordering::Relaxed))
+        }
+
+        /// Observe the duration between two points in time, in seconds.
+        pub fn observe_between(histogram: &raw::Histogram, start: SystemTime, end: SystemTime) {
+            let duration = end
+                .duration_since(start)
+                .map_or(0.0, |duration| duration.as_secs_f64());
+            histogram.observe(duration);
+        }
     }
 
     pub mod iobuf;
@@ -918,7 +974,8 @@ mod tests {
     use crate::{
         metrics::{
             raw::{Counter, Family},
-            EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, LabelSetEncoder,
+            EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
+            EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
         },
         telemetry::traces::collector::TraceStorage,
     };

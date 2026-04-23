@@ -503,10 +503,11 @@ where
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
-                    let _ = self
-                        .latest_vote
-                        .get_or_create_by(&sender)
-                        .try_set_max(view.get());
+                        {
+                            let latest_vote = self.latest_vote.get_or_create_by(&sender);
+                            let _ =
+                                commonware_runtime::metrics::try_set_max(&latest_vote, view.get());
+                        }
 
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local

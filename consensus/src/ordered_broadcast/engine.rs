@@ -650,11 +650,16 @@ impl<
         // If a higher height than the previous tip...
         if is_new {
             // Update metrics for sequencer height
-            let _ = self
-                .metrics
-                .sequencer_heights
-                .get_or_create_by(&node.chunk.sequencer)
-                .try_set(node.chunk.height.get());
+            {
+                let sequencer_height = self
+                    .metrics
+                    .sequencer_heights
+                    .get_or_create_by(&node.chunk.sequencer);
+                let _ = commonware_runtime::metrics::try_set(
+                    &sequencer_height,
+                    node.chunk.height.get(),
+                );
+            }
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
