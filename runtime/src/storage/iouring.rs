@@ -23,8 +23,8 @@
 use super::Header;
 use crate::{
     iouring::{self},
-    utils::{self, MetricScope},
-    Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    telemetry::metrics::MetricScope,
+    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};

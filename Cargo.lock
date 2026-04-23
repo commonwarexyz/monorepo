@@ -1622,6 +1622,7 @@ version = "2026.4.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
+ "prometheus-client",
  "quote",
  "syn",
 ]
