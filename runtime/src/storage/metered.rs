@@ -185,16 +185,15 @@ mod tests {
         Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
 
-    fn test_pool() -> BufferPool {
-        let mut registry = crate::telemetry::metrics::Registry::new();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry.scope())
+    fn test_pool(scope: &mut crate::telemetry::metrics::MetricScope<'_>) -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry.scope());
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry_with_prefix("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry_with_prefix("storage"));
 
         run_storage_tests(storage).await;
     }
@@ -203,8 +202,8 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry.scope());
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry_with_prefix("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry_with_prefix("storage"));
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -259,8 +258,8 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry.scope());
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry_with_prefix("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry_with_prefix("storage"));
 
         // Open multiple blobs
         let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
@@ -300,8 +299,8 @@ mod tests {
     #[tokio::test]
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut registry.scope());
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry_with_prefix("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry_with_prefix("storage"));
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
