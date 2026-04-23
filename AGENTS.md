@@ -328,16 +328,17 @@ let executor = deterministic::Runner::timed(Duration::from_secs(30));
 
 ```rust
 // Test unclean shutdowns and recovery
-let mut prev_ctx = None;
+let mut prev_checkpoint = None;
 loop {
-    let (complete, context) = if let Some(prev_ctx) = prev_ctx {
-        deterministic::Runner::from(prev_ctx) // Resume from previous state
-    } else {
-        deterministic::Runner::timed(Duration::from_secs(30))
-    }.start(f);
+    let (complete, checkpoint) = prev_checkpoint
+        .map_or_else(
+            || deterministic::Runner::timed(Duration::from_secs(30)),
+            deterministic::Runner::from,
+        )
+        .start_and_recover(f);
 
     if complete { break; }
-    prev_ctx = Some(context.recover()); // Save state for next iteration
+    prev_checkpoint = Some(checkpoint); // Save state for next iteration
 }
 ```
 
@@ -392,13 +393,14 @@ fn separated(n: usize, a: usize, b: usize) -> bool {
 }
 link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await;
 
-// Update links dynamically
+// Update links dynamically (remove then add with new config)
 let degraded_link = Link {
     latency: Duration::from_secs(3), // Simulate slow network
     jitter: Duration::from_millis(0),
     success_rate: 1.0,
 };
-oracle.update_link(pk1, pk2, degraded_link).await.unwrap();
+oracle.remove_link(pk1, pk2).await.unwrap();
+oracle.add_link(pk1, pk2, degraded_link).await.unwrap();
 
 // Test with lossy networks
 let lossy_link = Link {
