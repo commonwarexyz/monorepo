@@ -17,7 +17,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    metrics::{Counter, CounterFamily, GaugeFamily, Histogram},
+    metrics::{Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram},
     spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
@@ -503,11 +503,7 @@ where
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
-                        {
-                            let latest_vote = self.latest_vote.get_or_create_by(&sender);
-                            let _ =
-                                commonware_runtime::metrics::try_set_max(&latest_vote, view.get());
-                        }
+                    let _ = self.latest_vote.get_or_create_by(&sender).try_set_max(view.get());
 
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local

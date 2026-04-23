@@ -421,6 +421,14 @@ where
     S: Clone + std::hash::Hash + Eq,
     C: crate::metrics::family::MetricConstructor<M>,
 {
+    pub fn get_by<Q>(&self, label_set: &Q) -> Option<impl Deref<Target = M> + '_>
+    where
+        for<'a> S: From<&'a Q>,
+    {
+        let label_set = S::from(label_set);
+        self.get(&label_set)
+    }
+
     pub fn get_or_create_by<Q>(&self, label_set: &Q) -> impl Deref<Target = M> + '_
     where
         for<'a> S: From<&'a Q>,

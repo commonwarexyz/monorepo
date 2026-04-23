@@ -106,6 +106,80 @@ stability_scope!(BETA {
         /// A registered family of gauges keyed by `L`.
         pub type GaugeFamily<L> = crate::Registered<raw::Family<L, raw::Gauge>>;
 
+        /// Convenience methods for Prometheus gauges.
+        #[cfg(target_has_atomic = "64")]
+        pub trait GaugeExt {
+            /// Set a gauge from a lossless integer conversion.
+            fn try_set<T>(&self, value: T) -> Result<i64, T::Error>
+            where
+                T: TryInto<i64>;
+
+            /// Atomically raise a gauge to at least the provided value.
+            fn try_set_max<T>(&self, value: T) -> Result<i64, T::Error>
+            where
+                T: TryInto<i64> + Copy;
+        }
+
+        #[cfg(target_has_atomic = "64")]
+        impl GaugeExt for raw::Gauge {
+            fn try_set<T>(&self, value: T) -> Result<i64, T::Error>
+            where
+                T: TryInto<i64>,
+            {
+                try_set(self, value)
+            }
+
+            fn try_set_max<T>(&self, value: T) -> Result<i64, T::Error>
+            where
+                T: TryInto<i64> + Copy,
+            {
+                try_set_max(self, value)
+            }
+        }
+
+        /// Convenience methods for Prometheus gauges.
+        #[cfg(not(target_has_atomic = "64"))]
+        pub trait GaugeExt {
+            /// Set a gauge from a lossless integer conversion.
+            fn try_set<T>(&self, value: T) -> Result<i32, T::Error>
+            where
+                T: TryInto<i32>;
+
+            /// Atomically raise a gauge to at least the provided value.
+            fn try_set_max<T>(&self, value: T) -> Result<i32, T::Error>
+            where
+                T: TryInto<i32> + Copy;
+        }
+
+        #[cfg(not(target_has_atomic = "64"))]
+        impl GaugeExt for raw::Gauge {
+            fn try_set<T>(&self, value: T) -> Result<i32, T::Error>
+            where
+                T: TryInto<i32>,
+            {
+                try_set(self, value)
+            }
+
+            fn try_set_max<T>(&self, value: T) -> Result<i32, T::Error>
+            where
+                T: TryInto<i32> + Copy,
+            {
+                try_set_max(self, value)
+            }
+        }
+
+        /// Convenience methods for Prometheus histograms.
+        pub trait HistogramExt {
+            /// Observe the duration between two points in time, in seconds.
+            fn observe_between(&self, start: SystemTime, end: SystemTime);
+        }
+
+        impl HistogramExt for raw::Histogram {
+            fn observe_between(&self, start: SystemTime, end: SystemTime) {
+                observe_between(self, start, end);
+            }
+        }
+
         /// Set a gauge from a lossless integer conversion.
         #[cfg(target_has_atomic = "64")]
         pub fn try_set<T>(gauge: &raw::Gauge, value: T) -> Result<i64, T::Error>

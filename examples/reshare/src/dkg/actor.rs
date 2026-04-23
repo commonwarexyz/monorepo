@@ -28,7 +28,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, GaugeFamily},
+    metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily},
     spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
@@ -376,14 +376,10 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            {
-                                                let latest_share =
-                                                    self.latest_share.get_or_create_by(&sender_pk);
-                                                let _ = commonware_runtime::metrics::try_set_max(
-                                                    &latest_share,
-                                                    epoch.get(),
-                                                );
-                                            }
+                                            let _ = self
+                                                .latest_share
+                                                .get_or_create_by(&sender_pk)
+                                                .try_set_max(epoch.get());
 
                                             let payload =
                                                 Message::<V, C::PublicKey>::Ack(ack).encode();
@@ -406,14 +402,10 @@ where
                                             .handle(&mut storage, epoch, sender_pk.clone(), ack)
                                             .await;
                                         if added {
-                                            {
-                                                let latest_ack =
-                                                    self.latest_ack.get_or_create_by(&sender_pk);
-                                                let _ = commonware_runtime::metrics::try_set_max(
-                                                    &latest_ack,
-                                                    epoch.get(),
-                                                );
-                                            }
+                                            let _ = self
+                                                .latest_ack
+                                                .get_or_create_by(&sender_pk)
+                                                .try_set_max(epoch.get());
                                         }
                                     }
                                 }

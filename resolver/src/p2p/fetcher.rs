@@ -2,7 +2,7 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{EncodeStruct, GaugeFamily, Histogram},
+    metrics::{EncodeStruct, GaugeExt, GaugeFamily, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, CounterExt, Status},
@@ -215,7 +215,7 @@ where
         let next = past.saturating_add(elapsed.as_millis()) / 2;
         self.participants.put(participant.clone(), next);
         let performance = self.performance.get_or_create_by(participant);
-        let _ = commonware_runtime::metrics::try_set(&performance, next);
+        let _ = performance.try_set(next);
     }
 
     /// Get eligible peers for a key in priority order.
