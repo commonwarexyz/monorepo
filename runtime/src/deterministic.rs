@@ -54,7 +54,7 @@ use crate::{
     },
     telemetry::metrics::{
         add_attribute,
-        raw::{Counter, Family, Gauge},
+        raw, Counter, CounterFamily, GaugeFamily,
         task::Label,
         validate_label, Metric, Register, Registered, Registry,
     },
@@ -64,7 +64,7 @@ use crate::{
         Panicker,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
-    Panicked, Spawner as _, METRICS_PREFIX,
+    child_label, prefixed_name, Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -108,48 +108,35 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 #[derive(Debug)]
 struct Metrics {
     iterations: Counter,
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
-    task_polls: Family<Label, Counter>,
-
-    network_bandwidth: Counter,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
+    task_polls: CounterFamily<Label>,
 }
 
 impl Metrics {
     pub fn init(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            iterations: Counter::default(),
-            task_polls: Family::default(),
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-            network_bandwidth: Counter::default(),
-        };
-        registry.register(
-            "iterations",
-            "Total number of iterations",
-            metrics.iterations.clone(),
-        );
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "task_polls",
-            "Total number of task polls",
-            metrics.task_polls.clone(),
-        );
-        registry.register(
-            "bandwidth",
-            "Total amount of data sent over network",
-            metrics.network_bandwidth.clone(),
-        );
-        metrics
+        Self {
+            iterations: registry.register(
+                "iterations",
+                "Total number of iterations",
+                raw::Counter::default(),
+            ),
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+            task_polls: registry.register(
+                "task_polls",
+                "Total number of task polls",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -1240,24 +1227,8 @@ impl crate::Metrics for Context {
     }
 
     fn with_label(&self, label: &str) -> Self {
-        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
-        validate_label(label);
-
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
-        assert!(
-            !name.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
         Self {
-            name,
+            name: child_label(&self.name, label),
             ..self.clone()
         }
     }
@@ -1302,20 +1273,12 @@ impl crate::Metrics for Context {
                 hasher.update(v.as_bytes());
             }
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
         let metric = Arc::new(metric);
         {
             let mut registry = executor.registry.lock();
-            registry.register_external(
+            registry.register(
                 Arc::downgrade(&executor.registry),
-                prefixed_name,
+                prefixed_name(&self.name, &name),
                 help,
                 self.attributes.clone(),
                 metric,

@@ -149,7 +149,7 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
-    telemetry::metrics::{raw::Gauge, Register},
+    telemetry::metrics::{raw, Gauge, Register},
     Error, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{
@@ -204,15 +204,13 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            pending_operations: Gauge::default(),
-        };
-        registry.register(
-            "pending_operations",
-            "Number of active logical requests in the io_uring loop",
-            metrics.pending_operations.clone(),
-        );
-        metrics
+        Self {
+            pending_operations: registry.register(
+                "pending_operations",
+                "Number of active logical requests in the io_uring loop",
+                raw::Gauge::default(),
+            ),
+        }
     }
 }
 

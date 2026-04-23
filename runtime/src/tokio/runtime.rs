@@ -18,13 +18,13 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
         add_attribute,
-        raw::{Counter, Family, Gauge},
+        raw, CounterFamily, GaugeFamily,
         task::Label,
         Metric, Register, Registered, Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    child_label, prefixed_name, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -61,27 +61,24 @@ cfg_if::cfg_if! {
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
 }
 
 impl Metrics {
     pub fn init(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-        };
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        metrics
+        Self {
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -692,21 +689,8 @@ impl crate::Metrics for Context {
     }
 
     fn with_label(&self, label: &str) -> Self {
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
-        assert!(
-            !name.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
         Self {
-            name,
+            name: child_label(&self.name, label),
             ..self.clone()
         }
     }
@@ -735,20 +719,12 @@ impl crate::Metrics for Context {
     ) -> Registered<M> {
         let name = name.into();
         let help = help.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
         let metric = Arc::new(metric);
         {
             let mut registry = self.executor.registry.lock();
-            registry.register_external(
+            registry.register(
                 Arc::downgrade(&self.executor.registry),
-                prefixed_name,
+                prefixed_name(&self.name, &name),
                 help,
                 self.attributes.clone(),
                 metric,
