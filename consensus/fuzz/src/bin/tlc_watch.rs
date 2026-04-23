@@ -314,8 +314,9 @@ fn process_trace_inner(
         .collect();
     if new_keys.is_empty() {
         let reason = format!(
-            "no new TLC states: sent={sent} accepted={accepted} keys={}",
-            response.keys.len()
+            "no new TLC states: sent={sent} accepted={accepted} keys={} total={}",
+            response.keys.len(),
+            fingerprints.len()
         );
         archive_rejected(config, hash, json).map_err(ProcessTraceError::Permanent)?;
         reject(config, hash, &reason).map_err(ProcessTraceError::Permanent)?;
@@ -357,18 +358,19 @@ fn process_trace_inner(
         fingerprints.insert(*key);
     }
     append_fingerprints(keys_path, &new_keys).map_err(ProcessTraceError::Permanent)?;
+    let total = fingerprints.len();
     mark_seen(
         config,
         hash,
         &format!(
-            "accepted: sent={sent} accepted={accepted} keys={} new={}",
+            "accepted: sent={sent} accepted={accepted} keys={} new={} total={total}",
             response.keys.len(),
             new_keys.len()
         ),
     )
     .map_err(ProcessTraceError::Permanent)?;
     println!(
-        "[tlc-watch] accept {hash}: sent={sent} accepted={accepted} keys={} new={} -> {}",
+        "[tlc-watch] accept {hash}: sent={sent} accepted={accepted} keys={} new={} total={total} -> {}",
         response.keys.len(),
         new_keys.len(),
         corpus_path.display()
