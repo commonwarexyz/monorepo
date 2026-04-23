@@ -789,6 +789,72 @@ where
         }
         db.get(key).await
     }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U>,
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local mutations.
+            if let Some(value) = self.mutations.get(*key) {
+                results.push(value.clone());
+                continue;
+            }
+
+            // Check parent diff chain.
+            let mut found = false;
+            if let Some(parent) = self.base.parent() {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(entry.value().cloned());
+                    found = true;
+                }
+                if !found {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(entry.value().cloned());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // Unordered-specific methods.
@@ -1348,6 +1414,65 @@ where
             }
         }
         db.get(key).await
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I, H>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U>,
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local diff.
+            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+                results.push(entry.value().cloned());
+                continue;
+            }
+
+            // Walk parent chain.
+            let mut found = false;
+            for batch in self.ancestors() {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                    results.push(entry.value().cloned());
+                    found = true;
+                    break;
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value;
+            }
+        }
+
+        Ok(results)
     }
 }
 
@@ -2384,6 +2509,88 @@ mod tests {
                 "root depended on pending-vs-committed parent path \
                  when re-creating a deleted key with collision siblings"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn get_many_resolves_mutation_parent_and_db() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("get-many-basic", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let key_db = colliding_digest(0x40, 0);
+            let val_db = colliding_digest(0x40, 1);
+            let key_parent = colliding_digest(0x41, 0);
+            let val_parent = colliding_digest(0x41, 1);
+            let key_batch = colliding_digest(0x42, 0);
+            let val_batch = colliding_digest(0x42, 1);
+            let key_missing = colliding_digest(0x43, 0);
+
+            // Commit one key to disk.
+            let seed = db
+                .new_batch()
+                .write(key_db, Some(val_db))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // DB-level get_many.
+            let results = db.get_many(&[&key_db, &key_missing]).await.unwrap();
+            assert_eq!(results, vec![Some(val_db), None]);
+
+            // Unmerkleized batch: mutation + DB fallthrough.
+            let batch = db.new_batch().write(key_batch, Some(val_batch));
+            let results = batch
+                .get_many(&[&key_batch, &key_db, &key_missing], &db)
+                .await
+                .unwrap();
+            assert_eq!(results, vec![Some(val_batch), Some(val_db), None]);
+
+            // Merkleized parent + child unmerkleized batch.
+            let parent = db
+                .new_batch()
+                .write(key_parent, Some(val_parent))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key_batch, Some(val_batch));
+            let results = child
+                .get_many(&[&key_batch, &key_parent, &key_db, &key_missing], &db)
+                .await
+                .unwrap();
+            assert_eq!(
+                results,
+                vec![Some(val_batch), Some(val_parent), Some(val_db), None]
+            );
+
+            // Merkleized batch get_many.
+            let results = parent
+                .get_many(&[&key_parent, &key_db, &key_missing], &db)
+                .await
+                .unwrap();
+            assert_eq!(results, vec![Some(val_parent), Some(val_db), None]);
+
+            // Empty input.
+            let results: Vec<Option<sha256::Digest>> =
+                db.get_many(&([] as [&sha256::Digest; 0])).await.unwrap();
+            assert!(results.is_empty());
 
             db.destroy().await.unwrap();
         });

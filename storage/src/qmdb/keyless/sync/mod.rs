@@ -13,7 +13,6 @@ use crate::{
         self,
         any::value::ValueEncoding,
         keyless::{operation::Codec, Keyless, Operation},
-        operation::Committable as _,
         sync,
     },
     Context, Persistable,
@@ -27,15 +26,15 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<V>>
+    C: Mutable<Item = Operation<F, V>>
         + Persistable<Error = JournalError>
-        + sync::Journal<F, Context = E, Op = Operation<V>>,
+        + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     C::Config: Clone + Send,
     H: Hasher,
-    Operation<V>: EncodeShared,
+    Operation<F, V>: EncodeShared,
 {
     type Family = F;
-    type Op = Operation<V>;
+    type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
     type Config = super::Config<C::Config>;
@@ -86,7 +85,7 @@ where
         )
         .await?;
 
-        let last_commit_loc = {
+        let (last_commit_loc, inactivity_floor_loc) = {
             let reader = journal.reader().await;
             let loc = reader
                 .bounds()
@@ -94,13 +93,16 @@ where
                 .checked_sub(1)
                 .expect("journal should not be empty");
             let op = reader.read(loc).await?;
-            assert!(op.is_commit(), "last operation should be a commit");
-            Location::new(loc)
+            let floor = op
+                .has_floor()
+                .expect("last operation should be a commit with floor");
+            (Location::new(loc), floor)
         };
 
         let db = Self {
             journal,
             last_commit_loc,
+            inactivity_floor_loc,
         };
 
         db.sync().await?;

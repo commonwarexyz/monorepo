@@ -389,6 +389,22 @@ where
         self.inner.get(key, &db.any).await
     }
 
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I>(
+        &self,
+        keys: &[&K],
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.inner.get_many(keys, &db.any).await
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
@@ -434,6 +450,22 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         self.inner.get(key, &db.any).await
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I>(
+        &self,
+        keys: &[&K],
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.inner.get_many(keys, &db.any).await
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
@@ -922,6 +954,23 @@ where
         H: Hasher<Digest = D>,
     {
         self.inner.get(key, &db.any).await
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I, H>(
+        &self,
+        keys: &[&U::Key],
+        db: &super::db::Db<F, E, C, I, H, U, N>,
+    ) -> Result<Vec<Option<U::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_many(keys, &db.any).await
     }
 }
 

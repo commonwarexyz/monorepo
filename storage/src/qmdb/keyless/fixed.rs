@@ -19,13 +19,13 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for fixed-size values.
-pub type Operation<V> = BaseOperation<FixedEncoding<V>>;
+pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 
 /// A keyless authenticated database for fixed-size data.
 pub type Db<F, E, V, H> =
-    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<V>>, H>;
+    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H>;
 
-type Journal<F, E, V, H> = authenticated::Journal<F, E, fixed::Journal<E, Operation<V>>, H>;
+type Journal<F, E, V, H> = authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H>;
 
 /// Configuration for a fixed-size [keyless](super) authenticated db.
 pub type Config = super::Config<JournalConfig>;
@@ -35,7 +35,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher> Db<F, E,
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error<F>> {
         let journal: Journal<F, E, V, H> =
-            Journal::new(context, cfg.merkle, cfg.log, Operation::<V>::is_commit).await?;
+            Journal::new(context, cfg.merkle, cfg.log, Operation::<F, V>::is_commit).await?;
         Self::init_from_journal(journal).await
     }
 }
@@ -81,7 +81,14 @@ mod test {
     type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
 
     async fn open_db<F: crate::merkle::Family>(context: deterministic::Context) -> TestDb<F> {
-        let cfg = db_config("partition", &context);
+        open_db_with_suffix("partition", context).await
+    }
+
+    async fn open_db_with_suffix<F: crate::merkle::Family>(
+        suffix: &str,
+        context: deterministic::Context,
+    ) -> TestDb<F> {
+        let cfg = db_config(suffix, &context);
         TestDb::init(context, cfg).await.unwrap()
     }
 
@@ -219,6 +226,14 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    fn test_keyless_fixed_get_many() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_get_many(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_keyless_fixed_batch_chained() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
@@ -327,6 +342,96 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
             tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_tracking() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_floor_tracking(ctx, db, reopen::<mmr::Family>()).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_regression_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_beyond_commit_loc_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_restores_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_rewind_restores_floor(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_changes_root() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db_a = open_db_with_suffix::<mmr::Family>("root-a", ctx.with_label("a")).await;
+            let db_b = open_db_with_suffix::<mmr::Family>("root-b", ctx.with_label("b")).await;
+            tests::test_keyless_db_floor_changes_root(db_a, db_b).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_at_commit_loc_accepted() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_at_commit_loc_accepted(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_after_reopen_with_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmr::Family>())
+                .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_regression_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_chained_apply_with_valid_floors_succeeds() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_chained_apply_with_valid_floors_succeeds(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_single_commit_live_set() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -573,6 +678,96 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_tracking_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_floor_tracking(ctx, db, reopen::<mmb::Family>()).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_regression_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_beyond_commit_loc_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_restores_floor_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_rewind_restores_floor(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_changes_root_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db_a = open_db_with_suffix::<mmb::Family>("root-a", ctx.with_label("a")).await;
+            let db_b = open_db_with_suffix::<mmb::Family>("root-b", ctx.with_label("b")).await;
+            tests::test_keyless_db_floor_changes_root(db_a, db_b).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_floor_at_commit_loc_accepted_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_floor_at_commit_loc_accepted(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_rewind_after_reopen_with_floor_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_rewind_after_reopen_with_floor(ctx, db, reopen::<mmb::Family>())
+                .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_regression_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_ancestor_floor_beyond_commit_loc_rejected(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_chained_apply_with_valid_floors_succeeds_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
+            tests::test_keyless_db_chained_apply_with_valid_floors_succeeds(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_single_commit_live_set_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmb::Family>(ctx.with_label("db1")).await;
+            tests::test_keyless_db_single_commit_live_set(ctx, db, reopen::<mmb::Family>()).await;
+        });
+    }
+
     /// Smoke test: verify the sync engine works end-to-end with a fixed-size keyless database.
     /// The full sync test suite runs against the variable variant via the harness in
     /// [`super::super::sync::tests`]; this test covers the fixed-size code path.
@@ -596,7 +791,8 @@ mod test {
             for i in 0..20u64 {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
-            let merkleized = batch.merkleize(&target_db, None);
+            let floor = target_db.inactivity_floor_loc();
+            let merkleized = batch.merkleize(&target_db, None, floor);
             target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();

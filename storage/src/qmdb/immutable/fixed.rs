@@ -59,7 +59,7 @@ impl<
 mod tests {
     use super::*;
     use crate::{
-        merkle::{journaled::Config as MmrConfig, mmb, mmr},
+        merkle::{journaled::Config as MerkleConfig, mmb, mmr},
         qmdb::immutable::test,
         translator::TwoCap,
     };
@@ -76,7 +76,7 @@ mod tests {
     fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -409,6 +409,22 @@ mod tests {
                 open_small_sections::<mmr::Family>,
             )
             .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_get_many(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_fixed_get_many_unexpected_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_get_many_unexpected_data(ctx, open::<mmr::Family>).await;
         });
     }
 
