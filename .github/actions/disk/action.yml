@@ -82,27 +82,15 @@ runs:
         fi
         sysctl vm.swapusage || true
 
-    # Windows pagefile: disable auto-management and set a fixed 8G pagefile on D:.
-    - name: Configure swap (Windows)
+    # Windows manages the pagefile dynamically by default, and changing its size requires a
+    # reboot to take effect (not practical within a single job). Log the current state only.
+    - name: Log pagefile (Windows)
       shell: pwsh
       if: runner.os == 'Windows'
       run: |
         $ErrorActionPreference = 'Continue'
-        New-Item -ItemType Directory -Path 'D:\' -Force | Out-Null
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-        if ($cs.AutomaticManagedPagefile) {
-          Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
-        }
-        Get-CimInstance -ClassName Win32_PageFileSetting | ForEach-Object {
-          Remove-CimInstance -InputObject $_
-        }
-        New-CimInstance -ClassName Win32_PageFileSetting -Property @{
-          Name        = 'D:\pagefile.sys'
-          InitialSize = 8192
-          MaximumSize = 8192
-        } | Out-Null
-        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List *
-        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List *
+        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List Name, AllocatedBaseSize, CurrentUsage, PeakUsage
+        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
 
     - name: Show disk free (after)
       shell: bash
