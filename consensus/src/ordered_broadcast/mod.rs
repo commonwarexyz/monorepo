@@ -64,6 +64,8 @@ cfg_if::cfg_if! {
         mod metrics;
         mod tip_manager;
         use tip_manager::TipManager;
+        mod verifier;
+        use verifier::Verifier;
     }
 }
 
