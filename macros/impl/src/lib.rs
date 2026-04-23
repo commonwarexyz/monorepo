@@ -244,6 +244,13 @@ fn found_crate_path(found: FoundCrate) -> proc_macro2::TokenStream {
     }
 }
 
+// The upstream derive crate hardcodes `::prometheus_client::encoding` in the
+// generated impls:
+// https://github.com/prometheus/client_rust/blob/7844d8617926a6f29b772d195860cf118051d019/derive-encode/src/lib.rs#L14-L133
+//
+// Commonware resolves through `commonware-runtime::metrics::encoding` first so
+// downstream crates can derive metric labels without a direct
+// `prometheus-client` dependency.
 fn metrics_encoding_path() -> proc_macro2::TokenStream {
     if let Ok(found) = crate_name("commonware-runtime") {
         let runtime = found_crate_path(found);
@@ -256,6 +263,9 @@ fn metrics_encoding_path() -> proc_macro2::TokenStream {
     quote!(::prometheus_client::encoding)
 }
 
+// Adapted from client_rust's `EncodeLabelSet` derive and extended to support
+// Commonware's `EncodeStruct` variant.
+// https://github.com/prometheus/client_rust/blob/7844d8617926a6f29b772d195860cf118051d019/derive-encode/src/lib.rs#L14-L87
 #[proc_macro_derive(EncodeLabelSet, attributes(prometheus))]
 pub fn derive_encode_label_set(input: TokenStream) -> TokenStream {
     derive_label_set_impl(input, false)
@@ -381,6 +391,9 @@ fn derive_label_set_impl(input: TokenStream, display: bool) -> TokenStream {
     .into()
 }
 
+// Adapted from client_rust's `EncodeLabelValue` derive so the generated impls
+// resolve through `metrics_encoding_path()` instead of a hardcoded crate path.
+// https://github.com/prometheus/client_rust/blob/7844d8617926a6f29b772d195860cf118051d019/derive-encode/src/lib.rs#L90-L133
 #[proc_macro_derive(EncodeLabelValue)]
 pub fn derive_encode_label_value(input: TokenStream) -> TokenStream {
     let ast: DeriveInput = syn::parse(input).unwrap();
@@ -932,6 +945,8 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
     .into()
 }
 
+// Copied from client_rust's keyword table, which in turn cites Askama:
+// https://github.com/prometheus/client_rust/blob/7844d8617926a6f29b772d195860cf118051d019/derive-encode/src/lib.rs#L135-L184
 static KEYWORD_IDENTIFIERS: [(&str, &str); 49] = [
     ("as", "r#as"),
     ("break", "r#break"),

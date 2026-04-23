@@ -75,6 +75,11 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+// Adapted from client_rust's internal descriptor encoder:
+// https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L218-L275
+//
+// Commonware needs a local copy because upstream keeps this helper internal
+// while the runtime assembles metric samples independently.
 fn encode_descriptor<W>(
     writer: &mut W,
     name: &str,
