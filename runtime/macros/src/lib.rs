@@ -9,7 +9,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::quote;
-use syn::{DeriveInput, Ident};
+use syn::{parse_quote, DeriveInput, Ident};
 
 fn found_crate_path(found: FoundCrate) -> proc_macro2::TokenStream {
     match found {
@@ -129,6 +129,16 @@ fn derive_label_set_impl(input: TokenStream, display: bool) -> TokenStream {
         let field = &fields_vec[0];
         let field_ident = field.ident.as_ref().unwrap();
         let field_ty = &field.ty;
+        // Preserve the wrapper's own predicates and add `Clone` on the field type,
+        // so wrappers that write their bounds in a `where` clause (not inline)
+        // still get a well-formed `From<&T>` impl.
+        let mut from_generics = ast.generics.clone();
+        from_generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#field_ty: ::core::clone::Clone));
+        let (from_impl_generics, from_ty_generics, from_where_clause) =
+            from_generics.split_for_impl();
         quote! {
             impl #impl_generics ::core::borrow::Borrow<#field_ty> for #name #ty_generics #where_clause {
                 fn borrow(&self) -> &#field_ty {
@@ -136,10 +146,7 @@ fn derive_label_set_impl(input: TokenStream, display: bool) -> TokenStream {
                 }
             }
 
-            impl #impl_generics ::core::convert::From<&#field_ty> for #name #ty_generics
-            where
-                #field_ty: ::core::clone::Clone,
-            {
+            impl #from_impl_generics ::core::convert::From<&#field_ty> for #name #from_ty_generics #from_where_clause {
                 fn from(value: &#field_ty) -> Self {
                     Self { #field_ident: value.clone() }
                 }
