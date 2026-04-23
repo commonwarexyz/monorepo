@@ -14,7 +14,7 @@ pub(crate) mod task;
 /// Prefix for runtime metrics.
 pub(crate) const METRICS_PREFIX: &str = "runtime";
 
-pub use commonware_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
+pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 pub use prometheus_client::{
     collector, encoding,
     encoding::{

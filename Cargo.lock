@@ -1578,6 +1578,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-parallel",
+ "commonware-runtime-macros",
  "commonware-utils",
  "console-subscriber",
  "criterion",
@@ -1613,6 +1614,16 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "commonware-runtime-macros"
+version = "2026.4.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
