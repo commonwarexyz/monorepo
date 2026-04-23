@@ -802,7 +802,8 @@ mod tests {
         // since been re-cached at a different slot, the old index entry (pointing to the
         // live slot) must not be removed.
         let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let mut scope = registry.scope();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut scope);
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
