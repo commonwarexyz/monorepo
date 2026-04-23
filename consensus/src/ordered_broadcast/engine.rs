@@ -29,7 +29,6 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
@@ -37,7 +36,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
@@ -63,7 +62,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
+    E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics + Strategist,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -72,7 +71,6 @@ pub struct Engine<
     R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    T: Strategy,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -85,7 +83,6 @@ pub struct Engine<
     relay: R,
     monitor: M,
     reporter: Z,
-    strategy: T,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -201,7 +198,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
+        E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics + Strategist,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -210,11 +207,10 @@ impl<
         R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        T: Strategy,
-    > Engine<E, C, S, P, D, A, R, Z, M, T>
+    > Engine<E, C, S, P, D, A, R, Z, M>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -227,7 +223,6 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            strategy: cfg.strategy,
             chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
@@ -404,7 +399,7 @@ impl<
                         continue;
                     }
                 };
-                let result = match self.validate_node(&node, &sender) {
+                let result = match self.validate_node(&node, &sender).await {
                     Ok(result) => result,
                     Err(err) => {
                         debug!(?err, ?sender, "node validate failed");
@@ -453,7 +448,7 @@ impl<
                         continue;
                     }
                 };
-                if let Err(err) = self.validate_ack(&ack, &sender) {
+                if let Err(err) = self.validate_ack(&ack, &sender).await {
                     debug!(?err, ?sender, "ack validate failed");
                     continue;
                 };
@@ -627,10 +622,18 @@ impl<
         };
 
         // Add the vote. If a new certificate is formed, handle it.
-        if let Some(certificate) = self
-            .ack_manager
-            .add_ack(ack, scheme.as_ref(), &self.strategy)
-        {
+        let mut ack_manager = std::mem::replace(&mut self.ack_manager, AckManager::new());
+        let ack = ack.clone();
+        let ack_for_assembly = ack.clone();
+        let (ack_manager, certificate) = self
+            .context
+            .with_strategy(move |strategy| {
+                let certificate = ack_manager.add_ack(&ack_for_assembly, scheme.as_ref(), strategy);
+                (ack_manager, certificate)
+            })
+            .await;
+        self.ack_manager = ack_manager;
+        if let Some(certificate) = certificate {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
             self.handle_certificate(&ack.chunk, ack.epoch, certificate)
@@ -879,7 +882,7 @@ impl<
     /// If valid (and not already the tracked tip for the sender), returns the implied
     /// parent chunk and its certificate.
     /// Else returns an error if the `Node` is invalid.
-    fn validate_node(
+    async fn validate_node(
         &mut self,
         node: &Node<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
@@ -901,19 +904,22 @@ impl<
         self.validate_chunk(&node.chunk, self.epoch)?;
 
         // Verify the node
-        node.verify(
-            &mut self.context,
-            &self.chunk_verifier,
-            &self.validators_provider,
-            &self.strategy,
-        )
+        let node = node.clone();
+        let chunk_verifier = self.chunk_verifier.clone();
+        let validators_provider = self.validators_provider.clone();
+        let mut rng = self.context.clone();
+        self.context
+            .with_strategy(move |strategy| {
+                node.verify(&mut rng, &chunk_verifier, &validators_provider, strategy)
+            })
+            .await
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
+    async fn validate_ack(
         &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
@@ -963,7 +969,13 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
+        let ack = ack.clone();
+        let mut rng = self.context.clone();
+        let valid = self
+            .context
+            .with_strategy(move |strategy| ack.verify(&mut rng, scheme.as_ref(), strategy))
+            .await;
+        if !valid {
             return Err(Error::InvalidAckSignature);
         }
 

@@ -19,10 +19,9 @@ use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Sender,
 };
-use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
-    ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    ContextCell, Handle, Metrics, Network, Spawner, Storage, Strategist,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
@@ -31,7 +30,7 @@ use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S, L, T>
+pub struct Config<B, V, C, H, A, S, L>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -41,13 +40,11 @@ where
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
-    T: Strategy,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
     pub marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
-    pub strategy: T,
 
     pub muxer_size: usize,
     pub mailbox_size: usize,
@@ -58,9 +55,9 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S, L, T>
+pub struct Actor<E, B, V, C, H, A, S, L>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + Strategist,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -69,7 +66,6 @@ where
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
-    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -79,7 +75,6 @@ where
     oracle: B,
     marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
     provider: Provider<S, C>,
-    strategy: T,
 
     muxer_size: usize,
     partition_prefix: String,
@@ -90,9 +85,9 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
+impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + Strategist,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -101,12 +96,11 @@ where
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, V, C, H, A, S, L, T>,
+        config: Config<B, V, C, H, A, S, L>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
@@ -123,7 +117,6 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
-                strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 page_cache_ref,
@@ -328,7 +321,6 @@ where
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
                 page_cache: self.page_cache_ref.clone(),
-                strategy: self.strategy.clone(),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );

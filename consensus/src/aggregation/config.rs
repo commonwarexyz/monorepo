@@ -8,7 +8,6 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -21,7 +20,6 @@ pub struct Config<
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-    T: Strategy,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
@@ -79,7 +77,4 @@ pub struct Config<
 
     /// Page cache for the journal.
     pub journal_page_cache: CacheRef,
-
-    /// Strategy for parallel operations.
-    pub strategy: T,
 }

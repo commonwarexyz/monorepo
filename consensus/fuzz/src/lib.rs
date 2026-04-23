@@ -33,7 +33,6 @@ use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
 };
-use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
@@ -402,7 +401,6 @@ where
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -636,7 +634,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);

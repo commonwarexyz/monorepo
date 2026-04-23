@@ -3,7 +3,6 @@ use crate::{
     Block,
 };
 use commonware_cryptography::certificate::Provider;
-use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -26,12 +25,11 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// height passes a prune target. The last processed height can be
 /// derived from an `Update::Block` at height `H` as
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
-pub struct Config<B, P, ES, T>
+pub struct Config<B, P, ES>
 where
     B: Block,
     P: Provider<Scope = Epoch>,
     ES: Epocher,
-    T: Strategy,
 {
     /// Provider for epoch-specific signing schemes.
     ///
@@ -79,7 +77,4 @@ where
     /// yet been acknowledged. Increasing this value allows the application
     /// to buffer work while marshal continues dispatching, hiding ack latency.
     pub max_pending_acks: NonZeroUsize,
-
-    /// Strategy for parallel operations.
-    pub strategy: T,
 }

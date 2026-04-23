@@ -16,9 +16,10 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
-use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Strategist,
+};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
     ordered::Quorum,
@@ -30,16 +31,14 @@ use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
+    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner + Strategist,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    T: Strategy,
 > {
     context: ContextCell<E>,
     scheme: S,
     blocker: Option<B>,
-    strategy: T,
 
     epoch: Epoch,
     mailbox_size: usize,
@@ -51,21 +50,19 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
+        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner + Strategist,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        T: Strategy,
-    > Actor<E, S, B, D, T>
+    > Actor<E, S, B, D>
 {
-    pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
-                strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
@@ -151,7 +148,7 @@ impl<
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
+    async fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -179,7 +176,14 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                let scheme = self.scheme.clone();
+                let verification = notarization.clone();
+                let mut rng = self.context.clone();
+                if !self
+                    .context
+                    .with_strategy(move |strategy| verification.verify(&mut rng, &scheme, strategy))
+                    .await
+                {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -199,7 +203,14 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                let scheme = self.scheme.clone();
+                let verification = finalization.clone();
+                let mut rng = self.context.clone();
+                if !self
+                    .context
+                    .with_strategy(move |strategy| verification.verify(&mut rng, &scheme, strategy))
+                    .await
+                {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -219,7 +230,16 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
+                let scheme = self.scheme.clone();
+                let verification = nullification.clone();
+                let mut rng = self.context.clone();
+                if !self
+                    .context
+                    .with_strategy(move |strategy| {
+                        verification.verify::<_, D>(&mut rng, &scheme, strategy)
+                    })
+                    .await
+                {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }
@@ -243,7 +263,7 @@ impl<
                 response,
             } => {
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, data) else {
+                let Some(parsed) = self.validate(view, data).await else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     response.send_lossy(false);

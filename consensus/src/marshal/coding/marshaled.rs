@@ -44,7 +44,6 @@
 //!     shards: shard_mailbox,
 //!     scheme_provider,
 //!     epocher,
-//!     strategy,
 //! };
 //! let application = Marshaled::new(context, cfg);
 //! ```
@@ -105,10 +104,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
-use commonware_parallel::Strategy;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_utils::{
     channel::{
@@ -132,13 +130,12 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
-pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
+pub struct MarshaledConfig<A, B, C, H, Z, ES>
 where
     B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     /// The underlying application to wrap.
@@ -150,8 +147,6 @@ where
     pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
-    /// Strategy for parallel operations.
-    pub strategy: S,
     /// Strategy for determining epoch boundaries.
     pub epocher: ES,
 }
@@ -163,15 +158,14 @@ where
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
-pub struct Marshaled<E, A, B, C, H, Z, S, ES>
+pub struct Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     context: E,
@@ -180,7 +174,6 @@ where
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
-    strategy: S,
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
@@ -190,9 +183,9 @@ where
     erasure_encode_duration: Timed<E>,
 }
 
-impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
+impl<E, A, B, C, H, Z, ES> Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -203,7 +196,6 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
@@ -211,13 +203,12 @@ where
     /// # Panics
     ///
     /// Panics if the marshal metadata store cannot be initialized.
-    pub fn new(context: E, cfg: MarshaledConfig<A, B, C, H, Z, S, ES>) -> Self {
+    pub fn new(context: E, cfg: MarshaledConfig<A, B, C, H, Z, ES>) -> Self {
         let MarshaledConfig {
             application,
             marshal,
             shards,
             scheme_provider,
-            strategy,
             epocher,
         } = cfg;
 
@@ -261,7 +252,6 @@ where
             marshal,
             shards,
             scheme_provider,
-            strategy,
             epocher,
             verification_tasks: VerificationTasks::new(),
             cached_genesis: Arc::new(OnceLock::new()),
@@ -432,9 +422,9 @@ where
     }
 }
 
-impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
+impl<E, A, B, C, H, Z, ES> Automaton for Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -445,7 +435,6 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     type Digest = Commitment;
@@ -497,7 +486,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let strategy = self.strategy.clone();
         let cached_genesis = self.cached_genesis.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
@@ -651,7 +639,11 @@ where
                 build_timer.observe();
 
                 let mut erasure_timer = erasure_encode_duration.timer();
-                let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
+                let coded_block = runtime_context
+                    .with_strategy(move |strategy| {
+                        CodedBlock::<B, C, H>::new(built_block, coding_config, strategy)
+                    })
+                    .await;
                 erasure_timer.observe();
 
                 let commitment = coded_block.commitment();
@@ -847,9 +839,9 @@ where
     }
 }
 
-impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
+impl<E, A, B, C, H, Z, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -860,7 +852,6 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
@@ -966,9 +957,9 @@ where
     }
 }
 
-impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
+impl<E, A, B, C, H, Z, ES> Relay for Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
         E,
         Block = B,
@@ -978,7 +969,6 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     type Digest = Commitment;
@@ -999,9 +989,9 @@ where
     }
 }
 
-impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
+impl<E, A, B, C, H, Z, ES> Reporter for Marshaled<E, A, B, C, H, Z, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
             E,
             Block = B,
@@ -1011,7 +1001,6 @@ where
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
-    S: Strategy,
     ES: Epocher,
 {
     type Activity = A::Activity;

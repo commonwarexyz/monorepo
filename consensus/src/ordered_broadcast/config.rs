@@ -4,7 +4,6 @@ use crate::{
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
-use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -21,7 +20,6 @@ pub struct Config<
     R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    T: Strategy,
 > {
     /// The signer used when this engine acts as a sequencer.
     ///
@@ -96,7 +94,4 @@ pub struct Config<
 
     /// Page cache for the journal.
     pub journal_page_cache: CacheRef,
-
-    /// Strategy for parallel operations.
-    pub strategy: T,
 }

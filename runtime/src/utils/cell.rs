@@ -206,6 +206,21 @@ commonware_macros::stability_scope!(BETA {
     use commonware_parallel::ThreadPool;
     use rayon::ThreadPoolBuildError;
 
+    impl<C> crate::Strategist for Cell<C>
+    where
+        C: crate::Strategist,
+    {
+        type Strategy = <C as crate::Strategist>::Strategy;
+
+        fn with_strategy<F, T>(&self, f: F) -> impl Future<Output = T> + Send
+        where
+            F: FnOnce(&Self::Strategy) -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            self.as_present().with_strategy(f)
+        }
+    }
+
     impl<C> crate::ThreadPooler for Cell<C>
     where
         C: crate::ThreadPooler,

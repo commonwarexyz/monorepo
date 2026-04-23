@@ -45,7 +45,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 });
 stability_scope!(BETA {
     use commonware_macros::select;
-    use commonware_parallel::{Rayon, ThreadPool};
+    use commonware_parallel::{
+        Rayon, Sequential, Strategy as ParallelStrategy, ThreadPool,
+    };
     use iobuf::PoolError;
     use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
@@ -250,6 +252,93 @@ stability_scope!(BETA {
         /// immediately. The [signal::Signal] returned will always resolve to the value of the
         /// first [Spawner::stop] call.
         fn stopped(&self) -> signal::Signal;
+    }
+
+    /// Runtime-owned strategy configuration for CPU-bound work.
+    #[derive(Clone, Debug, Default)]
+    pub enum StrategyConfig {
+        /// Execute strategy-backed work sequentially.
+        #[default]
+        Sequential,
+        /// Execute strategy-backed work on a rayon thread pool with the given concurrency.
+        Rayon(NonZeroUsize),
+    }
+
+    /// Runtime-owned strategy used by [`Strategist`].
+    #[derive(Clone, Debug)]
+    pub enum RuntimeStrategy {
+        Sequential(Sequential),
+        Rayon(Rayon),
+    }
+
+    impl Default for RuntimeStrategy {
+        fn default() -> Self {
+            Self::Sequential(Sequential)
+        }
+    }
+
+    impl ParallelStrategy for RuntimeStrategy {
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            match self {
+                Self::Sequential(strategy) => {
+                    strategy.fold_init(iter, init, identity, fold_op, reduce_op)
+                }
+                Self::Rayon(strategy) => {
+                    strategy.fold_init(iter, init, identity, fold_op, reduce_op)
+                }
+            }
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            match self {
+                Self::Sequential(strategy) => strategy.join(a, b),
+                Self::Rayon(strategy) => strategy.join(a, b),
+            }
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            match self {
+                Self::Sequential(strategy) => strategy.parallelism_hint(),
+                Self::Rayon(strategy) => strategy.parallelism_hint(),
+            }
+        }
+    }
+
+    /// Interface for runtimes that expose a built-in parallel strategy.
+    pub trait Strategist: Clone + Send + Sync + 'static {
+        /// Strategy implementation owned by the runtime.
+        type Strategy: ParallelStrategy;
+
+        /// Executes CPU-bound work using the runtime's configured strategy.
+        ///
+        /// The closure and output must be `Send + 'static` because runtimes may move
+        /// the work to a blocking or rayon executor.
+        fn with_strategy<F, T>(&self, f: F) -> impl Future<Output = T> + Send
+        where
+            F: FnOnce(&Self::Strategy) -> T + Send + 'static,
+            T: Send + 'static;
     }
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
@@ -865,6 +954,7 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
@@ -4180,6 +4270,49 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    fn test_with_strategy<R: Runner>(runner: R, expected_parallelism: usize)
+    where
+        R::Context: Strategist,
+    {
+        runner.start(|context| async move {
+            let (sum, parallelism) = context
+                .with_strategy(|strategy| {
+                    let sum =
+                        strategy.fold(0..1000u64, || 0u64, |acc, item| acc + item, |a, b| a + b);
+                    (sum, strategy.parallelism_hint())
+                })
+                .await;
+            assert_eq!(sum, 499_500);
+            assert_eq!(parallelism, expected_parallelism);
+        });
+    }
+
+    #[test]
+    fn test_tokio_with_strategy_sequential() {
+        test_with_strategy(tokio::Runner::default(), 1);
+    }
+
+    #[test]
+    fn test_tokio_with_strategy_rayon() {
+        let runner = tokio::Runner::new(
+            tokio::Config::default().with_strategy(StrategyConfig::Rayon(NZUsize!(4))),
+        );
+        test_with_strategy(runner, 4);
+    }
+
+    #[test]
+    fn test_deterministic_with_strategy_sequential() {
+        test_with_strategy(deterministic::Runner::default(), 1);
+    }
+
+    #[test]
+    fn test_deterministic_with_strategy_rayon() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default().with_strategy(StrategyConfig::Rayon(NZUsize!(4))),
+        );
+        test_with_strategy(runner, 4);
     }
 
     fn test_buffer_pooler<R: Runner>(

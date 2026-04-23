@@ -1567,7 +1567,6 @@ impl TestHarness for StandardHarness {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
         };
         let control = oracle.control(validator.clone());
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
@@ -1802,7 +1801,6 @@ impl TestHarness for StandardHarness {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: page_cache.clone(),
-            strategy: Sequential,
         };
 
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
@@ -2370,7 +2368,6 @@ impl TestHarness for CodingHarness {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
         };
 
         let control = oracle.control(validator.clone());
@@ -2469,14 +2466,13 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,
             },
             block_codec_cfg: (),
-            strategy: Sequential,
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
@@ -2638,7 +2634,6 @@ impl TestHarness for CodingHarness {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: page_cache.clone(),
-            strategy: Sequential,
         };
 
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
@@ -2655,14 +2650,13 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,
             },
             block_codec_cfg: (),
-            strategy: Sequential,
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,

@@ -504,6 +504,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         pub const fn with_pool(thread_pool: ThreadPool) -> Self {
             Self { thread_pool }
         }
+
+        /// Returns the underlying [`ThreadPool`].
+        pub const fn thread_pool(&self) -> &ThreadPool {
+            &self.thread_pool
+        }
     }
 
     impl Strategy for Rayon {

@@ -11,16 +11,15 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
 };
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics + Strategist,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -28,22 +27,21 @@ pub struct Engine<
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
-    T: Strategy,
 > {
     context: ContextCell<E>,
 
     voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F, R, T>,
+    batcher: batcher::Actor<E, S, B, D, F, R>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, S, B, D, T>,
+    resolver: resolver::Actor<E, S, B, D>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics + Strategist,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -51,11 +49,10 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Engine<E, S, L, B, D, A, R, F, T>
+    > Engine<E, S, L, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -67,7 +64,6 @@ impl<
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
                 relay: cfg.relay.clone(),
-                strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
@@ -105,7 +101,6 @@ impl<
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
-                strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,
