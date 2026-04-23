@@ -15,7 +15,10 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
+    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_final_exp,
+    blst_fp12, blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fp12_is_one,
+    blst_fp12_mul, blst_fp12_one, blst_fp12s_mult_pippenger, blst_miller_loop,
+    blst_fp12s_mult_pippenger_scratch_sizeof, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
     blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
@@ -440,9 +443,116 @@ pub struct GT(blst_fp12);
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
-    /// Create GT from blst_fp12.
-    pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
-        Self(fp12)
+    /// Compute the pairing e(g1, g2).
+    pub fn pairing(g1: &G1, g2: &G2) -> Self {
+        let p1_affine = g1.as_blst_p1_affine();
+        let p2_affine = g2.as_blst_p2_affine();
+
+        let mut result = blst_fp12::default();
+        let ptr = &raw mut result;
+        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_miller_loop(ptr, &p2_affine, &p1_affine);
+            blst_final_exp(ptr, ptr);
+        }
+
+        Self(result)
+    }
+
+    /// Compute the sum of multiple pairings: sum(e(g1_i, g2_i)).
+    ///
+    /// Uses a single final exponentiation for efficiency.
+    pub fn multi_pairing(pairs: &[(G1, G2)]) -> Self {
+        assert!(!pairs.is_empty());
+
+        let mut acc = blst_fp12::default();
+        let acc_ptr = &raw mut acc;
+
+        let p1_affine = pairs[0].0.as_blst_p1_affine();
+        let p2_affine = pairs[0].1.as_blst_p2_affine();
+        // SAFETY: Valid affine points; miller_loop writes to acc_ptr.
+        unsafe {
+            blst_miller_loop(acc_ptr, &p2_affine, &p1_affine);
+        }
+
+        for &(ref g1, ref g2) in &pairs[1..] {
+            let p1_affine = g1.as_blst_p1_affine();
+            let p2_affine = g2.as_blst_p2_affine();
+            let mut tmp = blst_fp12::default();
+            // SAFETY: Valid affine points; miller_loop writes to tmp. blst_fp12_mul supports
+            // in-place (ret==a).
+            unsafe {
+                blst_miller_loop(&mut tmp, &p2_affine, &p1_affine);
+                blst_fp12_mul(acc_ptr, acc_ptr, &tmp);
+            }
+        }
+
+        // SAFETY: blst_final_exp supports in-place (ret==f).
+        unsafe {
+            blst_final_exp(acc_ptr, acc_ptr);
+        }
+
+        Self(acc)
+    }
+
+    /// Returns the identity element in GT.
+    fn identity() -> GT {
+        // SAFETY: blst_fp12_one returns a valid pointer to the constant identity element.
+        GT(unsafe { *blst_fp12_one() })
+    }
+
+    /// Returns true if this element is the identity.
+    fn is_identity(&self) -> bool {
+        // SAFETY: blst_fp12_is_one reads from a valid blst_fp12.
+        unsafe { blst_fp12_is_one(&self.0) }
+    }
+
+    /// Computes scalar * self using double-and-add.
+    ///
+    /// Uses cyclotomic squaring (doubling in additive notation), which is
+    /// faster than general fp12 squaring for elements in the cyclotomic
+    /// subgroup (i.e. pairing outputs).
+    pub fn scalar_mul(&self, scalar: &Scalar) -> GT {
+        let s = scalar.as_blst_scalar();
+        self.scalar_mul_bytes(&s.b)
+    }
+
+    /// Double-and-add over little-endian scalar bytes.
+    fn scalar_mul_bytes(&self, bytes: &[u8]) -> GT {
+        // Find the highest set bit
+        let mut top_byte = bytes.len() - 1;
+        while top_byte > 0 && bytes[top_byte] == 0 {
+            top_byte -= 1;
+        }
+        if bytes[top_byte] == 0 {
+            return GT::identity();
+        }
+        let top_bit = 7 - bytes[top_byte].leading_zeros() as usize;
+
+        // Double-and-add (MSB to LSB)
+        let mut acc = self.0;
+        let base = &self.0;
+        let mut started = false;
+        for byte_idx in (0..=top_byte).rev() {
+            let b = bytes[byte_idx];
+            let bit_start = if byte_idx == top_byte { top_bit } else { 7 };
+            for bit in (0..=bit_start).rev() {
+                if started {
+                    // SAFETY: blst_fp12_cyclotomic_sqr supports in-place operation.
+                    unsafe { blst_fp12_cyclotomic_sqr(&mut acc, &acc) };
+                }
+                if (b >> bit) & 1 == 1 {
+                    if started {
+                        // SAFETY: blst_fp12_mul supports in-place when ret aliases a.
+                        unsafe { blst_fp12_mul(&mut acc, &acc, base) };
+                    } else {
+                        started = true;
+                    }
+                }
+            }
+        }
+
+        if started { GT(acc) } else { GT::identity() }
     }
 
     /// Converts the GT element to its canonical big-endian byte representation.
@@ -454,6 +564,177 @@ impl GT {
             blst_bendian_from_fp12(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+
+    /// Computes the conjugate of this GT element (negation in the
+    /// cyclotomic subgroup).
+    fn conjugate(&self) -> GT {
+        let mut out = self.0;
+        // SAFETY: blst_fp12_conjugate operates in-place on a valid blst_fp12.
+        unsafe {
+            blst_fp12_conjugate(&mut out);
+        }
+        GT(out)
+    }
+
+    fn msm_sequential(points: &[Self], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = points.len();
+
+        // SAFETY: blst_fp12s_mult_pippenger_scratch_sizeof returns size in bytes.
+        let scratch_size = unsafe { blst_fp12s_mult_pippenger_scratch_sizeof(npoints) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![0u64; scratch_size / 8];
+
+        let p: [*const blst_fp12; 2] = [&points[0].0 as *const _, ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_fp12::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_fp12s_mult_pippenger(
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr(),
+            );
+        }
+        GT(result)
+    }
+
+    /// Shared MSM logic: filters identity points and zero scalars, then
+    /// delegates to Pippenger.
+    fn msm_inner<'a>(
+        points: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+    ) -> Self {
+        let nbytes = nbits.div_ceil(8);
+        let (points_filtered, flat_scalars): (Vec<_>, Vec<u8>) = points
+            .filter(|(point, scalar)| {
+                !point.is_identity() && !bool::from(all_zero(&scalar[..nbytes]))
+            })
+            .fold(
+                (Vec::new(), Vec::new()),
+                |(mut pts, mut scs), (point, scalar)| {
+                    pts.push(*point);
+                    scs.extend_from_slice(&scalar[..nbytes]);
+                    (pts, scs)
+                },
+            );
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        Self::msm_sequential(&points_filtered, &flat_scalars, nbits)
+    }
+}
+
+// GT is treated as an additive group (matching G1/G2). The underlying fp12
+// multiplication is the group operation (+), the fp12 unit is the identity
+// (zero), and conjugation is negation.
+
+impl Object for GT {}
+
+impl AddAssign<&GT> for GT {
+    fn add_assign(&mut self, rhs: &GT) {
+        // SAFETY: blst_fp12_mul supports in-place when ret aliases a.
+        unsafe {
+            blst_fp12_mul(&mut self.0, &self.0, &rhs.0);
+        }
+    }
+}
+
+impl Add<&GT> for GT {
+    type Output = GT;
+
+    fn add(mut self, rhs: &GT) -> GT {
+        self += rhs;
+        self
+    }
+}
+
+impl SubAssign<&GT> for GT {
+    fn sub_assign(&mut self, rhs: &GT) {
+        let inv = rhs.conjugate();
+        *self += &inv;
+    }
+}
+
+impl Sub<&GT> for GT {
+    type Output = GT;
+
+    fn sub(mut self, rhs: &GT) -> GT {
+        self -= rhs;
+        self
+    }
+}
+
+impl Neg for GT {
+    type Output = GT;
+
+    fn neg(self) -> GT {
+        self.conjugate()
+    }
+}
+
+impl Additive for GT {
+    fn zero() -> Self {
+        GT::identity()
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for GT {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        *self = self.scalar_mul(rhs);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for GT {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<'a> MulAssign<&'a SmallScalar> for GT {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        *self = self.scalar_mul_bytes(rhs.as_bytes());
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for GT {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for GT {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
+
+impl Space<SmallScalar> for GT {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 
@@ -708,6 +989,31 @@ impl Object for Scalar {}
 impl From<u64> for Scalar {
     fn from(value: u64) -> Self {
         Self::from_u64(value)
+    }
+}
+
+impl From<SmallScalar> for Scalar {
+    fn from(small: SmallScalar) -> Self {
+        let mut fr = blst_fr::default();
+        // SAFETY: blst_fr_from_scalar reads a valid blst_scalar.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &small.inner);
+        }
+        Self(fr)
+    }
+}
+
+impl<'a, 'b> Mul<&'a Scalar> for &'b SmallScalar {
+    type Output = Scalar;
+
+    fn mul(self, rhs: &'a Scalar) -> Scalar {
+        let mut fr = blst_fr::default();
+        // SAFETY: blst_fr_from_scalar reads a valid blst_scalar.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &self.inner);
+        }
+        let lhs = Scalar(fr);
+        lhs * rhs
     }
 }
 
@@ -2054,6 +2360,119 @@ mod tests {
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars, &Sequential);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
+    }
+
+    #[test]
+    fn test_gt_pairing_bilinearity() {
+        let mut rng = test_rng();
+        let a = Scalar::random(&mut rng);
+        let b = Scalar::random(&mut rng);
+
+        let g1 = G1::generator();
+        let g2 = G2::generator();
+
+        // e(aG1, bG2) should equal e(G1, G2)^(ab)
+        let lhs = GT::pairing(&(g1 * &a), &(g2 * &b));
+        let e = GT::pairing(&g1, &g2);
+        let mut ab = a.clone();
+        ab *= &b;
+        let rhs = e.scalar_mul(&ab);
+        assert_eq!(lhs, rhs, "pairing bilinearity failed");
+
+        // e(abG1, G2) should also equal e(G1, G2)^(ab)
+        let lhs2 = GT::pairing(&(g1 * &ab), &g2);
+        assert_eq!(lhs2, rhs, "pairing bilinearity (left) failed");
+
+        // e(G1, abG2) should also equal e(G1, G2)^(ab)
+        let lhs3 = GT::pairing(&g1, &(g2 * &ab));
+        assert_eq!(lhs3, rhs, "pairing bilinearity (right) failed");
+    }
+
+    #[test]
+    fn test_gt_scalar_mul() {
+        let g1 = G1::generator();
+        let g2 = G2::generator();
+        let e = GT::pairing(&g1, &g2);
+
+        // e^5 via scalar_mul should equal e+e+e+e+e via repeated addition
+        let five = Scalar::from_u64(5);
+        let result = e.scalar_mul(&five);
+        let mut acc = GT::zero();
+        for _ in 0..5 {
+            acc += &e;
+        }
+        assert_eq!(result, acc, "scalar_mul(5) != 5 additions");
+
+        // e * 0 should be zero (identity)
+        let zero = Scalar::zero();
+        assert_eq!(e.scalar_mul(&zero), GT::zero(), "scalar_mul(0) != zero");
+
+        // e * 1 should be e
+        let one = Scalar::from_u64(1);
+        assert_eq!(e.scalar_mul(&one), e, "scalar_mul(1) != e");
+    }
+
+    #[test]
+    fn test_gt_conjugate() {
+        let mut rng = test_rng();
+        let a = Scalar::random(&mut rng);
+        let e = GT::pairing(&(G1::generator() * &a), &G2::generator());
+
+        // e + (-e) should be one (identity)
+        let neg_e = -e;
+        let sum = e + &neg_e;
+        assert_eq!(sum, GT::zero(), "e + (-e) should be zero");
+
+        // Double negation
+        assert_eq!(-(-e), e, "double negation should be identity");
+    }
+
+    #[test]
+    fn test_gt_msm() {
+        let mut rng = test_rng();
+        let e = GT::pairing(&G1::generator(), &G2::generator());
+        let n = 10;
+
+        let points: Vec<GT> = (0..n).map(|_| e * &Scalar::random(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+        // MSM should equal naive accumulation
+        let msm_result = GT::msm(&points, &scalars, &Sequential);
+        let naive_result = naive_msm(&points, &scalars);
+        assert_eq!(msm_result, naive_result, "GT MSM != naive");
+
+        // Empty MSM should be identity
+        let empty_scalars: &[Scalar] = &[];
+        let empty_result = GT::msm(&[], empty_scalars, &Sequential);
+        assert_eq!(empty_result, GT::zero(), "empty GT MSM should be zero");
+
+        // Single element
+        let single_result = GT::msm(&[points[0]], &[scalars[0].clone()], &Sequential);
+        assert_eq!(
+            single_result,
+            points[0] * &scalars[0],
+            "single GT MSM failed"
+        );
+    }
+
+    #[test]
+    fn test_gt_multi_pairing() {
+        let mut rng = test_rng();
+        let g1 = G1::generator();
+        let g2 = G2::generator();
+
+        let a = Scalar::random(&mut rng);
+        let b = Scalar::random(&mut rng);
+
+        let p1 = g1 * &a;
+        let p2 = g1 * &b;
+        let q1 = g2 * &Scalar::random(&mut rng);
+        let q2 = g2 * &Scalar::random(&mut rng);
+
+        // multi_pairing should equal sum of individual pairings
+        let multi = GT::multi_pairing(&[(p1, q1), (p2, q2)]);
+        let individual = GT::pairing(&p1, &q1) + &GT::pairing(&p2, &q2);
+        assert_eq!(multi, individual, "multi_pairing != sum of pairings");
     }
 
     #[test]
