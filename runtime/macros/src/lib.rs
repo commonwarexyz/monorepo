@@ -1,10 +1,4 @@
-//! Proc-macro derives for [`commonware-runtime`](https://docs.rs/commonware-runtime)'s
-//! Prometheus-style metric labels.
-//!
-//! These derives emit code that resolves `EncodeLabelSet`/`EncodeLabelValue` through
-//! `commonware_runtime::telemetry::metrics::encoding`, so downstream crates can use
-//! metric labels without depending on `prometheus-client` directly. Use them via the
-//! re-exports in [`commonware_runtime::telemetry::metrics`] rather than this crate.
+//! Augment the development of [`commonware-runtime`](https://docs.rs/commonware-runtime) with procedural macros.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
