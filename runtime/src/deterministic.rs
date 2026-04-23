@@ -1252,6 +1252,10 @@ impl crate::Metrics for Context {
                 format!("{prefix}_{label}")
             }
         };
+        assert!(
+            !name.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
         Self {
             name,
             ..self.clone()
@@ -2149,17 +2153,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "conflicts with an internal metric")]
-    fn test_metrics_user_collision_with_internal() {
-        // Registering a user metric whose resolved name matches a runtime-owned
-        // metric panics in `Registry::register`.
+    #[should_panic(expected = "using runtime label is not allowed")]
+    fn test_metrics_label_reserved_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let _handle = context.with_label(METRICS_PREFIX).register(
-                "iterations",
-                "shadow",
-                Counter::<u64>::default(),
-            );
+            context.with_label(METRICS_PREFIX);
         });
     }
 

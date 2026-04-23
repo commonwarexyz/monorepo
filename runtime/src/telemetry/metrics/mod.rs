@@ -529,74 +529,6 @@ impl Registry {
         }
     }
 
-    fn insert_internal<M>(
-        &mut self,
-        name: String,
-        help: String,
-        attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
-        metric: M,
-    ) where
-        M: Metric,
-    {
-        let metric = Arc::new(metric);
-        let encode_samples = create_sample_encoder(metric.clone());
-        // Match upstream prometheus-client's `Descriptor::new` normalization,
-        // which unconditionally appends `.` to the help text.
-        let help = help + ".";
-        let metric_type = metric.metric_type();
-        if let Some(family) = self.families.get(&name) {
-            assert_eq!(
-                family.help, help,
-                "metric family `{}` registered with inconsistent help text",
-                name
-            );
-            assert_eq!(
-                family.metric_type.as_str(),
-                metric_type.as_str(),
-                "metric family `{}` registered with inconsistent metric type",
-                name
-            );
-        }
-        let key = (name.clone(), attributes.clone());
-        if let Some(&existing_id) = self.keys.get(&key) {
-            let entry = self.metric_ref(existing_id);
-            assert!(
-                entry.internal,
-                "internal metric `{}` with attributes {:?} \
-                 conflicts with a user metric",
-                key.0, key.1
-            );
-            return;
-        }
-        let id = self.allocate_metric_id();
-        self.keys.insert(key, id);
-        let family = match self.families.entry(name.clone()) {
-            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                let mut descriptor = String::new();
-                encode_descriptor(&mut descriptor, &name, &help, metric_type)
-                    .expect("encoding cached descriptor failed");
-                entry.insert(MetricFamily {
-                    help,
-                    metric_type,
-                    descriptor,
-                    metric_ids: Vec::new(),
-                })
-            }
-        };
-        let family_index = family.metric_ids.len();
-        family.metric_ids.push(id);
-        self.metric_slot_mut(id).replace(MetricEntry {
-            family_name: name,
-            attributes,
-            encode_samples,
-            metric_any: metric,
-            registration: Weak::<GuardHolder<()>>::new(),
-            family_index,
-            internal: true,
-        });
-    }
-
     pub fn register_external<M>(
         &mut self,
         registry: Weak<Mutex<Self>>,
@@ -746,18 +678,74 @@ impl Registry {
     /// Registering the same name and attributes again is idempotent (no new
     /// entry is allocated). Registering a name and attribute set already held
     /// by a user-registered metric panics.
-    pub fn register_internal(
+    pub fn register_internal<M: Metric>(
         &mut self,
         name: String,
         help: String,
         attributes: Vec<(String, String)>,
-        metric: impl Metric,
+        metric: M,
     ) {
         let attributes = attributes
             .into_iter()
             .map(|(k, v)| (Cow::Owned(k), Cow::Owned(v)))
             .collect::<Vec<_>>();
-        self.insert_internal(name, help, attributes, metric);
+        let metric = Arc::new(metric);
+        let encode_samples = create_sample_encoder(metric.clone());
+        // Match upstream prometheus-client's `Descriptor::new` normalization,
+        // which unconditionally appends `.` to the help text.
+        let help = help + ".";
+        let metric_type = metric.metric_type();
+        if let Some(family) = self.families.get(&name) {
+            assert_eq!(
+                family.help, help,
+                "metric family `{}` registered with inconsistent help text",
+                name
+            );
+            assert_eq!(
+                family.metric_type.as_str(),
+                metric_type.as_str(),
+                "metric family `{}` registered with inconsistent metric type",
+                name
+            );
+        }
+        let key = (name.clone(), attributes.clone());
+        if let Some(&existing_id) = self.keys.get(&key) {
+            let entry = self.metric_ref(existing_id);
+            assert!(
+                entry.internal,
+                "internal metric `{}` with attributes {:?} \
+                 conflicts with a user metric",
+                key.0, key.1
+            );
+            return;
+        }
+        let id = self.allocate_metric_id();
+        self.keys.insert(key, id);
+        let family = match self.families.entry(name.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut descriptor = String::new();
+                encode_descriptor(&mut descriptor, &name, &help, metric_type)
+                    .expect("encoding cached descriptor failed");
+                entry.insert(MetricFamily {
+                    help,
+                    metric_type,
+                    descriptor,
+                    metric_ids: Vec::new(),
+                })
+            }
+        };
+        let family_index = family.metric_ids.len();
+        family.metric_ids.push(id);
+        self.metric_slot_mut(id).replace(MetricEntry {
+            family_name: name,
+            attributes,
+            encode_samples,
+            metric_any: metric,
+            registration: Weak::<GuardHolder<()>>::new(),
+            family_index,
+            internal: true,
+        });
     }
 
     pub fn unregister(&mut self, id: u64) {
