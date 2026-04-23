@@ -149,7 +149,7 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
-    metrics::{raw::Gauge, MetricScope},
+    telemetry::metrics::{raw::Gauge, MetricScope},
     Error, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{

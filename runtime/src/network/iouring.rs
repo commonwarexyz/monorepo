@@ -23,8 +23,8 @@
 
 use crate::{
     iouring::{self},
-    utils::{self, MetricScope},
-    Buf, BufferPool, Error, IoBufMut, IoBufs,
+    telemetry::metrics::MetricScope,
+    utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
 use std::{
     net::SocketAddr,
