@@ -9,7 +9,6 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Space};
@@ -150,18 +149,7 @@ impl Variant for MinPk {
 
     /// Compute the pairing `e(public, signature) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        let p1_affine = public.as_blst_p1_affine();
-        let p2_affine = signature.as_blst_p2_affine();
-
-        let mut result = blst_fp12::default();
-        let ptr = &raw mut result;
-        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
-        unsafe {
-            blst_miller_loop(ptr, &p2_affine, &p1_affine);
-            blst_final_exp(ptr, ptr);
-        }
-
-        GT::from_blst_fp12(result)
+        GT::pairing(public, signature)
     }
 }
 
@@ -252,18 +240,7 @@ impl Variant for MinSig {
 
     /// Compute the pairing `e(signature, public) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        let p1_affine = signature.as_blst_p1_affine();
-        let p2_affine = public.as_blst_p2_affine();
-
-        let mut result = blst_fp12::default();
-        let ptr = &raw mut result;
-        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
-        unsafe {
-            blst_miller_loop(ptr, &p2_affine, &p1_affine);
-            blst_final_exp(ptr, ptr);
-        }
-
-        GT::from_blst_fp12(result)
+        GT::pairing(signature, public)
     }
 }
 
