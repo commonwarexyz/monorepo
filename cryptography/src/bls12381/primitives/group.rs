@@ -15,7 +15,8 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
+    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12,
+    blst_fp12_cyclotomic_sqr, blst_fp12_is_one, blst_fp12_mul, blst_fp12_one, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
     blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
@@ -443,6 +444,73 @@ impl GT {
     /// Create GT from blst_fp12.
     pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
         Self(fp12)
+    }
+
+    /// Multiplies two GT elements.
+    pub fn mul(&self, other: &GT) -> GT {
+        let mut out = blst_fp12::default();
+        // SAFETY: blst_fp12_mul writes a valid blst_fp12 to `out` from two valid inputs.
+        unsafe {
+            blst_fp12_mul(&mut out, &self.0, &other.0);
+        }
+        GT(out)
+    }
+
+    /// Returns the identity element (one) in GT.
+    pub fn one() -> GT {
+        // SAFETY: blst_fp12_one returns a valid pointer to the constant identity element.
+        GT(unsafe { *blst_fp12_one() })
+    }
+
+    /// Returns true if this element is the identity (one).
+    pub fn is_one(&self) -> bool {
+        // SAFETY: blst_fp12_is_one reads from a valid blst_fp12.
+        unsafe { blst_fp12_is_one(&self.0) }
+    }
+
+    /// Computes self^scalar using square-and-multiply.
+    ///
+    /// Uses cyclotomic squaring, which is faster than general fp12
+    /// squaring for elements in the cyclotomic subgroup (i.e. pairing outputs).
+    pub fn scalar_mul(&self, scalar: &Scalar) -> GT {
+        let s = scalar.as_blst_scalar();
+        // blst_scalar.b is little-endian
+        let bytes = &s.b;
+
+        // Find the highest set bit
+        let mut top_byte = SCALAR_LENGTH - 1;
+        while top_byte > 0 && bytes[top_byte] == 0 {
+            top_byte -= 1;
+        }
+        if bytes[top_byte] == 0 {
+            return GT::one();
+        }
+        let top_bit = 7 - bytes[top_byte].leading_zeros() as usize;
+
+        // Square-and-multiply (MSB to LSB)
+        let mut acc = self.0;
+        let base = &self.0;
+        let mut started = false;
+        for byte_idx in (0..=top_byte).rev() {
+            let b = bytes[byte_idx];
+            let bit_start = if byte_idx == top_byte { top_bit } else { 7 };
+            for bit in (0..=bit_start).rev() {
+                if started {
+                    // SAFETY: blst_fp12_cyclotomic_sqr supports in-place operation.
+                    unsafe { blst_fp12_cyclotomic_sqr(&mut acc, &acc) };
+                }
+                if (b >> bit) & 1 == 1 {
+                    if started {
+                        // SAFETY: blst_fp12_mul supports in-place when ret aliases a.
+                        unsafe { blst_fp12_mul(&mut acc, &acc, base) };
+                    } else {
+                        started = true;
+                    }
+                }
+            }
+        }
+
+        if started { GT(acc) } else { GT::one() }
     }
 
     /// Converts the GT element to its canonical big-endian byte representation.
