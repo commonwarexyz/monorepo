@@ -437,7 +437,7 @@ mod tests {
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::journaled::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
+        merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
