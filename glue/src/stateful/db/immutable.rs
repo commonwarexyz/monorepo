@@ -294,7 +294,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(bounds.start, bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 
@@ -367,7 +367,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(bounds.start, bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 

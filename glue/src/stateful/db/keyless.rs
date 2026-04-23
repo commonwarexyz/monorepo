@@ -267,7 +267,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(bounds.start, bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 
@@ -333,7 +333,7 @@ where
         let bounds = self.bounds().await;
         sync::Target {
             root: self.root(),
-            range: non_empty_range!(bounds.start, bounds.end),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
         }
     }
 
@@ -494,6 +494,7 @@ mod tests {
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
@@ -515,7 +516,7 @@ mod tests {
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
             assert_eq!(target.root, guard.root());
-            assert_eq!(target.range.start(), mmr::Location::new(0));
+            assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));
         });
     }

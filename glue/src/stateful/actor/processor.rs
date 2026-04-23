@@ -473,6 +473,9 @@ where
         };
 
         self.databases.finalize(batch).await;
+        self.app
+            .finalized((context.clone(), block.context()), &block, &self.databases)
+            .await;
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor { height, digest };
 
@@ -743,15 +746,40 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct FinalizedObserver {
+        db_config: any::FixedConfig<TwoCap>,
+        reopened_counters: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
+        finalized_observer: Option<FinalizedObserver>,
     }
 
     impl ExecutionApp {
         fn new() -> Self {
             Self {
                 genesis: Block::genesis(),
+                finalized_observer: None,
             }
+        }
+
+        fn with_finalized_observer(
+            db_config: any::FixedConfig<TwoCap>,
+        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let reopened_counters = Arc::new(Mutex::new(Vec::new()));
+            let observer = FinalizedObserver {
+                db_config,
+                reopened_counters: reopened_counters.clone(),
+            };
+            (
+                Self {
+                    genesis: Block::genesis(),
+                    finalized_observer: Some(observer),
+                },
+                reopened_counters,
+            )
         }
 
         async fn execute(
@@ -836,6 +864,31 @@ mod tests {
                 range: block.range.clone(),
             }
         }
+
+        async fn finalized(
+            &mut self,
+            context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            let Some(observer) = &self.finalized_observer else {
+                return;
+            };
+
+            let reopened = Qmdb::init(
+                context.0.with_label("finalized_observer_reopen"),
+                observer.db_config.clone(),
+            )
+            .await
+            .expect("database reopen inside finalized hook should succeed");
+            let counter = reopened
+                .get(&counter_key())
+                .await
+                .expect("reopened counter read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .unwrap_or(0);
+            observer.reopened_counters.lock().push(counter);
+        }
     }
 
     #[derive(Clone, Default)]
@@ -868,12 +921,38 @@ mod tests {
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
         db_config: any::FixedConfig<TwoCap>,
+        finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
+            Self::with_app(context, provider, config.clone(), ExecutionApp::new(), None).await
+        }
+
+        async fn new_with_finalized_observer(context: deterministic::Context) -> Self {
+            let provider = MapProvider::default();
+            let config = qmdb_config(&next_partition_prefix(), &context);
+            let (app, finalized_reopened_counters) =
+                ExecutionApp::with_finalized_observer(config.clone());
+            Self::with_app(
+                context,
+                provider,
+                config,
+                app,
+                Some(finalized_reopened_counters),
+            )
+            .await
+        }
+
+        async fn with_app(
+            context: deterministic::Context,
+            provider: MapProvider,
+            config: any::FixedConfig<TwoCap>,
+            app: ExecutionApp,
+            finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
+        ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
             >>::init(context.with_label("db_set"), config.clone())
@@ -882,7 +961,7 @@ mod tests {
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
-                    ExecutionApp::new(),
+                    app,
                     databases,
                     Anchor {
                         height: Height::zero(),
@@ -892,6 +971,7 @@ mod tests {
                 ),
                 provider,
                 db_config: config,
+                finalized_reopened_counters,
             }
         }
 
@@ -969,6 +1049,14 @@ mod tests {
                 .await
                 .expect("reopened db read should succeed")
                 .map(|value| digest_to_u64(&value))
+        }
+
+        fn finalized_reopened_counters(&self) -> Vec<u64> {
+            self.finalized_reopened_counters
+                .as_ref()
+                .expect("finalized observer should be configured")
+                .lock()
+                .clone()
         }
     }
 
@@ -1202,6 +1290,28 @@ mod tests {
                 harness.reopen_height_value(context, Height::new(1)).await,
                 Some(1),
                 "height state should survive reopen after finalization",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_finalized_hook_runs_after_durable_finalize() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let status = harness.finalize(block1).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+            assert_eq!(
+                harness.finalized_reopened_counters(),
+                vec![1],
+                "finalized hook should observe the durably committed state",
             );
         });
     }
