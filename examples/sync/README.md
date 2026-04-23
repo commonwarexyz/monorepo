@@ -8,8 +8,8 @@ Continuously synchronize state between a server and client with [qmdb::any](http
 
 - [Server](src/bin/server.rs): Serves historical operations and proofs to clients.
 - [Client](src/bin/client.rs): Continuously syncs to the server's database state.
-- [Resolver](src/resolver.rs): Used by client to communicate with server.
-- [Protocol](src/protocol.rs): Defines network messages.
+- [Resolver](src/net/resolver.rs): Used by client to communicate with server.
+- [Wire](src/net/wire.rs): Defines network messages.
 
 ## Usage
 
