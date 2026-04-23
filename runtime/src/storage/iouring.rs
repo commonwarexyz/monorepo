@@ -374,7 +374,6 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let mut scope = registry.scope();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
