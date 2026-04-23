@@ -552,7 +552,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
     pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
-        let offset = blob.size().await;
+        let offset = blob.size();
         blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok(offset)
@@ -583,7 +583,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
-        let remaining = blob.try_size()?.checked_sub(offset)?;
+        let remaining = blob.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
             return None;
@@ -639,8 +639,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.
+    #[allow(clippy::unused_async)]
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section).await
+        self.manager.size(section)
     }
 
     /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.

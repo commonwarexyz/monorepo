@@ -511,7 +511,7 @@ mod tests {
                 .unwrap();
 
             // Don't write any data - blob remains empty
-            assert_eq!(append.size().await, 0);
+            assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
             let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();

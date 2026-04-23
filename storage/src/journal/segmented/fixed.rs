@@ -95,7 +95,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Repair any blobs with trailing bytes (incomplete items from crash)
         let sections: Vec<_> = manager.sections().collect();
         for section in sections {
-            let size = manager.size(section).await?;
+            let size = manager.size(section)?;
             if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
                 let valid_size = size - (size % Self::CHUNK_SIZE_U64);
                 warn!(
@@ -120,7 +120,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
-        let size = blob.size().await;
+        let size = blob.size();
         if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, size));
         }
@@ -173,7 +173,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let end = offset
             .checked_add(Self::CHUNK_SIZE_U64)
             .ok_or(Error::ItemOutOfRange(position))?;
-        if end > blob.size().await {
+        if end > blob.size() {
             return Err(Error::ItemOutOfRange(position));
         }
 
@@ -221,7 +221,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
         let blob = self.manager.get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
-        let remaining = blob.try_size()?.checked_sub(offset)?;
+        let remaining = blob.size().checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let size = blob.size().await;
+        let size = blob.size();
         if size < Self::CHUNK_SIZE_U64 {
             return Ok(None);
         }
@@ -269,7 +269,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let blob_size = blob.size().await;
+            let blob_size = blob.size();
             let mut replay = blob.replay(buffer).await?;
             // For the first section, seek to the start position
             let initial_position = if section == start_section {
@@ -381,14 +381,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Returns the number of items in the given section.
+    #[allow(clippy::unused_async)]
     pub async fn section_len(&self, section: u64) -> Result<u64, Error> {
-        let size = self.manager.size(section).await?;
+        let size = self.manager.size(section)?;
         Ok(size / Self::CHUNK_SIZE_U64)
     }
 
     /// Returns the byte size of the given section.
+    #[allow(clippy::unused_async)]
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section).await
+        self.manager.size(section)
     }
 
     /// Rewind the journal to a specific section and byte offset.

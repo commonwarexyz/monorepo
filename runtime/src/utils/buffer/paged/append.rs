@@ -17,7 +17,7 @@ use super::read::{PageReader, Replay};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
-        tip::Buffer,
+        tip::{Buffer, TipBounds},
     },
     Blob, Error, IoBuf, IoBufMut, IoBufs,
 };
@@ -67,6 +67,11 @@ pub struct Append<B: Blob> {
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
     buffer: Arc<AsyncRwLock<Buffer>>,
+
+    /// Lock-free snapshot of the tip's logical bounds. Mirrors `buffer.offset` and
+    /// `buffer.size()`, published by mutators so `try_read_sync` and `size()` can serve
+    /// requests without touching the buffer lock.
+    tip: Arc<TipBounds>,
 }
 
 /// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
@@ -135,12 +140,14 @@ impl<B: Blob> Append<B> {
             capacity,
             cache_ref.pool().clone(),
         );
+        let tip = Arc::new(TipBounds::new(buffer.offset, buffer.size()));
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
             id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
+            tip,
         })
     }
 
@@ -215,8 +222,10 @@ impl<B: Blob> Append<B> {
     /// Append all bytes in `buf` to the tip of the blob.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
+        let over_capacity = buffer.append(buf);
+        self.tip.publish_append(buffer.size());
 
-        if !buffer.append(buf) {
+        if !over_capacity {
             return Ok(());
         }
 
@@ -293,6 +302,10 @@ impl<B: Blob> Append<B> {
             let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
+
+        // Publish after the cache is populated so readers that see the advanced offset also
+        // see the cached bytes.
+        self.tip.publish_flush(new_offset);
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
         // we're writing to it.
@@ -390,18 +403,9 @@ impl<B: Blob> Append<B> {
     }
 
     /// Returns the logical size of the blob. This accounts for both written and buffered data.
-    pub async fn size(&self) -> u64 {
-        let buffer = self.buffer.read().await;
-        buffer.size()
-    }
-
-    /// Returns the logical size of the blob if it can be observed without waiting.
-    ///
-    /// This is useful for opportunistic fast paths that should fall back rather than contend with
-    /// concurrent writers.
-    pub fn try_size(&self) -> Option<u64> {
-        let buffer = self.buffer.try_read().ok()?;
-        Some(buffer.size())
+    /// Served from the atomic `tip` snapshot — lock-free.
+    pub fn size(&self) -> u64 {
+        self.tip.size()
     }
 
     /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false` otherwise.
@@ -409,7 +413,32 @@ impl<B: Blob> Append<B> {
     /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
     /// already validated that `offset + buf.len()` is within the blob's logical size.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        self.cache_ref.read_cached(self.id, buf, offset) == buf.len()
+        // Classify the range using an atomic snapshot of the tip bounds. Stale reads produce
+        // false negatives (caller takes the async path) but never wrong bytes. This keeps the
+        // common paths lock-free so a hot stream of `try_read_sync` calls cannot barge past
+        // queued writers on the buffer lock.
+        let end_offset = offset + buf.len() as u64;
+        let (tip_offset, tip_size) = self.tip.load();
+
+        if end_offset <= tip_offset {
+            // Entirely before the tip: serve from the page cache, never touch the buffer lock.
+            return self.cache_ref.read_cached(self.id, buf, offset) == buf.len();
+        }
+
+        if offset >= tip_offset && end_offset <= tip_size {
+            // Entirely inside the tip: take the buffer lock and copy. Re-verify under the lock
+            // in case the atomic snapshot was stale relative to the buffer's current state.
+            if let Ok(buffer) = self.buffer.try_read() {
+                if offset >= buffer.offset && end_offset <= buffer.size() {
+                    let src_start = (offset - buffer.offset) as usize;
+                    buf.copy_from_slice(&buffer.as_ref()[src_start..src_start + buf.len()]);
+                    return true;
+                }
+            }
+        }
+
+        // Straddle, out-of-bounds, or lock contention: punt to the async path.
+        false
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -440,7 +469,7 @@ impl<B: Blob> Append<B> {
             bufs.truncate(0);
             return Ok((bufs, 0));
         }
-        let blob_size = self.size().await;
+        let blob_size = self.size();
         let available = (blob_size.saturating_sub(logical_offset) as usize).min(len);
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
@@ -846,7 +875,7 @@ impl<B: Blob> Append<B> {
     /// - Concurrent readers which try to read past the new size during the resize may error.
     /// - The resize is not guaranteed durable until the next sync.
     pub async fn resize(&self, size: u64) -> Result<(), Error> {
-        let current_size = self.size().await;
+        let current_size = self.size();
 
         // Handle growing by appending zero bytes.
         if size > current_size {
@@ -885,8 +914,7 @@ impl<B: Blob> Append<B> {
 
         // Evict cached pages at or beyond the new full-page boundary. The page at `full_pages` (if
         // partial) is now owned by the tip buffer, and anything above is beyond the new logical
-        // size. Leaving their pre-resize contents in the cache lets `try_read_sync` (which bypasses
-        // the tip buffer) observe stale bytes once the tip is repopulated.
+        // size.
         self.cache_ref.invalidate_from(self.id, full_pages);
 
         // Update blob state and buffer based on the desired logical size. The partial page data is
@@ -918,6 +946,8 @@ impl<B: Blob> Append<B> {
             // No partial page - all pages are full or blob is empty.
             buf_guard.clear();
         }
+
+        self.tip.publish_resize(buf_guard.offset, buf_guard.size());
 
         Ok(())
     }
@@ -953,7 +983,7 @@ mod tests {
                 .unwrap();
 
             append.append(&[0u8; 8]).await.unwrap();
-            assert_eq!(append.size().await, 8);
+            assert_eq!(append.size(), 8);
 
             // Empty offsets should succeed immediately.
             let mut buf = [];
@@ -978,7 +1008,7 @@ mod tests {
 
             let data: Vec<u8> = (0..20).collect();
             append.append(&data).await.unwrap();
-            assert_eq!(append.size().await, 20);
+            assert_eq!(append.size(), 20);
 
             // Read 4-byte items at offsets 0, 4, 8, 12, 16.
             let offsets = [0u64, 4, 8, 12, 16];
@@ -1012,7 +1042,7 @@ mod tests {
             let data: Vec<u8> = (0..20).collect();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
-            assert_eq!(append.size().await, 20);
+            assert_eq!(append.size(), 20);
 
             let offsets = [0u64, 8, 16];
             let mut buf = vec![0u8; 3 * 4];
@@ -1048,7 +1078,7 @@ mod tests {
 
             let second: Vec<u8> = (16..32).collect();
             append.append(&second).await.unwrap();
-            assert_eq!(append.size().await, 32);
+            assert_eq!(append.size(), 32);
 
             // Offsets span both synced and unsynced regions.
             let offsets = [0u64, 4, 16, 24];
@@ -1080,7 +1110,7 @@ mod tests {
                 .unwrap();
 
             append.append(&[0u8; 8]).await.unwrap();
-            assert_eq!(append.size().await, 8);
+            assert_eq!(append.size(), 8);
 
             // Last offset's end (8 + 4 = 12) exceeds size (8).
             let mut buf = vec![0u8; 4];
@@ -1105,7 +1135,7 @@ mod tests {
 
             let data = vec![0xAA; 8];
             append.append(&data).await.unwrap();
-            assert_eq!(append.size().await, 8);
+            assert_eq!(append.size(), 8);
 
             let mut buf = vec![0u8; 8];
             append.read_many_into(&mut buf, &[0], 8).await.unwrap();
@@ -1159,7 +1189,7 @@ mod tests {
             // Add more in tip buffer.
             let more: Vec<u8> = (0u8..50).collect();
             append.append(&more).await.unwrap();
-            assert_eq!(append.size().await, 350);
+            assert_eq!(append.size(), 350);
 
             let item_size = 10;
             let offsets: Vec<u64> = (0..35).map(|i| i * item_size as u64).collect();
@@ -1262,7 +1292,7 @@ mod tests {
                 .unwrap();
 
             // Verify initial size is 0.
-            assert_eq!(append.size().await, 0);
+            assert_eq!(append.size(), 0);
 
             // Close & re-open.
             append.sync().await.unwrap();
@@ -1275,7 +1305,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(append.size().await, 0);
+            assert_eq!(append.size(), 0);
         });
     }
 
@@ -1296,21 +1326,21 @@ mod tests {
                 .unwrap();
 
             // Verify initial size is 0.
-            assert_eq!(append.size().await, 0);
+            assert_eq!(append.size(), 0);
 
             // Append some bytes.
             let data = vec![1, 2, 3, 4, 5];
             append.append(&data).await.unwrap();
 
             // Verify size reflects appended data.
-            assert_eq!(append.size().await, 5);
+            assert_eq!(append.size(), 5);
 
             // Append more bytes.
             let more_data = vec![6, 7, 8, 9, 10];
             append.append(&more_data).await.unwrap();
 
             // Verify size is cumulative.
-            assert_eq!(append.size().await, 10);
+            assert_eq!(append.size(), 10);
 
             // Read back the first chunk and verify.
             let read_buf = append.read_at(0, 5).await.unwrap().coalesce();
@@ -1335,14 +1365,14 @@ mod tests {
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 10); // CRC should be stripped after verification
+            assert_eq!(append.size(), 10); // CRC should be stripped after verification
 
             // Append data that spans a page boundary.
             // PAGE_SIZE=103 is the logical page size. We have 10 bytes, so writing
             // 100 more bytes (total 110) will cross the page boundary at byte 103.
             let spanning_data: Vec<u8> = (11..=110).collect();
             append.append(&spanning_data).await.unwrap();
-            assert_eq!(append.size().await, 110);
+            assert_eq!(append.size(), 110);
 
             // Read back data that spans the page boundary.
             let read_buf = append.read_at(10, 100).await.unwrap().coalesce();
@@ -1363,7 +1393,7 @@ mod tests {
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 110);
+            assert_eq!(append.size(), 110);
 
             // Append data to reach exactly a page boundary.
             // Logical page size is 103. We have 110 bytes, next boundary is 206 (103 * 2).
@@ -1371,7 +1401,7 @@ mod tests {
             let boundary_data: Vec<u8> = (111..=206).collect();
             assert_eq!(boundary_data.len(), 96);
             append.append(&boundary_data).await.unwrap();
-            assert_eq!(append.size().await, 206);
+            assert_eq!(append.size(), 206);
 
             // Verify we can read it back.
             let read_buf = append.read_at(0, 206).await.unwrap().coalesce();
@@ -1388,7 +1418,7 @@ mod tests {
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 206);
+            assert_eq!(append.size(), 206);
 
             // Verify data is still readable after reopen.
             let read_buf = append.read_at(0, 206).await.unwrap().coalesce();
@@ -2109,7 +2139,7 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 120);
+            assert_eq!(append.size(), 120);
             let all_data: Vec<u8> = append.read_at(0, 120).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=120).collect();
             assert_eq!(all_data, expected);
@@ -2187,7 +2217,7 @@ mod tests {
             let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 30);
+            assert_eq!(append.size(), 30);
             let all_data: Vec<u8> = append.read_at(0, 30).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=30).collect();
             assert_eq!(all_data, expected);
@@ -2217,7 +2247,7 @@ mod tests {
 
             // Should fall back to 10 bytes (slot 0's length)
             assert_eq!(
-                append.size().await,
+                append.size(),
                 10,
                 "Should fall back to slot 0's 10 bytes after primary CRC corruption"
             );
@@ -2329,7 +2359,7 @@ mod tests {
             let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 113);
+            assert_eq!(append.size(), 113);
             let all_data: Vec<u8> = append.read_at(0, 113).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=113).collect();
             assert_eq!(all_data, expected);
@@ -2364,7 +2394,7 @@ mod tests {
 
             // The blob still reports 113 bytes because init only validates the last page.
             // But reading from page 0 should fail because the CRC fallback is partial.
-            assert_eq!(append.size().await, 113);
+            assert_eq!(append.size(), 113);
 
             // Try to read from page 0 - this should fail with InvalidChecksum because
             // the fallback CRC has len=10 (partial), which is invalid for a non-last page.
@@ -2420,7 +2450,7 @@ mod tests {
             let data: Vec<u8> = (0..=249).collect();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
-            assert_eq!(append.size().await, 250);
+            assert_eq!(append.size(), 250);
             drop(append);
 
             // Corrupt the CRC record of page 1 (middle page).
@@ -2442,7 +2472,7 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 250);
+            assert_eq!(append.size(), 250);
 
             // Try to shrink to 150 bytes, which ends in page 1 (the corrupted page).
             // 150 bytes = page 0 (103 full) + page 1 (47 partial).
@@ -2526,7 +2556,7 @@ mod tests {
             // Write some initial data.
             append.append(&[1, 2, 3, 4, 5]).await.unwrap();
             append.sync().await.unwrap();
-            assert_eq!(append.size().await, 5);
+            assert_eq!(append.size(), 5);
             drop(append);
 
             let (blob, size) = context
@@ -2537,7 +2567,7 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 5);
+            assert_eq!(append.size(), 5);
 
             append.append(&[6, 7, 8]).await.unwrap();
             append.resize(6).await.unwrap();
@@ -2601,7 +2631,7 @@ mod tests {
             match result {
                 Ok(append) => {
                     // If it opens successfully, the corrupted page should have been truncated
-                    let recovered_size = append.size().await;
+                    let recovered_size = append.size();
                     assert_eq!(
                         recovered_size, 0,
                         "Corrupted page should be truncated, size should be 0"
@@ -2666,7 +2696,7 @@ mod tests {
             match result {
                 Ok(append) => {
                     // Corrupted page truncated
-                    assert_eq!(append.size().await, 0);
+                    assert_eq!(append.size(), 0);
                 }
                 Err(e) => {
                     assert!(

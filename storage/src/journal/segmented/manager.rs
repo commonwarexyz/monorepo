@@ -20,7 +20,7 @@ use tracing::debug;
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
-    fn size(&self) -> impl Future<Output = u64> + Send;
+    fn size(&self) -> u64;
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
@@ -30,8 +30,8 @@ pub trait SectionBuffer: Clone + Send + Sync {
 }
 
 impl<B: Blob> SectionBuffer for Append<B> {
-    async fn size(&self) -> u64 {
-        Self::size(self).await
+    fn size(&self) -> u64 {
+        Self::size(self)
     }
 
     async fn sync(&self) -> Result<(), RError> {
@@ -44,8 +44,8 @@ impl<B: Blob> SectionBuffer for Append<B> {
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
-    async fn size(&self) -> u64 {
-        Self::size(self).await
+    fn size(&self) -> u64 {
+        Self::size(self)
     }
 
     async fn sync(&self) -> Result<(), RError> {
@@ -245,7 +245,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
             // Remove blob from map
             let blob = self.blobs.remove(&section).unwrap();
-            let size = blob.size().await;
+            let size = blob.size();
             drop(blob);
 
             // Remove blob from storage
@@ -301,7 +301,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         if let Some(blob) = self.blobs.remove(&section) {
-            let size = blob.size().await;
+            let size = blob.size();
             drop(blob);
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
@@ -317,7 +317,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size().await;
+            let size = blob.size();
             drop(blob);
             debug!(section, size, "destroyed blob");
             self.context
@@ -339,7 +339,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn clear(&mut self) -> Result<(), Error> {
         let blobs = take(&mut self.blobs);
         for (section, blob) in blobs {
-            let size = blob.size().await;
+            let size = blob.size();
             drop(blob);
             debug!(section, size, "cleared blob");
             self.context
@@ -377,7 +377,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
         // If the section exists, truncate it to the given size
         if let Some(blob) = self.blobs.get(&section) {
-            let current_size = blob.size().await;
+            let current_size = blob.size();
             if size < current_size {
                 blob.resize(size).await?;
                 debug!(
@@ -399,7 +399,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         // Get the blob at the given section
         if let Some(blob) = self.blobs.get(&section) {
             // Truncate the blob to the given size
-            let current = blob.size().await;
+            let current = blob.size();
             if size < current {
                 blob.resize(size).await?;
                 debug!(section, from = current, to = size, "rewound section");
@@ -410,11 +410,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Returns the byte size of the given section.
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.prune_guard(section)?;
-        match self.blobs.get(&section) {
-            Some(blob) => Ok(blob.size().await),
-            None => Ok(0),
-        }
+        Ok(self.blobs.get(&section).map_or(0, |blob| blob.size()))
     }
 }

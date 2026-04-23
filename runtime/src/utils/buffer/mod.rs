@@ -623,9 +623,9 @@ mod tests {
 
             let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(8));
             writer.write_at(0, b"hello").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
 
             // Verify data was written correctly
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
@@ -646,9 +646,9 @@ mod tests {
 
             let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer.write_at(3, b"defg").await.unwrap();
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
             writer.sync().await.unwrap();
 
             // Verify the final result
@@ -670,14 +670,14 @@ mod tests {
 
             let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer
                 .write_at(3, b"defghijklmnopqrstuvwxyz")
                 .await
                 .unwrap();
-            assert_eq!(writer.size().await, 26);
+            assert_eq!(writer.size(), 26);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 26);
+            assert_eq!(writer.size(), 26);
 
             // Verify the complete data
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
@@ -698,12 +698,12 @@ mod tests {
 
             // Write data that fits in buffer
             writer.write_at(0, b"hello").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
 
             // Append data that causes buffer flush
             writer.write_at(5, b" world").await.unwrap();
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
 
             // Verify the complete result
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
@@ -724,11 +724,11 @@ mod tests {
 
             // Initial write
             writer.write_at(0, b"abcdefghij").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Overwrite middle section
             writer.write_at(2, b"01234").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Verify overwrite result
@@ -740,9 +740,9 @@ mod tests {
 
             // Extend buffer and do partial overwrite
             writer.write_at(10, b"klmnopqrst").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.write_at(9, b"wxyz").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
 
             // Verify final result
@@ -764,11 +764,11 @@ mod tests {
 
             // Write data at a later offset first
             writer.write_at(10, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Write at an earlier offset (should flush buffer first)
             writer.write_at(0, b"abcde").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
 
             // Verify data placement with gap
@@ -783,9 +783,9 @@ mod tests {
 
             // Fill the gap between existing data
             writer.write_at(5, b"fghij").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Verify gap is filled
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
@@ -807,9 +807,9 @@ mod tests {
 
             // Write initial data
             writer.write_at(0, b"hello world").await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 11);
+            assert_eq!(writer.size(), 11);
 
             let (blob_check, size_check) =
                 context.open("partition", b"resize_write").await.unwrap();
@@ -818,7 +818,7 @@ mod tests {
 
             // Resize to smaller size
             writer.resize(5).await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
 
             // Verify resize
@@ -830,7 +830,7 @@ mod tests {
 
             // Write to resized blob
             writer.write_at(0, b"X").await.unwrap();
-            assert_eq!(writer.size().await, 5);
+            assert_eq!(writer.size(), 5);
             writer.sync().await.unwrap();
 
             // Verify overwrite
@@ -842,7 +842,7 @@ mod tests {
 
             // Test resize to larger size
             writer.resize(10).await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Verify resize
@@ -857,13 +857,13 @@ mod tests {
             let (blob_zero, size) = context.open("partition", b"resize_zero").await.unwrap();
             let writer_zero = Write::from_pooler(&context, blob_zero.clone(), size, NZUsize!(10));
             writer_zero.write_at(0, b"some data").await.unwrap();
-            assert_eq!(writer_zero.size().await, 9);
+            assert_eq!(writer_zero.size(), 9);
             writer_zero.sync().await.unwrap();
-            assert_eq!(writer_zero.size().await, 9);
+            assert_eq!(writer_zero.size(), 9);
             writer_zero.resize(0).await.unwrap();
-            assert_eq!(writer_zero.size().await, 0);
+            assert_eq!(writer_zero.size(), 0);
             writer_zero.sync().await.unwrap();
-            assert_eq!(writer_zero.size().await, 0);
+            assert_eq!(writer_zero.size(), 0);
 
             // Ensure the blob is empty
             let (_, size_z) = context.open("partition", b"resize_zero").await.unwrap();
@@ -881,7 +881,7 @@ mod tests {
 
             // Write data that stays in buffer
             writer.write_at(0, b"buffered").await.unwrap();
-            assert_eq!(writer.size().await, 8);
+            assert_eq!(writer.size(), 8);
 
             // Read from buffer via writer
             let read_buf_vec = writer.read_at(0, 4).await.unwrap().coalesce();
@@ -895,9 +895,9 @@ mod tests {
 
             // Write large data that flushes buffer
             writer.write_at(8, b" and flushed").await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 20);
+            assert_eq!(writer.size(), 20);
 
             // Read from underlying blob through writer
             let read_buf_vec_2 = writer.read_at(0, 4).await.unwrap().coalesce();
@@ -908,7 +908,7 @@ mod tests {
 
             // Buffer new data at the end
             writer.write_at(20, b" more data").await.unwrap();
-            assert_eq!(writer.size().await, 30);
+            assert_eq!(writer.size(), 30);
 
             // Read newly buffered data
             let read_buf_vec_3 = writer.read_at(20, 5).await.unwrap().coalesce();
@@ -920,7 +920,7 @@ mod tests {
 
             // Verify complete content by reopening
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 30);
+            assert_eq!(writer.size(), 30);
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30);
@@ -1046,13 +1046,13 @@ mod tests {
 
             // Fill buffer completely
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Write at non-contiguous offset (should flush then write directly)
             writer.write_at(15, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 18);
+            assert_eq!(writer.size(), 18);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 18);
+            assert_eq!(writer.size(), 18);
 
             // Verify data with gap
             let (blob_check, size_check) =
@@ -1070,13 +1070,13 @@ mod tests {
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
             let writer2 = Write::from_pooler(&context, blob2.clone(), size, NZUsize!(10));
             writer2.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer2.size().await, 10);
+            assert_eq!(writer2.size(), 10);
 
             // Write large data that exceeds capacity
             writer2.write_at(5, b"ABCDEFGHIJKL").await.unwrap();
-            assert_eq!(writer2.size().await, 17);
+            assert_eq!(writer2.size(), 17);
             writer2.sync().await.unwrap();
-            assert_eq!(writer2.size().await, 17);
+            assert_eq!(writer2.size(), 17);
 
             // Verify overwrite result
             let (blob_check2, size_check2) =
@@ -1096,7 +1096,7 @@ mod tests {
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
             let writer = Write::from_pooler(&context, blob_orig.clone(), size, NZUsize!(8));
             writer.write_at(0, b"pending").await.unwrap();
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
 
             // Sync writer to persist data
             writer.sync().await.unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
             // Write data larger than buffer capacity (should write directly)
             let data_large = b"0123456789";
             writer.write_at(0, data_large).await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Sync to ensure data is persisted
             writer.sync().await.unwrap();
@@ -1141,7 +1141,7 @@ mod tests {
 
             // Now write small data that should be buffered
             writer.write_at(10, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 13);
+            assert_eq!(writer.size(), 13);
 
             // Verify it's in buffer by reading through writer
             let read_small_buf_vec = writer.read_at(10, 3).await.unwrap().coalesce();
@@ -1174,11 +1174,11 @@ mod tests {
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Overwrite and extend within buffer capacity
             writer.write_at(5, b"ABCDEFGHIJ").await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size(), 15);
 
             // Verify buffer content through writer
             let read_buf_vec = writer.read_at(0, 15).await.unwrap().coalesce();
@@ -1208,12 +1208,12 @@ mod tests {
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
 
             // Append at the current size (logical end)
-            writer.write_at(writer.size().await, b"abc").await.unwrap();
-            assert_eq!(writer.size().await, 13);
+            writer.write_at(writer.size(), b"abc").await.unwrap();
+            assert_eq!(writer.size(), 13);
             writer.sync().await.unwrap();
 
             // Verify complete result
@@ -1238,21 +1238,21 @@ mod tests {
 
             // First write
             writer.write_at(0, b"AAA").await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 3);
+            assert_eq!(writer.size(), 3);
 
             // Append using size()
-            writer.write_at(writer.size().await, b"BBB").await.unwrap();
-            assert_eq!(writer.size().await, 6); // 3 (AAA) + 3 (BBB)
+            writer.write_at(writer.size(), b"BBB").await.unwrap();
+            assert_eq!(writer.size(), 6); // 3 (AAA) + 3 (BBB)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 6);
+            assert_eq!(writer.size(), 6);
 
             // Append again using size()
-            writer.write_at(writer.size().await, b"CCC").await.unwrap();
-            assert_eq!(writer.size().await, 9); // 6 + 3 (CCC)
+            writer.write_at(writer.size(), b"CCC").await.unwrap();
+            assert_eq!(writer.size(), 9); // 6 + 3 (CCC)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 9);
+            assert_eq!(writer.size(), 9);
 
             // Verify final content
             let (blob_check, size_check) = context
@@ -1279,23 +1279,20 @@ mod tests {
 
             // Initial buffered write
             writer.write_at(0, b"INITIAL").await.unwrap(); // 7 bytes
-            assert_eq!(writer.size().await, 7);
+            assert_eq!(writer.size(), 7);
             // Buffer contains "INITIAL", inner.position = 0
 
             // Non-contiguous write, forces flush of "INITIAL" and direct write of "NONCONTIG"
             writer.write_at(20, b"NONCONTIG").await.unwrap();
-            assert_eq!(writer.size().await, 29);
+            assert_eq!(writer.size(), 29);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 29);
+            assert_eq!(writer.size(), 29);
 
             // Append at the new size
-            writer
-                .write_at(writer.size().await, b"APPEND")
-                .await
-                .unwrap();
-            assert_eq!(writer.size().await, 35); // 29 + 6
+            writer.write_at(writer.size(), b"APPEND").await.unwrap();
+            assert_eq!(writer.size(), 35); // 29 + 6
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 35);
+            assert_eq!(writer.size(), 35);
 
             // Verify final content
             let (blob_check, size_check) = context
@@ -1327,28 +1324,25 @@ mod tests {
 
             // Write initial data and sync
             writer.write_at(0, b"0123456789ABCDEF").await.unwrap(); // 16 bytes
-            assert_eq!(writer.size().await, 16);
+            assert_eq!(writer.size(), 16);
             writer.sync().await.unwrap(); // inner.position = 16, buffer empty
-            assert_eq!(writer.size().await, 16);
+            assert_eq!(writer.size(), 16);
 
             // Resize
             let resize_to = 5;
             writer.resize(resize_to).await.unwrap();
             // after resize, inner.position should be `resize_to` (5)
             // buffer should be empty
-            assert_eq!(writer.size().await, resize_to);
+            assert_eq!(writer.size(), resize_to);
             writer.sync().await.unwrap(); // Ensure truncation is persisted for verify step
-            assert_eq!(writer.size().await, resize_to);
+            assert_eq!(writer.size(), resize_to);
 
             // Append at the new (resized) size
-            writer
-                .write_at(writer.size().await, b"XXXXX")
-                .await
-                .unwrap(); // 5 bytes
-                           // inner.buffer = "XXXXX", inner.position = 5
-            assert_eq!(writer.size().await, 10); // 5 (resized) + 5 (XXXXX)
+            writer.write_at(writer.size(), b"XXXXX").await.unwrap(); // 5 bytes
+                                                                     // inner.buffer = "XXXXX", inner.position = 5
+            assert_eq!(writer.size(), 10); // 5 (resized) + 5 (XXXXX)
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size(), 10);
 
             // Verify final content
             let (blob_check, size_check) = context

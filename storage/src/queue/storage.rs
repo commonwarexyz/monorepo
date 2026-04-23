@@ -76,7 +76,7 @@ pub struct Queue<E: Context, V: CodecShared> {
 
     /// Position of the next item to dequeue.
     ///
-    /// Invariant: `read_pos <= journal.size()`. Note that `ack_up_to` can advance
+    /// Invariant: `read_pos <= journal.size().await`. Note that `ack_up_to` can advance
     /// `ack_floor` past `read_pos`; in this case, `dequeue` skips the already-acked items.
     read_pos: u64,
 

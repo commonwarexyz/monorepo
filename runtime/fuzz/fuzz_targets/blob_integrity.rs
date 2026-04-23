@@ -169,7 +169,7 @@ fn fuzz(input: FuzzInput) {
             }
         };
 
-        let reported_size = append.size().await;
+        let reported_size = append.size();
 
         // Step 4: Perform read operations and verify results.
         for read_op in &input.reads {

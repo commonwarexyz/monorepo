@@ -1,4 +1,7 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
+use crate::{
+    buffer::tip::{Buffer, TipBounds},
+    Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
+};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -13,6 +16,14 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
 /// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
 ///   bytes to the blob and leave the tip detached until the next buffered write.
+///
+/// # Warning
+///
+/// Concurrent mutable operations ([Self::write_at], [Self::resize], [Self::sync]) are not
+/// supported and require external synchronization from the caller. In particular, [Self::size]
+/// is a lock-free snapshot and may observe a stale value while another clone is mid-write;
+/// the common `write_at(size(), ...)` "append at end" pattern is only safe when the caller
+/// serializes `size()` and the following `write_at()` as a single critical section.
 ///
 /// # Example
 ///
@@ -50,6 +61,10 @@ pub struct Write<B: Blob> {
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
     buffer: Arc<AsyncRwLock<Buffer>>,
+
+    /// Lock-free snapshot of the tip's logical bounds so `size()` can be served without
+    /// taking the buffer lock.
+    tip: Arc<TipBounds>,
 }
 
 impl<B: Blob> Write<B> {
@@ -59,6 +74,7 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Arc::new(AsyncRwLock::new(Buffer::new(size, capacity.get(), pool))),
+            tip: Arc::new(TipBounds::new(size, size)),
         }
     }
 
@@ -76,9 +92,8 @@ impl<B: Blob> Write<B> {
     ///
     /// This represents the total size of data that would be present after flushing.
     #[allow(clippy::len_without_is_empty)]
-    pub async fn size(&self) -> u64 {
-        let buffer = self.buffer.read().await;
-        buffer.size()
+    pub fn size(&self) -> u64 {
+        self.tip.size()
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -181,6 +196,7 @@ impl<B: Blob> Write<B> {
             // write if it extended the underlying blob.
             buffer.offset = buffer.offset.max(current_offset);
         }
+        self.tip.publish_resize(buffer.offset, buffer.size());
 
         Ok(())
     }
@@ -203,6 +219,8 @@ impl<B: Blob> Write<B> {
         // Resize the underlying blob.
         self.blob.resize(len).await?;
 
+        self.tip.publish_resize(buffer.offset, buffer.size());
+
         Ok(())
     }
 
@@ -212,6 +230,7 @@ impl<B: Blob> Write<B> {
         if let Some((buf, offset)) = buffer.take() {
             self.blob.write_at(offset, buf).await?;
         }
+        self.tip.publish_flush(buffer.offset);
         self.blob.sync().await
     }
 }

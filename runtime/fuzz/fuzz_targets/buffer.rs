@@ -244,7 +244,7 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             data
                         };
-                        let current_size = append.size().await;
+                        let current_size = append.size();
                         if current_size.checked_add(data.len() as u64).is_some() {
                             let _ = append.append(&data).await;
                         }
@@ -307,7 +307,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::WriteSize => {
                     if let Some(ref writer) = write_buffer {
-                        let _ = writer.size().await;
+                        let _ = writer.size();
                     }
                 }
 
@@ -323,7 +323,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::AppendSize => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.size().await;
+                        let _ = append.size();
                     }
                 }
 
