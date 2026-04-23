@@ -1,22 +1,22 @@
 use commonware_runtime::{
     metrics::{Counter, Gauge},
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics, Registered,
+    Clock, Metrics as RuntimeMetrics,
 };
 use std::sync::Arc;
 
 /// Metrics for the [super::Engine].
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Lowest height without a certificate
-    pub tip: Registered<Gauge>,
+    pub tip: Gauge,
     /// Number of digests returned by the automaton by status
-    pub digest: Registered<status::Counter>,
+    pub digest: status::Counter,
     /// Number of [super::types::Ack] messages processed by status
-    pub acks: Registered<status::Counter>,
+    pub acks: status::Counter,
     /// Number of certificates produced
-    pub certificates: Registered<Counter>,
+    pub certificates: Counter,
     /// Number of rebroadcast attempts by status
-    pub rebroadcast: Registered<status::Counter>,
+    pub rebroadcast: status::Counter,
     /// Histogram of application digest durations
     pub digest_duration: histogram::Timed<E>,
 }
@@ -28,18 +28,18 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         let digest = context.register(
             "digest",
             "Number of digests returned by the automaton by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let acks = context.register(
             "acks",
             "Number of Ack messages processed by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let certificates = context.counter("certificates", "Number of certificates produced");
         let rebroadcast = context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let digest_duration = context.histogram(
             "digest_duration",

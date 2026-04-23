@@ -4,7 +4,7 @@ use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     metrics::{Counter, Gauge},
-    Blob, BufMut, Error as RError, Registered,
+    Blob, BufMut, Error as RError,
 };
 use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
@@ -76,9 +76,9 @@ pub struct Metadata<E: Context, K: Span, V: Codec> {
     partition: String,
     state: AsyncMutex<State<E::Blob, K>>,
 
-    sync_overwrites: Registered<Counter>,
-    sync_rewrites: Registered<Counter>,
-    keys: Registered<Gauge>,
+    sync_overwrites: Counter,
+    sync_rewrites: Counter,
+    keys: Gauge,
 }
 
 impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {

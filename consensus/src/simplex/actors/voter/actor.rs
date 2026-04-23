@@ -24,8 +24,8 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
     buffer::paged::CacheRef,
-    metrics::{Counter, Family, Histogram},
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner, Storage,
+    metrics::{CounterFamily, Histogram},
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -119,9 +119,9 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    outbound_messages: Registered<Family<Outbound, Counter>>,
-    notarization_latency: Registered<Histogram>,
-    finalization_latency: Registered<Histogram>,
+    outbound_messages: CounterFamily<Outbound>,
+    notarization_latency: Histogram,
+    finalization_latency: Histogram,
 }
 
 impl<

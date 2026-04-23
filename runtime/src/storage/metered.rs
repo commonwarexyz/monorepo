@@ -1,5 +1,5 @@
 use crate::{
-    metrics::{Counter, Gauge},
+    metrics::raw::{Counter, Gauge},
     utils::MetricScope,
     Buf, Error, IoBufs, IoBufsMut,
 };

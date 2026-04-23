@@ -44,7 +44,10 @@
 
 pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
-    metrics::{Counter, Family, Gauge, Metric},
+    metrics::{
+        raw::{Counter, Family, Gauge},
+        Metric,
+    },
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,

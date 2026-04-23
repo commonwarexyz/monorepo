@@ -1,8 +1,8 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, Family, Gauge},
+    metrics::{Counter, EncodeStruct, GaugeFamily},
     telemetry::metrics::{histogram, status},
-    Clock, Metrics as RuntimeMetrics, Registered,
+    Clock, Metrics as RuntimeMetrics,
 };
 use std::sync::Arc;
 
@@ -15,19 +15,19 @@ pub struct Sequencer<P: PublicKey> {
 /// Metrics for the [super::Engine]
 pub struct Metrics<E: RuntimeMetrics + Clock, P: PublicKey> {
     /// Height per sequencer
-    pub sequencer_heights: Registered<Family<Sequencer<P>, Gauge>>,
+    pub sequencer_heights: GaugeFamily<Sequencer<P>>,
     /// Number of acks processed by status
-    pub acks: Registered<status::Counter>,
+    pub acks: status::Counter,
     /// Number of nodes processed by status
-    pub nodes: Registered<status::Counter>,
+    pub nodes: status::Counter,
     /// Number of application verifications by status
-    pub verify: Registered<status::Counter>,
+    pub verify: status::Counter,
     /// Number of certificates produced
-    pub certificates: Registered<Counter>,
+    pub certificates: Counter,
     /// Number of propose attempts by status
-    pub propose: Registered<status::Counter>,
+    pub propose: status::Counter,
     /// Number of rebroadcast attempts by status
-    pub rebroadcast: Registered<status::Counter>,
+    pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
     pub verify_duration: histogram::Timed<E>,
     /// Histogram of time from new proposal to certificate generation
@@ -41,28 +41,28 @@ impl<E: RuntimeMetrics + Clock, P: PublicKey> Metrics<E, P> {
         let acks = context.register(
             "acks",
             "Number of acks processed by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let nodes = context.register(
             "nodes",
             "Number of nodes processed by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let verify = context.register(
             "verify",
             "Number of application verifications by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let certificates = context.counter("certificates", "Number of certificates produced");
         let propose = context.register(
             "propose",
             "Number of propose attempts by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let rebroadcast = context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let verify_duration = context.histogram(
             "verify_duration",

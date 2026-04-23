@@ -7,7 +7,7 @@ use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     metrics::Counter,
-    Blob, Buf, BufMut, BufferPooler, Error as RError, Registered,
+    Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
@@ -86,11 +86,11 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     pending: AsyncMutex<BTreeSet<u64>>,
 
     // Metrics
-    puts: Registered<Counter>,
-    gets: Registered<Counter>,
-    has: Registered<Counter>,
-    syncs: Registered<Counter>,
-    pruned: Registered<Counter>,
+    puts: Counter,
+    gets: Counter,
+    has: Counter,
+    syncs: Counter,
+    pruned: Counter,
 
     _phantom: PhantomData<V>,
 }

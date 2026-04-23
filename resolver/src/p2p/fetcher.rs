@@ -2,12 +2,12 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{EncodeStruct, Family, Gauge, Histogram},
+    metrics::{EncodeStruct, GaugeFamily, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, CounterExt, Status},
     },
-    Clock, Metrics, Registered,
+    Clock, Metrics,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use rand::{seq::SliceRandom, Rng};
@@ -133,16 +133,16 @@ where
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of response time in ms)
-    performance: Registered<Family<Peer<P>, Gauge>>,
+    performance: GaugeFamily<Peer<P>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
-    requests_created: Registered<status::Counter>,
+    requests_created: status::Counter,
 
     /// Status of individual network requests sent to peers
-    requests_sent: Registered<status::Counter>,
+    requests_sent: status::Counter,
 
     /// Histogram of successful response durations
-    resolves: Registered<Histogram>,
+    resolves: Histogram,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -164,12 +164,12 @@ where
         let requests_created = context.register(
             "requests_created",
             "Status of request creation attempts",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let requests_sent = context.register(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            status::Counter::default(),
+            status::Raw::default(),
         );
         let resolves = context.histogram(
             "resolves",

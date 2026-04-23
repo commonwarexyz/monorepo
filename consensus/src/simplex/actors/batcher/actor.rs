@@ -17,10 +17,10 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    metrics::{Counter, Family, Gauge, Histogram},
+    metrics::{Counter, CounterFamily, GaugeFamily, Histogram},
     spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextCell, Handle, Metrics, Registered, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
@@ -65,12 +65,12 @@ where
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    added: Registered<Counter>,
-    verified: Registered<Counter>,
-    inbound_messages: Registered<Family<Inbound, Counter>>,
-    latest_vote: Registered<Family<Peer<S::PublicKey>, Gauge>>,
+    added: Counter,
+    verified: Counter,
+    inbound_messages: CounterFamily<Inbound>,
+    latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     latest_seen: Vec<View>,
-    batch_size: Registered<Histogram>,
+    batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
 }
@@ -91,7 +91,7 @@ where
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
-        let latest_vote: Registered<Family<Peer<S::PublicKey>, Gauge>> =
+        let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
         for participant in participants.iter() {
             latest_vote.get_or_create_by(participant).set(0);

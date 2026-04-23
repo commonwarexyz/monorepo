@@ -14,9 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::{Counter, Family},
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Registered, Resolver,
-    SinkOf, Spawner, StreamOf,
+    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network,
+    Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use rand::seq::SliceRandom;
@@ -62,7 +61,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: Registered<Family<metrics::Peer<C::PublicKey>, Counter>>,
+    attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
 impl<

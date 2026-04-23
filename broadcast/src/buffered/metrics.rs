@@ -1,8 +1,8 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, Family, Gauge},
+    metrics::{CounterFamily, EncodeStruct, Gauge},
     telemetry::metrics::status,
-    Metrics as RuntimeMetrics, Registered,
+    Metrics as RuntimeMetrics,
 };
 
 /// Per-sequencer label.
@@ -14,16 +14,16 @@ pub struct Sequencer<P: PublicKey> {
 /// Metrics for the [super::Engine]
 pub struct Metrics<P: PublicKey> {
     /// Number of broadcasts received by peer
-    pub peer: Registered<Family<Sequencer<P>, Counter>>,
+    pub peer: CounterFamily<Sequencer<P>>,
     /// Number of received messages by status
-    pub receive: Registered<status::Counter>,
+    pub receive: status::Counter,
     /// Number of `subscribe` requests by status
-    pub subscribe: Registered<status::Counter>,
+    pub subscribe: status::Counter,
     /// Number of `get` requests by status
-    pub get: Registered<status::Counter>,
+    pub get: status::Counter,
     /// Number of digests being awaited. May be less than the number of waiters since there may be
     /// multiple waiters for the same digest.
-    pub waiters: Registered<Gauge>,
+    pub waiters: Gauge,
 }
 
 impl<P: PublicKey> Metrics<P> {
@@ -34,17 +34,17 @@ impl<P: PublicKey> Metrics<P> {
             receive: context.register(
                 "receive",
                 "Number of received messages by status",
-                status::Counter::default(),
+                status::Raw::default(),
             ),
             subscribe: context.register(
                 "subscribe",
                 "Number of `subscribe` requests by status",
-                status::Counter::default(),
+                status::Raw::default(),
             ),
             get: context.register(
                 "get",
                 "Number of `get` requests by status",
-                status::Counter::default(),
+                status::Raw::default(),
             ),
             waiters: context.gauge("waiters", "Number of digests being awaited"),
         }

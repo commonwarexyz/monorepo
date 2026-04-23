@@ -65,6 +65,11 @@ stability_scope!(BETA {
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     /// Re-exports of Prometheus types under the runtime namespace.
+    ///
+    /// Top-level aliases ([`Counter`], [`Gauge`], [`Histogram`],
+    /// [`CounterFamily`], [`GaugeFamily`]) are [`crate::Registered`] handles
+    /// suitable for use as field types on metrics structs. Use [`raw`] when
+    /// constructing a metric to pass to [`crate::Metrics::register`].
     pub mod metrics {
         pub use prometheus_client::{collector, encoding, registry};
 
@@ -72,10 +77,25 @@ stability_scope!(BETA {
         pub use prometheus_client::metrics::*;
         pub use prometheus_client::registry::*;
 
-        pub use counter::Counter;
-        pub use family::Family;
-        pub use gauge::Gauge;
-        pub use histogram::Histogram;
+        /// Underlying Prometheus metric types. Used when constructing a metric
+        /// to pass to [`crate::Metrics::register`].
+        pub mod raw {
+            pub use prometheus_client::metrics::counter::Counter;
+            pub use prometheus_client::metrics::family::Family;
+            pub use prometheus_client::metrics::gauge::Gauge;
+            pub use prometheus_client::metrics::histogram::Histogram;
+        }
+
+        /// A registered counter metric.
+        pub type Counter = crate::Registered<raw::Counter>;
+        /// A registered gauge metric.
+        pub type Gauge = crate::Registered<raw::Gauge>;
+        /// A registered histogram metric.
+        pub type Histogram = crate::Registered<raw::Histogram>;
+        /// A registered family of counters keyed by `L`.
+        pub type CounterFamily<L> = crate::Registered<raw::Family<L, raw::Counter>>;
+        /// A registered family of gauges keyed by `L`.
+        pub type GaugeFamily<L> = crate::Registered<raw::Family<L, raw::Gauge>>;
     }
 
     pub mod iobuf;
@@ -470,8 +490,8 @@ stability_scope!(BETA {
             &self,
             name: N,
             help: H,
-        ) -> Registered<metrics::Counter> {
-            self.register(name, help, metrics::Counter::default())
+        ) -> metrics::Counter {
+            self.register(name, help, metrics::raw::Counter::default())
         }
 
         /// Register a gauge with the runtime.
@@ -479,8 +499,8 @@ stability_scope!(BETA {
             &self,
             name: N,
             help: H,
-        ) -> Registered<metrics::Gauge> {
-            self.register(name, help, metrics::Gauge::default())
+        ) -> metrics::Gauge {
+            self.register(name, help, metrics::raw::Gauge::default())
         }
 
         /// Register a histogram with the runtime.
@@ -489,23 +509,23 @@ stability_scope!(BETA {
             name: N,
             help: H,
             buckets: I,
-        ) -> Registered<metrics::Histogram>
+        ) -> metrics::Histogram
         where
             I: IntoIterator<Item = f64>,
         {
-            self.register(name, help, metrics::Histogram::new(buckets))
+            self.register(name, help, metrics::raw::Histogram::new(buckets))
         }
 
         /// Register a metric family with the runtime.
-        fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<metrics::Family<S, M>>
+        fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<metrics::raw::Family<S, M>>
         where
             N: Into<String>,
             H: Into<String>,
             S: Clone + std::hash::Hash + Eq,
             M: Default,
-            metrics::Family<S, M>: metrics::Metric,
+            metrics::raw::Family<S, M>: metrics::Metric,
         {
-            self.register(name, help, metrics::Family::<S, M>::default())
+            self.register(name, help, metrics::raw::Family::<S, M>::default())
         }
 
         /// Encode all metrics into a buffer.
@@ -896,7 +916,8 @@ mod tests {
     use super::*;
     use crate::{
         metrics::{
-            Counter, EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, Family, LabelSetEncoder,
+            raw::{Counter, Family},
+            EncodeLabelKey, EncodeLabelSet, EncodeLabelValue, LabelSetEncoder,
         },
         telemetry::traces::collector::TraceStorage,
     };

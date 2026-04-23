@@ -7,9 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{
-    buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf, Registered,
-};
+use commonware_runtime::{buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
@@ -417,11 +415,11 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     resize_progress: Option<u32>,
 
     // Metrics
-    puts: Registered<Counter>,
-    gets: Registered<Counter>,
-    unnecessary_reads: Registered<Counter>,
-    unnecessary_writes: Registered<Counter>,
-    resizes: Registered<Counter>,
+    puts: Counter,
+    gets: Counter,
+    unnecessary_reads: Counter,
+    unnecessary_writes: Counter,
+    resizes: Counter,
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {

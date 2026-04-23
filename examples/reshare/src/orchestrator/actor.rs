@@ -22,7 +22,7 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, metrics::Gauge, spawn_cell, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Network, Registered, Spawner, Storage,
+    Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
@@ -84,7 +84,7 @@ where
     partition_prefix: String,
     page_cache_ref: CacheRef,
 
-    latest_epoch: Registered<Gauge>,
+    latest_epoch: Gauge,
 
     _phantom: PhantomData<L>,
 }

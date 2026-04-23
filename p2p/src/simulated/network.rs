@@ -18,9 +18,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    metrics::{Counter, Family},
-    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics,
-    Network as RNetwork, Quota, Registered, Spawner,
+    metrics::CounterFamily, spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _,
+    Metrics, Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
@@ -171,8 +170,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
 
     // Metrics for received and sent messages
-    received_messages: Registered<Family<metrics::Message, Counter>>,
-    sent_messages: Registered<Family<metrics::Message, Counter>>,
+    received_messages: CounterFamily<metrics::Message>,
+    sent_messages: CounterFamily<metrics::Message>,
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
@@ -1327,7 +1326,7 @@ impl Link {
         sampler: Normal<f64>,
         success_rate: f64,
         max_size: u32,
-        received_messages: Registered<Family<metrics::Message, Counter>>,
+        received_messages: CounterFamily<metrics::Message>,
     ) -> Self {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.

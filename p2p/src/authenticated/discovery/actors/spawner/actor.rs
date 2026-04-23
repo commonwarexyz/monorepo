@@ -14,9 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::{Counter, Family},
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Sink, Spawner,
-    Stream,
+    metrics::CounterFamily, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Sink,
+    Spawner, Stream,
 };
 use commonware_utils::channel::mpsc;
 use rand_core::CryptoRngCore;
@@ -40,10 +39,10 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
-    sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    received_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
+    sent_messages: CounterFamily<metrics::Message<C>>,
+    received_messages: CounterFamily<metrics::Message<C>>,
+    dropped_messages: CounterFamily<metrics::Message<C>>,
+    rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
 impl<

@@ -1,15 +1,15 @@
 //! Metrics for [super::Queue].
 
-use commonware_runtime::{metrics::Gauge, Metrics as RuntimeMetrics, Registered};
+use commonware_runtime::{metrics::Gauge, Metrics as RuntimeMetrics};
 
 /// Metrics for [super::Queue].
 pub struct Metrics {
     /// Total enqueued items.
-    pub tip: Registered<Gauge>,
+    pub tip: Gauge,
     /// Acknowledged items.
-    pub floor: Registered<Gauge>,
+    pub floor: Gauge,
     /// Next item to dequeue.
-    pub next: Registered<Gauge>,
+    pub next: Gauge,
 }
 
 impl Metrics {

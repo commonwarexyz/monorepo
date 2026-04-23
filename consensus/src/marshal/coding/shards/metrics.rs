@@ -2,9 +2,9 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, Family, Gauge, Histogram},
+    metrics::{Counter, CounterFamily, EncodeStruct, Gauge, Histogram},
     telemetry::metrics::histogram::Buckets,
-    Metrics as MetricsTrait, Registered,
+    Metrics as MetricsTrait,
 };
 
 /// Per-peer label.
@@ -16,17 +16,17 @@ pub struct Peer<P: PublicKey> {
 /// Metrics for the shard engine.
 pub struct ShardMetrics<P: PublicKey> {
     /// Histogram of erasure decoding duration in seconds.
-    pub erasure_decode_duration: Registered<Histogram>,
+    pub erasure_decode_duration: Histogram,
     /// Number of blocks in the reconstructed blocks cache.
-    pub reconstructed_blocks_cache_count: Registered<Gauge>,
+    pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
-    pub reconstruction_states_count: Registered<Gauge>,
+    pub reconstruction_states_count: Gauge,
     /// Number of shards received per peer.
-    pub shards_received: Registered<Family<Peer<P>, Counter>>,
+    pub shards_received: CounterFamily<Peer<P>>,
     /// Total number of blocks successfully reconstructed.
-    pub blocks_reconstructed_total: Registered<Counter>,
+    pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
-    pub reconstruction_failures_total: Registered<Counter>,
+    pub reconstruction_failures_total: Counter,
 }
 
 impl<P: PublicKey> ShardMetrics<P> {

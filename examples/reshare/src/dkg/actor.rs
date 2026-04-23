@@ -28,9 +28,9 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, Family, Gauge},
-    spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
-    Spawner, Storage as RuntimeStorage,
+    metrics::{Counter, EncodeStruct, GaugeFamily},
+    spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;
@@ -121,12 +121,12 @@ where
     partition_prefix: String,
     max_supported_mode: ModeVersion,
 
-    successful_epochs: Registered<Counter>,
-    failed_epochs: Registered<Counter>,
-    our_reveals: Registered<Counter>,
-    all_reveals: Registered<Counter>,
-    latest_share: Registered<Family<Peer<C::PublicKey>, Gauge>>,
-    latest_ack: Registered<Family<Peer<C::PublicKey>, Gauge>>,
+    successful_epochs: Counter,
+    failed_epochs: Counter,
+    our_reveals: Counter,
+    all_reveals: Counter,
+    latest_share: GaugeFamily<Peer<C::PublicKey>>,
+    latest_ack: GaugeFamily<Peer<C::PublicKey>>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>

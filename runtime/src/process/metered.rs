@@ -1,6 +1,6 @@
 //! Process metrics collection.
 
-use crate::{metrics::Gauge, utils::MetricScope};
+use crate::{metrics::raw::Gauge, utils::MetricScope};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 

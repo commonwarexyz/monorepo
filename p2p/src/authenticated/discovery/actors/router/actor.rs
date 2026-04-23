@@ -14,8 +14,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::{Counter, Family},
-    spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Registered, Spawner,
+    metrics::CounterFamily, spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, ring},
@@ -33,7 +32,7 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
-    messages_dropped: Registered<Family<metrics::Message<P>, Counter>>,
+    messages_dropped: CounterFamily<metrics::Message<P>>,
 }
 
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {

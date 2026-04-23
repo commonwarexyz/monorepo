@@ -148,7 +148,7 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{metrics::Gauge, utils::MetricScope, Error, IoBufMut, IoBufs};
+use crate::{metrics::raw::Gauge, utils::MetricScope, Error, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,

@@ -10,7 +10,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
     metrics::{Counter, Gauge},
-    Buf, BufMut, BufferPooler, Metrics, Registered, Storage,
+    Buf, BufMut, BufferPooler, Metrics, Storage,
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
@@ -126,12 +126,12 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     intervals: RMap,
 
     // Metrics
-    items_tracked: Registered<Gauge>,
-    indices_pruned: Registered<Counter>,
-    unnecessary_reads: Registered<Counter>,
-    gets: Registered<Counter>,
-    has: Registered<Counter>,
-    syncs: Registered<Counter>,
+    items_tracked: Gauge,
+    indices_pruned: Counter,
+    unnecessary_reads: Counter,
+    gets: Counter,
+    has: Counter,
+    syncs: Counter,
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>

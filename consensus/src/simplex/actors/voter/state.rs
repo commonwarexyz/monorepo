@@ -16,8 +16,8 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{
-    metrics::{Counter, Family, Gauge},
-    Clock, Metrics, Registered,
+    metrics::{CounterFamily, Gauge},
+    Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;
 use rand_core::CryptoRngCore;
@@ -106,10 +106,10 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
-    current_view: Registered<Gauge>,
-    tracked_views: Registered<Gauge>,
-    timeouts: Registered<Family<Timeout, Counter>>,
-    nullifications: Registered<Family<Leader<S::PublicKey>, Counter>>,
+    current_view: Gauge,
+    tracked_views: Gauge,
+    timeouts: CounterFamily<Timeout>,
+    nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>

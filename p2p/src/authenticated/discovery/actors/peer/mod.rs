@@ -6,10 +6,7 @@ use crate::authenticated::discovery::{
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{
-    metrics::{Counter, Family},
-    Registered,
-};
+use commonware_runtime::metrics::CounterFamily;
 use std::{num::NonZeroUsize, time::Duration};
 use thiserror::Error;
 
@@ -27,10 +24,10 @@ pub struct Config<C: PublicKey> {
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
 
-    pub sent_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    pub received_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    pub dropped_messages: Registered<Family<metrics::Message<C>, Counter>>,
-    pub rate_limited: Registered<Family<metrics::Message<C>, Counter>>,
+    pub sent_messages: CounterFamily<metrics::Message<C>>,
+    pub received_messages: CounterFamily<metrics::Message<C>>,
+    pub dropped_messages: CounterFamily<metrics::Message<C>>,
+    pub rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
 #[derive(Error, Debug)]

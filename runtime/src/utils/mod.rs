@@ -330,7 +330,7 @@ impl<M> Registered<M> {
         Self::from_parts(Arc::new(metric), registration)
     }
 
-    pub(crate) fn from_parts(metric: Arc<M>, registration: Registration) -> Self {
+    pub(crate) const fn from_parts(metric: Arc<M>, registration: Registration) -> Self {
         Self {
             metric,
             registration,
@@ -747,7 +747,7 @@ mod tests {
     use super::*;
     use crate::{
         deterministic,
-        metrics::{Counter, Gauge, Histogram},
+        metrics::raw::{Counter, Gauge, Histogram},
         Metrics, Runner, Spawner,
     };
     use commonware_macros::test_traced;
@@ -1090,7 +1090,7 @@ mod tests {
         // descriptor on scrape. This matches upstream prometheus-client's
         // `encode_omit_empty` behavior.
         let mut registry = Registry::default();
-        let empty_family = crate::metrics::Family::<Vec<(String, String)>, Counter>::default();
+        let empty_family = crate::metrics::raw::Family::<Vec<(String, String)>, Counter>::default();
         registry.register_permanent(
             "votes".to_string(),
             "vote count".to_string(),

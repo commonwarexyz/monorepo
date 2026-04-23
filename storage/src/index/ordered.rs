@@ -13,7 +13,7 @@ use crate::{
 };
 use commonware_runtime::{
     metrics::{Counter, Gauge},
-    Metrics, Registered,
+    Metrics,
 };
 use std::{
     collections::{
@@ -91,9 +91,9 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, Record<V>>,
 
-    keys: Registered<Gauge>,
-    items: Registered<Gauge>,
-    pruned: Registered<Counter>,
+    keys: Gauge,
+    items: Gauge,
+    pruned: Counter,
 }
 
 impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {

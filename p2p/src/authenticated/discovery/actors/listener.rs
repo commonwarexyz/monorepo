@@ -9,7 +9,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     metrics::Counter, spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter,
-    Listener, Metrics, Network, Quota, Registered, SinkOf, Spawner, StreamOf,
+    Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -42,10 +42,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    handshakes_blocked: Registered<Counter>,
-    handshakes_concurrent_rate_limited: Registered<Counter>,
-    handshakes_ip_rate_limited: Registered<Counter>,
-    handshakes_subnet_rate_limited: Registered<Counter>,
+    handshakes_blocked: Counter,
+    handshakes_concurrent_rate_limited: Counter,
+    handshakes_ip_rate_limited: Counter,
+    handshakes_subnet_rate_limited: Counter,
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {

@@ -27,8 +27,7 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    metrics::Gauge, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered,
-    Spawner, Storage,
+    metrics::Gauge, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -259,9 +258,9 @@ where
 
     // ---------- Metrics ----------
     // Latest height metric
-    finalized_height: Registered<Gauge>,
+    finalized_height: Gauge,
     // Latest processed height
-    processed_height: Registered<Gauge>,
+    processed_height: Gauge,
 }
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>

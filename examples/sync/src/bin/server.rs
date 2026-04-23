@@ -6,7 +6,7 @@ use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     metrics::Counter, tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network,
-    Registered, Runner, SinkOf, Spawner, Storage, StreamOf,
+    Runner, SinkOf, Spawner, Storage, StreamOf,
 };
 use commonware_storage::{mmr, qmdb::sync::Target};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -62,11 +62,11 @@ struct State<DB> {
     /// The database wrapped in async rwlock.
     database: AsyncRwLock<DB>,
     /// Request counter for metrics.
-    request_counter: Registered<Counter>,
+    request_counter: Counter,
     /// Error counter for metrics.
-    error_counter: Registered<Counter>,
+    error_counter: Counter,
     /// Counter for operations added.
-    ops_counter: Registered<Counter>,
+    ops_counter: Counter,
     /// Last time we added operations.
     last_operation_time: Mutex<SystemTime>,
 }

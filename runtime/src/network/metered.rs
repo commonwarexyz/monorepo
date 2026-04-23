@@ -1,4 +1,4 @@
-use crate::{metrics::Counter, utils::MetricScope, IoBufs, SinkOf, StreamOf};
+use crate::{metrics::raw::Counter, utils::MetricScope, IoBufs, SinkOf, StreamOf};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]

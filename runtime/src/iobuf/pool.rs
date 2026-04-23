@@ -52,7 +52,10 @@
 use super::IoBufMut;
 use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
-    metrics::{Counter, EncodeLabelSet, Family, Gauge},
+    metrics::{
+        raw::{Counter, Family, Gauge},
+        EncodeLabelSet,
+    },
     utils::MetricScope,
 };
 use commonware_utils::NZUsize;

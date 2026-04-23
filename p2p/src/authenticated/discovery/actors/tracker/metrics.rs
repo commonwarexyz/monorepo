@@ -1,8 +1,8 @@
 use crate::authenticated::discovery::metrics;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, Family, Gauge},
-    Metrics as RuntimeMetrics, Registered,
+    metrics::{CounterFamily, Gauge, GaugeFamily},
+    Metrics as RuntimeMetrics,
 };
 
 /// Metrics for the [super::Actor]
@@ -10,22 +10,22 @@ pub struct Metrics<P: PublicKey> {
     /// The total number of unique peers in all peer sets being tracked.
     /// Includes bootstrappers, even if they are not in any peer set.
     /// Does not include self, despite having a record for it.
-    pub tracked: Registered<Gauge>,
+    pub tracked: Gauge,
 
     /// Blocked peers (value = expiry time as epoch millis).
-    pub blocked: Registered<Family<metrics::Peer<P>, Gauge>>,
+    pub blocked: GaugeFamily<metrics::Peer<P>>,
 
     /// The total number of outstanding reservations.
-    pub reserved: Registered<Gauge>,
+    pub reserved: Gauge,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connected: Registered<Family<metrics::Peer<P>, Gauge>>,
+    pub connected: GaugeFamily<metrics::Peer<P>>,
 
     /// A count of the number of rate-limited reservation events for each peer.
-    pub limits: Registered<Family<metrics::Peer<P>, Counter>>,
+    pub limits: CounterFamily<metrics::Peer<P>>,
 
     /// A count of the number of updates for each peer.
-    pub updates: Registered<Family<metrics::Peer<P>, Counter>>,
+    pub updates: CounterFamily<metrics::Peer<P>>,
 }
 
 impl<P: PublicKey> Metrics<P> {

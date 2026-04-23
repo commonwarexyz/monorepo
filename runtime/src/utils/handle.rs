@@ -1,4 +1,4 @@
-use crate::{metrics::Gauge, supervision::Tree, utils::extract_panic_message, Error};
+use crate::{metrics::raw::Gauge, supervision::Tree, utils::extract_panic_message, Error};
 use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, Once},

@@ -12,7 +12,10 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    metrics::{Counter, Family, Gauge, Metric},
+    metrics::{
+        raw::{Counter, Family, Gauge},
+        Metric,
+    },
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,

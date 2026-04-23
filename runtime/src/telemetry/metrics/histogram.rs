@@ -1,6 +1,6 @@
 //! Utilities for working with histograms.
 
-use crate::{metrics::Histogram, Clock, Registered};
+use crate::{metrics::Histogram, Clock};
 use std::{sync::Arc, time::SystemTime};
 
 /// Holds constants for bucket sizes for histograms.
@@ -39,7 +39,7 @@ impl Buckets {
 #[derive(Clone)]
 pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Registered<Histogram>,
+    histogram: Histogram,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,
@@ -47,7 +47,7 @@ pub struct Timed<C: Clock> {
 
 impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
-    pub const fn new(histogram: Registered<Histogram>, clock: Arc<C>) -> Self {
+    pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
         Self { histogram, clock }
     }
 
@@ -76,7 +76,7 @@ impl<C: Clock> Timed<C> {
 /// A timer that records a duration when dropped.
 pub struct Timer<C: Clock> {
     /// The histogram to record durations in.
-    histogram: Registered<Histogram>,
+    histogram: Histogram,
 
     /// The clock to use for recording durations.
     clock: Arc<C>,

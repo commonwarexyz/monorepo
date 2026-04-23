@@ -12,7 +12,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     metrics::{Counter, Gauge},
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Registered, Spawner,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
@@ -49,9 +49,9 @@ where
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
 
     // Metrics
-    outstanding: Registered<Gauge>,
-    requests: Registered<Counter>,
-    responses: Registered<Counter>,
+    outstanding: Gauge,
+    requests: Counter,
+    responses: Counter,
 }
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>

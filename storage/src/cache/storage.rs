@@ -6,7 +6,7 @@ use crate::{
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{
     metrics::{Counter, Gauge},
-    Buf, BufMut, Metrics, Registered, Storage,
+    Buf, BufMut, Metrics, Storage,
 };
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,10 +69,10 @@ pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     indices: BTreeMap<u64, u64>,
     intervals: RMap,
 
-    items_tracked: Registered<Gauge>,
-    gets: Registered<Counter>,
-    has: Registered<Counter>,
-    syncs: Registered<Counter>,
+    items_tracked: Gauge,
+    gets: Counter,
+    has: Counter,
+    syncs: Counter,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {

@@ -10,7 +10,7 @@ use commonware_runtime::{
         Write,
     },
     metrics::{Counter, Gauge},
-    Blob, BufferPool, Error as RError, Metrics, Registered, Storage,
+    Blob, BufferPool, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
 use futures::future::try_join_all;
@@ -137,9 +137,9 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     /// the current execution. Not persisted across restarts.
     oldest_retained_section: u64,
 
-    tracked: Registered<Gauge>,
-    synced: Registered<Counter>,
-    pruned: Registered<Counter>,
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
 }
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
