@@ -57,14 +57,14 @@
 //! Given a [`Setup`], [`Witness`], and [`Claim`], you can create a [`Proof`]
 //! with [`prove`].
 //!
-//! Both [`prove`] and [`pre_verify`] also take a [`Transcript`]. The proof is only
-//! valid for the transcript state used to produce it, so the verifier must
-//! replay the same transcript history before calling [`pre_verify`] or [`verify`].
+//! Both [`prove`] and [`verify`] take a [`Transcript`]. The proof is only valid
+//! for the transcript state used to produce it, so the verifier must replay the
+//! same transcript history before calling [`verify`].
 //!
 //! On the verifier side, we don't have a [`Witness`], and can instead check
 //! that the prover had a valid witness, using their [`Proof`], through [`verify`].
-//! If you need the verification equation itself for batching or deferred
-//! evaluation, use [`pre_verify`] to obtain the corresponding [`Tangle`].
+//! The result is a [`Synthetic`] verification equation that can be evaluated
+//! against the setup's generators, or combined with other equations for batching.
 //!
 //! ## Example
 //!
@@ -117,13 +117,11 @@
 //! // Verification must replay the same transcript state.
 //! let mut verifier_transcript = Transcript::new(b"ipa-example");
 //! verifier_transcript.commit(b"context".as_slice());
-//! assert!(verify(
-//!     &mut verifier_transcript,
-//!     &setup,
-//!     &claim,
-//!     proof,
-//!     &strategy,
-//! ));
+//! let valid = setup
+//!     .eval(|vs| verify(&mut verifier_transcript, vs, &claim, proof), &strategy)
+//!     .map(|g| g == G::zero())
+//!     .unwrap_or(false);
+//! assert!(valid);
 //! ```
 //!
 //! # References
@@ -135,10 +133,10 @@ use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
-    algebra::{powers, Additive, CryptoGroup, Field, Random, Space},
-    tangle::{Tangle, TangleIdx},
+    algebra::{powers, CryptoGroup, Field, Random, Space},
+    synthetic::Synthetic,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 
 /// A setup decides on what group elements we use to commit to vectors and their product.
 ///
@@ -244,42 +242,35 @@ impl<G> Setup<G> {
         self.g.len() >> lg_len > 0
     }
 
-    pub fn tangle_points<F>(
+    /// Build a virtual setup, call `f` to obtain a verification equation,
+    /// and evaluate it against the concrete generators in `self`.
+    ///
+    /// Returns `None` when `f` returns `None` (malformed proof).
+    /// Otherwise returns the evaluated group element, which should be
+    /// zero for a valid proof.
+    pub fn eval<F: Field>(
         &self,
-        log_len: u8,
-    ) -> impl Iterator<Item = (TangleIdx, G)> + use<'_, F, G>
+        f: impl FnOnce(&Setup<Synthetic<F, G>>) -> Option<Synthetic<F, G>>,
+        strategy: &impl Strategy,
+    ) -> Option<G>
     where
-        F: Additive,
         G: Space<F>,
     {
-        let len = 1usize.checked_shl(u32::from(log_len)).unwrap_or(usize::MAX);
-        std::iter::once(((2, 0), self.product_generator().clone()))
-            .chain(
-                self.g()
-                    .iter()
-                    .take(len)
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, g_i)| {
-                        (
-                            (0, i.try_into().expect("generator index should fit in u32")),
-                            g_i,
-                        )
-                    }),
-            )
-            .chain(
-                self.h()
-                    .iter()
-                    .take(len)
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, h_i)| {
-                        (
-                            (1, i.try_into().expect("generator index should fit in u32")),
-                            h_i,
-                        )
-                    }),
-            )
+        let n = self.g.len();
+        let mut gens = Synthetic::<F, G>::generators();
+        let vg: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vh: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vq = gens.next().expect("generators is infinite");
+        let vs = Setup::new(vq, vg.into_iter().zip(vh));
+        let mut flat = Vec::with_capacity(2 * n + 1);
+        flat.extend_from_slice(&self.g);
+        flat.extend_from_slice(&self.h);
+        flat.push(self.product_generator.clone());
+        f(&vs).map(|v| v.eval(&flat, strategy))
     }
 }
 
@@ -662,25 +653,22 @@ where
     })
 }
 
-/// Construct the verification equation for a [`Proof`], relative to a [`Claim`].
+/// Construct the verification equation for a [`Proof`], relative to a
+/// [`Claim`] and a virtual [`Setup`].
 ///
 /// If the check succeeds, we are convinced that the prover knows a valid
 /// [`Witness`] to this particular [`Claim`].
 ///
-/// When evaluating the returned [`Tangle`], it's important that the verifier
-/// uses a [`Setup`] that they know to be correct, rather than one that the
-/// prover is telling them to use. For example, by using one generated from a
-/// deterministic seed that's agreed upon, or something similar.
+/// The returned [`Synthetic`] should evaluate to zero for a correct proof.
+/// Use [`Setup::eval`] to create the virtual setup and evaluate the result.
 ///
 /// The return will be `None` if the proof is incorrect in an obvious way.
-/// Otherwise, we have a [`Tangle`] which should [`Tangle::eval`] to 0 if the
-/// proof is correct, using [`Setup::g`] as row 0, [`Setup::h`] as row 1, and
-/// [`Setup::product_generator`] as row 2.
-pub fn pre_verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
+pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
+    setup: &Setup<Synthetic<F, G>>,
     claim: &Claim<F, G>,
     proof: Proof<F, G>,
-) -> Option<Tangle<F, G>>
+) -> Option<Synthetic<F, G>>
 where
     Claim<F, G>: Encode,
 {
@@ -777,7 +765,7 @@ where
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
     let mut us = Vec::<(F, F)>::with_capacity(rounds);
-    let mut out = Tangle::tethered(l_r_coms.into_iter().flat_map(|(l, r)| {
+    let mut out = Synthetic::concrete(l_r_coms.into_iter().flat_map(|(l, r)| {
         transcript.commit(l.encode());
         transcript.commit(r.encode());
         let u = F::random(transcript.noise(b"u challenge"));
@@ -798,8 +786,8 @@ where
     if transcript.summarize() != transcript_summary {
         return None;
     }
-    out += &Tangle::tethered([(F::one(), claim.commitment.clone())]);
-    out += &Tangle::free_point((2, 0), claim.product.clone() * &w);
+    out += &Synthetic::concrete([(F::one(), claim.commitment.clone())]);
+    out += &(setup.product_generator().clone() * &(claim.product.clone() * &w));
     let g_weights = {
         let mut weights = Vec::<F>::with_capacity(claimed_len);
         weights.push(F::one());
@@ -815,37 +803,18 @@ where
         }
         weights
     };
-    let h_weights = g_weights
+    let h_weights: Vec<F> = g_weights
         .iter()
         .rev()
         .zip(powers(F::one(), &claim.y))
-        .map(|(w_i, y_i)| y_i * w_i);
-    out -= &(Tangle::free_row(1, h_weights) * &b_final);
-    out -= &(Tangle::free_row(0, g_weights) * &a_final);
-    out -= &Tangle::free_point((2, 0), a_final * &b_final * &w);
+        .map(|(w_i, y_i)| y_i * w_i)
+        .collect();
+    let g = &setup.g()[..claimed_len];
+    let h = &setup.h()[..claimed_len];
+    out -= &(Synthetic::msm(h, &h_weights, &Sequential) * &b_final);
+    out -= &(Synthetic::msm(g, &g_weights, &Sequential) * &a_final);
+    out -= &(setup.product_generator().clone() * &(a_final * &b_final * &w));
     Some(out)
-}
-
-/// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
-#[must_use]
-pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    transcript: &mut Transcript,
-    setup: &Setup<G>,
-    claim: &Claim<F, G>,
-    proof: Proof<F, G>,
-    strategy: &impl Strategy,
-) -> bool
-where
-    Claim<F, G>: Encode,
-{
-    pre_verify(transcript, claim, proof)
-        .map(|check| {
-            check
-                .eval(setup.tangle_points(claim.log_len), strategy)
-                .expect("should be enough setup points for IPA verification")
-                == G::zero()
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -1026,13 +995,16 @@ pub mod fuzz {
             } else {
                 NAMESPACE
             };
-            verify(
-                &mut Transcript::new(ns),
-                self.setup,
-                &self.claim,
-                self.proof,
-                &Sequential,
-            )
+            let setup = self.setup;
+            let claim = self.claim;
+            let proof = self.proof;
+            setup
+                .eval(
+                    |vs| super::verify(&mut Transcript::new(ns), vs, &claim, proof),
+                    &Sequential,
+                )
+                .map(|g| g == G::zero())
+                .unwrap_or(false)
         }
     }
 

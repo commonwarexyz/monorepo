@@ -39,12 +39,11 @@
 //! [`Proof`] with [`prove`].
 //!
 //! The proof is bound to the current [`Transcript`] state. The verifier must
-//! replay the same transcript history before calling [`pre_verify`],
-//! [`verify`], or [`batch_verify`].
+//! replay the same transcript history before calling [`verify`] or
+//! [`batch_verify`].
 //!
-//! Use [`verify`] for a single proof, [`batch_verify`] for many proofs, or
-//! [`pre_verify`] if you need the verification equation as a [`Tangle`] for
-//! deferred evaluation, or more advanced batching.
+//! Use [`verify`] if you need the returned [`Synthetic`] verification equation
+//! for a single proof, or [`batch_verify`] to check many proofs at once.
 //!
 //! ## Example
 //!
@@ -114,15 +113,14 @@
 //! let mut verifier_rng = test_rng();
 //! let mut verifier_transcript = Transcript::new(b"circuit-example");
 //! verifier_transcript.commit(b"context".as_slice());
-//! assert!(verify(
-//!     &mut verifier_rng,
-//!     &mut verifier_transcript,
-//!     &setup,
-//!     &circuit,
-//!     &claim,
-//!     proof,
-//!     &Sequential,
-//! ));
+//! let valid = setup
+//!     .eval(
+//!         |vs| verify(&mut verifier_rng, &mut verifier_transcript, vs, &circuit, &claim, proof, &Sequential),
+//!         &Sequential,
+//!     )
+//!     .map(|g| g == G::zero())
+//!     .unwrap_or(false);
+//! assert!(valid);
 //! ```
 //!
 //! # References
@@ -140,9 +138,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{powers, Additive, CryptoGroup, Field, Random, Ring, Space},
-    tangle::{Tangle, TangleIdx},
+    synthetic::Synthetic,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
@@ -336,22 +334,36 @@ impl<G> Setup<G> {
         self.ipa.supports(lg_len)
     }
 
-    /// Return the points needed to evaluate verification tangles.
-    ///
-    /// Rows 0-2 come from the underlying IPA setup. Row 3 contains the
-    /// Pedersen value and blinding generators.
-    pub fn tangle_points<F>(
+    /// Build a virtual setup, call `f` to obtain a verification equation,
+    /// and evaluate it against the concrete generators in `self`.
+    pub fn eval<F: Field>(
         &self,
-        log_len: u8,
-    ) -> impl Iterator<Item = (TangleIdx, G)> + use<'_, F, G>
+        f: impl FnOnce(&Setup<Synthetic<F, G>>) -> Option<Synthetic<F, G>>,
+        strategy: &impl Strategy,
+    ) -> Option<G>
     where
-        F: Additive,
         G: Space<F>,
     {
-        self.ipa.tangle_points(log_len).chain([
-            ((3, 0), self.pedersen_value.clone()),
-            ((3, 1), self.pedersen_blinding.clone()),
-        ])
+        let n = self.ipa.g().len();
+        let mut gens = Synthetic::<F, G>::generators();
+        let vg: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vh: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vq = gens.next().expect("generators is infinite");
+        let ipa_vs = ipa::Setup::new(vq, vg.into_iter().zip(vh));
+        let pv = gens.next().expect("generators is infinite");
+        let pb = gens.next().expect("generators is infinite");
+        let vs = Setup::new(ipa_vs, pv, pb);
+        let mut flat = Vec::with_capacity(2 * n + 3);
+        flat.extend_from_slice(self.ipa.g());
+        flat.extend_from_slice(self.ipa.h());
+        flat.push(self.ipa.product_generator().clone());
+        flat.push(self.pedersen_value.clone());
+        flat.push(self.pedersen_blinding.clone());
+        f(&vs).map(|v| v.eval(&flat, strategy))
     }
 }
 
@@ -928,19 +940,20 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 
 /// Construct the verification equation for a circuit proof.
 ///
-/// When the returned [`Tangle`] is evaluated with [`Setup::tangle_points`], a
-/// correct proof will evaluate to 0.
+/// The returned [`Synthetic`] should evaluate to zero for a correct proof.
+/// Use [`Setup::eval`] to create the virtual setup and evaluate the result.
 ///
 /// The extra randomness is used to compress the circuit-specific checks into a
 /// single equation before combining them with the inner product argument.
-pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
+pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRngCore,
     transcript: &mut Transcript,
+    setup: &Setup<Synthetic<F, G>>,
     circuit: &Circuit<F>,
     claim: &Claim<G>,
     proof: Proof<F, G>,
     strategy: &impl Strategy,
-) -> Option<Tangle<F, G>> {
+) -> Option<Synthetic<F, G>> {
     let Proof {
         m_big,
         o_big,
@@ -1036,22 +1049,33 @@ pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encod
     let x = F::random(transcript.noise(b"x"));
     let x = powers(x.clone(), &x).take(6).collect::<Vec<_>>();
 
-    let t_check = Tangle::free_row(3, [t_x.clone(), t_tilde_x])
-        - &(Tangle::free_row(3, [(-kappa + &delta_y_z)]) * &x[1])
-        + &(Tangle::tethered(theta.iter().cloned().zip(claim.commitments.iter().cloned())) * &x[1])
-        - &Tangle::tethered(std::iter::once(&x[0]).chain(&x[2..]).cloned().zip(t_big));
+    let ipa_g = setup.ipa.g();
+    let ipa_h = setup.ipa.h();
+
+    let pedersen_value = &setup.pedersen_value;
+    let pedersen_blinding = &setup.pedersen_blinding;
+
+    let t_check = Synthetic::msm(
+        &[pedersen_value.clone(), pedersen_blinding.clone()],
+        &[t_x.clone(), t_tilde_x],
+        &Sequential,
+    ) - &(pedersen_value.clone() * &((-kappa + &delta_y_z) * &x[1]))
+        + &(Synthetic::concrete(theta.iter().cloned().zip(claim.commitments.iter().cloned()))
+            * &x[1])
+        - &Synthetic::concrete(std::iter::once(&x[0]).chain(&x[2..]).cloned().zip(t_big));
 
     let p_check = {
-        let p_0 = Tangle::free_row(1, y_inv_omega_minus_y);
-        let p_1 = Tangle::free_row(0, y_inv_rho) + &Tangle::free_row(1, y_inv_lambda);
-        Tangle::tethered([
+        let p_0 = Synthetic::msm(ipa_h, &y_inv_omega_minus_y, &Sequential);
+        let p_1 = Synthetic::msm(&ipa_g[..circuit.internal_vars], &y_inv_rho, &Sequential)
+            + &Synthetic::msm(&ipa_h[..circuit.internal_vars], &y_inv_lambda, &Sequential);
+        Synthetic::concrete([
             (F::one(), p.clone()),
             (-x[0].clone(), m_big),
             (-x[1].clone(), o_big),
             (-x[2].clone(), m_big_tilde),
         ]) - &p_0
             - &(p_1 * &x[0])
-            + &Tangle::free_point((3, 1), s_tilde)
+            + &(pedersen_blinding.clone() * &s_tilde)
     };
 
     let ipa_claim = ipa::Claim {
@@ -1064,44 +1088,11 @@ pub fn pre_verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encod
             .expect("should be less than 2^256 rows"),
     };
 
-    let ipa_check = ipa::pre_verify(transcript, &ipa_claim, ipa_proof)?;
+    let ipa_check = ipa::verify(transcript, &setup.ipa, &ipa_claim, ipa_proof)?;
 
     let final_check =
         ipa_check + &(p_check * &F::random(&mut *rng)) + &(t_check * &F::random(&mut *rng));
     Some(final_check)
-}
-
-/// Check a circuit proof against the provided setup.
-///
-/// This returns false if the setup is too short for the circuit, if the proof
-/// is malformed, or if the verification equation does not evaluate to 0.
-#[must_use]
-pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
-    transcript: &mut Transcript,
-    setup: &Setup<G>,
-    circuit: &Circuit<F>,
-    claim: &Claim<G>,
-    proof: Proof<F, G>,
-    strategy: &impl Strategy,
-) -> bool {
-    let log_len = circuit
-        .internal_vars
-        .next_power_of_two()
-        .ilog2()
-        .try_into()
-        .expect("should be less than 2^256 rows");
-    if !setup.supports(log_len) {
-        return false;
-    }
-    pre_verify(rng, transcript, circuit, claim, proof, strategy)
-        .map(|check| {
-            check
-                .eval(setup.tangle_points(log_len), strategy)
-                .expect("should be enough setup points for bulletproof verification")
-                == G::zero()
-        })
-        .unwrap_or(false)
 }
 
 /// Like [`verify`], but efficiently checking multiple proofs at once.
@@ -1118,9 +1109,29 @@ pub fn batch_verify<
     work: impl IntoIterator<Item = (Transcript, &'p Circuit<F>, &'p Claim<G>, Proof<F, G>)>,
     strategy: &impl Strategy,
 ) -> Result<(), Vec<usize>> {
+    // Build the virtual setup and flat generators for evaluation.
+    let n = setup.ipa.g().len();
+    let mut vgens = Synthetic::<F, G>::generators();
+    let vg: Vec<_> = (0..n)
+        .map(|_| vgens.next().expect("generators is infinite"))
+        .collect();
+    let vh: Vec<_> = (0..n)
+        .map(|_| vgens.next().expect("generators is infinite"))
+        .collect();
+    let vq = vgens.next().expect("generators is infinite");
+    let ipa_vs = ipa::Setup::new(vq, vg.into_iter().zip(vh));
+    let pv = vgens.next().expect("generators is infinite");
+    let pb = vgens.next().expect("generators is infinite");
+    let vs = Setup::new(ipa_vs, pv, pb);
+    let mut flat = Vec::with_capacity(2 * n + 3);
+    flat.extend_from_slice(setup.ipa.g());
+    flat.extend_from_slice(setup.ipa.h());
+    flat.push(setup.ipa.product_generator().clone());
+    flat.push(setup.pedersen_value.clone());
+    flat.push(setup.pedersen_blinding.clone());
+
     let mut invalid = Vec::new();
-    // At this point, invalid contains everything where we can't even get a Tangle.
-    let (indices, log_lens, checks) = work
+    let (indices, checks) = work
         .into_iter()
         .map(|(mut transcript, circuit, claim, proof)| {
             let log_len: u8 = circuit
@@ -1129,49 +1140,36 @@ pub fn batch_verify<
                 .ilog2()
                 .try_into()
                 .ok()?;
-            if !setup.supports(log_len) {
+            if !vs.supports(log_len) {
                 return None;
             }
-            let check = pre_verify(rng, &mut transcript, circuit, claim, proof, strategy)?;
-            Some((log_len, check))
+            verify(rng, &mut transcript, &vs, circuit, claim, proof, strategy)
         })
         .enumerate()
         .filter_map(|(i, x)| {
             if x.is_none() {
                 invalid.push(i);
             }
-            x.map(|(lg_len_i, check_i)| (i, lg_len_i, check_i))
+            x.map(|check_i| (i, check_i))
         })
-        .collect::<(Vec<_>, Vec<_>, Vec<_>)>();
-    let Some(max_log_len) = log_lens.iter().max().cloned() else {
+        .collect::<(Vec<_>, Vec<_>)>();
+    if checks.is_empty() {
         return if invalid.is_empty() {
             Ok(())
         } else {
             Err(invalid)
         };
-    };
-    let weights = checks
-        .iter()
-        .map(|_| F::random(&mut *rng))
-        .collect::<Vec<_>>();
-    let global_check = Tangle::msm(&checks, &weights, strategy);
-    let all_ok = global_check
-        .eval(setup.tangle_points(max_log_len), strategy)
-        .expect("should be enough points in setup")
-        == G::zero();
+    }
+    let weights: Vec<F> = checks.iter().map(|_| F::random(&mut *rng)).collect();
+    let global_check = Synthetic::msm(&checks, &weights, strategy);
+    let all_ok = global_check.eval(&flat, strategy) == G::zero();
     if !all_ok {
-        // Figure out which ones are invalid.
-        for ((i, lg_len_i), check_i) in indices.into_iter().zip(log_lens).zip(checks) {
-            if G::zero()
-                != check_i
-                    .eval(setup.tangle_points(lg_len_i), strategy)
-                    .expect("should be enough points in setup")
-            {
+        for (i, check_i) in indices.into_iter().zip(checks) {
+            if check_i.eval(&flat, strategy) != G::zero() {
                 invalid.push(i);
             }
         }
     }
-
     if invalid.is_empty() {
         Ok(())
     } else {
@@ -1336,15 +1334,23 @@ pub mod fuzz {
             .enumerate()
             .filter_map(|(i, (case, (claim, proof, satisfied)))| {
                 let mut transcript = Transcript::new(NAMESPACE);
-                let verified = verify(
-                    &mut rng,
-                    &mut transcript,
-                    setup,
-                    &case.circuit,
-                    claim,
-                    proof.clone(),
-                    &Sequential,
-                );
+                let verified = setup
+                    .eval(
+                        |vs| {
+                            verify(
+                                &mut rng,
+                                &mut transcript,
+                                vs,
+                                &case.circuit,
+                                claim,
+                                proof.clone(),
+                                &Sequential,
+                            )
+                        },
+                        &Sequential,
+                    )
+                    .map(|g| g == G::zero())
+                    .unwrap_or(false);
                 assert_eq!(verified, *satisfied);
                 (!verified).then_some(i)
             })
