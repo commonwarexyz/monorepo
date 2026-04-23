@@ -45,7 +45,7 @@ use commonware_runtime::{
 use commonware_storage::{
     archive::immutable,
     journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, journaled::Config as MmrJournalConfig, Location},
+    mmr::{self, full::Config as MmrJournalConfig, Location},
     qmdb::{
         any::{unordered::fixed, FixedConfig},
         sync::Target,

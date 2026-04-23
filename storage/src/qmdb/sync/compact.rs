@@ -78,13 +78,33 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 /// Compact sync authenticates only the final committed root and total leaf count. Unlike replay
 /// sync, there is no lower replay bound here because compact sync does not transfer or reconstruct
 /// historical operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `PartialEq`, `Eq`, and `Clone` are implemented manually to avoid requiring `F` to implement
+/// them.
+#[derive(Debug)]
 pub struct Target<F: Family, D: Digest> {
     /// Authenticated root of the committed compact state.
     pub root: D,
     /// Total committed operations/leaves in that state.
     pub leaf_count: Location<F>,
 }
+
+impl<F: Family, D: Digest> Clone for Target<F, D> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            leaf_count: self.leaf_count,
+        }
+    }
+}
+
+impl<F: Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.leaf_count == other.leaf_count
+    }
+}
+
+impl<F: Family, D: Digest> Eq for Target<F, D> {}
 
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {

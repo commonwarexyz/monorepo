@@ -384,7 +384,7 @@ mod tests {
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, journaled::Config as MmrJournalConfig, Location, Proof},
+        mmr::{self, full::Config as MmrJournalConfig, Location, Proof},
         qmdb::any::{unordered::fixed, FixedConfig},
         translator::TwoCap,
     };
