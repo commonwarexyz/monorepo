@@ -66,10 +66,11 @@ stability_scope!(BETA {
     pub use governor::Quota;
     /// Re-exports of Prometheus types under the runtime namespace.
     ///
-    /// Top-level aliases ([`Counter`], [`Gauge`], [`Histogram`],
-    /// [`CounterFamily`], [`GaugeFamily`]) are [`crate::Registered`] handles
-    /// suitable for use as field types on metrics structs. Use [`raw`] when
-    /// constructing a metric to pass to [`crate::Metrics::register`].
+    /// Top-level aliases ([`metrics::Counter`], [`metrics::Gauge`],
+    /// [`metrics::Histogram`], [`metrics::CounterFamily`],
+    /// [`metrics::GaugeFamily`]) are [`Registered`] handles suitable for use as
+    /// field types on metrics structs. Use [`metrics::raw`] when constructing a
+    /// metric to pass to [`Metrics::register`].
     pub mod metrics {
         pub use prometheus_client::{collector, encoding, registry};
 
@@ -78,7 +79,7 @@ stability_scope!(BETA {
         pub use prometheus_client::registry::*;
 
         /// Underlying Prometheus metric types. Used when constructing a metric
-        /// to pass to [`crate::Metrics::register`].
+        /// to pass to [`crate::Metrics::register`](super::Metrics::register).
         pub mod raw {
             pub use prometheus_client::metrics::counter::Counter;
             pub use prometheus_client::metrics::family::Family;
