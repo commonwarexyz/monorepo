@@ -51,7 +51,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Deref,
     sync::{atomic::Ordering, Arc, Weak},
-    time::SystemTime,
 };
 
 /// Native integer width used by [`raw::Gauge`] on this target.
@@ -95,20 +94,7 @@ impl GaugeExt for raw::Gauge {
     }
 }
 
-/// Convenience methods for Prometheus histograms.
-pub trait HistogramExt {
-    /// Observe the duration between two points in time, in seconds.
-    fn observe_between(&self, start: SystemTime, end: SystemTime);
-}
-
-impl HistogramExt for raw::Histogram {
-    fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = end
-            .duration_since(start)
-            .map_or(0.0, |duration| duration.as_secs_f64());
-        self.observe(duration);
-    }
-}
+pub use histogram::HistogramExt;
 
 /// One-line constructors for the common metric types.
 ///
