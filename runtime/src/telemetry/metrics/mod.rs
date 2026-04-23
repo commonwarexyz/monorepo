@@ -48,7 +48,7 @@ use prometheus_client::encoding::{
 use std::{
     any::Any,
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Deref,
     sync::{atomic::Ordering, Arc, Weak},
     time::SystemTime,
@@ -509,6 +509,12 @@ struct MetricFamily {
     metric_ids: Vec<u64>,
 }
 
+#[derive(Clone, Copy)]
+enum DroppedMetricId {
+    ReusableNow,
+    ReusableAfterStaleUnregister,
+}
+
 /// Manages runtime-internal metrics plus user-registered metrics with explicit lifetimes.
 ///
 /// Runtime internals are stored permanently in the same table as user metrics, but
@@ -517,6 +523,7 @@ struct MetricFamily {
 pub struct Registry {
     metrics: Vec<Option<MetricEntry>>,
     free_metric_ids: Vec<u64>,
+    pending_free_metric_ids: HashSet<u64>,
     families: BTreeMap<String, MetricFamily>,
     keys: HashMap<MetricKey, u64>,
     next_metric_id: u64,
@@ -533,6 +540,7 @@ impl Registry {
         Self {
             metrics: Vec::new(),
             free_metric_ids: Vec::new(),
+            pending_free_metric_ids: HashSet::new(),
             families: BTreeMap::new(),
             keys: HashMap::new(),
             next_metric_id: 0,
@@ -676,9 +684,9 @@ impl Registry {
             // The existing entry's last handle is mid-drop: its Weak no longer
             // upgrades, but the pending `unregister` call has not yet run.
             // Clear the slot ourselves so the in-flight `unregister` no-ops on
-            // the `None` check, and no duplicate family id lingers between now
-            // and when that `unregister` would have run.
-            self.drop_metric_entry(existing_id);
+            // the `None` check, and hold the id out of the free list until
+            // that unregister arrives so it cannot remove a replacement metric.
+            self.drop_metric_entry(existing_id, DroppedMetricId::ReusableAfterStaleUnregister);
         }
         if let Some(family) = self.families.get(&name) {
             assert_eq!(
@@ -793,6 +801,9 @@ impl Registry {
             .get(Self::metric_index(id))
             .and_then(Option::as_ref)
         else {
+            if self.pending_free_metric_ids.remove(&id) {
+                self.free_metric_ids.push(id);
+            }
             return;
         };
         debug_assert!(
@@ -800,10 +811,10 @@ impl Registry {
             "unregister called for runtime-internal metric `{}`",
             entry.family_name
         );
-        self.drop_metric_entry(id);
+        self.drop_metric_entry(id, DroppedMetricId::ReusableNow);
     }
 
-    fn drop_metric_entry(&mut self, id: u64) {
+    fn drop_metric_entry(&mut self, id: u64, dropped_id: DroppedMetricId) {
         let metric = self
             .metrics
             .get_mut(Self::metric_index(id))
@@ -836,7 +847,12 @@ impl Registry {
         if remove_family {
             self.families.remove(&family_name);
         }
-        self.free_metric_ids.push(id);
+        match dropped_id {
+            DroppedMetricId::ReusableNow => self.free_metric_ids.push(id),
+            DroppedMetricId::ReusableAfterStaleUnregister => {
+                self.pending_free_metric_ids.insert(id);
+            }
+        }
     }
 
     pub fn encode(&self) -> String {
@@ -996,6 +1012,63 @@ mod tests {
             let gauge = raw::Gauge::<i64>::default();
             let _metric_b = context.with_label("a").register("test", "help", gauge);
         });
+    }
+
+    #[test]
+    fn test_stale_unregister_does_not_remove_re_registered_metric() {
+        let mut registry = Registry::new();
+        let key: MetricKey = ("votes".to_string(), Vec::new());
+
+        let original = registry.register(
+            Weak::new(),
+            key.0.clone(),
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        let original_id = *registry.keys.get(&key).expect("metric key missing");
+
+        let dead_registration = Registration::detached();
+        let stale_registration = dead_registration.downgrade();
+        drop(dead_registration);
+        registry.metric_mut(original_id).registration = stale_registration;
+        drop(original);
+
+        let replacement = registry.register(
+            Weak::new(),
+            key.0.clone(),
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        replacement.inc_by(7);
+
+        let replacement_id = *registry.keys.get(&key).expect("metric key missing");
+        assert_ne!(
+            original_id, replacement_id,
+            "replacement must not reuse an id with a pending unregister"
+        );
+
+        registry.unregister(original_id);
+
+        let encoded = registry.encode();
+        assert!(
+            encoded.contains("votes_total 7"),
+            "replacement metric was unregistered by stale drop: {encoded}"
+        );
+
+        drop(replacement);
+        registry.unregister(replacement_id);
+        assert!(
+            registry.keys.is_empty(),
+            "keys left behind: {:?}",
+            registry.keys
+        );
+        assert!(
+            registry.families.is_empty(),
+            "families left behind: {:?}",
+            registry.families
+        );
     }
 
     #[test]
