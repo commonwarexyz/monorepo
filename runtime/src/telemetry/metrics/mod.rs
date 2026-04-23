@@ -26,7 +26,7 @@ pub use prometheus_client::{
     },
     metrics::{MetricType, TypedMetric},
     registry,
-    registry::{Metric, Unit},
+    registry::Metric,
 };
 
 /// Underlying Prometheus metric types. Used when constructing a metric
