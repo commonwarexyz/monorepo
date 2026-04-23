@@ -484,7 +484,7 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        telemetry::metrics::Registry,
+        telemetry::metrics::{MetricScope, Registry},
         thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Sink as _, Stream as _,
     };
@@ -755,8 +755,11 @@ mod tests {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
+        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry_with_prefix("iouring"),
+        );
         let handle = std::thread::spawn(move || io_loop.run());
 
         // Build the wrapper directly so the test exercises `submit_recv`
@@ -767,7 +770,7 @@ mod tests {
             submitter,
             Duration::from_secs(1),
             0,
-            test_pool(),
+            pool,
         );
 
         // Pretend the caller already filled two bytes, then complete exactly
@@ -914,8 +917,11 @@ mod tests {
     async fn test_channel_close_fallbacks() {
         // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
         let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
+        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry_with_prefix("iouring"),
+        );
         let recv_handle = submitter.clone();
         drop(io_loop);
 
@@ -936,7 +942,7 @@ mod tests {
             recv_handle,
             Duration::from_secs(1),
             0,
-            test_pool(),
+            pool,
         );
         assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
     }
