@@ -498,8 +498,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
-        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        let mut scope = registry.scope();
         BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
     }
 

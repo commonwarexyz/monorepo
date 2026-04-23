@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn test_process_metrics_init() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         let mut metrics = Metrics::init(&mut scope);
 
         // Update metrics

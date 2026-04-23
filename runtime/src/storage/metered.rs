@@ -187,14 +187,14 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        let mut scope = registry.scope();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);
 
@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);
 
@@ -262,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);
 
@@ -304,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);
 

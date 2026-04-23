@@ -376,7 +376,7 @@ mod tests {
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
         let mut registry = registry.scope();
-        let mut scope = registry.sub_registry_with_prefix("test_pool");
+        let mut scope = registry.scope();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
 
@@ -723,7 +723,7 @@ mod tests {
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default().sub_registry_with_prefix("test"),
+            &mut Registry::default().scope(),
             pool,
         );
 
@@ -757,7 +757,7 @@ mod tests {
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut Registry::default().sub_registry_with_prefix("test"),
+            &mut Registry::default().scope(),
             pool,
         );
 

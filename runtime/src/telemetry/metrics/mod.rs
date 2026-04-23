@@ -110,11 +110,7 @@ impl HistogramExt for raw::Histogram {
     }
 }
 
-/// Ergonomic constructors layered over [`crate::Metrics::register`].
-///
-/// Separating these from [`crate::Metrics`] keeps the core trait focused on
-/// label/attribute/registration plumbing. Callers that want one-line
-/// counter/gauge/histogram/family registration import this trait:
+/// One-line constructors for the common metric types.
 ///
 /// ```ignore
 /// use commonware_runtime::telemetry::metrics::MetricsExt;
@@ -331,10 +327,6 @@ impl Registration {
         }
     }
 
-    fn from_inner(inner: Arc<dyn RegistrationGuard>) -> Self {
-        Self { inner }
-    }
-
     fn downgrade(&self) -> Weak<dyn RegistrationGuard> {
         Arc::downgrade(&self.inner)
     }
@@ -496,7 +488,10 @@ struct MetricEntry {
     attributes: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    registration: Option<Weak<dyn RegistrationGuard>>,
+    /// Weak handle to the drop guard owned by the outstanding [`Registered<_>`].
+    /// Permanent (runtime-internal) metrics use a dangling [`Weak::new`], which
+    /// never upgrades, so the dedup check below uniformly yields `None` for them.
+    registration: Weak<dyn RegistrationGuard>,
     family_index: usize,
 }
 
@@ -610,7 +605,7 @@ impl Registry {
             attributes,
             encode_samples,
             metric_any: metric,
-            registration: None,
+            registration: Weak::<GuardHolder<()>>::new(),
             family_index,
         });
         id
@@ -639,7 +634,7 @@ impl Registry {
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
-            if let Some(inner) = entry.registration.as_ref().and_then(Weak::upgrade) {
+            if let Some(inner) = entry.registration.upgrade() {
                 if let Some(family) = self.families.get(&name) {
                     assert_eq!(
                         family.help, help,
@@ -655,7 +650,7 @@ impl Registry {
                             key.0, key.1
                         )
                     });
-                return Registered::from_parts(existing_metric, Registration::from_inner(inner));
+                return Registered::from_parts(existing_metric, Registration { inner });
             }
             // The existing entry's last handle is mid-drop: its Weak no longer
             // upgrades, but the pending `unregister` call has not yet run.
@@ -703,7 +698,7 @@ impl Registry {
             attributes,
             encode_samples,
             metric_any,
-            registration: Some(registration.downgrade()),
+            registration: registration.downgrade(),
             family_index,
         });
         Registered::from_parts(metric, registration)

@@ -2367,7 +2367,7 @@ mod tests {
             }
         }
         let mut registry = crate::telemetry::metrics::Registry::default();
-        let mut scope = registry.sub_registry_with_prefix("test");
+        let mut scope = registry.scope();
         BufferPool::new(pool_config, &mut scope)
     }
 
