@@ -399,7 +399,7 @@ stability_scope!(BETA {
         /// # Querying The Latest Attribute
         ///
         /// To query the latest attribute value dynamically, create a gauge to track the current value.
-        /// The returned [`Registered`] handle must be retained on the long-lived owner: dropping it
+        /// The returned [`telemetry::metrics::Registered`] handle must be retained on the long-lived owner: dropping it
         /// unregisters the metric.
         /// ```ignore
         /// // Create a gauge to track the current epoch. Hold the handle on `self`.
@@ -430,7 +430,7 @@ stability_scope!(BETA {
         ///
         /// Any registered metric will include (as a prefix) the label of the current context.
         ///
-        /// The returned [`Registered`] value must be retained for as long as the
+        /// The returned [`telemetry::metrics::Registered`] value must be retained for as long as the
         /// metric should remain exposed. Dropping the returned handle unregisters
         /// the metric immediately.
         ///
