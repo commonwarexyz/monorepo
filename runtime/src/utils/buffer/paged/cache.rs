@@ -633,8 +633,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry.scope())
     }
 
     // Logical page size (what CacheRef uses and what gets cached).
@@ -802,8 +801,7 @@ mod tests {
         // since been re-cached at a different slot, the old index entry (pointing to the
         // live slot) must not be removed.
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut scope);
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry.scope());
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;

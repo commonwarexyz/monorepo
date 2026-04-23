@@ -1401,12 +1401,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let mut registry = Registry::default();
-            let mut scope = registry.scope();
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
                     .with_max_per_class(NZUsize!(2)),
-                &mut scope,
+                &mut registry.scope(),
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
 

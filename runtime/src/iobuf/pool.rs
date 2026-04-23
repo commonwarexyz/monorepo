@@ -1068,8 +1068,7 @@ mod tests {
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(config, &mut scope)
+        BufferPool::new(config, &mut registry.scope())
     }
 
     /// Creates a test config with page alignment.

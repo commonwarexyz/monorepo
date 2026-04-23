@@ -314,8 +314,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
+        BufferPool::new(BufferPoolConfig::for_network(), &mut registry.scope())
     }
 
     #[tokio::test]

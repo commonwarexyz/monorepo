@@ -269,8 +269,7 @@ mod tests {
 
     fn test_pool() -> crate::BufferPool {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut scope)
+        crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry.scope())
     }
 
     #[test]

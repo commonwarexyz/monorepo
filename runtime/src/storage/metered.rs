@@ -187,16 +187,14 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.scope();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry.scope())
     }
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut scope);
+        let storage = Storage::new(inner, &mut registry.scope());
 
         run_storage_tests(storage).await;
     }
@@ -205,9 +203,8 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut scope);
+        let storage = Storage::new(inner, &mut registry.scope());
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -262,9 +259,8 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut scope);
+        let storage = Storage::new(inner, &mut registry.scope());
 
         // Open multiple blobs
         let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
@@ -304,9 +300,8 @@ mod tests {
     #[tokio::test]
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
         let inner = MemoryStorage::new(test_pool());
-        let storage = Storage::new(inner, &mut scope);
+        let storage = Storage::new(inner, &mut registry.scope());
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();

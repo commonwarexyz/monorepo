@@ -498,8 +498,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(BufferPoolConfig::for_network(), &mut scope)
+        BufferPool::new(BufferPoolConfig::for_network(), &mut registry.scope())
     }
 
     #[test]
@@ -775,9 +774,8 @@ mod tests {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         let handle = std::thread::spawn(move || io_loop.run());
 
         // Build the wrapper directly so the test exercises `submit_recv`
@@ -813,9 +811,8 @@ mod tests {
     async fn test_vectored_send_path() {
         // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         let handle = std::thread::spawn(move || io_loop.run());
 
         let (left, mut right) = UnixStream::pair().unwrap();
@@ -845,9 +842,8 @@ mod tests {
     async fn test_zero_length_send_short_circuits_before_submit() {
         // Verify empty sends return locally without depending on a live io_uring loop.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         drop(io_loop);
 
         // Construct a sink whose handle would fail immediately if the wrapper
@@ -949,9 +945,8 @@ mod tests {
     async fn test_channel_close_fallbacks() {
         // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         let recv_handle = submitter.clone();
         drop(io_loop);
 

@@ -2367,8 +2367,7 @@ mod tests {
             }
         }
         let mut registry = crate::telemetry::metrics::Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(pool_config, &mut scope)
+        BufferPool::new(pool_config, &mut registry.scope())
     }
 
     fn assert_encode_with_pool_matches_encode<T: Encode + EncodeExt>(value: &T) {

@@ -373,9 +373,10 @@ mod tests {
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
     fn test_pool() -> BufferPool {
-        let mut registry = Registry::default();
-        let mut scope = registry.scope();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut Registry::default().scope(),
+        )
     }
 
     /// Build a fresh storage instance rooted in a unique temporary directory.
@@ -389,14 +390,13 @@ mod tests {
 
         let pool = test_pool();
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
-            &mut registry,
+            &mut registry.scope(),
             pool,
         );
         (storage, storage_directory)
@@ -810,10 +810,9 @@ mod tests {
         // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -861,10 +860,9 @@ mod tests {
         // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -896,10 +894,9 @@ mod tests {
         // `set_len` on a socket-backed file descriptor should fail in the
         // kernel, letting the wrapper expose `BlobResizeFailed`.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         drop(io_loop);
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
@@ -926,10 +923,9 @@ mod tests {
         // Run a real loop so the request reaches the kernel and fails there
         // rather than through the wrapper's disconnected-submit path.
         let mut registry = Registry::default();
-        let mut registry = registry.scope();
         let pool = test_pool();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
         let handle = std::thread::spawn(move || io_loop.run());
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter.clone(), pool);

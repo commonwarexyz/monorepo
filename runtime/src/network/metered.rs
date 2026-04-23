@@ -185,8 +185,7 @@ mod tests {
     async fn test_trait() {
         tests::test_network_trait(|| {
             let mut registry = crate::telemetry::metrics::Registry::new();
-            let mut scope = registry.scope();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope())
         })
         .await;
     }
@@ -196,8 +195,7 @@ mod tests {
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             let mut registry = crate::telemetry::metrics::Registry::new();
-            let mut scope = registry.scope();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope())
         })
         .await;
     }
@@ -208,8 +206,7 @@ mod tests {
 
         // Create a registry and network
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut scope = registry.scope();
-        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut scope);
+        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope());
 
         // Set up server.
         // Note this is a deterministic network, so we can use any address
