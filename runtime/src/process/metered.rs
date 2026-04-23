@@ -1,6 +1,6 @@
 //! Process metrics collection.
 
-use crate::telemetry::metrics::{raw::Gauge, GaugeExt, MetricScope};
+use crate::telemetry::metrics::{raw::Gauge, GaugeExt, MetricRegister};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -22,7 +22,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize process metrics and register them with the given registry.
-    pub fn init(registry: &mut MetricScope<'_>) -> Self {
+    pub fn init(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             pid: sysinfo::Pid::from_u32(std::process::id()),
             rss: Gauge::default(),
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn test_process_metrics_init() {
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let mut metrics = Metrics::init(&mut registry.scope());
+        let mut metrics = Metrics::init(&mut registry);
 
         // Update metrics
         metrics.update();

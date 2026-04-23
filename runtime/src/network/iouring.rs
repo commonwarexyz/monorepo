@@ -23,7 +23,7 @@
 
 use crate::{
     iouring::{self},
-    telemetry::metrics::MetricScope,
+    telemetry::metrics::MetricRegister,
     utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
 use std::{
@@ -113,7 +113,7 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
-        registry: &mut MetricScope<'_>,
+        registry: &mut impl MetricRegister,
         pool: BufferPool,
     ) -> Result<Self, Error> {
         // Optimize performance by hinting the kernel that a single task will
@@ -127,13 +127,13 @@ impl Network {
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
-        let mut sender_registry = registry.sub_registry_with_prefix("iouring_sender");
+        let mut sender_registry = registry.sub_registry("iouring_sender");
         let (send_handle, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), &mut sender_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
-        let mut receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
+        let mut receiver_registry = registry.sub_registry("iouring_receiver");
         let (recv_handle, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, &mut receiver_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
@@ -484,7 +484,7 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        telemetry::metrics::{MetricScope, Registry},
+        telemetry::metrics::{MetricRegister, Registry},
         thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Sink as _, Stream as _,
     };
@@ -496,7 +496,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    fn test_pool(scope: &mut MetricScope<'_>) -> BufferPool {
+    fn test_pool(scope: &mut impl MetricRegister) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
 
@@ -505,10 +505,10 @@ mod tests {
     /// the same registry.
     fn test_network(cfg: Config) -> Result<Network, Error> {
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         Network::start(
             cfg,
-            &mut registry.sub_registry_with_prefix("network"),
+            &mut registry.sub_registry("network"),
             pool,
         )
     }
@@ -755,10 +755,10 @@ mod tests {
         // Verify `submit_recv` translates the request state's cumulative total
         // back into the per-call byte count expected by the higher-level recv loop.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         let handle = std::thread::spawn(move || io_loop.run());
 
@@ -796,7 +796,7 @@ mod tests {
         // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
         let mut registry = Registry::default();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         let handle = std::thread::spawn(move || io_loop.run());
 
         let (left, mut right) = UnixStream::pair().unwrap();
@@ -827,7 +827,7 @@ mod tests {
         // Verify empty sends return locally without depending on a live io_uring loop.
         let mut registry = Registry::default();
         let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry.scope());
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
 
         // Construct a sink whose handle would fail immediately if the wrapper
@@ -917,10 +917,10 @@ mod tests {
     async fn test_channel_close_fallbacks() {
         // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         let recv_handle = submitter.clone();
         drop(io_loop);

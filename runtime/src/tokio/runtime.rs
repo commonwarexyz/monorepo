@@ -20,7 +20,7 @@ use crate::{
         add_attribute,
         raw::{Counter, Family, Gauge},
         task::Label,
-        Metric, MetricScope, Registered, Registry,
+        Metric, MetricRegister, Registered, Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
@@ -66,7 +66,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut MetricScope<'_>) -> Self {
+    pub fn init(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -363,7 +363,7 @@ impl crate::Runner for Runner {
     {
         // Create a new registry
         let mut registry = Registry::new();
-        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
@@ -391,18 +391,18 @@ impl crate::Runner for Runner {
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             self.cfg.resolved_network_buffer_pool_config(),
-            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             self.cfg.resolved_storage_buffer_pool_config(),
-            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let mut iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_storage");
+                    runtime_registry.sub_registry("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(
                         IoUringConfig {
@@ -433,7 +433,7 @@ impl crate::Runner for Runner {
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let mut iouring_registry =
-                    runtime_registry.sub_registry_with_prefix("iouring_network");
+                    runtime_registry.sub_registry("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
@@ -742,7 +742,7 @@ impl crate::Metrics for Context {
         let metric = Arc::new(metric);
         {
             let mut registry = self.executor.registry.lock();
-            registry.register(
+            registry.register_external(
                 Arc::downgrade(&self.executor.registry),
                 prefixed_name,
                 help,

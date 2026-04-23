@@ -54,7 +54,7 @@ use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
     telemetry::metrics::{
         raw::{Counter, Family, Gauge},
-        EncodeLabelSet, MetricScope,
+        EncodeLabelSet, MetricRegister,
     },
 };
 use commonware_utils::NZUsize;
@@ -412,7 +412,7 @@ struct PoolMetrics {
 }
 
 impl PoolMetrics {
-    fn new(registry: &mut MetricScope<'_>) -> Self {
+    fn new(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             created: Family::default(),
             exhausted_total: Family::default(),
@@ -833,7 +833,7 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
-    pub(crate) fn new(config: BufferPoolConfig, registry: &mut MetricScope<'_>) -> Self {
+    pub(crate) fn new(config: BufferPoolConfig, registry: &mut impl MetricRegister) -> Self {
         config.validate();
         let metrics = PoolMetrics::new(registry);
         let mut classes = Vec::with_capacity(config.num_classes());
@@ -1068,7 +1068,7 @@ mod tests {
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
         let mut registry = Registry::default();
-        BufferPool::new(config, &mut registry.scope())
+        BufferPool::new(config, &mut registry)
     }
 
     /// Creates a test config with page alignment.

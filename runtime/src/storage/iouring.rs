@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self},
-    telemetry::metrics::MetricScope,
+    telemetry::metrics::MetricRegister,
     utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
@@ -75,7 +75,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub(crate) fn start(cfg: Config, registry: &mut MetricScope<'_>, pool: BufferPool) -> Self {
+    pub(crate) fn start(cfg: Config, registry: &mut impl MetricRegister, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
             mut iouring_config,
@@ -372,7 +372,7 @@ mod tests {
 
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
-    fn test_pool(scope: &mut MetricScope<'_>) -> BufferPool {
+    fn test_pool(scope: &mut impl MetricRegister) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
@@ -386,14 +386,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
 
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
-            &mut registry.sub_registry_with_prefix("storage"),
+            &mut registry.sub_registry("storage"),
             pool,
         );
         (storage, storage_directory)
@@ -712,14 +712,14 @@ mod tests {
         // Start storage against the invalid root so `open` reaches the
         // filesystem setup path under realistic wrapper code.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut registry.sub_registry_with_prefix("storage"),
+            &mut registry.sub_registry("storage"),
             pool,
         );
 
@@ -747,14 +747,14 @@ mod tests {
         std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            &mut registry.sub_registry_with_prefix("storage"),
+            &mut registry.sub_registry("storage"),
             pool,
         );
 
@@ -809,10 +809,10 @@ mod tests {
         // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
 
@@ -861,10 +861,10 @@ mod tests {
         // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
 
@@ -897,10 +897,10 @@ mod tests {
         // `set_len` on a socket-backed file descriptor should fail in the
         // kernel, letting the wrapper expose `BlobResizeFailed`.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         drop(io_loop);
 
@@ -928,10 +928,10 @@ mod tests {
         // Run a real loop so the request reaches the kernel and fails there
         // rather than through the wrapper's disconnected-submit path.
         let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry_with_prefix("pool"));
+        let pool = test_pool(&mut registry.sub_registry("pool"));
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config::default(),
-            &mut registry.sub_registry_with_prefix("iouring"),
+            &mut registry.sub_registry("iouring"),
         );
         let handle = std::thread::spawn(move || io_loop.run());
 

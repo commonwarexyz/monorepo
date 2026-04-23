@@ -547,25 +547,6 @@ impl Registry {
         }
     }
 
-    pub fn sub_registry_with_prefix(&mut self, prefix: &str) -> MetricScope<'_> {
-        validate_label(prefix);
-        MetricScope {
-            registry: self,
-            prefix: prefix.to_string(),
-        }
-    }
-
-    /// Create an unprefixed [`MetricScope`] over this registry.
-    ///
-    /// Equivalent to a sub-scope with an empty prefix. Use this when a component
-    /// needs a `MetricScope` but no additional prefix stacking is required.
-    pub const fn scope(&mut self) -> MetricScope<'_> {
-        MetricScope {
-            registry: self,
-            prefix: String::new(),
-        }
-    }
-
     fn insert_internal<M>(
         &mut self,
         name: String,
@@ -634,7 +615,7 @@ impl Registry {
         });
     }
 
-    pub fn register<M>(
+    pub fn register_external<M>(
         &mut self,
         registry: Weak<Mutex<Self>>,
         name: String,
@@ -885,8 +866,36 @@ pub struct MetricScope<'a> {
     prefix: String,
 }
 
-impl MetricScope<'_> {
-    pub fn register(&mut self, name: &str, help: &str, metric: impl Metric) {
+/// Shared registration surface accepted by runtime-internal constructors.
+///
+/// Both [`Registry`] (no prefix) and [`MetricScope`] (with prefix) implement
+/// this, so a `fn new(registry: &mut impl MetricRegister)` can accept either
+/// without the caller having to produce a scope first.
+pub trait MetricRegister {
+    /// Register a runtime-internal metric under this scope's prefix.
+    fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M);
+
+    /// Create a child scope by appending `prefix` to the current prefix.
+    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_>;
+}
+
+impl MetricRegister for Registry {
+    fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) {
+        validate_label(name);
+        self.register_internal(name.to_string(), help.to_string(), Vec::new(), metric);
+    }
+
+    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_> {
+        validate_label(prefix);
+        MetricScope {
+            registry: self,
+            prefix: prefix.to_string(),
+        }
+    }
+}
+
+impl MetricRegister for MetricScope<'_> {
+    fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) {
         validate_label(name);
         self.registry.register_internal(
             prefixed_name(&self.prefix, name),
@@ -896,7 +905,7 @@ impl MetricScope<'_> {
         );
     }
 
-    pub fn sub_registry_with_prefix(&mut self, prefix: &str) -> MetricScope<'_> {
+    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_> {
         validate_label(prefix);
         MetricScope {
             registry: &mut *self.registry,
@@ -1019,7 +1028,7 @@ mod tests {
         let mut registry = Registry::new();
         let key: MetricKey = ("votes".to_string(), Vec::new());
 
-        let original = registry.register(
+        let original = registry.register_external(
             Weak::new(),
             key.0.clone(),
             "vote count".to_string(),
@@ -1034,7 +1043,7 @@ mod tests {
         registry.metric_mut(original_id).registration = stale_registration;
         drop(original);
 
-        let replacement = registry.register(
+        let replacement = registry.register_external(
             Weak::new(),
             key.0.clone(),
             "vote count".to_string(),
@@ -1210,14 +1219,11 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_scope_registers_without_prefix() {
+    fn test_encode_registers_without_prefix() {
         let mut registry = Registry::default();
-        {
-            let mut scope = registry.scope();
-            let counter = raw::Counter::<u64>::default();
-            counter.inc();
-            scope.register("votes", "vote count", counter);
-        }
+        let counter = raw::Counter::<u64>::default();
+        counter.inc();
+        registry.register("votes", "vote count", counter);
         let encoded = registry.encode();
         assert!(
             encoded.contains("votes_total 1"),
@@ -1317,7 +1323,7 @@ mod tests {
                 let weak = weak.clone();
                 std::thread::spawn(move || {
                     for _ in 0..2000 {
-                        let handle = registry.lock().register(
+                        let handle = registry.lock().register_external(
                             weak.clone(),
                             "votes".to_string(),
                             "vote count".to_string(),

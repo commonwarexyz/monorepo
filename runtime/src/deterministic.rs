@@ -56,7 +56,7 @@ use crate::{
         add_attribute,
         raw::{Counter, Family, Gauge},
         task::Label,
-        validate_label, Metric, MetricScope, Registered, Registry,
+        validate_label, Metric, MetricRegister, Registered, Registry,
     },
     utils::{
         signal::{Signal, Stopper},
@@ -116,7 +116,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut MetricScope<'_>) -> Self {
+    pub fn init(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -919,7 +919,7 @@ impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
-        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
@@ -935,11 +935,11 @@ impl Context {
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             cfg.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             cfg.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Create storage fault config (default to disabled if None)
@@ -1010,7 +1010,7 @@ impl Context {
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
-        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
 
         // Copy state
@@ -1021,11 +1021,11 @@ impl Context {
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
             checkpoint.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
             checkpoint.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
         // Initialize panicker
@@ -1309,7 +1309,7 @@ impl crate::Metrics for Context {
         let metric = Arc::new(metric);
         {
             let mut registry = executor.registry.lock();
-            registry.register(
+            registry.register_external(
                 Arc::downgrade(&executor.registry),
                 prefixed_name,
                 help,

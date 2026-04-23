@@ -718,7 +718,7 @@ mod tests {
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
         let mut registry = Registry::default();
-        BufferPool::new(config, &mut registry.scope())
+        BufferPool::new(config, &mut registry)
     }
 
     fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {

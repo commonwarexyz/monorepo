@@ -1,5 +1,5 @@
 use crate::{
-    telemetry::metrics::{raw::Counter, MetricScope},
+    telemetry::metrics::{raw::Counter, MetricRegister},
     IoBufs, SinkOf, StreamOf,
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -18,7 +18,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(registry: &mut MetricScope<'_>) -> Self {
+    fn new(registry: &mut impl MetricRegister) -> Self {
         let metrics = Self {
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
@@ -130,7 +130,7 @@ pub struct Network<N: crate::Network> {
 impl<N: crate::Network> Network<N> {
     /// Wraps `inner` to make it metered.
     /// The `registry` is used to register the metrics.
-    pub(crate) fn new(inner: N, registry: &mut MetricScope<'_>) -> Self {
+    pub(crate) fn new(inner: N, registry: &mut impl MetricRegister) -> Self {
         let metrics = Metrics::new(registry);
         Self {
             inner,
@@ -185,7 +185,7 @@ mod tests {
     async fn test_trait() {
         tests::test_network_trait(|| {
             let mut registry = crate::telemetry::metrics::Registry::new();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope())
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
         })
         .await;
     }
@@ -195,7 +195,7 @@ mod tests {
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             let mut registry = crate::telemetry::metrics::Registry::new();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope())
+            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
         })
         .await;
     }
@@ -206,7 +206,7 @@ mod tests {
 
         // Create a registry and network
         let mut registry = crate::telemetry::metrics::Registry::new();
-        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry.scope());
+        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry);
 
         // Set up server.
         // Note this is a deterministic network, so we can use any address

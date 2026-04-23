@@ -258,7 +258,7 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry.scope())
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
     #[tokio::test]
