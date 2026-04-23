@@ -620,7 +620,7 @@ impl Registry {
                             "duplicate metric `{}` with attributes {:?} registered with different type",
                             key.0, key.1
                         )
-                });
+                    });
                 return Registered {
                     metric: existing_metric,
                     registration: Registration::from_inner(inner),
