@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metered_storage() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
@@ -190,7 +190,7 @@ mod tests {
     /// Test that metrics are updated correctly for basic operations.
     #[tokio::test]
     async fn test_metered_blob_metrics() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 

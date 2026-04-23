@@ -356,7 +356,7 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Arc<Mutex<Registry>>,
+    registry: Registry,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -904,12 +904,6 @@ impl Clone for Context {
 
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
-        // Create a new registry
-        let mut registry = Registry::new();
-        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
-
-        // Initialize runtime
-        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
@@ -919,39 +913,56 @@ impl Context {
         // Create shared RNG (used by both executor and storage)
         let rng = Arc::new(Mutex::new(cfg.rng));
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            cfg.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            cfg.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
+        // Create a new registry
+        let mut registry = Registry::new();
+        let (metrics, network_buffer_pool, storage_buffer_pool, storage, network) = {
+            let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
-        // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(
-                FaultyStorage::new(
-                    MemStorage::new(storage_buffer_pool.clone()),
-                    rng.clone(),
-                    storage_fault_config,
+            // Initialize runtime
+            let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+
+            // Initialize buffer pools
+            let network_buffer_pool = BufferPool::new(
+                cfg.network_buffer_pool_cfg.clone(),
+                &mut runtime_registry.sub_registry("network_buffer_pool"),
+            );
+            let storage_buffer_pool = BufferPool::new(
+                cfg.storage_buffer_pool_cfg.clone(),
+                &mut runtime_registry.sub_registry("storage_buffer_pool"),
+            );
+
+            // Create storage fault config (default to disabled if None)
+            let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
+            let storage = MeteredStorage::new(
+                AuditedStorage::new(
+                    FaultyStorage::new(
+                        MemStorage::new(storage_buffer_pool.clone()),
+                        rng.clone(),
+                        storage_fault_config,
+                    ),
+                    auditor.clone(),
                 ),
-                auditor.clone(),
-            ),
-            &mut runtime_registry,
-        );
+                &mut runtime_registry,
+            );
 
-        // Create network
-        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
-        let network = MeteredNetwork::new(network, &mut runtime_registry);
+            // Create network
+            let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+            let network = MeteredNetwork::new(network, &mut runtime_registry);
+
+            (
+                metrics,
+                network_buffer_pool,
+                storage_buffer_pool,
+                storage,
+                network,
+            )
+        };
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Arc::new(Mutex::new(registry)),
+            registry,
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -997,23 +1008,27 @@ impl Context {
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
-        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
-        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let (metrics, network, network_buffer_pool, storage_buffer_pool) = {
+            let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
+            let metrics = Arc::new(Metrics::init(&mut runtime_registry));
 
-        // Copy state
-        let network =
-            AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
-        let network = MeteredNetwork::new(network, &mut runtime_registry);
+            // Copy state
+            let network =
+                AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
+            let network = MeteredNetwork::new(network, &mut runtime_registry);
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            checkpoint.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            checkpoint.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
+            // Initialize buffer pools
+            let network_buffer_pool = BufferPool::new(
+                checkpoint.network_buffer_pool_cfg.clone(),
+                &mut runtime_registry.sub_registry("network_buffer_pool"),
+            );
+            let storage_buffer_pool = BufferPool::new(
+                checkpoint.storage_buffer_pool_cfg.clone(),
+                &mut runtime_registry.sub_registry("storage_buffer_pool"),
+            );
+
+            (metrics, network, network_buffer_pool, storage_buffer_pool)
+        };
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
@@ -1028,7 +1043,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Arc::new(Mutex::new(registry)),
+            registry,
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1274,23 +1289,18 @@ impl crate::Metrics for Context {
             }
         });
         let metric = Arc::new(metric);
-        {
-            let mut registry = executor.registry.lock();
-            registry.register(
-                Arc::downgrade(&executor.registry),
-                prefixed_name(&self.name, &name),
-                help,
-                self.attributes.clone(),
-                metric,
-            )
-        }
+        executor.registry.register_with_attributes(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let encoded = executor.registry.lock().encode();
-        encoded
+        executor.registry.encode()
     }
 }
 

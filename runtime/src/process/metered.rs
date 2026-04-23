@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_process_metrics_init() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let mut metrics = Metrics::init(&mut registry);
 
         // Update metrics
