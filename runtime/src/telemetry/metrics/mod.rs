@@ -50,10 +50,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
     ops::Deref,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
-    },
+    sync::{atomic::Ordering, Arc, Weak},
 };
 
 /// Native integer width used by [`raw::Gauge`] on this target.
@@ -279,17 +276,12 @@ fn prefixed_name(prefix: &str, name: &str) -> String {
 }
 
 trait RegistrationGuard: Send + Sync {
-    fn close(&self, _registration: &Arc<RegistrationInner>) {}
+    fn close(&self, _registration: &Arc<dyn RegistrationGuard>) {}
 }
 
 impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
 
 struct GuardHolder<G>(Mutex<G>);
-
-struct RegistrationInner {
-    guard: Box<dyn RegistrationGuard>,
-    handles: AtomicUsize,
-}
 
 /// A shared lifecycle token for a [`Registered`] metric handle.
 ///
@@ -297,22 +289,9 @@ struct RegistrationInner {
 /// registration is dropped as well. Runtime-managed metrics use that drop to
 /// unregister themselves from the runtime registry, while external callers may
 /// attach any custom drop guard.
+#[derive(Clone)]
 pub struct Registration {
-    inner: Arc<RegistrationInner>,
-}
-
-impl Clone for Registration {
-    fn clone(&self) -> Self {
-        self.inner
-            .handles
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |handles| {
-                handles.checked_add(1)
-            })
-            .expect("registration handle count overflow");
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
+    inner: Arc<dyn RegistrationGuard>,
 }
 
 impl Registration {
@@ -332,41 +311,29 @@ impl Registration {
         G: Send + 'static,
     {
         Self {
-            inner: Arc::new(RegistrationInner {
-                guard: Box::new(GuardHolder(Mutex::new(guard))),
-                handles: AtomicUsize::new(1),
-            }),
+            inner: Arc::new(GuardHolder(Mutex::new(guard))),
         }
     }
 
     fn from_runtime(guard: RuntimeRegistration) -> Self {
         Self {
-            inner: Arc::new(RegistrationInner {
-                guard: Box::new(guard),
-                handles: AtomicUsize::new(1),
-            }),
+            inner: Arc::new(guard),
         }
     }
 
-    fn from_inner(inner: Arc<RegistrationInner>) -> Self {
-        inner
-            .handles
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |handles| {
-                handles.checked_add(1)
-            })
-            .expect("registration handle count overflow");
+    fn from_inner(inner: Arc<dyn RegistrationGuard>) -> Self {
         Self { inner }
     }
 
-    fn downgrade(&self) -> Weak<RegistrationInner> {
+    fn downgrade(&self) -> Weak<dyn RegistrationGuard> {
         Arc::downgrade(&self.inner)
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if self.inner.handles.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.inner.guard.close(&self.inner);
+        if Arc::strong_count(&self.inner) == 1 {
+            self.inner.close(&self.inner);
         }
     }
 }
@@ -377,7 +344,7 @@ struct RuntimeRegistration {
 }
 
 impl RegistrationGuard for RuntimeRegistration {
-    fn close(&self, registration: &Arc<RegistrationInner>) {
+    fn close(&self, registration: &Arc<dyn RegistrationGuard>) {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
@@ -530,7 +497,7 @@ struct MetricEntry {
     /// upgrades; the [`internal`] flag is the authoritative source for kind.
     ///
     /// [`internal`]: MetricEntry::internal
-    registration: Weak<RegistrationInner>,
+    registration: Weak<dyn RegistrationGuard>,
     family_index: usize,
     /// `true` for runtime-internal metrics registered via
     /// [`Registry::register_internal`]; `false` for user metrics registered via
@@ -788,7 +755,7 @@ impl Registry {
             attributes,
             encode_samples,
             metric_any: metric,
-            registration: Weak::new(),
+            registration: Weak::<GuardHolder<()>>::new(),
             family_index,
             internal: true,
         });
@@ -810,7 +777,7 @@ impl Registry {
         self.drop_metric_entry(id);
     }
 
-    fn unregister_if_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
+    fn unregister_if_registration(&mut self, id: u64, registration: &Arc<dyn RegistrationGuard>) {
         let Some(entry) = self
             .metrics
             .get(Self::metric_index(id))
@@ -827,7 +794,7 @@ impl Registry {
         if !entry.registration.ptr_eq(&registration_weak) {
             return;
         }
-        if registration.handles.load(Ordering::Acquire) != 0 {
+        if Arc::strong_count(registration) != 1 {
             return;
         }
         self.drop_metric_entry(id);
