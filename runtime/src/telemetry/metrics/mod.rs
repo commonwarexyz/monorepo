@@ -364,12 +364,8 @@ impl<M> Registered<M> {
     /// The provided [`Registration`] is dropped when the last clone of this
     /// handle is dropped.
     pub fn with_registration(metric: M, registration: Registration) -> Self {
-        Self::from_parts(Arc::new(metric), registration)
-    }
-
-    pub(crate) const fn from_parts(metric: Arc<M>, registration: Registration) -> Self {
         Self {
-            metric,
+            metric: Arc::new(metric),
             registration,
         }
     }
@@ -646,7 +642,10 @@ impl Registry {
                             key.0, key.1
                         )
                     });
-                return Registered::from_parts(existing_metric, Registration { inner });
+                return Registered {
+                    metric: existing_metric,
+                    registration: Registration { inner },
+                };
             }
             // The existing entry's last handle is mid-drop: its Weak no longer
             // upgrades, but the pending `unregister` call has not yet run.
@@ -698,7 +697,10 @@ impl Registry {
             family_index,
             internal: false,
         });
-        Registered::from_parts(metric, registration)
+        Registered {
+            metric,
+            registration,
+        }
     }
 
     fn metric_index(id: u64) -> usize {
