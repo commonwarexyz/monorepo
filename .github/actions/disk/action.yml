@@ -59,6 +59,51 @@ runs:
         echo "TMP=D:\Temp" >> $env:GITHUB_ENV
         New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
 
+    - name: Configure swap (Linux)
+      shell: bash
+      if: runner.os == 'Linux'
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 8G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+
+    # macOS manages swap dynamically via dynamic_pager; ensure it is running and report state.
+    - name: Configure swap (macOS)
+      shell: bash
+      if: runner.os == 'macOS'
+      run: |
+        set -euxo pipefail
+        sudo mkdir -p /private/var/vm
+        if ! pgrep -x dynamic_pager >/dev/null; then
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
+        fi
+        sysctl vm.swapusage || true
+
+    # Windows pagefile: disable auto-management and set a fixed 8G pagefile on D:.
+    - name: Configure swap (Windows)
+      shell: pwsh
+      if: runner.os == 'Windows'
+      run: |
+        $ErrorActionPreference = 'Continue'
+        New-Item -ItemType Directory -Path 'D:\' -Force | Out-Null
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        if ($cs.AutomaticManagedPagefile) {
+          Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
+        }
+        Get-CimInstance -ClassName Win32_PageFileSetting | ForEach-Object {
+          Remove-CimInstance -InputObject $_
+        }
+        New-CimInstance -ClassName Win32_PageFileSetting -Property @{
+          Name        = 'D:\pagefile.sys'
+          InitialSize = 8192
+          MaximumSize = 8192
+        } | Out-Null
+        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List *
+        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List *
+
     - name: Show disk free (after)
       shell: bash
       run: df -h || true
