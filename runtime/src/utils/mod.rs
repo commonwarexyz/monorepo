@@ -466,12 +466,9 @@ impl Registry {
             );
         }
         let key = (name.clone(), attributes.clone());
-        assert!(
-            !self.keys.contains_key(&key),
-            "duplicate metric: {} with attributes {:?}",
-            key.0,
-            key.1
-        );
+        if let Some(&existing_id) = self.keys.get(&key) {
+            return existing_id;
+        }
         let id = self.allocate_metric_id();
         self.keys.insert(key, id);
         let family = match self.families.entry(name.clone()) {
