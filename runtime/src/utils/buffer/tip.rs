@@ -9,17 +9,17 @@ use std::{
 ///
 /// Mirrors `Buffer.offset` and `Buffer.offset + Buffer.len`, published by mutators under the
 /// buffer write lock so readers can classify ranges and serve `size()` without touching the
-/// lock. Stale reads (due to concurrent mutation) only produce false negatives in
-/// `try_read_sync`; callers that miss fall back to the async path. They never produce wrong
-/// bytes.
+/// lock. Since `offset` and `size` are loaded independently, readers may observe values from
+/// different updates. Those mixed snapshots are only used for classification: before-tip reads
+/// must still hit the page cache, and in-tip reads are revalidated under the buffer lock before
+/// bytes are copied. If either check fails, callers fall back to the async path.
 ///
 /// Update conventions:
 /// - `publish_append(new_size)` after a pure append (offset unchanged, size grew).
 /// - `publish_flush(new_offset)` after a flush drains buffered bytes (offset advanced, size
 ///   unchanged since `offset + len` is invariant across a flush).
 /// - `publish_resize(new_offset, new_size)` after resize/sync or any state change that may
-///   move both bounds. Stores are not atomic as a pair; a torn read can only misclassify a
-///   range as before-tip or as straddle, both of which are safe (fall back to async).
+///   move both bounds.
 pub(super) struct TipBounds {
     offset: AtomicU64,
     size: AtomicU64,
@@ -39,8 +39,8 @@ impl TipBounds {
         self.size.load(Ordering::Acquire)
     }
 
-    /// Loads `(offset, size)` for range classification. Reads are not atomic as a pair;
-    /// callers must treat stale combinations as false negatives and fall back accordingly.
+    /// Loads `(offset, size)` for range classification. Reads are not atomic as a pair, so
+    /// callers must revalidate any classification before returning bytes.
     pub(super) fn load(&self) -> (u64, u64) {
         let offset = self.offset.load(Ordering::Acquire);
         let size = self.size.load(Ordering::Acquire);

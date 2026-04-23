@@ -403,7 +403,7 @@ impl<B: Blob> Append<B> {
     }
 
     /// Returns the logical size of the blob. This accounts for both written and buffered data.
-    /// Served from the atomic `tip` snapshot — lock-free.
+    /// Served from the atomic `tip` snapshot without locking.
     pub fn size(&self) -> u64 {
         self.tip.size()
     }
@@ -413,11 +413,14 @@ impl<B: Blob> Append<B> {
     /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
     /// already validated that `offset + buf.len()` is within the blob's logical size.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        // Classify the range using an atomic snapshot of the tip bounds. Stale reads produce
-        // false negatives (caller takes the async path) but never wrong bytes. This keeps the
-        // common paths lock-free so a hot stream of `try_read_sync` calls cannot barge past
-        // queued writers on the buffer lock.
-        let end_offset = offset + buf.len() as u64;
+        // Classify the range using an atomic snapshot of the tip bounds. Mixed snapshots may
+        // misclassify a range, so before-tip reads must hit the page cache and in-tip reads are
+        // revalidated under the buffer lock before returning bytes. This keeps the common paths
+        // lock-free so hot `try_read_sync` calls cannot barge past queued writers on the buffer
+        // lock.
+        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+            return false;
+        };
         let (tip_offset, tip_size) = self.tip.load();
 
         if end_offset <= tip_offset {

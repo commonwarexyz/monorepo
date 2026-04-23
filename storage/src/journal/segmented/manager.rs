@@ -19,7 +19,10 @@ use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
-    /// Returns the current logical size of the buffer including any buffered data.
+    /// Returns a logical size snapshot including buffered data.
+    ///
+    /// This is not a synchronization point: callers that perform concurrent mutation must not
+    /// assume the returned size is linearizable with a later operation.
     fn size(&self) -> u64;
 
     /// Ensure all pending data is durably persisted.

@@ -6,7 +6,9 @@
 //! initialization time is not included in the benchmark. The page cache is large enough to hold the
 //! entire active key set to eliminate disk access delays from affecting the results.
 
-use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
+use crate::common::{
+    seed_db, seed_db_unsynced, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE,
+};
 use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -341,12 +343,20 @@ fn cur_var_cfg(
 // -- Benchmark helpers --
 
 /// Single-batch benchmark: create batch, write updates, merkleize, read root.
+///
+/// If `seed_unsynced` is `true`, the setup skips the final `sync()` so ancestor lookups during
+/// merkleize hit the in-memory tip buffer rather than the page cache.
 async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
     iters: u64,
+    seed_unsynced: bool,
 ) -> Duration {
-    seed_db(&mut db, num_keys).await;
+    if seed_unsynced {
+        seed_db_unsynced(&mut db, num_keys).await;
+    } else {
+        seed_db(&mut db, num_keys).await;
+    }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
     let mut total = Duration::ZERO;
@@ -374,9 +384,14 @@ async fn run_chained_bench<
     mut db: C,
     num_keys: u64,
     iters: u64,
+    seed_unsynced: bool,
     fork_child: Fn,
 ) -> Duration {
-    seed_db(&mut db, num_keys).await;
+    if seed_unsynced {
+        seed_db_unsynced(&mut db, num_keys).await;
+    } else {
+        seed_db(&mut db, num_keys).await;
+    }
     let num_updates = num_keys / 10;
     let mut rng = StdRng::seed_from_u64(99);
     let mut total = Duration::ZERO;
@@ -553,27 +568,32 @@ cfg_if::cfg_if! {
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
-        for num_keys in NUM_KEYS {
-            for &variant in VARIANTS {
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} num_keys={num_keys} chained={chained}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_variant!(ctx, variant, |db| {
-                                if chained {
-                                    run_chained_bench(db, num_keys, iters, |p| p.new_batch()).await
-                                } else {
-                                    run_bench(db, num_keys, iters).await
-                                }
-                            })
-                        });
-                    },
-                );
+        for seed_unsynced in [false, true] {
+            for num_keys in NUM_KEYS {
+                for &variant in VARIANTS {
+                    c.bench_function(
+                        &format!(
+                            "{}/variant={} keys={num_keys} ch={chained} ns={seed_unsynced}",
+                            module_path!(),
+                            variant.name(),
+                        ),
+                        |b| {
+                            b.to_async(&runner).iter_custom(|iters| async move {
+                                let ctx = context::get::<Context>();
+                                dispatch_variant!(ctx, variant, |db| {
+                                    if chained {
+                                        run_chained_bench(db, num_keys, iters, seed_unsynced, |p| {
+                                            p.new_batch()
+                                        })
+                                        .await
+                                    } else {
+                                        run_bench(db, num_keys, iters, seed_unsynced).await
+                                    }
+                                })
+                            });
+                        },
+                    );
+                }
             }
         }
     }

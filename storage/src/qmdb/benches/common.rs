@@ -35,7 +35,7 @@ pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
-pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
@@ -505,6 +505,24 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     db: &mut C,
     num_keys: u64,
 ) {
+    seed_db_inner(db, num_keys, true).await;
+}
+
+/// Like [`seed_db`], but skips the final `sync()` so freshly-seeded operations remain in the
+/// journal's in-memory append tip. Useful for benches that want to exercise the in-tip branch
+/// of `try_read_sync` during ancestor lookups.
+pub async fn seed_db_unsynced<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    db: &mut C,
+    num_keys: u64,
+) {
+    seed_db_inner(db, num_keys, false).await;
+}
+
+async fn seed_db_inner<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    db: &mut C,
+    num_keys: u64,
+    sync_after: bool,
+) {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
@@ -514,7 +532,9 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     let merkleized = batch.merkleize(db, None).await.unwrap();
     db.apply_batch(merkleized).await.unwrap();
     db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    if sync_after {
+        db.sync().await.unwrap();
+    }
 }
 
 /// Write `num_updates` random key updates into a batch.
