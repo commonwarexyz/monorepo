@@ -149,7 +149,7 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
-    telemetry::metrics::{raw::Gauge, MetricRegister},
+    telemetry::metrics::{raw::Gauge, Register},
     Error, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{
@@ -203,7 +203,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut impl MetricRegister) -> Self {
+    pub fn new(registry: &mut impl Register) -> Self {
         let metrics = Self {
             pending_operations: Gauge::default(),
         };
@@ -515,7 +515,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut impl MetricRegister) -> (Handle, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut impl Register) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"

@@ -20,7 +20,7 @@ use crate::{
         add_attribute,
         raw::{Counter, Family, Gauge},
         task::Label,
-        Metric, MetricRegister, Registered, Registry,
+        Metric, Register, Registered, Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
@@ -66,7 +66,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut impl MetricRegister) -> Self {
+    pub fn init(registry: &mut impl Register) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),

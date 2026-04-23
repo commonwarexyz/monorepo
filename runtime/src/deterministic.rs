@@ -56,7 +56,7 @@ use crate::{
         add_attribute,
         raw::{Counter, Family, Gauge},
         task::Label,
-        validate_label, Metric, MetricRegister, Registered, Registry,
+        validate_label, Metric, Register, Registered, Registry,
     },
     utils::{
         signal::{Signal, Stopper},
@@ -116,7 +116,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut impl MetricRegister) -> Self {
+    pub fn init(registry: &mut impl Register) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),

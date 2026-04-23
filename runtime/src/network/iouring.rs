@@ -23,7 +23,7 @@
 
 use crate::{
     iouring::{self},
-    telemetry::metrics::MetricRegister,
+    telemetry::metrics::Register,
     utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
 use std::{
@@ -113,7 +113,7 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
-        registry: &mut impl MetricRegister,
+        registry: &mut impl Register,
         pool: BufferPool,
     ) -> Result<Self, Error> {
         // Optimize performance by hinting the kernel that a single task will
@@ -484,7 +484,7 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        telemetry::metrics::{MetricRegister, Registry},
+        telemetry::metrics::{Register, Registry},
         thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Sink as _, Stream as _,
     };
@@ -496,7 +496,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    fn test_pool(scope: &mut impl MetricRegister) -> BufferPool {
+    fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
 

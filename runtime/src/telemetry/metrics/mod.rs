@@ -861,40 +861,40 @@ impl Registry {
     }
 }
 
-pub struct MetricScope<'a> {
+pub struct Scope<'a> {
     registry: &'a mut Registry,
     prefix: String,
 }
 
 /// Shared registration surface accepted by runtime-internal constructors.
 ///
-/// Both [`Registry`] (no prefix) and [`MetricScope`] (with prefix) implement
-/// this, so a `fn new(registry: &mut impl MetricRegister)` can accept either
+/// Both [`Registry`] (no prefix) and [`Scope`] (with prefix) implement
+/// this, so a `fn new(registry: &mut impl Register)` can accept either
 /// without the caller having to produce a scope first.
-pub trait MetricRegister {
+pub trait Register {
     /// Register a runtime-internal metric under this scope's prefix.
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M);
 
     /// Create a child scope by appending `prefix` to the current prefix.
-    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_>;
+    fn sub_registry(&mut self, prefix: &str) -> Scope<'_>;
 }
 
-impl MetricRegister for Registry {
+impl Register for Registry {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) {
         validate_label(name);
         self.register_internal(name.to_string(), help.to_string(), Vec::new(), metric);
     }
 
-    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_> {
+    fn sub_registry(&mut self, prefix: &str) -> Scope<'_> {
         validate_label(prefix);
-        MetricScope {
+        Scope {
             registry: self,
             prefix: prefix.to_string(),
         }
     }
 }
 
-impl MetricRegister for MetricScope<'_> {
+impl Register for Scope<'_> {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) {
         validate_label(name);
         self.registry.register_internal(
@@ -905,9 +905,9 @@ impl MetricRegister for MetricScope<'_> {
         );
     }
 
-    fn sub_registry(&mut self, prefix: &str) -> MetricScope<'_> {
+    fn sub_registry(&mut self, prefix: &str) -> Scope<'_> {
         validate_label(prefix);
-        MetricScope {
+        Scope {
             registry: &mut *self.registry,
             prefix: prefixed_name(&self.prefix, prefix),
         }

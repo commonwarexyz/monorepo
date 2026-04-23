@@ -1,5 +1,5 @@
 use crate::{
-    telemetry::metrics::{raw::Counter, MetricRegister},
+    telemetry::metrics::{raw::Counter, Register},
     IoBufs, SinkOf, StreamOf,
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -18,7 +18,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(registry: &mut impl MetricRegister) -> Self {
+    fn new(registry: &mut impl Register) -> Self {
         let metrics = Self {
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
@@ -130,7 +130,7 @@ pub struct Network<N: crate::Network> {
 impl<N: crate::Network> Network<N> {
     /// Wraps `inner` to make it metered.
     /// The `registry` is used to register the metrics.
-    pub(crate) fn new(inner: N, registry: &mut impl MetricRegister) -> Self {
+    pub(crate) fn new(inner: N, registry: &mut impl Register) -> Self {
         let metrics = Metrics::new(registry);
         Self {
             inner,

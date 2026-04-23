@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self},
-    telemetry::metrics::MetricRegister,
+    telemetry::metrics::Register,
     utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
@@ -75,7 +75,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub(crate) fn start(cfg: Config, registry: &mut impl MetricRegister, pool: BufferPool) -> Self {
+    pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
             mut iouring_config,
@@ -372,7 +372,7 @@ mod tests {
 
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
-    fn test_pool(scope: &mut impl MetricRegister) -> BufferPool {
+    fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 

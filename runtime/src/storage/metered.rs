@@ -1,7 +1,7 @@
 use crate::{
     telemetry::metrics::{
         raw::{Counter, Gauge},
-        MetricRegister,
+        Register,
     },
     Buf, Error, IoBufs, IoBufsMut,
 };
@@ -20,7 +20,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    fn new(registry: &mut impl MetricRegister) -> Self {
+    fn new(registry: &mut impl Register) -> Self {
         let metrics = Self {
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
@@ -67,7 +67,7 @@ pub struct Storage<S> {
 }
 
 impl<S> Storage<S> {
-    pub(crate) fn new(inner: S, registry: &mut impl MetricRegister) -> Self {
+    pub(crate) fn new(inner: S, registry: &mut impl Register) -> Self {
         Self {
             inner,
             metrics: Metrics::new(registry).into(),
@@ -185,7 +185,7 @@ mod tests {
         Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
 
-    fn test_pool(scope: &mut impl MetricRegister) -> BufferPool {
+    fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
