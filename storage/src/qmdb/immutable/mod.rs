@@ -596,10 +596,26 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        if batch.new_inactivity_floor_loc < self.inactivity_floor_loc {
+        let mut prev_floor = self.inactivity_floor_loc;
+        for i in (0..batch.ancestor_diff_ends.len()).rev() {
+            let ancestor_end = batch.ancestor_diff_ends[i];
+            if ancestor_end <= db_size {
+                continue;
+            }
+            let ancestor_floor = batch.ancestor_new_inactivity_floor_locs[i];
+            let ancestor_commit_loc = Location::new(ancestor_end - 1);
+            if ancestor_floor < prev_floor {
+                return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
+            }
+            if ancestor_floor > ancestor_commit_loc {
+                return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
+            }
+            prev_floor = ancestor_floor;
+        }
+        if batch.new_inactivity_floor_loc < prev_floor {
             return Err(Error::FloorRegressed(
                 batch.new_inactivity_floor_loc,
-                self.inactivity_floor_loc,
+                prev_floor,
             ));
         }
         let tip_commit_loc = Location::new(batch.total_size - 1);
@@ -2557,6 +2573,45 @@ pub(super) mod test {
         )
         .await
         .unwrap();
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Verify that chained immutable batches validate ancestor commit floors, not just the tip.
+    pub(crate) async fn test_immutable_chained_ancestor_floor_regression<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("test")).await;
+
+        let k1 = Sha256::fill(1u8);
+        let v1 = Sha256::fill(2u8);
+        db.apply_batch(
+            db.new_batch()
+                .set(k1, v1)
+                .merkleize(&db, None, Location::new(2)),
+        )
+        .await
+        .unwrap();
+
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3u8), Sha256::fill(4u8))
+            .merkleize(&db, None, Location::new(1));
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(5u8), Sha256::fill(6u8))
+            .merkleize(&db, None, Location::new(6));
+
+        let result = db.apply_batch(child).await;
+        assert!(matches!(result, Err(Error::FloorRegressed(new, current))
+                if new == Location::new(1) && current == Location::new(2)));
 
         db.destroy().await.unwrap();
     }
