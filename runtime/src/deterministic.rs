@@ -2155,9 +2155,11 @@ mod tests {
         // metric panics in `Registry::register`.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let _handle = context
-                .with_label(METRICS_PREFIX)
-                .register("iterations", "shadow", Counter::<u64>::default());
+            let _handle = context.with_label(METRICS_PREFIX).register(
+                "iterations",
+                "shadow",
+                Counter::<u64>::default(),
+            );
         });
     }
 
