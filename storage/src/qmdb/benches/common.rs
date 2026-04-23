@@ -5,7 +5,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, journaled::Config as MerkleConfig, Family},
+    merkle::{self, full::Config as MerkleConfig, Family},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},

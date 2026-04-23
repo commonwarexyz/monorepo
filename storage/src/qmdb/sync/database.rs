@@ -60,11 +60,10 @@ pub trait Database: Sized + Send {
     /// Returns whether persisted local state already matches the requested sync target.
     ///
     /// Databases can override this to let the sync engine finish immediately when an
-    /// on-disk database already reflects the target. Implementations may verify only
-    /// that persisted tree size and root match; the merkle pruning boundary is not
-    /// re-checked. Callers are responsible for keeping their local pruning point at or
-    /// below `target.range.start()`; pruning past it can cause a later
-    /// [`Self::from_sync_result`] rebuild to fail.
+    /// on-disk database already reflects the target. Simple append-only variants may
+    /// verify only the persisted tree size and root. Variants with additional
+    /// pruning-dependent state should also ensure their persisted lower bound still
+    /// covers `target.range.start()`.
     fn has_local_target_state(
         _context: Self::Context,
         _config: &Self::Config,

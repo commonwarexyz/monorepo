@@ -11,6 +11,15 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
+    /// Compact proof did not verify against the requested root.
+    #[error("compact proof failed verification")]
+    InvalidProof,
+    /// Compact payload leaf count did not match the requested target size.
+    #[error("unexpected compact leaf count - expected {expected}, got {actual}")]
+    UnexpectedLeafCount {
+        expected: Location<F>,
+        actual: Location<F>,
+    },
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {
@@ -26,6 +35,12 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Sync target moved backward
     #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
+        old: Target<F, D>,
+        new: Target<F, D>,
+    },
+    /// Sync target root changed without growing the tree.
+    #[error("sync target root changed without end growth: {old:?} -> {new:?}")]
+    SyncTargetRootChangedWithoutGrowth {
         old: Target<F, D>,
         new: Target<F, D>,
     },

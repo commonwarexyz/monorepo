@@ -6,13 +6,13 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        journaled::{self, Journaled},
+        full::{self, Merkle},
         Family, Location,
     },
     qmdb::{
         any::ValueEncoding,
-        build_snapshot_from_log,
-        immutable::{self, Operation},
+        build_snapshot_from_log, compact_witness,
+        immutable::{self, CompactDb, Operation},
         operation::{Key, Operation as _},
         sync::{self},
         Error,
@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
     Context, Persistable,
 };
-use commonware_codec::EncodeShared;
+use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_utils::range::NonEmptyRange;
 
@@ -75,9 +75,9 @@ where
         let hasher = StandardHasher::new();
 
         // Initialize Merkle structure for sync
-        let merkle = Journaled::init_sync(
+        let merkle = Merkle::init_sync(
             context.with_label("merkle"),
-            journaled::SyncConfig {
+            full::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range,
                 pinned_nodes,
@@ -134,6 +134,72 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
+    }
+}
+
+impl<F, E, K, V, H, Cfg> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: Read<Cfg = Cfg>,
+    Cfg: Clone + Send + Sync + 'static,
+{
+    type Family = F;
+    type Op = Operation<F, K, V>;
+    type Config = immutable::CompactConfig<Cfg>;
+    type Digest = H::Digest;
+    type Context = E;
+    type Hasher = H;
+
+    async fn from_compact_state(
+        context: Self::Context,
+        config: Self::Config,
+        state: sync::compact::State<Self::Family, Self::Op, Self::Digest>,
+    ) -> Result<Self, Error<F>> {
+        let sync::compact::State {
+            leaf_count,
+            pinned_nodes,
+            last_commit_op,
+            last_commit_proof,
+        } = state;
+        let last_commit_loc = Location::new(*leaf_count - 1);
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        };
+        let commit_codec_config = config.commit_codec_config.clone();
+        let commit_op_bytes =
+            Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
+                .encode()
+                .to_vec();
+        let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
+            context.with_label("merkle"),
+            &StandardHasher::<H>::new(),
+            config.merkle,
+            leaf_count,
+            pinned_nodes.clone(),
+        )
+        .await?;
+        Self::init_from_verified_state(
+            merkle,
+            commit_codec_config,
+            last_commit_metadata,
+            inactivity_floor_loc,
+            commit_op_bytes,
+            last_commit_proof,
+            pinned_nodes,
+        )
+    }
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn persist_compact_state(&self) -> Result<(), Error<F>> {
+        compact_witness::persist_cached_serve_state(self).await
     }
 }
 

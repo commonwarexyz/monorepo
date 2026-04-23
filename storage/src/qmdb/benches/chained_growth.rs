@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{self, journaled, mmb::Family as Mmb},
+    merkle::{self, full, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
@@ -48,8 +48,8 @@ type CurOFix32Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, SMAL
 type CurUFix256Mmb = UCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
 type CurOFix256Mmb = OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> journaled::Config {
-    journaled::Config {
+fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config {
+    full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,

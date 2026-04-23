@@ -4,14 +4,15 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
+    journal::contiguous::fixed::Config as FConfig,
     merkle::{
-        journaled::Config as MmrConfig,
+        full::Config as MmrConfig,
         mmr::{self, Location, Proof},
     },
     qmdb::{
         self,
-        immutable::{self, Config},
+        immutable::{fixed, Config},
+        sync::compact,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -19,13 +20,13 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
+pub type Database<E> = fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = immutable::variable::Operation<mmr::Family, Key, Value>;
+pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),
@@ -40,11 +41,9 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<
             thread_pool: None,
             page_cache: page_cache.clone(),
         },
-        log: VConfig {
+        log: FConfig {
             partition: "log".into(),
-            items_per_section: NZU64!(4096),
-            compression: None,
-            codec_config: ((), ()),
+            items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
             page_cache,
         },
@@ -83,7 +82,7 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     operations
 }
 
-impl<E> super::Syncable for Database<E>
+impl<E> super::ExampleDatabase for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
@@ -125,6 +124,15 @@ where
         self.root()
     }
 
+    fn name() -> &'static str {
+        "immutable"
+    }
+}
+
+impl<E> super::Syncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
     async fn size(&self) -> Location {
         self.bounds().await.end
     }
@@ -149,8 +157,16 @@ where
     ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
+}
 
-    fn name() -> &'static str {
-        "immutable"
+impl<E> super::CompactSyncable for Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
+        compact::Target {
+            root: self.root(),
+            leaf_count: self.bounds().await.end,
+        }
     }
 }

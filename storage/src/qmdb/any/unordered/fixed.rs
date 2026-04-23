@@ -788,7 +788,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::{
-                mmr::{self, journaled::Mmr},
+                mmr::{self, full::Mmr},
                 Family as _,
             },
             qmdb::any::sync::tests::FromSyncTestable,

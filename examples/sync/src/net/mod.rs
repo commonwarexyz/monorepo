@@ -113,9 +113,13 @@ impl Read for ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
+    use crate::{
+        keyless_compact,
+        net::{request_id::Generator, wire, wire::GetOperationsRequest, ErrorCode},
+    };
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_storage::mmr::Location;
+    use commonware_cryptography::sha256;
+    use commonware_storage::{mmr::Location, qmdb::sync::compact::State};
     use commonware_utils::NZU64;
     use rstest::rstest;
 
@@ -181,5 +185,41 @@ mod tests {
             request.validate(),
             Err(crate::Error::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn test_get_compact_state_response_roundtrip() {
+        let request_id = Generator::new().next();
+        let digest_a = sha256::Digest::from([7; 32]);
+        let digest_b = sha256::Digest::from([8; 32]);
+        let digest_c = sha256::Digest::from([10; 32]);
+        let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
+            request_id,
+            state: State {
+                leaf_count: Location::new(11),
+                pinned_nodes: vec![digest_a, digest_b],
+                last_commit_op: keyless_compact::Operation::Commit(None, Location::new(0)),
+                last_commit_proof: commonware_storage::mmr::Proof {
+                    leaves: Location::new(11),
+                    digests: vec![digest_c],
+                },
+            },
+        });
+
+        let encoded = message.encode().to_vec();
+        let decoded = wire::Message::<
+            keyless_compact::Operation,
+            commonware_cryptography::sha256::Digest,
+        >::decode(&encoded[..])
+        .expect("failed to decode compact response");
+
+        match decoded {
+            wire::Message::GetCompactStateResponse(response) => {
+                assert_eq!(response.request_id, request_id);
+                assert_eq!(response.state.leaf_count, Location::new(11));
+                assert_eq!(response.state.pinned_nodes.len(), 2);
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
     }
 }

@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Graftable, Location},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };

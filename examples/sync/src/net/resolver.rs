@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr::{self, Location},
-    qmdb::sync,
+    qmdb::sync::{self, compact},
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
@@ -63,6 +63,67 @@ where
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetSyncTargetResponse(r) => Ok(r.target),
+            wire::Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            _ => Err(crate::Error::UnexpectedResponse { request_id }),
+        }
+    }
+
+    /// Returns compact authenticated state for the given target.
+    pub async fn get_compact_target(
+        &self,
+    ) -> Result<compact::Target<mmr::Family, D>, crate::Error> {
+        let request_id = self.request_id_generator.next();
+        let request =
+            wire::Message::GetCompactTargetRequest(wire::GetCompactTargetRequest { request_id });
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .clone()
+            .send(io::Request {
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::RequestChannelClosed)?;
+        let response = rx
+            .await
+            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
+        match response {
+            wire::Message::GetCompactTargetResponse(r) => Ok(r.target),
+            wire::Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            _ => Err(crate::Error::UnexpectedResponse { request_id }),
+        }
+    }
+
+    /// Returns compact authenticated state for the given target.
+    pub async fn get_compact_state(
+        &self,
+        target: compact::Target<mmr::Family, D>,
+    ) -> Result<compact::State<mmr::Family, Op, D>, crate::Error> {
+        let request_id = self.request_id_generator.next();
+        let request = wire::Message::GetCompactStateRequest(wire::GetCompactStateRequest {
+            request_id,
+            target,
+        });
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .clone()
+            .send(io::Request {
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::RequestChannelClosed)?;
+        let response = rx
+            .await
+            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
+        match response {
+            wire::Message::GetCompactStateResponse(r) => Ok(r.state),
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,
@@ -129,5 +190,24 @@ where
             success_tx: tx,
             pinned_nodes,
         })
+    }
+}
+
+impl<Op, D> compact::Resolver for Resolver<Op, D>
+where
+    Op: Clone + Read + EncodeShared,
+    Op::Cfg: IsUnit,
+    D: Digest,
+{
+    type Family = mmr::Family;
+    type Digest = D;
+    type Op = Op;
+    type Error = crate::Error;
+
+    async fn get_compact_state(
+        &self,
+        target: compact::Target<Self::Family, Self::Digest>,
+    ) -> Result<compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.get_compact_state(target).await
     }
 }

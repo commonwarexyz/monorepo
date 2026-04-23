@@ -62,10 +62,10 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible once for the generic journaled Merkle type used in tests.
+// Implement Destructible once for the generic full Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::journaled::Journaled<F, deterministic::Context, Digest>
+    for crate::merkle::full::Merkle<F, deterministic::Context, Digest>
 {
     type Family = F;
 
@@ -829,6 +829,71 @@ where
         assert_eq!(synced_db.sync_boundary().await, lower_bound);
 
         synced_db.destroy().await.unwrap();
+
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+/// Test that prune-only target updates are rejected when the authenticated state does not advance.
+pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        target_db = H::apply_ops(target_db, H::create_ops(50)).await;
+
+        let initial_lower_bound = target_db.inactivity_floor_loc().await;
+        assert!(
+            *initial_lower_bound > 1,
+            "test setup requires lower bound that can advance twice"
+        );
+        let upper_bound = target_db.bounds().await.end;
+        let root = H::sync_target_root(&target_db);
+
+        let (update_sender, update_receiver) = mpsc::channel(2);
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(5),
+            target: Target {
+                root,
+                range: non_empty_range!(initial_lower_bound, upper_bound),
+            },
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 10,
+            update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
+        };
+        let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
+
+        let first_target = Target {
+            root,
+            range: non_empty_range!(initial_lower_bound.checked_add(1).unwrap(), upper_bound),
+        };
+        let second_target = Target {
+            root,
+            range: non_empty_range!(initial_lower_bound.checked_add(2).unwrap(), upper_bound),
+        };
+        update_sender.send(first_target).await.unwrap();
+        update_sender.send(second_target).await.unwrap();
+
+        match client.step().await {
+            Err(sync::Error::Engine(sync::EngineError::SyncTargetRootUnchanged)) => {}
+            Err(err) => panic!("expected SyncTargetRootUnchanged, got {err:?}"),
+            Ok(_) => panic!("prune-only update should be rejected"),
+        }
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -2666,6 +2731,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_bounds_increase() {
                 super::test_target_update_bounds_increase::<$harness>();
+            }
+
+            #[test]
+            fn test_target_update_prune_only_rejected() {
+                super::test_target_update_prune_only_rejected::<$harness>();
             }
 
             #[test_traced("WARN")]

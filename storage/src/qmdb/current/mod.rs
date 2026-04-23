@@ -242,7 +242,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, journaled::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig, Location},
     mmr::StandardHasher,
     qmdb::{
         any::{
