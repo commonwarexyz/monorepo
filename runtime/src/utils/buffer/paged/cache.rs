@@ -578,8 +578,8 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, utils::Registry, BufferPool, BufferPoolConfig,
-        Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, BufferPool,
+        BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;

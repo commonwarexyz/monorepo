@@ -140,7 +140,7 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        utils::Registry,
+        telemetry::metrics::Registry,
         Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
     };
     use commonware_utils::sync::Mutex;

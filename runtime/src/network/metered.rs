@@ -1,4 +1,7 @@
-use crate::{metrics::raw::Counter, utils::MetricScope, IoBufs, SinkOf, StreamOf};
+use crate::{
+    telemetry::metrics::{raw::Counter, MetricScope},
+    IoBufs, SinkOf, StreamOf,
+};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -181,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            let mut registry = crate::utils::Registry::new();
+            let mut registry = crate::telemetry::metrics::Registry::new();
             let mut scope = registry.sub_registry_with_prefix("test");
             MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
         })
@@ -192,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
-            let mut registry = crate::utils::Registry::new();
+            let mut registry = crate::telemetry::metrics::Registry::new();
             let mut scope = registry.sub_registry_with_prefix("test");
             MeteredNetwork::new(DeterministicNetwork::default(), &mut scope)
         })
@@ -204,7 +207,7 @@ mod tests {
         const MSG_SIZE: usize = 100;
 
         // Create a registry and network
-        let mut registry = crate::utils::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::new();
         let mut scope = registry.sub_registry_with_prefix("test");
         let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut scope);
 

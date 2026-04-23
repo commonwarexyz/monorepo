@@ -250,7 +250,8 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _,
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
+        Storage as _,
     };
     use rand::{Rng as _, SeedableRng};
     use std::env;

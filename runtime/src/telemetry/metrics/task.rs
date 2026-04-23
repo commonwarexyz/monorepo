@@ -1,6 +1,6 @@
 //! Recording metrics related to tasks.
 
-use crate::metrics::{EncodeLabelSet, EncodeLabelValue};
+use super::{EncodeLabelSet, EncodeLabelValue};
 
 /// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

@@ -17,9 +17,11 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    metrics::{Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram},
     spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+    },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{

@@ -160,7 +160,11 @@ use commonware_p2p::{
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell,
+    telemetry::metrics::{GaugeExt as _, HistogramExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+};
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, mpsc, oneshot},

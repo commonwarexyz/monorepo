@@ -52,11 +52,10 @@
 use super::IoBufMut;
 use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
-    metrics::{
+    telemetry::metrics::{
         raw::{Counter, Family, Gauge},
-        EncodeLabelSet,
+        EncodeLabelSet, MetricScope,
     },
-    utils::MetricScope,
 };
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
@@ -1049,7 +1048,7 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{iobuf::IoBuf, utils::Registry};
+    use crate::{iobuf::IoBuf, telemetry::metrics::Registry};
     use bytes::{Buf, BufMut};
     use std::{
         sync::{mpsc, Arc},

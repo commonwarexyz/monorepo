@@ -12,20 +12,19 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    metrics::{
-        raw::{Counter, Family, Gauge},
-        Metric,
-    },
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label,
-    utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, MetricScope, Panicker, Registry,
+    telemetry::metrics::{
+        add_attribute,
+        raw::{Counter, Family, Gauge},
+        task::Label,
+        Metric, MetricScope, Registered, Registry,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, Registered,
-    SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    utils::{self, signal::Stopper, supervision::Tree, Panicker},
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]

@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    metrics::{Counter, Gauge},
+    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Buf, BufMut, Metrics, Storage,
 };
 use futures::{future::try_join_all, pin_mut, StreamExt};

@@ -1,7 +1,7 @@
 use crate::authenticated::lookup::metrics;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{CounterFamily, Gauge, GaugeFamily},
+    telemetry::metrics::{CounterFamily, Gauge, GaugeFamily, MetricsExt as _},
     Metrics as RuntimeMetrics,
 };
 

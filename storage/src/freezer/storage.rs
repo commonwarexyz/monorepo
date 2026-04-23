@@ -7,7 +7,11 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, metrics::Counter, Blob, Buf, BufMut, BufferPooler, IoBuf};
+use commonware_runtime::{
+    buffer,
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Blob, Buf, BufMut, BufferPooler, IoBuf,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};

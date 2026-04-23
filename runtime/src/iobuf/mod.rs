@@ -2366,7 +2366,7 @@ mod tests {
                 let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
-        let mut registry = crate::utils::Registry::default();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let mut scope = registry.sub_registry_with_prefix("test");
         BufferPool::new(pool_config, &mut scope)
     }

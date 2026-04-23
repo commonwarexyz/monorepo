@@ -1,9 +1,6 @@
 //! Process metrics collection.
 
-use crate::{
-    metrics::{self, raw::Gauge},
-    utils::MetricScope,
-};
+use crate::telemetry::metrics::{raw::Gauge, GaugeExt, MetricScope};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -60,8 +57,8 @@ impl Metrics {
 
         // If the process exists, update the metrics
         if let Some(process) = self.system.process(self.pid) {
-            let _ = metrics::try_set(&self.rss, process.memory());
-            let _ = metrics::try_set(&self.virtual_memory, process.virtual_memory());
+            let _ = self.rss.try_set(process.memory());
+            let _ = self.virtual_memory.try_set(process.virtual_memory());
         }
     }
 
@@ -88,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_process_metrics_init() {
-        let mut registry = crate::utils::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::new();
         let mut scope = registry.sub_registry_with_prefix("test");
         let mut metrics = Metrics::init(&mut scope);
 

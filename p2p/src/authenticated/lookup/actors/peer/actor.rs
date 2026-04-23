@@ -9,8 +9,8 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
-    RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, telemetry::metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs,
+    Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -335,7 +335,8 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{
-        deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
+        deterministic, mocks, telemetry::metrics::MetricsExt as _, BufferPooler,
+        Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};

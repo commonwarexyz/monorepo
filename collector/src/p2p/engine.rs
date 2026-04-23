@@ -11,8 +11,9 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{Counter, Gauge},
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell,
+    telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},

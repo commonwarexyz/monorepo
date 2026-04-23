@@ -1,4 +1,8 @@
-use crate::{metrics::Metric, signal, Error, Handle};
+use crate::{
+    signal,
+    telemetry::metrics::{Metric, Registered},
+    Error, Handle,
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand::{CryptoRng, RngCore};
 use std::{
@@ -161,7 +165,7 @@ where
         name: N,
         help: H,
         metric: M,
-    ) -> crate::Registered<M> {
+    ) -> Registered<M> {
         self.as_present().register(name, help, metric)
     }
 

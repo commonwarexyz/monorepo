@@ -1,6 +1,6 @@
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::metrics::EncodeStruct;
+use commonware_runtime::telemetry::metrics::EncodeStruct;
 use std::fmt;
 
 /// Per-peer label.

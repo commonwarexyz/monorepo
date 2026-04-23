@@ -235,7 +235,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, utils::Registry, Blob, BufferPoolConfig, Storage as _,
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
+        Storage as _,
     };
 
     fn test_pool() -> BufferPool {

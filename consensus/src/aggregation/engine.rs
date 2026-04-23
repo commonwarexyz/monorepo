@@ -27,6 +27,7 @@ use commonware_runtime::{
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
+        GaugeExt as _,
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };

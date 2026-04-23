@@ -44,10 +44,6 @@
 
 pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
-    metrics::{
-        raw::{Counter, Family, Gauge},
-        Metric,
-    },
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -56,15 +52,19 @@ use crate::{
         audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::task::Label,
-    utils::{
+    telemetry::metrics::{
         add_attribute,
+        raw::{Counter, Family, Gauge},
+        task::Label,
+        validate_label, Metric, MetricScope, Registered, Registry,
+    },
+    utils::{
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricScope, Panicker, Registry,
+        Panicker,
     },
-    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Registered, Spawner as _, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
+    Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};

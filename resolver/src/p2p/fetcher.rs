@@ -2,10 +2,10 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{EncodeStruct, GaugeExt, GaugeFamily, Histogram},
     telemetry::metrics::{
         histogram::Buckets,
         status::{self, CounterExt, Status},
+        EncodeStruct, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, Metrics,
 };

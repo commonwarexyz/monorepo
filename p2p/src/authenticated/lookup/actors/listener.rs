@@ -8,8 +8,10 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    metrics::Counter, spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter,
-    Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
+    spawn_cell,
+    telemetry::metrics::{Counter, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};

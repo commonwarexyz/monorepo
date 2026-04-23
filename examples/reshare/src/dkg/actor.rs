@@ -28,8 +28,9 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily},
-    spawn_cell, Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell,
+    telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
+    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};

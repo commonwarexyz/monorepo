@@ -1,5 +1,8 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{metrics::Metric, Metrics};
+use commonware_runtime::{
+    telemetry::metrics::{Metric, Registered},
+    Metrics,
+};
 use criterion::criterion_main;
 
 mod hashmap_insert;
@@ -36,8 +39,8 @@ impl Metrics for DummyMetrics {
         _: N,
         _: H,
         metric: M,
-    ) -> commonware_runtime::Registered<M> {
-        commonware_runtime::Registered::detached(metric)
+    ) -> Registered<M> {
+        Registered::detached(metric)
     }
 
     fn encode(&self) -> String {

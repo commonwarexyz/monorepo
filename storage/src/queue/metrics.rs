@@ -1,6 +1,9 @@
 //! Metrics for [super::Queue].
 
-use commonware_runtime::{metrics::Gauge, Metrics as RuntimeMetrics};
+use commonware_runtime::{
+    telemetry::metrics::{Gauge, MetricsExt as _},
+    Metrics as RuntimeMetrics,
+};
 
 /// Metrics for [super::Queue].
 pub struct Metrics {

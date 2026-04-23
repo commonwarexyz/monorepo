@@ -27,7 +27,9 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    metrics::Gauge, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    spawn_cell,
+    telemetry::metrics::{Gauge, GaugeExt as _, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,

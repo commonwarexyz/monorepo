@@ -57,177 +57,12 @@ stability_scope!(BETA {
     };
     use thiserror::Error;
 
-    /// Prefix for runtime metrics.
-    pub(crate) const METRICS_PREFIX: &str = "runtime";
+    pub(crate) use telemetry::metrics::METRICS_PREFIX;
 
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
-    /// Re-exports of Prometheus types under the runtime namespace.
-    ///
-    /// Top-level aliases ([`metrics::Counter`], [`metrics::Gauge`],
-    /// [`metrics::Histogram`], [`metrics::CounterFamily`],
-    /// [`metrics::GaugeFamily`]) are [`Registered`] handles suitable for use as
-    /// field types on metrics structs. Use [`metrics::raw`] when constructing a
-    /// metric to pass to [`Metrics::register`].
-    pub mod metrics {
-        pub use commonware_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
-        pub use prometheus_client::{collector, encoding, registry};
-        pub use prometheus_client::metrics::*;
-        pub use prometheus_client::registry::*;
-        pub use prometheus_client::encoding::{
-            CounterValueEncoder, DescriptorEncoder, EncodeCounterValue, EncodeExemplarTime,
-            EncodeExemplarValue, EncodeGaugeValue, EncodeLabel, EncodeLabelKey, EncodeMetric,
-            ExemplarValueEncoder, GaugeValueEncoder, LabelEncoder, LabelKeyEncoder,
-            LabelSetEncoder, LabelValueEncoder, MetricEncoder, NoLabelSet,
-        };
-        pub use prometheus_client::encoding::EncodeLabelSet as EncodeLabelSetTrait;
-        pub use prometheus_client::encoding::EncodeLabelValue as EncodeLabelValueTrait;
-        use std::{sync::atomic::Ordering, time::SystemTime};
-
-        /// Underlying Prometheus metric types. Used when constructing a metric
-        /// to pass to [`crate::Metrics::register`](super::Metrics::register).
-        pub mod raw {
-            pub use prometheus_client::metrics::counter::Counter;
-            pub use prometheus_client::metrics::family::Family;
-            pub use prometheus_client::metrics::gauge::Gauge;
-            pub use prometheus_client::metrics::histogram::Histogram;
-        }
-
-        /// A registered counter metric.
-        pub type Counter = crate::Registered<raw::Counter>;
-        /// A registered gauge metric.
-        pub type Gauge = crate::Registered<raw::Gauge>;
-        /// A registered histogram metric.
-        pub type Histogram = crate::Registered<raw::Histogram>;
-        /// A registered family of counters keyed by `L`.
-        pub type CounterFamily<L> = crate::Registered<raw::Family<L, raw::Counter>>;
-        /// A registered family of gauges keyed by `L`.
-        pub type GaugeFamily<L> = crate::Registered<raw::Family<L, raw::Gauge>>;
-
-        /// Convenience methods for Prometheus gauges.
-        #[cfg(target_has_atomic = "64")]
-        pub trait GaugeExt {
-            /// Set a gauge from a lossless integer conversion.
-            fn try_set<T>(&self, value: T) -> Result<i64, T::Error>
-            where
-                T: TryInto<i64>;
-
-            /// Atomically raise a gauge to at least the provided value.
-            fn try_set_max<T>(&self, value: T) -> Result<i64, T::Error>
-            where
-                T: TryInto<i64> + Copy;
-        }
-
-        #[cfg(target_has_atomic = "64")]
-        impl GaugeExt for raw::Gauge {
-            fn try_set<T>(&self, value: T) -> Result<i64, T::Error>
-            where
-                T: TryInto<i64>,
-            {
-                try_set(self, value)
-            }
-
-            fn try_set_max<T>(&self, value: T) -> Result<i64, T::Error>
-            where
-                T: TryInto<i64> + Copy,
-            {
-                try_set_max(self, value)
-            }
-        }
-
-        /// Convenience methods for Prometheus gauges.
-        #[cfg(not(target_has_atomic = "64"))]
-        pub trait GaugeExt {
-            /// Set a gauge from a lossless integer conversion.
-            fn try_set<T>(&self, value: T) -> Result<i32, T::Error>
-            where
-                T: TryInto<i32>;
-
-            /// Atomically raise a gauge to at least the provided value.
-            fn try_set_max<T>(&self, value: T) -> Result<i32, T::Error>
-            where
-                T: TryInto<i32> + Copy;
-        }
-
-        #[cfg(not(target_has_atomic = "64"))]
-        impl GaugeExt for raw::Gauge {
-            fn try_set<T>(&self, value: T) -> Result<i32, T::Error>
-            where
-                T: TryInto<i32>,
-            {
-                try_set(self, value)
-            }
-
-            fn try_set_max<T>(&self, value: T) -> Result<i32, T::Error>
-            where
-                T: TryInto<i32> + Copy,
-            {
-                try_set_max(self, value)
-            }
-        }
-
-        /// Convenience methods for Prometheus histograms.
-        pub trait HistogramExt {
-            /// Observe the duration between two points in time, in seconds.
-            fn observe_between(&self, start: SystemTime, end: SystemTime);
-        }
-
-        impl HistogramExt for raw::Histogram {
-            fn observe_between(&self, start: SystemTime, end: SystemTime) {
-                observe_between(self, start, end);
-            }
-        }
-
-        /// Set a gauge from a lossless integer conversion.
-        #[cfg(target_has_atomic = "64")]
-        pub fn try_set<T>(gauge: &raw::Gauge, value: T) -> Result<i64, T::Error>
-        where
-            T: TryInto<i64>,
-        {
-            let value = value.try_into()?;
-            Ok(gauge.set(value))
-        }
-
-        /// Set a gauge from a lossless integer conversion.
-        #[cfg(not(target_has_atomic = "64"))]
-        pub fn try_set<T>(gauge: &raw::Gauge, value: T) -> Result<i32, T::Error>
-        where
-            T: TryInto<i32>,
-        {
-            let value = value.try_into()?;
-            Ok(gauge.set(value))
-        }
-
-        /// Atomically raise a gauge to at least the provided value.
-        #[cfg(target_has_atomic = "64")]
-        pub fn try_set_max<T>(gauge: &raw::Gauge, value: T) -> Result<i64, T::Error>
-        where
-            T: TryInto<i64> + Copy,
-        {
-            let value = value.try_into()?;
-            Ok(gauge.inner().fetch_max(value, Ordering::Relaxed))
-        }
-
-        /// Atomically raise a gauge to at least the provided value.
-        #[cfg(not(target_has_atomic = "64"))]
-        pub fn try_set_max<T>(gauge: &raw::Gauge, value: T) -> Result<i32, T::Error>
-        where
-            T: TryInto<i32> + Copy,
-        {
-            let value = value.try_into()?;
-            Ok(gauge.inner().fetch_max(value, Ordering::Relaxed))
-        }
-
-        /// Observe the duration between two points in time, in seconds.
-        pub fn observe_between(histogram: &raw::Histogram, start: SystemTime, end: SystemTime) {
-            let duration = end
-                .duration_since(start)
-                .map_or(0.0, |duration| duration.as_secs_f64());
-            histogram.observe(duration);
-        }
-    }
 
     pub mod iobuf;
     pub use iobuf::{
@@ -605,59 +440,17 @@ stability_scope!(BETA {
         /// panics.
         ///
         /// Implementations outside `commonware-runtime` that do not expose metrics
-        /// through a runtime registry may return [`Registered::detached`] or use
-        /// [`Registered::with_registration`] with a custom [`Registration`].
+        /// through a runtime registry may return [`telemetry::metrics::Registered::detached`] or
+        /// use [`telemetry::metrics::Registered::with_registration`] with a custom
+        /// [`telemetry::metrics::Registration`].
         ///
         /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-        fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+        fn register<N: Into<String>, H: Into<String>, M: telemetry::metrics::Metric>(
             &self,
             name: N,
             help: H,
             metric: M,
-        ) -> Registered<M>;
-
-        /// Register a counter with the runtime.
-        fn counter<N: Into<String>, H: Into<String>>(
-            &self,
-            name: N,
-            help: H,
-        ) -> metrics::Counter {
-            self.register(name, help, metrics::raw::Counter::default())
-        }
-
-        /// Register a gauge with the runtime.
-        fn gauge<N: Into<String>, H: Into<String>>(
-            &self,
-            name: N,
-            help: H,
-        ) -> metrics::Gauge {
-            self.register(name, help, metrics::raw::Gauge::default())
-        }
-
-        /// Register a histogram with the runtime.
-        fn histogram<N: Into<String>, H: Into<String>, I>(
-            &self,
-            name: N,
-            help: H,
-            buckets: I,
-        ) -> metrics::Histogram
-        where
-            I: IntoIterator<Item = f64>,
-        {
-            self.register(name, help, metrics::raw::Histogram::new(buckets))
-        }
-
-        /// Register a metric family with the runtime.
-        fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<metrics::raw::Family<S, M>>
-        where
-            N: Into<String>,
-            H: Into<String>,
-            S: Clone + std::hash::Hash + Eq,
-            M: Default,
-            metrics::raw::Family<S, M>: metrics::Metric,
-        {
-            self.register(name, help, metrics::raw::Family::<S, M>::default())
-        }
+        ) -> telemetry::metrics::Registered<M>;
 
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
@@ -1045,13 +838,14 @@ stability_scope!(BETA, cfg(feature = "external") {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use crate::telemetry::{
         metrics::{
+            count_running_tasks,
             raw::{Counter, Family},
             EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
             EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
         },
-        telemetry::traces::collector::TraceStorage,
+        traces::collector::TraceStorage,
     };
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};

@@ -6,7 +6,7 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    metrics::Counter,
+    telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};

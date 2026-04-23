@@ -1,6 +1,5 @@
 use commonware_runtime::{
-    metrics::Gauge,
-    telemetry::metrics::{histogram, status},
+    telemetry::metrics::{histogram, status, Gauge, MetricsExt as _},
     Clock, Metrics as RuntimeMetrics,
 };
 use std::sync::Arc;

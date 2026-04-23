@@ -1,6 +1,6 @@
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::metrics::EncodeLabelSet;
+use commonware_runtime::telemetry::metrics::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Message {

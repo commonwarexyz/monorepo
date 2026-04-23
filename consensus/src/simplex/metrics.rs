@@ -1,5 +1,5 @@
 use commonware_cryptography::PublicKey;
-use commonware_runtime::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
+use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 use commonware_utils::Array;
 
 /// Per-peer label.

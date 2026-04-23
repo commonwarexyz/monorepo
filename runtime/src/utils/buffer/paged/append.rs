@@ -927,8 +927,8 @@ impl<B: Blob> Append<B> {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, utils::Registry, BufferPool, BufferPoolConfig, Metrics as _, Runner as _,
-        Storage as _,
+        deterministic, telemetry::metrics::Registry, BufferPool, BufferPoolConfig, Metrics as _,
+        Runner as _, Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;

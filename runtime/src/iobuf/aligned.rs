@@ -706,7 +706,7 @@ mod tests {
     use super::*;
     use crate::{
         iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig},
-        utils::Registry,
+        telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::NZUsize;

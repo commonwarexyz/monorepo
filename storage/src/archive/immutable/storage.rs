@@ -6,7 +6,10 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{metrics::Counter, Buf, BufMut, BufferPooler};
+use commonware_runtime::{
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Buf, BufMut, BufferPooler,
+};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use std::collections::BTreeMap;

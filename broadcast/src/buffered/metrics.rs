@@ -1,7 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{CounterFamily, EncodeStruct, Gauge},
-    telemetry::metrics::status,
+    telemetry::metrics::{status, CounterFamily, EncodeStruct, Gauge, MetricsExt as _},
     Metrics as RuntimeMetrics,
 };
 

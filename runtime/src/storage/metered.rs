@@ -1,6 +1,8 @@
 use crate::{
-    metrics::raw::{Counter, Gauge},
-    utils::MetricScope,
+    telemetry::metrics::{
+        raw::{Counter, Gauge},
+        MetricScope,
+    },
     Buf, Error, IoBufs, IoBufsMut,
 };
 use std::{
@@ -179,19 +181,19 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        utils::Registry,
+        telemetry::metrics::Registry,
         Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
 
     fn test_pool() -> BufferPool {
-        let mut registry = crate::utils::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::new();
         let mut scope = registry.sub_registry_with_prefix("test_pool");
         BufferPool::new(BufferPoolConfig::for_storage(), &mut scope)
     }
 
     #[tokio::test]
     async fn test_metered_storage() {
-        let mut registry = crate::utils::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::new();
         let mut scope = registry.sub_registry_with_prefix("test");
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);
@@ -202,7 +204,7 @@ mod tests {
     /// Test that metrics are updated correctly for basic operations.
     #[tokio::test]
     async fn test_metered_blob_metrics() {
-        let mut registry = crate::utils::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::new();
         let mut scope = registry.sub_registry_with_prefix("test");
         let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut scope);

@@ -3,7 +3,7 @@
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::metrics::CounterFamily;
+use commonware_runtime::telemetry::metrics::CounterFamily;
 use std::num::NonZeroUsize;
 use thiserror::Error;
 

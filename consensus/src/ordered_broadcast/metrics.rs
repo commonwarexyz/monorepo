@@ -1,7 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    metrics::{Counter, EncodeStruct, GaugeFamily},
-    telemetry::metrics::{histogram, status},
+    telemetry::metrics::{histogram, status, Counter, EncodeStruct, GaugeFamily, MetricsExt as _},
     Clock, Metrics as RuntimeMetrics,
 };
 use std::sync::Arc;

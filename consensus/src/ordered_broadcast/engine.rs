@@ -32,11 +32,11 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
-    metrics::GaugeExt,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
+        GaugeExt,
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };

@@ -1,9 +1,6 @@
 //! Recording metrics with a status.
 
-use crate::{
-    metrics::{self, EncodeLabelSet, EncodeLabelValue},
-    Registered,
-};
+use super::{raw, EncodeLabelSet, EncodeLabelValue, Registered};
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -30,7 +27,7 @@ pub enum Status {
 
 /// Raw family backing a status [`Counter`]. Construct this and pass it to
 /// [`crate::Metrics::register`].
-pub type Raw = metrics::raw::Family<Label, metrics::raw::Counter>;
+pub type Raw = raw::Family<Label, raw::Counter>;
 
 /// A registered counter metric with a status label.
 pub type Counter = Registered<Raw>;

@@ -1,7 +1,7 @@
 //! Shared structures and functionality for [crate::index] types.
 
 use crate::index::Cursor as CursorTrait;
-use commonware_runtime::metrics::{Counter, Gauge};
+use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 
 /// Each key is mapped to a [Record] that contains a linked list of potential values for that key.
 ///

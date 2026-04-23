@@ -16,7 +16,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{
-    metrics::{CounterFamily, Gauge},
+    telemetry::metrics::{CounterFamily, Gauge, GaugeExt as _, MetricsExt as _},
     Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;

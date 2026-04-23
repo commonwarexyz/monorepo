@@ -12,7 +12,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::{
-    metrics::{Counter, Gauge},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Metrics,
 };
 use std::{

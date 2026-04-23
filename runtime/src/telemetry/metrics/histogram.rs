@@ -1,6 +1,7 @@
 //! Utilities for working with histograms.
 
-use crate::{metrics::Histogram, Clock};
+use super::{Histogram, HistogramExt};
+use crate::Clock;
 use std::{sync::Arc, time::SystemTime};
 
 /// Holds constants for bucket sizes for histograms.

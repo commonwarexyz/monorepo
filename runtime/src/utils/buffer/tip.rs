@@ -265,7 +265,7 @@ impl AsRef<[u8]> for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::Registry;
+    use crate::telemetry::metrics::Registry;
 
     fn test_pool() -> crate::BufferPool {
         let mut registry = Registry::default();

@@ -95,7 +95,10 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    telemetry::metrics::histogram::{Buckets, Timed},
+    telemetry::metrics::{
+        histogram::{Buckets, Timed},
+        MetricsExt as _,
+    },
     Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};

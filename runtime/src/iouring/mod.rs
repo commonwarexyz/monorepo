@@ -148,7 +148,10 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{metrics::raw::Gauge, utils::MetricScope, Error, IoBufMut, IoBufs};
+use crate::{
+    metrics::{raw::Gauge, MetricScope},
+    Error, IoBufMut, IoBufs,
+};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -1103,7 +1106,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::Registry, IoBuf, IoBufMut};
+    use crate::{telemetry::metrics::Registry, IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
     use request::{RecvRequest, SendRequest, SyncRequest};

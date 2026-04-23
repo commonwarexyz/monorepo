@@ -248,13 +248,13 @@ fn found_crate_path(found: FoundCrate) -> proc_macro2::TokenStream {
 // generated impls:
 // https://github.com/prometheus/client_rust/blob/7844d8617926a6f29b772d195860cf118051d019/derive-encode/src/lib.rs#L14-L133
 //
-// Commonware resolves through `commonware-runtime::metrics::encoding` first so
-// downstream crates can derive metric labels without a direct
+// Commonware resolves through `commonware-runtime::telemetry::metrics::encoding`
+// first so downstream crates can derive metric labels without a direct
 // `prometheus-client` dependency.
 fn metrics_encoding_path() -> proc_macro2::TokenStream {
     if let Ok(found) = crate_name("commonware-runtime") {
         let runtime = found_crate_path(found);
-        return quote!(#runtime::metrics::encoding);
+        return quote!(#runtime::telemetry::metrics::encoding);
     }
     if let Ok(found) = crate_name("prometheus-client") {
         let prometheus = found_crate_path(found);
