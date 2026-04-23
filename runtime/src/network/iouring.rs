@@ -506,11 +506,7 @@ mod tests {
     fn test_network(cfg: Config) -> Result<Network, Error> {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        Network::start(
-            cfg,
-            &mut registry.sub_registry("network"),
-            pool,
-        )
+        Network::start(cfg, &mut registry.sub_registry("network"), pool)
     }
 
     #[test]
@@ -582,8 +578,8 @@ mod tests {
         // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
         let network = test_network(Config {
-                read_write_timeout: op_timeout,
-                ..Default::default()
+            read_write_timeout: op_timeout,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
@@ -621,8 +617,8 @@ mod tests {
         // Verify disabling the internal read buffer preserves direct recv behavior.
         // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = test_network(Config {
-                read_buffer_size: 0,
-                ..Default::default()
+            read_buffer_size: 0,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
@@ -671,8 +667,8 @@ mod tests {
         // so the OS cannot reuse the FD number.
         let op_timeout = Duration::from_millis(200);
         let network = test_network(Config {
-                read_write_timeout: op_timeout,
-                ..Default::default()
+            read_write_timeout: op_timeout,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
@@ -845,8 +841,8 @@ mod tests {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
         let network = test_network(Config {
-                read_buffer_size: 8,
-                ..Default::default()
+            read_buffer_size: 8,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
@@ -873,9 +869,9 @@ mod tests {
     async fn test_configured_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept exercise the configured socket-option branches.
         let network = test_network(Config {
-                tcp_nodelay: Some(true),
-                zero_linger: true,
-                ..Default::default()
+            tcp_nodelay: Some(true),
+            zero_linger: true,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
@@ -896,9 +892,9 @@ mod tests {
     async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
         // Verify both dial and accept also cover the "do not touch socket options" branches.
         let network = test_network(Config {
-                tcp_nodelay: None,
-                zero_linger: false,
-                ..Default::default()
+            tcp_nodelay: None,
+            zero_linger: false,
+            ..Default::default()
         })
         .expect("Failed to start io_uring");
 
