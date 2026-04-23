@@ -582,39 +582,30 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
-        let result = async {
-            let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
-                // The height may already be confirmed; continue silently if so.
-                return Ok(());
-            };
+        let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
+            // The height may already be confirmed; continue silently if so.
+            return Ok(());
+        };
 
-            // Get our signature.
-            let scheme = self.scheme(self.epoch)?;
-            let Some(signer) = scheme.me() else {
-                return Err(Error::NotSigner(self.epoch));
-            };
-            let ack = acks
-                .get(&self.epoch)
-                .and_then(|acks| acks.get(&signer).cloned());
-            let ack = match ack {
-                Some(ack) => ack,
-                None => self.sign_ack(height, *digest).await?,
-            };
+        // Get our signature.
+        let scheme = self.scheme(self.epoch)?;
+        let Some(signer) = scheme.me() else {
+            return Err(Error::NotSigner(self.epoch));
+        };
+        let ack = acks
+            .get(&self.epoch)
+            .and_then(|acks| acks.get(&signer).cloned());
+        let ack = match ack {
+            Some(ack) => ack,
+            None => self.sign_ack(height, *digest).await?,
+        };
 
-            // Reinsert the height with a new deadline.
-            self.rebroadcast_deadlines
-                .put(height, self.context.current() + self.rebroadcast_timeout);
+        // Reinsert the height with a new deadline.
+        self.rebroadcast_deadlines
+            .put(height, self.context.current() + self.rebroadcast_timeout);
 
-            // Broadcast the ack to all peers.
-            self.broadcast(ack, sender).await
-        }
-        .await;
-        guard.set(match result {
-            Ok(()) => Status::Success,
-            Err(_) => Status::Failure,
-        });
-        result
+        // Broadcast the ack to all peers.
+        self.broadcast(ack, sender).await
     }
 
     // ---------- Validation ----------
