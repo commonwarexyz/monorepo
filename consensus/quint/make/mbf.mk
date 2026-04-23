@@ -134,7 +134,7 @@ mbf_live_fuzz_fast:
 		TRACE_SELECTION_STRATEGY="$(MBF_FAST_TRACE_SELECTION_STRATEGY)" \
 		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
 		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
-		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" "$$corpus" "$$approved" -- -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) -reload=1 & \
+		cargo +nightly fuzz run "$(MBF_TRACE_GEN_TARGET)" "$$corpus" "$$approved" -- -rss_limit_mb=16000 -runs=$(MBF_TRACE_GEN_FUZZ_RUNS) -reload=1 & \
 		fuzz_pid=$$!; \
 		while kill -0 $$watcher_pid 2>/dev/null && kill -0 $$fuzz_pid 2>/dev/null; do \
 			sleep 1; \

@@ -1510,7 +1510,7 @@ async fn build_honest_trace_data(
         configuration: N4F0C4,
         partition: Partition::Connected,
         strategy: input.strategy,
-        byzantine_actor: input.byzantine_actor,
+        byzantine_actor: None,
     };
 
     let (oracle, participants, schemes, mut registrations) =
@@ -1655,7 +1655,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             configuration: N4F0C4,
             partition: Partition::Connected,
             strategy: input.strategy,
-            byzantine_actor: input.byzantine_actor,
+            byzantine_actor: None,
         };
 
         let (oracle, participants, schemes, mut registrations) =
@@ -1711,7 +1711,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: sometimes_certifier(),
+                should_certify: application::Certifier::Always,
             };
             let (actor, application) =
                 application::Application::new(ctx.with_label("application"), app_cfg);

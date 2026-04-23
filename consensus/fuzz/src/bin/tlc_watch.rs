@@ -9,6 +9,14 @@
 //!       consensus/fuzz/corpus/simplex_ed25519_quint_honest_tlc \
 //!       consensus/fuzz/artifacts/tlc_rejected/simplex_ed25519_quint_honest_smallscope
 //!
+//! Every processed trace is archived under the state directory:
+//!
+//!   * `accepted_traces/<hash>.json` - trace contributed new TLC fingerprints
+//!   * `rejected_traces/<hash>.json` - trace was replayable but added no
+//!     new states
+//!   * `errored_traces/<hash>.json` + `<hash>.txt` - trace failed after read
+//!     (parse, mapper, TLC, or write failure); `.txt` carries the reason
+//!
 //! Environment:
 //!
 //!   * `TLC_URL` - oracle endpoint, default `http://localhost:2023/execute`
@@ -16,7 +24,7 @@
 //!   * `TLC_ONCE=1` - process currently available traces once and exit
 
 use commonware_consensus_fuzz::{
-    tlc::{non_reset_action_count, verdict_for, TlcClient, TlcMapper, TlcVerdict, DEFAULT_TLC_URL},
+    tlc::{accepted_action_count, non_reset_action_count, TlcClient, TlcMapper, DEFAULT_TLC_URL},
     tracing::data::TraceData,
 };
 use std::{
@@ -140,6 +148,18 @@ fn prepare_dirs(config: &Config) -> Result<(), String> {
         .map_err(|e| format!("create rejected dir {}: {e}", config.rejected_dir.display()))?;
     fs::create_dir_all(seen_dir(config))
         .map_err(|e| format!("create seen dir {}: {e}", seen_dir(config).display()))?;
+    fs::create_dir_all(rejected_traces_dir(config)).map_err(|e| {
+        format!(
+            "create rejected trace dir {}: {e}",
+            rejected_traces_dir(config).display()
+        )
+    })?;
+    fs::create_dir_all(errored_traces_dir(config)).map_err(|e| {
+        format!(
+            "create errored trace dir {}: {e}",
+            errored_traces_dir(config).display()
+        )
+    })?;
     Ok(())
 }
 
@@ -182,12 +202,38 @@ fn process_trace(
     path: &Path,
     hash: &str,
 ) -> Result<(), String> {
+    // Reading the trace file: treat as transient (permission race, half-
+    // written file). Propagate to caller and let the next tick retry.
     let json = fs::read_to_string(path).map_err(|e| format!("read trace: {e}"))?;
+
+    match process_trace_inner(config, client, keys_path, fingerprints, path, hash, &json) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Anything past the file read is deterministic (parse, mapper,
+            // TLC, or local write failure). Archive the JSON plus the error
+            // and mark seen so the same trace doesn't spam every poll tick.
+            archive_errored(config, hash, &json, &err);
+            let _ = mark_seen(config, hash, &format!("errored: {err}"));
+            Err(err)
+        }
+    }
+}
+
+fn process_trace_inner(
+    config: &Config,
+    client: &TlcClient,
+    keys_path: &Path,
+    fingerprints: &mut HashSet<i64>,
+    path: &Path,
+    hash: &str,
+    json: &str,
+) -> Result<(), String> {
     let trace: TraceData =
-        serde_json::from_str(&json).map_err(|e| format!("parse trace JSON: {e}"))?;
+        serde_json::from_str(json).map_err(|e| format!("parse trace JSON: {e}"))?;
     let actions = TlcMapper::map_trace(&trace);
     let sent = non_reset_action_count(&actions);
     if actions.is_empty() {
+        archive_rejected(config, hash, json)?;
         reject(config, hash, "empty action list")?;
         mark_seen(config, hash, "rejected: empty action list")?;
         println!("[tlc-watch] skip {hash}: empty action list");
@@ -197,17 +243,12 @@ fn process_trace(
     let response = client
         .execute_full(&actions)
         .map_err(|e| format!("tlc execute failed: {e}"))?;
-    match verdict_for(&actions, &response) {
-        TlcVerdict::Accepted => {}
-        TlcVerdict::Rejected { sent, accepted } => {
-            let reason = format!("model rejected: sent={sent} accepted={accepted}");
-            reject(config, hash, &reason)?;
-            mark_seen(config, hash, &format!("rejected: {reason}"))?;
-            println!("[tlc-watch] skip {hash}: {reason}");
-            return Ok(());
-        }
-    }
+    let accepted = accepted_action_count(&response);
 
+    // Follow the ModelFuzz paper (arXiv:2410.02307): the feedback signal is
+    // novelty of TLC state fingerprints, not whether every action fired. A
+    // partial replay where sent > accepted is still a useful sample if the
+    // prefix TLC was able to step through surfaces a previously unseen state.
     let mut seen_new_keys = HashSet::new();
     let new_keys: Vec<i64> = response
         .keys
@@ -217,9 +258,10 @@ fn process_trace(
         .collect();
     if new_keys.is_empty() {
         let reason = format!(
-            "no new TLC states: actions={sent} keys={}",
+            "no new TLC states: sent={sent} accepted={accepted} keys={}",
             response.keys.len()
         );
+        archive_rejected(config, hash, json)?;
         reject(config, hash, &reason)?;
         mark_seen(config, hash, &format!("rejected: {reason}"))?;
         println!("[tlc-watch] skip {hash}: {reason}");
@@ -231,6 +273,7 @@ fn process_trace(
         Ok(bytes) => bytes,
         Err(e) => {
             let reason = format!("missing corpus bytes {}: {e}", bytes_path.display());
+            archive_rejected(config, hash, json)?;
             reject(config, hash, &reason)?;
             mark_seen(config, hash, &format!("rejected: {reason}"))?;
             println!("[tlc-watch] skip {hash}: {reason}");
@@ -252,13 +295,13 @@ fn process_trace(
         config,
         hash,
         &format!(
-            "accepted: actions={sent} keys={} new={}",
+            "accepted: sent={sent} accepted={accepted} keys={} new={}",
             response.keys.len(),
             new_keys.len()
         ),
     )?;
     println!(
-        "[tlc-watch] accept {hash}: actions={sent} keys={} new={} -> {}",
+        "[tlc-watch] accept {hash}: sent={sent} accepted={accepted} keys={} new={} -> {}",
         response.keys.len(),
         new_keys.len(),
         corpus_path.display()
@@ -296,6 +339,28 @@ fn seen_path(config: &Config, hash: &str) -> PathBuf {
 
 fn accepted_traces_dir(config: &Config) -> PathBuf {
     config.rejected_dir.join("accepted_traces")
+}
+
+fn rejected_traces_dir(config: &Config) -> PathBuf {
+    config.rejected_dir.join("rejected_traces")
+}
+
+fn errored_traces_dir(config: &Config) -> PathBuf {
+    config.rejected_dir.join("errored_traces")
+}
+
+fn archive_rejected(config: &Config, hash: &str, json: &str) -> Result<(), String> {
+    let dest = rejected_traces_dir(config).join(format!("{hash}.json"));
+    fs::write(&dest, json)
+        .map_err(|e| format!("archive rejected trace {}: {e}", dest.display()))
+}
+
+// Best-effort archive from the error handler; failures here are swallowed so
+// we don't mask the underlying processing error being returned to the caller.
+fn archive_errored(config: &Config, hash: &str, json: &str, err: &str) {
+    let dir = errored_traces_dir(config);
+    let _ = fs::write(dir.join(format!("{hash}.json")), json);
+    let _ = fs::write(dir.join(format!("{hash}.txt")), err);
 }
 
 fn mark_seen(config: &Config, hash: &str, status: &str) -> Result<(), String> {

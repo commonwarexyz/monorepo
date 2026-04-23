@@ -9,5 +9,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(input) = FuzzInput::arbitrary(&mut u) else {
         return;
     };
-    run_quint_byzantine_tracing(input.byzantine_actor, input, data);
+    let actor = input
+        .byzantine_actor
+        .expect("byzantine fuzz target requires input.byzantine_actor = Some(...)");
+    run_quint_byzantine_tracing(actor, input, data);
 });

@@ -139,7 +139,7 @@ mod tests {
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
-            byzantine_actor: ByzantineActor::Disrupter,
+            byzantine_actor: Some(ByzantineActor::Disrupter),
         }
     }
 
