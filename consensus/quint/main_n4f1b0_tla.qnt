@@ -10,7 +10,7 @@ module main {
         CORRECT = Set("n0", "n1", "n2", "n3"),
         BYZANTINE = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
-        VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5", "val_b6", "val_b7", "val_b8", "val_b9", "val_b10"),
+        VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5", "val_b6", "val_b7", "val_b8", "val_b9", "val_b10", "val_b11","val_b12","val_b13","val_b14","val_b15","val_b16","val_b17","val_b18","val_b19","val_b20","val_b21","val_b22"),
         INVALID_PAYLOADS = Set("inval_0", "inval_1"),
         VIEWS = 1.to(30),
         ACTIVITY_TIMEOUT = 10,
