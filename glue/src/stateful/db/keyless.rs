@@ -100,9 +100,10 @@ where
         self.batch.get(location, &*db).await
     }
 
-    /// Read values at multiple locations, amortizing lock acquisition.
+    /// Read multiple values by location, falling back to committed state.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be sorted in ascending order. Returns results in the same
+    /// order as the input locations.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -164,9 +165,10 @@ where
         self.inner.get(location, &*db).await
     }
 
-    /// Read values at multiple locations, amortizing lock acquisition.
+    /// Read multiple values by location, falling back to committed state.
     ///
-    /// Locations must be sorted in ascending order.
+    /// Locations must be sorted in ascending order. Returns results in the same
+    /// order as the input locations.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],

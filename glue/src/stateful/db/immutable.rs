@@ -107,7 +107,7 @@ where
         self.batch.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -174,7 +174,7 @@ where
         self.inner.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {

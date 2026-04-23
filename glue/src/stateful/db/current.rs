@@ -88,7 +88,7 @@ where
         self.batch.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -173,7 +173,7 @@ where
         self.batch.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -185,6 +185,32 @@ where
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
+    }
+}
+
+/// Read-through operations for the `current` merkleized batch.
+impl<F, E, C, I, H, U, const N: usize> CurrentMerkleized<F, E, C, I, H, U, N>
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Read a value by key, falling back to committed state.
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        let db = self.db.read().await;
+        self.inner.get(key, &*db).await
+    }
+
+    /// Read multiple values by key, falling back to committed state.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        let db = self.db.read().await;
+        self.inner.get_many(keys, &*db).await
     }
 }
 

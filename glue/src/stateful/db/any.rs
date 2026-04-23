@@ -37,12 +37,7 @@ use commonware_storage::{
     translator::Translator,
     Persistable,
 };
-use commonware_utils::{
-    channel::mpsc,
-    non_empty_range,
-    sync::{AsyncRwLock, AsyncRwLockReadGuard},
-    Array,
-};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type AnyDbHandle<F, E, C, I, H, U> = Arc<AsyncRwLock<Db<F, E, C, I, H, U>>>;
@@ -84,25 +79,13 @@ where
         self
     }
 
-    /// Acquire a read lock on the DB.
-    pub async fn lock(
-        &self,
-    ) -> AsyncRwLockReadGuard<'_, Db<F, E, C, I, H, unordered::Update<K, V>>> {
-        self.db.read().await
-    }
-
-    /// Get a reference to the inner batch.
-    pub const fn batch(&self) -> &UnmerkleizedBatch<F, H, unordered::Update<K, V>> {
-        &self.batch
-    }
-
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -186,7 +169,7 @@ where
         self.batch.get(key, &*db).await
     }
 
-    /// Read multiple values by key, amortizing lock acquisition and journal I/O.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -198,6 +181,32 @@ where
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
+    }
+}
+
+/// Read-through operations for the `any` merkleized batch.
+impl<F, E, C, I, H, U> AnyMerkleized<F, E, C, I, H, U>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Read a value by key, falling back to committed state.
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        let db = self.db.read().await;
+        self.inner.get(key, &*db).await
+    }
+
+    /// Read multiple values by key, falling back to committed state.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        let db = self.db.read().await;
+        self.inner.get_many(keys, &*db).await
     }
 }
 
