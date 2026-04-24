@@ -451,6 +451,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Returns true if we have evidence that the leader was active in `view`.
+    ///
+    /// This lets the voter ignore a stale inactivity hint from the batcher: the
+    /// batcher sends timeout hints asynchronously, so a leader proposal for the
+    /// same view may arrive before the hint is processed.
     pub fn has_leader_activity(&self, view: View) -> bool {
         self.views
             .get(&view)

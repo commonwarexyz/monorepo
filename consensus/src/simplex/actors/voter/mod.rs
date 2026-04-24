@@ -3513,10 +3513,10 @@ mod tests {
             );
 
             // Wait for initial batcher notification
-            if let batcher::Message::Update { .. } =
-                batcher_receiver.recv().await.unwrap()
-            {
-            }
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
 
             // Step 1: Send finalization for view 2 (certify should NOT be called)
             let view2 = View::new(2);

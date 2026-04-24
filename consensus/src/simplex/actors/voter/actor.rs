@@ -817,18 +817,18 @@ impl<
             "consensus initialized"
         );
 
-        // Initialize batcher with leader for current view.
+        // Initialize batcher with leader for current view
         let leader = self
             .state
             .leader_index(observed_view)
             .expect("leader not set");
+        batcher
+            .update(observed_view, leader, self.state.last_finalized(), None)
+            .await;
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        batcher
-            .update(observed_view, leader, self.state.last_finalized(), None)
-            .await;
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
         select_loop! {
@@ -1061,6 +1061,12 @@ impl<
             },
             on_end => {
                 // Attempt to send any new view messages
+                //
+                // The batcher may drop votes we construct here if it has not
+                // yet been updated to the message's view. This only happens
+                // when we skip ahead multiple views, which always coincides
+                // with entering a new view and updating the batcher below
+                // before sending votes for the new current view.
                 self.notify(
                     &mut batcher,
                     &mut resolver,
@@ -1083,6 +1089,8 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
+                    // Notify can advance state, so update the batcher with
+                    // the latest view after any new messages have been sent.
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
                     let forwardable_proposal = current_view

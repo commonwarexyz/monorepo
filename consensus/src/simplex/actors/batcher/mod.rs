@@ -194,6 +194,28 @@ mod tests {
             .expect("finalization requires a quorum of votes")
     }
 
+    async fn assert_no_timeout<S: Scheme<Sha256Digest>>(
+        context: &mut deterministic::Context,
+        receiver: &mut mpsc::UnboundedReceiver<voter::Message<S, Sha256Digest>>,
+        view: View,
+    ) {
+        context.sleep(Duration::from_millis(10)).await;
+        // Setup activity can leave proposals or certificates queued; these checks only rule out
+        // the timeout hint that used to be returned synchronously from update.
+        loop {
+            match receiver.try_recv() {
+                Ok(voter::Message::Timeout(v, reason)) => {
+                    panic!("unexpected timeout for view {v}: {reason:?}");
+                }
+                Ok(_) => {}
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("voter receiver disconnected while checking no timeout for view {view}");
+                }
+            }
+        };
+    }
+
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -286,6 +308,7 @@ mod tests {
             // Initialize batcher
             let view = View::new(1);
             batcher_mailbox.update(view, Participant::new(0), View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build certificates
             let round = Round::new(epoch, view);
@@ -458,6 +481,7 @@ mod tests {
             batcher_mailbox
                 .update(target_view, Participant::new(0), View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, target_view).await;
 
             // Build certificates for the same target view.
             let round = Round::new(epoch, target_view);
@@ -485,6 +509,7 @@ mod tests {
             batcher_mailbox
                 .update(target_view.next(), Participant::new(1), View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, target_view.next()).await;
 
             // Send old notarization for V after moving current view forward.
             injector_sender
@@ -614,6 +639,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
@@ -2048,6 +2074,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
@@ -2226,6 +2253,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
@@ -2429,8 +2457,7 @@ mod tests {
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
 
-            // Give time for update to process
-            context.sleep(Duration::from_millis(10)).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build proposal and leader's vote
             let round = Round::new(epoch, view);
@@ -2576,10 +2603,16 @@ mod tests {
 
             // Should receive the leader's proposal forwarded to voter
             let output = voter_receiver.recv().await.unwrap();
-            assert!(
-                matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
-                "Expected proposal to be forwarded after leader set (vote arrived before leader was known)"
-            );
+            match output {
+                voter::Message::Proposal(p) => {
+                    assert_eq!(p.view(), view);
+                    assert_eq!(p.payload, Sha256::hash(b"test_payload"));
+                }
+                voter::Message::Timeout(v, reason) => {
+                    panic!("unexpected timeout for view {v}: {reason:?}");
+                }
+                _ => panic!("expected proposal to be forwarded after leader set"),
+            }
         });
     }
 
@@ -2682,6 +2715,7 @@ mod tests {
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 batcher_mailbox.update(view, leader, View::zero(), None).await;
+                assert_no_timeout(&mut context, &mut voter_receiver, view).await;
             }
 
             // Test 2: At view skip_timeout, the leader has been silent for
@@ -2714,6 +2748,7 @@ mod tests {
             // Leader voted in view 5, which is in the recent window, so should be active
             let view = View::new(skip_timeout + 1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Test 5: Jump far ahead. The last seen message is now outside the
             // skip window, so the leader becomes inactive again.
@@ -2736,6 +2771,7 @@ mod tests {
             batcher_mailbox
                 .update(view, self_leader, View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
         });
     }
 
@@ -2795,7 +2831,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -2829,15 +2865,25 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let leader = Participant::new(1);
-            for v in 1..=skip_timeout {
+            for v in 1..skip_timeout {
                 let view = View::new(v);
-                let _ = batcher_mailbox
+                batcher_mailbox
                     .update(view, leader, View::zero(), None)
                     .await;
+                assert_no_timeout(&mut context, &mut voter_receiver, view).await;
             }
+            let view = View::new(skip_timeout);
+            batcher_mailbox
+                .update(view, leader, View::zero(), None)
+                .await;
+            let output = voter_receiver.recv().await.unwrap();
+            assert!(
+                matches!(output, voter::Message::Timeout(v, TimeoutReason::Inactivity) if v == view),
+                "leader should be inactive after {skip_timeout} silent views"
+            );
 
             // Send a nullify vote from the leader in view skip_timeout.
-            let round = Round::new(epoch, View::new(skip_timeout));
+            let round = Round::new(epoch, view);
             let leader_vote = Nullify::sign::<Sha256Digest>(&schemes[1], round).unwrap();
             leader_sender
                 .send(
@@ -2855,6 +2901,7 @@ mod tests {
             batcher_mailbox
                 .update(next_view, leader, View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, next_view).await;
         });
     }
 
@@ -2958,6 +3005,7 @@ mod tests {
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 batcher_mailbox.update(view, leader, View::zero(), None).await;
+                assert_no_timeout(&mut context, &mut voter_receiver, view).await;
             }
 
             // Enter the threshold view with no activity and confirm that we fast-timeout.
@@ -2997,6 +3045,7 @@ mod tests {
             batcher_mailbox
                 .update(next_view, leader, View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, next_view).await;
         });
     }
 
@@ -3364,6 +3413,7 @@ mod tests {
             batcher_mailbox
                 .update(view1, leader, View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view1).await;
 
             // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             let round1 = Round::new(epoch, view1);
@@ -3409,6 +3459,7 @@ mod tests {
             // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=2)
             let view3 = View::new(3);
             batcher_mailbox.update(view3, leader, view2, None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view3).await;
 
             // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
             let round2 = Round::new(epoch, view2);
@@ -3587,6 +3638,7 @@ mod tests {
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build proposal and send enough votes to reach quorum
             let round = Round::new(epoch, view);
@@ -3753,7 +3805,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -3791,6 +3843,7 @@ mod tests {
             batcher_mailbox
                 .update(view, Participant::new(1), View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -3963,7 +4016,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -4001,6 +4054,7 @@ mod tests {
             batcher_mailbox
                 .update(view, Participant::new(1), View::zero(), None)
                 .await;
+            assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             let round = Round::new(epoch, view);
             let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));
