@@ -88,8 +88,40 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     assert_eq!(&decoded, &data);
 }
 
-pub fn fuzz_phased<S: PhasedScheme>(input: FuzzInput) {
-    let FuzzInput {
+/// Input for phased fuzz targets (e.g. Zoda). Bounds total shards to 64
+/// because `weaken()` recomputes topology + FFT per shard.
+#[derive(Debug)]
+pub struct PhasedFuzzInput {
+    min: u16,
+    recovery: u16,
+    to_use: u16,
+    data: Vec<u8>,
+    shuffle: Shuffle,
+}
+
+const MAX_PHASED_DATA: usize = 4096;
+
+impl<'a> Arbitrary<'a> for PhasedFuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let min = u.int_in_range(1..=63)?;
+        let recovery = u.int_in_range(1..=(64 - min))?;
+        let to_use = u.int_in_range(min..=min + recovery)?;
+        let shuffle = Shuffle::arbitrary(u, (min + recovery) as usize)?;
+        let data_len = u.int_in_range(0..=MAX_PHASED_DATA.min(u.len()))?;
+        let data = u.bytes(data_len)?.to_vec();
+
+        Ok(PhasedFuzzInput {
+            recovery,
+            min,
+            to_use,
+            data,
+            shuffle,
+        })
+    }
+}
+
+pub fn fuzz_phased<S: PhasedScheme>(input: PhasedFuzzInput) {
+    let PhasedFuzzInput {
         recovery,
         min,
         to_use,
