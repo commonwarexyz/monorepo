@@ -1028,6 +1028,32 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_try_read_sync_all_in_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"try_read_sync_tip")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(
+                &context.with_label("cache"),
+                PAGE_SIZE,
+                NZUsize!(BUFFER_SIZE),
+            );
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..20).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; data.len()];
+            assert!(append.try_read_sync(0, &mut buf));
+            assert_eq!(buf, data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_read_many_into_all_from_cache() {
         // Sync data to disk so tip buffer is empty; reads go through page cache / blob.
         let executor = deterministic::Runner::default();
