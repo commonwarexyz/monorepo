@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    channel::{mpsc, oneshot},
+    channel::{mpsc, oneshot, request},
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
@@ -39,6 +39,7 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
+    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -817,22 +818,23 @@ impl<
             "consensus initialized"
         );
 
-        // Initialize batcher with leader for current view
+        // Initialize batcher with leader for current view.
         let leader = self
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        if let Some(reason) = batcher
-            .update(observed_view, leader, self.state.last_finalized(), None)
-            .await
-        {
-            debug!(%observed_view, %leader, ?reason, "nullifying round");
-            self.state.trigger_timeout(observed_view, reason);
-        }
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
+        let mut pending_batcher_updates = request::Pool::default();
+        pending_batcher_updates.push(batcher.update_deferred(
+            observed_view,
+            leader,
+            self.state.last_finalized(),
+            None,
+        ));
+        let mut pending_batcher_update_views = BTreeSet::from([observed_view]);
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
         select_loop! {
@@ -850,35 +852,40 @@ impl<
                     }
                 }
 
-                // If needed, propose a container
-                if pending_propose.is_none() {
-                    pending_propose = self.try_propose().await;
-                }
+                let waiting_for_batcher =
+                    pending_batcher_update_views.contains(&self.state.current_view());
+                if !waiting_for_batcher {
+                    // If needed, propose a container
+                    if pending_propose.is_none() {
+                        pending_propose = self.try_propose().await;
+                    }
 
-                // If needed, verify current view
-                if pending_verify.is_none() {
-                    pending_verify = self.try_verify().await;
-                }
+                    // If needed, verify current view
+                    if pending_verify.is_none() {
+                        pending_verify = self.try_verify().await;
+                    }
 
-                // Attempt to certify any views that we have notarizations for.
-                for (proposal, is_local) in self.state.certify_candidates() {
-                    let round = proposal.round;
-                    let view = round.view();
-                    debug!(%view, "attempting certification");
-                    let result = if is_local {
-                        Either::Left(ready(Ok(true)))
-                    } else {
-                        let receiver = self.automaton.certify(round, proposal.payload).await;
-                        Either::Right(receiver)
-                    };
-                    let handle = certify_pool.push(async move { (round, result.await) });
-                    self.state.set_certify_handle(view, handle);
+                    // Attempt to certify any views that we have notarizations for.
+                    for (proposal, is_local) in self.state.certify_candidates() {
+                        let round = proposal.round;
+                        let view = round.view();
+                        debug!(%view, "attempting certification");
+                        let result = if is_local {
+                            Either::Left(ready(Ok(true)))
+                        } else {
+                            let receiver = self.automaton.certify(round, proposal.payload).await;
+                            Either::Right(receiver)
+                        };
+                        let handle = certify_pool.push(async move { (round, result.await) });
+                        self.state.set_certify_handle(view, handle);
+                    }
                 }
 
                 // Prepare waiters
                 let propose_wait = Waiter(&mut pending_propose);
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
+                let batcher_update_wait = pending_batcher_updates.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
                 let timeout = self.state.next_timeout_deadline();
@@ -994,6 +1001,26 @@ impl<
                     }
                 };
             },
+            (updated, response) = batcher_update_wait => {
+                pending_batcher_update_views.remove(&updated);
+                view = updated;
+                if updated != self.state.current_view() {
+                    trace!(
+                        %updated,
+                        current = %self.state.current_view(),
+                        "dropping stale batcher update"
+                    );
+                    continue;
+                }
+                if let Some(reason) = response {
+                    let leader = self
+                        .state
+                        .leader_index(updated)
+                        .expect("leader not set");
+                    debug!(%updated, %leader, ?reason, "nullifying round");
+                    self.state.trigger_timeout(updated, reason);
+                }
+            },
             Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
                 match msg {
@@ -1061,15 +1088,19 @@ impl<
                 // coincides with entering a new view (triggering a batcher update below before we send
                 // any votes for the new current view). This has no impact on liveness, however, we may miss
                 // building a finalization for an old view where we otherwise could have contributed.
-                self.notify(
-                    &mut batcher,
-                    &mut resolver,
-                    &mut vote_sender,
-                    &mut certificate_sender,
-                    view,
-                    resolved,
-                )
-                .await;
+                let waiting_for_batcher =
+                    pending_batcher_update_views.contains(&self.state.current_view());
+                if !waiting_for_batcher {
+                    self.notify(
+                        &mut batcher,
+                        &mut resolver,
+                        &mut vote_sender,
+                        &mut certificate_sender,
+                        view,
+                        resolved,
+                    )
+                    .await;
+                }
 
                 // After sending all required messages, prune any views
                 // we no longer need
@@ -1091,17 +1122,13 @@ impl<
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
-                    if let Some(reason) = batcher
-                        .update(
+                    if pending_batcher_update_views.insert(current_view) {
+                        pending_batcher_updates.push(batcher.update_deferred(
                             current_view,
                             leader,
                             self.state.last_finalized(),
                             forwardable_proposal,
-                        )
-                        .await
-                    {
-                        debug!(%current_view, %leader, ?reason, "nullifying round");
-                        self.state.trigger_timeout(current_view, reason);
+                        ));
                     }
                 }
             },

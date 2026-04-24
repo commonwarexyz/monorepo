@@ -123,8 +123,9 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Returns an empty response if the tracker is shut down.
     pub async fn dialable(&mut self) -> Dialable<C> {
         self.0
-            .request_or_default(|responder| Message::Dialable { responder })
+            .request(|responder| Message::Dialable { responder })
             .await
+            .unwrap_or_default()
     }
 
     /// Send a `Dial` message to the tracker.
@@ -145,15 +146,13 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Returns `false` if the tracker is shut down.
     pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
         self.0
-            .request_or(
-                |responder| Message::Acceptable {
-                    public_key,
-                    source_ip,
-                    responder,
-                },
-                false,
-            )
+            .request(|responder| Message::Acceptable {
+                public_key,
+                source_ip,
+                responder,
+            })
             .await
+            .unwrap_or(false)
     }
 
     /// Send a `Listen` message to the tracker.

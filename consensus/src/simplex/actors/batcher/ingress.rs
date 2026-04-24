@@ -6,7 +6,7 @@ use crate::{
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot, request};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -38,25 +38,46 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     ///
     /// Returns `None` if the leader is active, or `Some(reason)` if the round
     /// should be nullified.
+    #[cfg(test)]
     pub async fn update(
         &mut self,
         current: View,
         leader: Participant,
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
-    ) -> Option<TimeoutReason> {
-        self.sender
-            .request_or(
-                |response| Message::Update {
-                    current,
-                    leader,
-                    finalized,
-                    forwardable_proposal,
-                    response,
-                },
-                None,
-            )
-            .await
+    ) -> Option<TimeoutReason>
+    where
+        Message<S, D>: Send + 'static,
+    {
+        let (_, response) = self
+            .update_deferred(current, leader, finalized, forwardable_proposal)
+            .await;
+        response
+    }
+
+    /// Send an update message without blocking the caller's event loop.
+    ///
+    /// The returned future owns the bounded send and acknowledgement receiver.
+    /// Actors should poll it alongside mailbox input instead of awaiting it
+    /// inline.
+    pub fn update_deferred(
+        &mut self,
+        current: View,
+        leader: Participant,
+        finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
+    ) -> request::Pending<(View, Option<TimeoutReason>)>
+    where
+        Message<S, D>: Send + 'static,
+    {
+        let pending = request::pending(&self.sender, move |response| Message::Update {
+            current,
+            leader,
+            finalized,
+            forwardable_proposal,
+            response,
+        });
+        request::Pending::from_future(async move { (current, pending.await.flatten()) })
     }
 
     /// Send a constructed vote.

@@ -48,28 +48,6 @@ pub trait FallibleExt<T> {
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
-
-    /// Send a request and return the provided default on failure.
-    ///
-    /// This is a convenience wrapper around [`request`](Self::request) for cases
-    /// where you have a sensible default value.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl std::future::Future<Output = R> + Send
-    where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
-
-    /// Send a request and return `R::default()` on failure.
-    ///
-    /// This is a convenience wrapper around [`request`](Self::request) for types
-    /// that implement [`Default`].
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
-    where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
 }
 
 impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
@@ -87,22 +65,6 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
             return None;
         }
         rx.await.ok()
-    }
-
-    async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
-    where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
-    {
-        self.request(make_msg).await.unwrap_or(default)
-    }
-
-    async fn request_or_default<R, F>(&self, make_msg: F) -> R
-    where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
-    {
-        self.request(make_msg).await.unwrap_or_default()
     }
 }
 
@@ -134,22 +96,6 @@ pub trait AsyncFallibleExt<T> {
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send;
-
-    /// Send a request and return the provided default on failure.
-    fn request_or<R, F>(
-        &self,
-        make_msg: F,
-        default: R,
-    ) -> impl std::future::Future<Output = R> + Send
-    where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
-
-    /// Send a request and return `R::default()` on failure.
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl std::future::Future<Output = R> + Send
-    where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
 }
 
 impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
@@ -171,22 +117,6 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
             return None;
         }
         rx.await.ok()
-    }
-
-    async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
-    where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
-    {
-        self.request(make_msg).await.unwrap_or(default)
-    }
-
-    async fn request_or_default<R, F>(&self, make_msg: F) -> R
-    where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
-    {
-        self.request(make_msg).await.unwrap_or_default()
     }
 }
 
@@ -262,30 +192,6 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    #[test_async]
-    async fn test_request_or_disconnected() {
-        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        drop(rx);
-
-        let result = tx
-            .request_or(|responder| TestMessage::RequestBool { responder }, false)
-            .await;
-
-        assert!(!result);
-    }
-
-    #[test_async]
-    async fn test_request_or_default_disconnected() {
-        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        drop(rx);
-
-        let result: Vec<u32> = tx
-            .request_or_default(|responder| TestMessage::RequestVec { responder })
-            .await;
-
-        assert!(result.is_empty());
-    }
-
     // AsyncFallibleExt tests for bounded channels
 
     #[test_async]
@@ -315,34 +221,6 @@ mod tests {
             AsyncFallibleExt::request(&tx, |responder| TestMessage::Request { responder }).await;
 
         assert_eq!(result, None);
-    }
-
-    #[test_async]
-    async fn test_async_request_or_disconnected() {
-        let (tx, rx) = mpsc::channel::<TestMessage>(1);
-        drop(rx);
-
-        let result = AsyncFallibleExt::request_or(
-            &tx,
-            |responder| TestMessage::RequestBool { responder },
-            false,
-        )
-        .await;
-
-        assert!(!result);
-    }
-
-    #[test_async]
-    async fn test_async_request_or_default_disconnected() {
-        let (tx, rx) = mpsc::channel::<TestMessage>(1);
-        drop(rx);
-
-        let result: Vec<u32> = AsyncFallibleExt::request_or_default(&tx, |responder| {
-            TestMessage::RequestVec { responder }
-        })
-        .await;
-
-        assert!(result.is_empty());
     }
 
     // try_send_lossy tests

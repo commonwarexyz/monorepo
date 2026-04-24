@@ -85,7 +85,7 @@ mod tests {
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
     use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
-    use futures::FutureExt;
+    use futures::{pin_mut, FutureExt};
     use std::{
         num::{NonZeroU16, NonZeroU32},
         sync::Arc,
@@ -8769,5 +8769,148 @@ mod tests {
         batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
         batcher_update_triggers_timeout(ed25519::fixture);
         batcher_update_triggers_timeout(secp256r1::fixture);
+    }
+
+    #[test_traced]
+    fn voter_drains_mailbox_while_batcher_update_is_pending() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"voter_pending_batcher_update".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), false).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (application_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            application_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition: format!("voter_pending_batcher_update_{me}"),
+                epoch: Epoch::new(333),
+                mailbox_size: 1,
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_secs(5),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let resolver = resolver::Mailbox::new(resolver_sender);
+
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1);
+            let mut batcher = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(batcher.clone(), resolver, vote_sender, certificate_sender);
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    finalized,
+                    response,
+                    ..
+                } => {
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
+                    response.send(None).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            let queued = Nullify::sign::<Sha256Digest>(
+                &schemes[0],
+                Round::new(Epoch::new(333), View::new(1)),
+            )
+            .unwrap();
+            batcher.constructed(Vote::Nullify(queued)).await;
+
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), View::new(1)),
+                View::zero(),
+                Sha256::hash(b"view_1"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(finalization))
+                .await;
+
+            match resolver_receiver.recv().await.unwrap() {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                    assert_eq!(finalization.view(), View::new(1));
+                }
+                _ => panic!("unexpected resolver message"),
+            }
+
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), View::new(2)),
+                View::new(1),
+                Sha256::hash(b"view_2"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(finalization))
+                .await;
+
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), View::new(3)),
+                View::new(2),
+                Sha256::hash(b"view_3"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            let send = mailbox.recovered(Certificate::Finalization(finalization));
+            pin_mut!(send);
+            select! {
+                _ = send => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("voter stopped draining while batcher update was pending");
+                }
+            }
+        });
     }
 }
