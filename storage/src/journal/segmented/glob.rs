@@ -112,7 +112,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         // Write to blob
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
-        let offset = writer.size();
+        let offset = writer.size().await;
         writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
 
         Ok((offset, entry_size))
@@ -173,8 +173,8 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     }
 
     /// Get the current size of a section (including buffered data).
-    pub fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section)
+    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section).await
     }
 
     /// Rewind to a specific section and size.

@@ -740,7 +740,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 }
 
                 // Get sizes from oversized (crash recovery already ran during init)
-                let oversized_size = oversized.size(max_section)?;
+                let oversized_size = oversized.size(max_section).await?;
 
                 (
                     Checkpoint {
@@ -1087,7 +1087,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
         // Get size from oversized
-        let oversized_size = self.oversized.size(self.current_section)?;
+        let oversized_size = self.oversized.size(self.current_section).await?;
 
         Ok(Checkpoint {
             epoch: stored_epoch,

@@ -1,68 +1,6 @@
 use crate::{BufferPool, IoBuf, IoBufMut};
 use bytes::BufMut;
-use std::{
-    ops::{Bound, RangeBounds},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-/// Lock-free atomic snapshot of the tip's logical bounds.
-///
-/// Mirrors `Buffer.offset` and `Buffer.offset + Buffer.len`, published by mutators under the
-/// buffer write lock so readers can classify ranges and serve `size()` without touching the
-/// lock. Since `offset` and `size` are loaded independently, readers may observe values from
-/// different updates. Those mixed snapshots are only used for classification: before-tip reads
-/// must still hit the page cache, and in-tip reads are revalidated under the buffer lock before
-/// bytes are copied. If either check fails, callers fall back to the async path.
-///
-/// Update conventions:
-/// - `publish_append(new_size)` after a pure append (offset unchanged, size grew).
-/// - `publish_flush(new_offset)` after a flush drains buffered bytes (offset advanced, size
-///   unchanged since `offset + len` is invariant across a flush).
-/// - `publish_resize(new_offset, new_size)` after resize/sync or any state change that may
-///   move both bounds.
-pub(super) struct TipBounds {
-    offset: AtomicU64,
-    size: AtomicU64,
-}
-
-impl TipBounds {
-    /// Creates a new tip-bounds snapshot with the given initial offset and size.
-    pub(super) const fn new(offset: u64, size: u64) -> Self {
-        Self {
-            offset: AtomicU64::new(offset),
-            size: AtomicU64::new(size),
-        }
-    }
-
-    /// Loads the current logical size of the blob.
-    pub(super) fn size(&self) -> u64 {
-        self.size.load(Ordering::Acquire)
-    }
-
-    /// Loads `(offset, size)` for range classification. Reads are not atomic as a pair, so
-    /// callers must revalidate any classification before returning bytes.
-    pub(super) fn load(&self) -> (u64, u64) {
-        let offset = self.offset.load(Ordering::Acquire);
-        let size = self.size.load(Ordering::Acquire);
-        (offset, size)
-    }
-
-    /// Publishes a new logical size after appending data to the tip. Offset is unchanged.
-    pub(super) fn publish_append(&self, size: u64) {
-        self.size.store(size, Ordering::Release);
-    }
-
-    /// Publishes a new offset after a flush drains buffered bytes. Size is unchanged.
-    pub(super) fn publish_flush(&self, offset: u64) {
-        self.offset.store(offset, Ordering::Release);
-    }
-
-    /// Publishes both bounds after a resize or other state change that may move both.
-    pub(super) fn publish_resize(&self, offset: u64, size: u64) {
-        self.offset.store(offset, Ordering::Release);
-        self.size.store(size, Ordering::Release);
-    }
-}
+use std::ops::{Bound, RangeBounds};
 
 /// A buffer for caching data written to the tip of a blob.
 ///
