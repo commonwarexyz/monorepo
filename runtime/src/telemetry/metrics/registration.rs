@@ -5,9 +5,7 @@ pub(crate) type RegistrationHandle = Arc<dyn RegistrationGuard>;
 pub(crate) type WeakRegistrationHandle = Weak<dyn RegistrationGuard>;
 
 pub(crate) trait RegistrationGuard: Send + Sync + 'static {
-    fn registration_cloned(&self, _registration: &RegistrationHandle) {}
-
-    fn registration_dropped(&self, _registration: &RegistrationHandle) {}
+    fn registration_dropped(&self) {}
 }
 
 impl RegistrationGuard for () {}
@@ -23,34 +21,37 @@ struct GuardHolder<G>(Mutex<G>);
 /// metrics use that drop to unregister themselves from the runtime registry,
 /// while external callers may attach custom cleanup with [`Registration::from_guard`].
 pub struct Registration {
-    pub(crate) guard: RegistrationHandle,
+    inner: Arc<RegistrationInner>,
+}
+
+struct RegistrationInner {
+    guard: RegistrationHandle,
 }
 
 impl Clone for Registration {
     fn clone(&self) -> Self {
-        self.guard.registration_cloned(&self.guard);
         Self {
-            guard: Arc::clone(&self.guard),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
 impl Registration {
     pub(crate) fn from_handle(handle: RegistrationHandle) -> Self {
-        Self { guard: handle }
+        Self {
+            inner: Arc::new(RegistrationInner { guard: handle }),
+        }
     }
 
     pub(crate) fn from_registration_guard<G>(guard: G) -> Self
     where
         G: RegistrationGuard,
     {
-        Self {
-            guard: Arc::new(guard),
-        }
+        Self::from_handle(Arc::new(guard))
     }
 
     pub(crate) fn downgrade(&self) -> WeakRegistrationHandle {
-        Arc::downgrade(&self.guard)
+        Arc::downgrade(&self.inner.guard)
     }
 
     /// Create a registration from a guard that should be dropped when the last
@@ -70,8 +71,8 @@ impl From<()> for Registration {
     }
 }
 
-impl Drop for Registration {
+impl Drop for RegistrationInner {
     fn drop(&mut self) {
-        self.guard.registration_dropped(&self.guard);
+        self.guard.registration_dropped();
     }
 }

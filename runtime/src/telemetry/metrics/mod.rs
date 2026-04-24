@@ -40,7 +40,7 @@ use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
 };
 pub use registration::Registration;
-use registration::{RegistrationGuard, RegistrationHandle, WeakRegistrationHandle};
+use registration::{RegistrationGuard, WeakRegistrationHandle};
 use std::{
     any::Any,
     borrow::Cow,
@@ -287,14 +287,7 @@ struct RegistryGuard {
 }
 
 impl RegistrationGuard for RegistryGuard {
-    fn registration_cloned(&self, _registration: &RegistrationHandle) {
-        let Some(registry) = self.registry.upgrade() else {
-            return;
-        };
-        registry.lock().claim_registration(self.id);
-    }
-
-    fn registration_dropped(&self, _registration: &RegistrationHandle) {
+    fn registration_dropped(&self) {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
@@ -924,6 +917,64 @@ mod tests {
             let encoded = context.encode();
             assert!(encoded.contains("a_test_total 3"));
         });
+    }
+
+    #[test]
+    fn test_claims_track_register_calls_not_handle_clones() {
+        let registry = Registry::new();
+        let key: MetricKey = ("votes".to_string(), Vec::new());
+
+        let first = registry.register(
+            key.0.clone(),
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        let first_clone = first.clone();
+        let id = {
+            let registry = registry.inner.lock();
+            let id = *registry.keys.get(&key).expect("metric key missing");
+            assert_eq!(registry.metric_ref(id).claims, 1);
+            id
+        };
+
+        let second = registry.register(
+            key.0,
+            "vote count".to_string(),
+            Vec::new(),
+            Arc::new(raw::Counter::<u64>::default()),
+        );
+        let second_clone = second.clone();
+        {
+            let registry = registry.inner.lock();
+            assert_eq!(registry.metric_ref(id).claims, 2);
+        }
+
+        drop(first);
+        drop(second);
+        {
+            let registry = registry.inner.lock();
+            assert_eq!(registry.metric_ref(id).claims, 2);
+        }
+
+        drop(second_clone);
+        {
+            let registry = registry.inner.lock();
+            assert_eq!(registry.metric_ref(id).claims, 1);
+        }
+
+        drop(first_clone);
+        let registry = registry.inner.lock();
+        assert!(
+            registry.keys.is_empty(),
+            "keys left behind: {:?}",
+            registry.keys
+        );
+        assert!(
+            registry.families.is_empty(),
+            "families left behind: {:?}",
+            registry.families
+        );
     }
 
     #[test]
