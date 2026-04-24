@@ -49,6 +49,7 @@ impl AlignedBuffer {
     /// Panics if:
     /// - `capacity == 0`
     /// - `alignment` is not a power of two
+    #[inline]
     pub fn new(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
@@ -69,6 +70,7 @@ impl AlignedBuffer {
     /// Panics if:
     /// - `capacity == 0`
     /// - `alignment` is not a power of two
+    #[inline]
     pub(crate) fn new_zeroed(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
@@ -155,6 +157,7 @@ unsafe impl<O: Owner> Send for BufInner<O> {}
 unsafe impl<O: Owner> Sync for BufInner<O> {}
 
 impl<O: Owner> BufInner<O> {
+    #[inline]
     const fn new(buffer: AlignedBuffer, owner: O) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),

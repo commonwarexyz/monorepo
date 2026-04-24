@@ -459,6 +459,7 @@ impl Default for IoBufMut {
 
 impl IoBufMut {
     /// Create a buffer with the given capacity.
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::with_capacity(capacity)),
@@ -504,6 +505,7 @@ impl IoBufMut {
     /// Unlike `with_capacity`, this sets both capacity and length to `len`,
     /// making the entire buffer immediately usable for read operations
     /// (e.g., `file.read_exact`).
+    #[inline]
     pub fn zeroed(len: usize) -> Self {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::zeroed(len)),

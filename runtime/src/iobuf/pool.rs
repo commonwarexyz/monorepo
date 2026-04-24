@@ -522,6 +522,7 @@ impl SizeClass {
     ///
     /// Returns the reserved slot id if the reservation succeeded, or `None` if
     /// the class is already at capacity.
+    #[inline]
     fn try_reserve(&self) -> Option<u32> {
         self.created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
