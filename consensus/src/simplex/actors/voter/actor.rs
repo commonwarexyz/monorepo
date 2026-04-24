@@ -513,8 +513,7 @@ impl<
         // Tell the resolver this view is complete so it can stop requesting it.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Notarization {
-            resolver
-                .updated(Certificate::Notarization(notarization.clone()));
+            resolver.updated(Certificate::Notarization(notarization.clone()));
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
@@ -562,8 +561,7 @@ impl<
         // Notify resolver so dependent parents can progress.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Nullification {
-            resolver
-                .updated(Certificate::Nullification(nullification.clone()));
+            resolver.updated(Certificate::Nullification(nullification.clone()));
         }
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
@@ -634,8 +632,7 @@ impl<
         // Tell the resolver this view is complete so it can stop requesting it.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Finalization {
-            resolver
-                .updated(Certificate::Finalization(finalization.clone()));
+            resolver.updated(Certificate::Finalization(finalization.clone()));
         }
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
@@ -745,8 +742,7 @@ impl<
                     }
                     Artifact::Notarization(notarization) => {
                         self.handle_notarization(notarization.clone()).await;
-                        resolver
-                            .updated(Certificate::Notarization(notarization.clone()));
+                        resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
@@ -770,8 +766,7 @@ impl<
                     }
                     Artifact::Nullification(nullification) => {
                         self.handle_nullification(nullification.clone()).await;
-                        resolver
-                            .updated(Certificate::Nullification(nullification.clone()));
+                        resolver.updated(Certificate::Nullification(nullification.clone()));
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
@@ -782,8 +777,7 @@ impl<
                     }
                     Artifact::Finalization(finalization) => {
                         self.handle_finalization(finalization.clone()).await;
-                        resolver
-                            .updated(Certificate::Finalization(finalization.clone()));
+                        resolver.updated(Certificate::Finalization(finalization.clone()));
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
@@ -816,8 +810,7 @@ impl<
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        batcher
-            .update(observed_view, leader, self.state.last_finalized(), None);
+        batcher.update(observed_view, leader, self.state.last_finalized(), None);
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
