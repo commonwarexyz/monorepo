@@ -242,8 +242,8 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, Location},
-    mmr::{journaled::Config as MmrConfig, StandardHasher},
+    merkle::{self, journaled::Config as MerkleConfig, Location},
+    mmr::StandardHasher,
     qmdb::{
         any::{
             self,
@@ -273,7 +273,7 @@ pub mod unordered;
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MmrConfig,
+    pub merkle_config: MerkleConfig,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -406,7 +406,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
+    use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
@@ -447,7 +447,7 @@ pub mod tests {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -473,7 +473,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
