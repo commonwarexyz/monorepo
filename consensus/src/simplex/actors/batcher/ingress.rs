@@ -29,8 +29,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         Self { sender }
     }
 
-    /// Send an update message without waiting for a response.
-    pub async fn send_update(
+    /// Send an update message.
+    pub async fn update(
         &mut self,
         current: View,
         leader: Participant,

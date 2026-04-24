@@ -15,7 +15,7 @@ use crate::{
         },
         Plan,
     },
-    types::{Participant, Round as Rnd, View},
+    types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
@@ -683,27 +683,6 @@ impl<
             .await;
     }
 
-    /// Sends a view update to the batcher without blocking the voter.
-    fn send_batcher_update(
-        &self,
-        batcher: &batcher::Mailbox<S, D>,
-        current: View,
-        leader: Participant,
-        finalized: View,
-        forwardable_proposal: Option<Proposal<D>>,
-    ) where
-        batcher::Message<S, D>: Send + 'static,
-    {
-        let mut batcher = batcher.clone();
-        self.context
-            .with_label("batcher_update")
-            .spawn(move |_| async move {
-                batcher
-                    .send_update(current, leader, finalized, forwardable_proposal)
-                    .await;
-            });
-    }
-
     /// Spawns the actor event loop with the provided channels.
     pub fn start(
         mut self,
@@ -847,7 +826,9 @@ impl<
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        self.send_batcher_update(&batcher, observed_view, leader, self.state.last_finalized(), None);
+        batcher
+            .update(observed_view, leader, self.state.last_finalized(), None)
+            .await;
         let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
         select_loop! {
@@ -1108,13 +1089,14 @@ impl<
                         .previous()
                         .and_then(|view| self.state.forwardable_proposal(view));
 
-                    self.send_batcher_update(
-                        &batcher,
-                        current_view,
-                        leader,
-                        self.state.last_finalized(),
-                        forwardable_proposal,
-                    );
+                    batcher
+                        .update(
+                            current_view,
+                            leader,
+                            self.state.last_finalized(),
+                            forwardable_proposal,
+                        )
+                        .await;
                 }
             },
         }
