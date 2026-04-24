@@ -75,12 +75,6 @@ use std::{
 /// amortizing shared-queue traffic.
 const MIN_THREAD_CACHE_BATCHING_CAPACITY: usize = 4;
 
-/// Minimum number of striped global-freelist words per size class.
-///
-/// Small classes intentionally over-shard the bitmap so direct global traffic
-/// can spread across words instead of collapsing into a single hot atomic word.
-const GLOBAL_FREELIST_MIN_WORDS: usize = 8;
-
 /// Error returned when buffer pool allocation fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
@@ -133,12 +127,12 @@ const fn cache_line_size() -> usize {
 /// Policy for sizing each thread's cache within a buffer pool size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BufferPoolThreadCacheConfig {
+    /// Derive the per-thread cache size from the pool's expected parallelism.
+    Auto,
     /// Disable thread-local caching and route all reuse through the shared global freelist.
     Disabled,
     /// Use an exact per-thread cache size for every size class.
     Fixed(NonZeroUsize),
-    /// Derive a per-thread cache size from an expected level of parallelism.
-    ForParallelism(NonZeroUsize),
 }
 
 /// Configuration for a buffer pool.
@@ -161,12 +155,16 @@ pub struct BufferPoolConfig {
     /// Buffer alignment. Must be a power of two.
     /// Use `page_size()` for storage I/O and `cache_line_size()` for network I/O.
     pub alignment: NonZeroUsize,
+    /// Expected number of threads concurrently accessing the pool.
+    ///
+    /// This sizes the shared global freelist stripes. It is also used to derive
+    /// thread-cache capacity when the thread-cache policy is automatic.
+    pub parallelism: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
+    /// By default, thread-cache capacity is derived from [`Self::parallelism`].
     /// [`Self::with_thread_cache_disabled`] bypasses thread-local caches.
     /// [`Self::with_thread_cache_capacity`] uses an exact per-thread cache size.
-    /// [`Self::with_thread_cache_for_parallelism`] derives a size from the
-    /// expected level of parallelism.
     pub(crate) thread_cache_config: BufferPoolThreadCacheConfig,
 }
 
@@ -187,7 +185,8 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(4096),
             prefill: false,
             alignment: cache_line,
-            thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
         }
     }
 
@@ -204,7 +203,8 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(64),
             prefill: false,
             alignment: page,
-            thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
         }
     }
 
@@ -232,23 +232,26 @@ impl BufferPoolConfig {
         self
     }
 
+    /// Returns a copy of this config with a new expected parallelism.
+    ///
+    /// This controls the minimum global-freelist stripe count, and controls
+    /// thread-cache capacity when the thread-cache policy is automatic.
+    pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
     /// Returns a copy of this config with an explicit per-thread cache size.
+    ///
+    /// Pool parallelism still controls global-freelist striping.
     pub const fn with_thread_cache_capacity(mut self, thread_cache_capacity: NonZeroUsize) -> Self {
         self.thread_cache_config = BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity);
         self
     }
 
-    /// Returns a copy of this config with thread-cache capacity derived from a parallelism hint.
-    ///
-    /// The final per-thread cache size is resolved when the pool is created, using the final
-    /// `max_per_class` value. The derived size reserves half the class budget for the shared
-    /// freelist and clamps the local cache to `[1, 8]`.
-    pub const fn with_thread_cache_for_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
-        self.thread_cache_config = BufferPoolThreadCacheConfig::ForParallelism(parallelism);
-        self
-    }
-
     /// Returns a copy of this config with thread-local caching disabled.
+    ///
+    /// Pool parallelism still controls global-freelist striping.
     pub const fn with_thread_cache_disabled(mut self) -> Self {
         self.thread_cache_config = BufferPoolThreadCacheConfig::Disabled;
         self
@@ -385,16 +388,32 @@ impl BufferPoolConfig {
     /// per-thread retention.
     fn resolve_thread_cache_capacity(&self) -> usize {
         match self.thread_cache_config {
+            BufferPoolThreadCacheConfig::Auto => {
+                let max_per_class = self.max_per_class.get();
+                let effective_threads = self.parallelism.get().min(max_per_class);
+                (max_per_class / (2 * effective_threads)).clamp(1, 8)
+            }
             BufferPoolThreadCacheConfig::Disabled => 0,
             BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity) => {
                 thread_cache_capacity.get()
             }
-            BufferPoolThreadCacheConfig::ForParallelism(parallelism) => {
-                let max_per_class = self.max_per_class.get();
-                let effective_threads = parallelism.get().min(max_per_class);
-                (max_per_class / (2 * effective_threads)).clamp(1, 8)
-            }
         }
+    }
+
+    /// Resolves the minimum number of global freelist stripes for a size class.
+    ///
+    /// The freelist is striped for the pool's expected contention level. If the
+    /// class has too few slots to cover the requested parallelism without
+    /// permanently empty stripes, use the largest power-of-two stripe count that
+    /// fits.
+    const fn resolve_freelist_min_stripes(&self) -> NonZeroUsize {
+        let capacity = self.max_per_class.get();
+        let stripes = match self.parallelism.get().checked_next_power_of_two() {
+            Some(rounded) if rounded <= capacity => self.parallelism.get(),
+            _ => 1usize << capacity.ilog2(),
+        };
+
+        NonZeroUsize::new(stripes).expect("resolved freelist stripe count must be non-zero")
     }
 }
 
@@ -485,15 +504,17 @@ impl SizeClass {
         class_id: usize,
         size: usize,
         alignment: usize,
-        max: usize,
+        max: NonZeroUsize,
+        min_stripes: NonZeroUsize,
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
         assert!(
-            max <= u32::MAX as usize,
+            max.get() <= u32::MAX as usize,
             "max buffers per size class must fit in u32 slot ids"
         );
-        let freelist = Freelist::new(max, GLOBAL_FREELIST_MIN_WORDS);
+        let freelist = Freelist::new(max, min_stripes);
+        let max = max.get();
         let mut created = 0;
         if prefill {
             for slot in 0..max {
@@ -889,6 +910,7 @@ impl BufferPool {
         let metrics = PoolMetrics::new(registry);
         let mut classes = Vec::with_capacity(config.num_classes());
         let thread_cache_capacity = config.resolve_thread_cache_capacity();
+        let freelist_min_stripes = config.resolve_freelist_min_stripes();
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
             let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
@@ -896,7 +918,8 @@ impl BufferPool {
                 class_id,
                 size,
                 config.alignment.get(),
-                config.max_per_class.get(),
+                config.max_per_class,
+                freelist_min_stripes,
                 thread_cache_capacity,
                 config.prefill,
             ));
@@ -1117,7 +1140,8 @@ mod tests {
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             size,
             alignment,
-            8,
+            NZUsize!(8),
+            NZUsize!(4),
             4,
             false,
         ))
@@ -1134,7 +1158,8 @@ mod tests {
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(page_size()),
         }
@@ -1199,7 +1224,8 @@ mod tests {
             min_size: NZUsize!(3000),
             max_size: NZUsize!(8192),
             max_per_class: NZUsize!(10),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(page_size()),
         };
@@ -1323,7 +1349,8 @@ mod tests {
                 min_size: NZUsize!(512),
                 max_size: NZUsize!(1024),
                 max_per_class: NZUsize!(2),
-                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+                parallelism: NZUsize!(1),
+                thread_cache_config: BufferPoolThreadCacheConfig::Auto,
                 prefill: false,
                 alignment: NZUsize!(128),
             },
@@ -1372,7 +1399,8 @@ mod tests {
                 min_size: page,
                 max_size: page,
                 max_per_class: NZUsize!(5),
-                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+                parallelism: NZUsize!(1),
+                thread_cache_config: BufferPoolThreadCacheConfig::Auto,
                 prefill: true,
                 alignment: page,
             },
@@ -1397,9 +1425,10 @@ mod tests {
         assert_eq!(config.min_size.get(), 1024);
         assert_eq!(config.max_size.get(), 64 * 1024);
         assert_eq!(config.max_per_class.get(), 4096);
+        assert_eq!(config.parallelism, NZUsize!(1));
         assert_eq!(
             config.thread_cache_config,
-            BufferPoolThreadCacheConfig::Disabled
+            BufferPoolThreadCacheConfig::Auto
         );
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), cache_line_size());
@@ -1413,9 +1442,10 @@ mod tests {
         assert_eq!(config.min_size.get(), page_size());
         assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
+        assert_eq!(config.parallelism, NZUsize!(1));
         assert_eq!(
             config.thread_cache_config,
-            BufferPoolThreadCacheConfig::Disabled
+            BufferPoolThreadCacheConfig::Auto
         );
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
@@ -1437,6 +1467,7 @@ mod tests {
         let config = BufferPoolConfig::for_storage()
             .with_pool_min_size(1024)
             .with_max_per_class(NZUsize!(64))
+            .with_parallelism(NZUsize!(4))
             .with_thread_cache_capacity(NZUsize!(8))
             .with_prefill(true)
             .with_min_size(page)
@@ -1447,6 +1478,7 @@ mod tests {
         assert_eq!(config.min_size, page);
         assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
+        assert_eq!(config.parallelism, NZUsize!(4));
         assert_eq!(
             config.thread_cache_config,
             BufferPoolThreadCacheConfig::Fixed(NZUsize!(8))
@@ -1458,13 +1490,14 @@ mod tests {
         // Alignment can be tuned explicitly as long as min_size is also adjusted.
         let aligned = BufferPoolConfig::for_network()
             .with_pool_min_size(256)
-            .with_thread_cache_for_parallelism(NZUsize!(4))
+            .with_parallelism(NZUsize!(4))
             .with_alignment(NZUsize!(256))
             .with_min_size(NZUsize!(256));
         aligned.validate();
+        assert_eq!(aligned.parallelism, NZUsize!(4));
         assert_eq!(
             aligned.thread_cache_config,
-            BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(4))
+            BufferPoolThreadCacheConfig::Auto
         );
         assert_eq!(aligned.alignment.get(), 256);
         assert_eq!(aligned.min_size.get(), 256);
@@ -1475,7 +1508,7 @@ mod tests {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(
-            test_config(page, page, 64).with_thread_cache_for_parallelism(NZUsize!(8)),
+            test_config(page, page, 64).with_parallelism(NZUsize!(8)),
             &mut registry,
         );
         let class_index = pool.inner.config.class_index(page).unwrap();
@@ -1483,17 +1516,45 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_thread_cache_capacity_overrides_runtime_parallelism() {
+    fn test_parallelism_policy_resolves_freelist_stripes() {
+        let page = page_size();
+        let config = test_config(page, page, 64).with_parallelism(NZUsize!(16));
+        assert_eq!(config.resolve_freelist_min_stripes(), NZUsize!(16));
+
+        let mut registry = test_registry();
+        let pool = BufferPool::new(config, &mut registry);
+        let class_index = pool.inner.config.class_index(page).unwrap();
+        assert_eq!(pool.inner.classes[class_index].global.num_words(), 16);
+
+        let capped = test_config(page, page, 12).with_parallelism(NZUsize!(9));
+        assert_eq!(capped.resolve_freelist_min_stripes(), NZUsize!(8));
+
+        let mut registry = test_registry();
+        let pool = BufferPool::new(capped, &mut registry);
+        let class_index = pool.inner.config.class_index(page).unwrap();
+        assert_eq!(pool.inner.classes[class_index].global.num_words(), 8);
+
+        let disabled = test_config(page, page, 64)
+            .with_parallelism(NZUsize!(16))
+            .with_thread_cache_disabled();
+        assert_eq!(disabled.resolve_freelist_min_stripes(), NZUsize!(16));
+    }
+
+    #[test]
+    fn test_fixed_thread_cache_capacity_overrides_auto_capacity() {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(
-            test_config(page, page, 64).with_thread_cache_capacity(NZUsize!(7)),
+            test_config(page, page, 64)
+                .with_parallelism(NZUsize!(8))
+                .with_thread_cache_capacity(NZUsize!(7)),
             &mut registry,
         );
         let class_index = pool.inner.config.class_index(page).unwrap();
 
         // Fixed capacity should bypass the derived parallelism heuristic.
         assert_eq!(pool.inner.classes[class_index].thread_cache_capacity, 7);
+        assert_eq!(pool.inner.classes[class_index].global.num_words(), 8);
     }
 
     #[test]
@@ -1568,7 +1629,8 @@ mod tests {
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(4),
         }
@@ -1581,7 +1643,8 @@ mod tests {
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(4),
         }
@@ -1610,7 +1673,8 @@ mod tests {
             min_size: NZUsize!(8),
             max_size: NZUsize!(4),
             max_per_class: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(4),
         };
@@ -1624,7 +1688,8 @@ mod tests {
             min_size: NZUsize!(8),
             max_size: NZUsize!(12),
             max_per_class: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
+            parallelism: NZUsize!(1),
+            thread_cache_config: BufferPoolThreadCacheConfig::Auto,
             prefill: false,
             alignment: NZUsize!(4),
         };
@@ -1777,7 +1842,8 @@ mod tests {
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             64,
             64,
-            2,
+            NZUsize!(2),
+            NZUsize!(1),
             1,
             false,
         ));

@@ -302,21 +302,19 @@ impl Config {
         self.maximum_buffer_size
     }
 
-    /// Returns the network buffer pool config, deriving thread-cache
-    /// parallelism from `worker_threads` if not explicitly configured.
+    /// Returns the network buffer pool config, deriving pool parallelism from
+    /// `worker_threads` if not explicitly configured.
     fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
         self.network_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_network()
-                .with_thread_cache_for_parallelism(NZUsize!(self.worker_threads))
+            BufferPoolConfig::for_network().with_parallelism(NZUsize!(self.worker_threads))
         })
     }
 
-    /// Returns the storage buffer pool config, deriving thread-cache
-    /// parallelism from `worker_threads` if not explicitly configured.
+    /// Returns the storage buffer pool config, deriving pool parallelism from
+    /// `worker_threads` if not explicitly configured.
     fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
         self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_storage()
-                .with_thread_cache_for_parallelism(NZUsize!(self.worker_threads))
+            BufferPoolConfig::for_storage().with_parallelism(NZUsize!(self.worker_threads))
         })
     }
 }
@@ -902,19 +900,18 @@ mod tests {
         let cfg = Config::new().with_worker_threads(8);
 
         assert_eq!(cfg.worker_threads, 8);
+        let network = cfg.resolved_network_buffer_pool_config();
+        assert_eq!(network.parallelism, NZUsize!(8));
         assert_eq!(
-            cfg.resolved_network_buffer_pool_config()
-                .thread_cache_config,
-            BufferPoolConfig::for_network()
-                .with_thread_cache_for_parallelism(NZUsize!(8))
-                .thread_cache_config
+            network.thread_cache_config,
+            BufferPoolConfig::for_network().thread_cache_config
         );
+
+        let storage = cfg.resolved_storage_buffer_pool_config();
+        assert_eq!(storage.parallelism, NZUsize!(8));
         assert_eq!(
-            cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_config,
-            BufferPoolConfig::for_storage()
-                .with_thread_cache_for_parallelism(NZUsize!(8))
-                .thread_cache_config
+            storage.thread_cache_config,
+            BufferPoolConfig::for_storage().thread_cache_config
         );
     }
 
@@ -938,23 +935,24 @@ mod tests {
         // Order does not matter -- explicit configs always win.
         let cfg = Config::new()
             .with_network_buffer_pool_config(
-                BufferPoolConfig::for_network().with_thread_cache_for_parallelism(NZUsize!(2)),
+                BufferPoolConfig::for_network().with_parallelism(NZUsize!(2)),
             )
             .with_worker_threads(8)
             .with_storage_buffer_pool_config(
                 BufferPoolConfig::for_storage().with_thread_cache_disabled(),
             );
 
+        let network = cfg.resolved_network_buffer_pool_config();
+        assert_eq!(network.parallelism, NZUsize!(2));
         assert_eq!(
-            cfg.resolved_network_buffer_pool_config()
-                .thread_cache_config,
-            BufferPoolConfig::for_network()
-                .with_thread_cache_for_parallelism(NZUsize!(2))
-                .thread_cache_config
+            network.thread_cache_config,
+            BufferPoolConfig::for_network().thread_cache_config
         );
+
+        let storage = cfg.resolved_storage_buffer_pool_config();
+        assert_eq!(storage.parallelism, NZUsize!(1));
         assert_eq!(
-            cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_config,
+            storage.thread_cache_config,
             BufferPoolConfig::for_storage()
                 .with_thread_cache_disabled()
                 .thread_cache_config

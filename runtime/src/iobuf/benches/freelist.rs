@@ -24,14 +24,14 @@ use commonware_runtime::iobuf::bench::{AlignedBuffer, Freelist};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
-use std::{hint::black_box, sync::Arc};
+use std::{hint::black_box, num::NonZeroUsize, sync::Arc};
 
 const SLOTS: &[usize] = &[16, 64, 512];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
-const BENCH_PREFERRED_WORDS: usize = 8;
+const BENCH_MIN_STRIPES: usize = 8;
 
 #[derive(Debug)]
 struct Entry {
@@ -215,7 +215,11 @@ impl FreelistImplementation for Freelist {
     }
 
     fn with_capacity(capacity: usize) -> Self {
-        let freelist = Self::new(capacity, BENCH_PREFERRED_WORDS);
+        let freelist = Self::new(
+            NonZeroUsize::new(capacity).expect("bench capacity must be non-zero"),
+            NonZeroUsize::new(BENCH_MIN_STRIPES.min(capacity).max(1))
+                .expect("bench minimum stripe count must be non-zero"),
+        );
         for slot in 0..capacity {
             freelist.put(
                 slot as u32,
