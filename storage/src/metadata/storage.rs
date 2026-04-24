@@ -2,10 +2,12 @@ use super::{Config, Error};
 use crate::Context;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Blob, BufMut, Error as RError};
+use commonware_runtime::{
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
+    Blob, BufMut, Error as RError,
+};
 use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -104,20 +106,13 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
-        let sync_rewrites = Counter::default();
-        let sync_overwrites = Counter::default();
-        let keys = Gauge::default();
-        context.register(
-            "sync_rewrites",
-            "number of syncs that rewrote all data",
-            sync_rewrites.clone(),
-        );
-        context.register(
+        let sync_rewrites =
+            context.counter("sync_rewrites", "number of syncs that rewrote all data");
+        let sync_overwrites = context.counter(
             "sync_overwrites",
             "number of syncs that modified existing data",
-            sync_overwrites.clone(),
         );
-        context.register("keys", "number of tracked keys", keys.clone());
+        let keys = context.gauge("keys", "number of tracked keys");
 
         // Return metadata
         let _ = keys.try_set(map.len());

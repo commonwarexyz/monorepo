@@ -615,14 +615,13 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, Clock as _,
-        IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, BufferPool,
+        BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
     use futures::future::pending;
-    use prometheus_client::registry::Registry;
     use std::{
         num::NonZeroU16,
         sync::{
@@ -631,6 +630,11 @@ mod tests {
         },
         time::Duration,
     };
+
+    fn test_pool() -> BufferPool {
+        let mut registry = Registry::default();
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
+    }
 
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -747,8 +751,7 @@ mod tests {
 
     #[test_traced]
     fn test_cache_basic() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
@@ -1222,8 +1225,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_all_cached() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
         let page0 = vec![0xAA; PAGE_SIZE.get() as usize];
@@ -1253,8 +1255,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_none_cached() {
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 
@@ -1273,8 +1274,7 @@ mod tests {
     fn test_read_cached_many_scattered_misses() {
         // Verify that read_cached_many checks ALL ranges, not just up to the
         // first miss. Pages 0 and 2 are cached, page 1 is not.
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 

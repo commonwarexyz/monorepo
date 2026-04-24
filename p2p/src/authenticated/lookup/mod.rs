@@ -219,8 +219,8 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        count_running_tasks, deterministic, tokio, BufferPooler, Clock, Metrics,
-        Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock,
+        Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
     use commonware_utils::{
         channel::mpsc,

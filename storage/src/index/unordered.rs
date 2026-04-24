@@ -9,8 +9,10 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_runtime::Metrics;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use commonware_runtime::{
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
+    Metrics,
+};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
@@ -102,21 +104,13 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
 
     /// Create a new index with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
+        Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
+            keys: ctx.gauge("keys", "Number of translated keys in the index"),
+            items: ctx.gauge("items", "Number of items in the index"),
+            pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
     }
 }
 

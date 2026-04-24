@@ -984,6 +984,12 @@ mod tests {
                 assert_eq!(retrieved, *value, "Value mismatch for key after resizes");
             }
 
+            // Verify metrics show resize operations occurred. Must be checked
+            // before closing: dropping the freezer drops its Registered metric
+            // handles, which unregisters the metrics.
+            let buffer = context.encode();
+            assert!(buffer.contains("first_resizes_total 8"), "{}", buffer);
+
             // Close and reopen to verify persistence
             let checkpoint = freezer.close().await.expect("Failed to close");
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
@@ -1003,10 +1009,6 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(retrieved, *value, "Value mismatch for key after restart");
             }
-
-            // Verify metrics show resize operations occurred
-            let buffer = context.encode();
-            assert!(buffer.contains("first_resizes_total 8"), "{}", buffer);
         });
     }
 

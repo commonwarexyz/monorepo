@@ -49,7 +49,8 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, Error, IoBuf, Metrics, Quota, Runner,
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Error, IoBuf, Metrics,
+        Quota, Runner,
     };
     use commonware_utils::NZUsize;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
