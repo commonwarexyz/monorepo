@@ -1,8 +1,25 @@
 //! Utilities for working with histograms.
 
+use super::{raw, Histogram};
 use crate::Clock;
-use prometheus_client::metrics::histogram::Histogram;
 use std::{sync::Arc, time::SystemTime};
+
+/// Convenience methods for Prometheus histograms.
+pub trait HistogramExt {
+    /// Observe the duration between two points in time, in seconds.
+    ///
+    /// If the clock goes backwards, the duration is 0.
+    fn observe_between(&self, start: SystemTime, end: SystemTime);
+}
+
+impl HistogramExt for raw::Histogram {
+    fn observe_between(&self, start: SystemTime, end: SystemTime) {
+        let duration = end
+            .duration_since(start)
+            .map_or(0.0, |duration| duration.as_secs_f64());
+        self.observe(duration);
+    }
+}
 
 /// Holds constants for bucket sizes for histograms.
 ///
@@ -34,25 +51,6 @@ impl Buckets {
         3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.002, 0.003, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03,
         0.1, 0.2,
     ];
-}
-
-/// Extension trait for histograms.
-pub trait HistogramExt {
-    /// Observe the duration between two points in time, in seconds.
-    ///
-    /// If the clock goes backwards, the duration is 0.
-    fn observe_between(&self, start: SystemTime, end: SystemTime);
-}
-
-impl HistogramExt for Histogram {
-    fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = end.duration_since(start).map_or(
-            // Clock went backwards
-            0.0,
-            |duration| duration.as_secs_f64(),
-        );
-        self.observe(duration);
-    }
 }
 
 /// A wrapper around a histogram that includes a clock.

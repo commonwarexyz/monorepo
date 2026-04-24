@@ -9,15 +9,14 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink,
-    Spawner, Stream,
+    iobuf::EncodeExt, telemetry::metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs,
+    Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -32,15 +31,18 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     high: mpsc::Receiver<EncodedData>,
     low: mpsc::Receiver<EncodedData>,
 
-    sent_messages: Family<metrics::Message, Counter>,
-    received_messages: Family<metrics::Message, Counter>,
-    dropped_messages: Family<metrics::Message, Counter>,
-    rate_limited: Family<metrics::Message, Counter>,
+    sent_messages: CounterFamily<metrics::Message<C>>,
+    received_messages: CounterFamily<metrics::Message<C>>,
+    dropped_messages: CounterFamily<metrics::Message<C>>,
+    rate_limited: CounterFamily<metrics::Message<C>>,
     _phantom: std::marker::PhantomData<C>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, UnboundedMailbox<Message>, Relay<EncodedData>) {
+    pub fn new(
+        context: E,
+        cfg: Config<C>,
+    ) -> (Self, UnboundedMailbox<Message>, Relay<EncodedData>) {
         let (control_sender, control_receiver) = UnboundedMailbox::new();
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -68,7 +70,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         msg: EncodedData,
         rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message, IoBufs) {
+    ) -> (metrics::Message<C>, IoBufs) {
         let encoded = msg.validate_channel(rate_limits);
         (
             metrics::Message::new_data(peer, encoded.channel),
@@ -78,9 +80,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     /// Records the send metric and appends the payload to the batch.
     fn push_batched(
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &CounterFamily<metrics::Message<C>>,
         batch: &mut Vec<IoBufs>,
-        metric: metrics::Message,
+        metric: metrics::Message<C>,
         payload: IoBufs,
     ) {
         sent_messages.get_or_create(&metric).inc();
@@ -101,7 +103,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-        sent_messages: &Family<metrics::Message, Counter>,
+        sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
@@ -336,11 +338,11 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{
-        deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
+        deterministic, mocks, telemetry::metrics::MetricsExt as _, BufferPooler,
+        Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
-    use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         num::NonZeroU32,
         sync::{
@@ -371,15 +373,15 @@ mod tests {
         }
     }
 
-    fn default_peer_config() -> Config {
+    fn default_peer_config(context: &impl Metrics) -> Config<PublicKey> {
         Config {
             mailbox_size: 10,
             send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
-            sent_messages: Family::<metrics::Message, Counter>::default(),
-            received_messages: Family::<metrics::Message, Counter>::default(),
-            dropped_messages: Family::<metrics::Message, Counter>::default(),
-            rate_limited: Family::<metrics::Message, Counter>::default(),
+            sent_messages: context.family("sent_messages", "test sent messages"),
+            received_messages: context.family("received_messages", "test received messages"),
+            dropped_messages: context.family("dropped_messages", "test dropped messages"),
+            rate_limited: context.family("rate_limited", "test rate limited messages"),
         }
     }
 
@@ -453,10 +455,13 @@ mod tests {
 
             // Clone the received_messages family so we can inspect it after
             // the actor finishes.
-            let received_messages = Family::<metrics::Message, Counter>::default();
+            let received_messages = context.family(
+                "received_messages_override",
+                "test received messages override",
+            );
             let cfg = Config {
                 received_messages: received_messages.clone(),
-                ..default_peer_config()
+                ..default_peer_config(&context)
             };
             let (peer_actor, _mailbox, _relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
@@ -560,7 +565,7 @@ mod tests {
 
             let cfg = Config {
                 send_batch_size: NZUsize!(2),
-                ..default_peer_config()
+                ..default_peer_config(&context)
             };
             let (peer_actor, mut peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);

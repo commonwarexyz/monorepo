@@ -194,7 +194,8 @@ mod tests {
     };
     use commonware_macros::{select, test_group};
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
+        deterministic, telemetry::metrics::count_running_tasks, Clock, IoBuf, Metrics, Quota,
+        Runner, Spawner,
     };
     use commonware_utils::{
         channel::mpsc,

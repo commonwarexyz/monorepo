@@ -1,7 +1,9 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::Metrics;
+use commonware_runtime::{
+    telemetry::metrics::{Metric, Registered, Registration},
+    Metrics,
+};
 use criterion::criterion_main;
-use prometheus_client::registry::Metric;
 
 mod hashmap_insert;
 mod hashmap_insert_fixed;
@@ -28,15 +30,18 @@ impl Metrics for DummyMetrics {
         Self
     }
 
-    fn with_scope(&self) -> Self {
-        Self
-    }
-
     fn with_span(&self) -> Self {
         Self
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _: N,
+        _: H,
+        metric: M,
+    ) -> Registered<M> {
+        Registered::with_registration(metric, Registration::from(()))
+    }
 
     fn encode(&self) -> String {
         "".into()

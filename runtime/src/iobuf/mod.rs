@@ -2366,7 +2366,7 @@ mod tests {
                 let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
-        let mut registry = prometheus_client::registry::Registry::default();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         BufferPool::new(pool_config, &mut registry)
     }
 

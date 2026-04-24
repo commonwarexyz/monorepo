@@ -148,7 +148,10 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{
+    telemetry::metrics::{raw, Gauge, Register},
+    Error, IoBufMut, IoBufs,
+};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -160,7 +163,6 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
     IoUring,
 };
-use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
     collections::VecDeque,
@@ -201,16 +203,14 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry) -> Self {
-        let metrics = Self {
-            pending_operations: Gauge::default(),
-        };
-        registry.register(
-            "pending_operations",
-            "Number of active logical requests in the io_uring loop",
-            metrics.pending_operations.clone(),
-        );
-        metrics
+    pub fn new(registry: &mut impl Register) -> Self {
+        Self {
+            pending_operations: registry.register(
+                "pending_operations",
+                "Number of active logical requests in the io_uring loop",
+                raw::Gauge::default(),
+            ),
+        }
     }
 }
 
@@ -513,7 +513,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Handle, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut impl Register) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -1104,10 +1104,9 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IoBuf, IoBufMut};
+    use crate::{telemetry::metrics::Registry, IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
-    use prometheus_client::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
         io::Write,

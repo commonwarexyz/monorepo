@@ -15,14 +15,15 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate, Digest};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
+use commonware_runtime::{
+    telemetry::metrics::{CounterFamily, Gauge, GaugeExt, MetricsExt as _},
+    Clock, Metrics,
+};
 use commonware_utils::futures::Aborter;
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     mem::{replace, take},
-    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -107,22 +108,18 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    timeouts: Family<Timeout, Counter>,
-    nullifications: Family<Leader, Counter>,
+    timeouts: CounterFamily<Timeout>,
+    nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        let current_view = Gauge::<i64, AtomicI64>::default();
-        let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let timeouts = Family::<Timeout, Counter>::default();
-        let nullifications = Family::<Leader, Counter>::default();
-        context.register("current_view", "current view", current_view.clone());
-        context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("timeouts", "timed out views", timeouts.clone());
-        context.register("nullifications", "nullifications", nullifications.clone());
+        let current_view = context.gauge("current_view", "current view");
+        let tracked_views = context.gauge("tracked_views", "tracked views");
+        let timeouts = context.family("timeouts", "timed out views");
+        let nullifications = context.family("nullifications", "nullifications");
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
@@ -332,9 +329,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
-            self.nullifications
-                .get_or_create(&Leader::new(&leader.key))
-                .inc();
+            self.nullifications.get_or_create_by(&leader.key).inc();
         }
 
         added

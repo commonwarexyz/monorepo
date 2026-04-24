@@ -1,0 +1,26 @@
+[package]
+name = "commonware-runtime-macros"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Augment the development of commonware-runtime with procedural macros."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime/macros"
+documentation = "https://docs.rs/commonware-runtime-macros"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+prometheus-client.workspace = true
+
+[lints]
+workspace = true

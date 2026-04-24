@@ -93,7 +93,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Provider, TrackedPeers,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{
+        deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Quota, Runner,
+    };
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,

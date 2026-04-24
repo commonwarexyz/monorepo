@@ -20,16 +20,13 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram::{self, Buckets},
-        status::GaugeExt,
+        Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::mpsc,
     ordered::{Quorum, Set},
-};
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
@@ -72,8 +69,8 @@ where
 
     added: Counter,
     verified: Counter,
-    inbound_messages: Family<Inbound, Counter>,
-    latest_vote: Family<Peer, Gauge>,
+    inbound_messages: CounterFamily<Inbound>,
+    latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     latest_seen: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
@@ -93,47 +90,28 @@ where
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let participants = cfg.scheme.participants().clone();
         let participant_count = participants.len();
-        let added = Counter::default();
-        let verified = Counter::default();
-        let inbound_messages = Family::<Inbound, Counter>::default();
-        let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
-        context.register(
-            "added",
-            "number of messages added to the verifier",
-            added.clone(),
-        );
-        context.register("verified", "number of messages verified", verified.clone());
-        context.register(
-            "inbound_messages",
-            "number of inbound messages",
-            inbound_messages.clone(),
-        );
-        let latest_vote = Family::<Peer, Gauge>::default();
-        context.register(
-            "latest_vote",
-            "view of latest vote received per peer",
-            latest_vote.clone(),
-        );
+        let added = context.counter("added", "number of messages added to the verifier");
+        let verified = context.counter("verified", "number of messages verified");
+        let inbound_messages = context.family("inbound_messages", "number of inbound messages");
+        let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
+            context.family("latest_vote", "view of latest vote received per peer");
         for participant in participants.iter() {
-            latest_vote.get_or_create(&Peer::new(participant)).set(0);
+            latest_vote.get_or_create_by(participant).set(0);
         }
-        context.register(
+        let batch_size = context.histogram(
             "batch_size",
             "number of messages in a signature verification batch",
-            batch_size.clone(),
+            [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let verify_latency = context.histogram(
             "verify_latency",
             "latency of signature verification",
-            verify_latency.clone(),
+            Buckets::CRYPTOGRAPHY,
         );
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let recover_latency = context.histogram(
             "recover_latency",
             "certificate recover latency",
-            recover_latency.clone(),
+            Buckets::CRYPTOGRAPHY,
         );
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
@@ -516,20 +494,16 @@ where
                 self.record_activity(&sender, view);
 
                 // Add the vote to the verifier
-                let peer = Peer::new(&sender);
                 if work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
-                    .add_network(sender, message)
+                    .add_network(sender.clone(), message)
                     .await
                 {
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
-                    let _ = self
-                        .latest_vote
-                        .get_or_create(&peer)
-                        .try_set_max(view.get());
+                    let _ = self.latest_vote.get_or_create_by(&sender).try_set_max(view.get());
 
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local

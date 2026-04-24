@@ -23,8 +23,10 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Spawner, Storage,
+    buffer::paged::CacheRef,
+    spawn_cell,
+    telemetry::metrics::{CounterFamily, Histogram, MetricsExt as _},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -36,7 +38,6 @@ use futures::{
     future::{ready, Either},
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
     num::NonZeroUsize,
@@ -119,7 +120,7 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::UnboundedReceiver<Message<S, D>>,
 
-    outbound_messages: Family<Outbound, Counter>,
+    outbound_messages: CounterFamily<Outbound>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
 }
@@ -142,24 +143,11 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
-            "outbound_messages",
-            "number of outbound messages",
-            outbound_messages.clone(),
-        );
-        context.register(
-            "notarization_latency",
-            "notarization latency",
-            notarization_latency.clone(),
-        );
-        context.register(
-            "finalization_latency",
-            "finalization latency",
-            finalization_latency.clone(),
-        );
+        let outbound_messages = context.family("outbound_messages", "number of outbound messages");
+        let notarization_latency =
+            context.histogram("notarization_latency", "notarization latency", LATENCY);
+        let finalization_latency =
+            context.histogram("finalization_latency", "finalization latency", LATENCY);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::unbounded_channel();
