@@ -200,8 +200,6 @@ mod tests {
         view: View,
     ) {
         context.sleep(Duration::from_millis(10)).await;
-        // Setup activity can leave proposals or certificates queued; these checks only rule out
-        // the timeout hint that used to be returned synchronously from update.
         loop {
             match receiver.try_recv() {
                 Ok(voter::Message::Timeout(v, reason)) => {
@@ -213,7 +211,7 @@ mod tests {
                     panic!("voter receiver disconnected while checking no timeout for view {view}");
                 }
             }
-        };
+        }
     }
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
@@ -2518,11 +2516,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.clone(),
-                participants.clone(),
-            )
-            .await;
+            let oracle = start_test_network_with_peers(context.clone(), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2553,10 +2547,16 @@ mod tests {
                 mpsc::unbounded_channel::<voter::Message<S, Sha256Digest>>();
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -2565,8 +2565,11 @@ mod tests {
                 success_rate: 1.0,
             };
             let leader_pk = participants[1].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -2596,7 +2599,9 @@ mod tests {
 
             // Now set the leader - this should cause the proposal to be forwarded
             let leader = Participant::new(1);
-            batcher_mailbox.update(view, leader, View::zero(), None).await;
+            batcher_mailbox
+                .update(view, leader, View::zero(), None)
+                .await;
 
             // Give time for batcher to process
             context.sleep(Duration::from_millis(50)).await;
