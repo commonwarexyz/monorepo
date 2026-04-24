@@ -1014,7 +1014,6 @@ dependencies = [
  "commonware-storage",
  "commonware-stream",
  "commonware-utils",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tracing",
@@ -1031,7 +1030,6 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
@@ -1065,7 +1063,6 @@ dependencies = [
  "commonware-utils",
  "crossterm 0.29.0",
  "futures",
- "prometheus-client",
  "ratatui",
  "serde_json",
  "tracing",
@@ -1151,7 +1148,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
- "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
@@ -1219,7 +1215,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "pin-project",
- "prometheus-client",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1352,7 +1347,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -1374,7 +1368,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "serde",
  "serde_yaml",
@@ -1410,7 +1403,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "crossterm 0.29.0",
- "prometheus-client",
  "rand 0.8.5",
  "ratatui",
  "serde_json",
@@ -1488,7 +1480,6 @@ dependencies = [
  "num-integer",
  "num-rational",
  "num-traits",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rand_distr",
@@ -1542,7 +1533,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
@@ -1568,7 +1558,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
@@ -1589,6 +1578,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-parallel",
+ "commonware-runtime-macros",
  "commonware-utils",
  "console-subscriber",
  "criterion",
@@ -1627,6 +1617,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-runtime-macros"
+version = "2026.4.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "prometheus-client",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "commonware-storage"
 version = "2026.4.0"
 dependencies = [
@@ -1647,7 +1648,6 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
- "prometheus-client",
  "rand 0.8.5",
  "rayon",
  "rstest",
@@ -1720,7 +1720,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",
@@ -3935,9 +3934,9 @@ dependencies = [
 
 [[package]]
 name = "prometheus-client"
-version = "0.24.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4500adecd7af8e0e9f4dbce15cfee07ce913fbf6ad605cc468b83f2d531ee94"
+checksum = "cca3d75b4566b9a29fe1ed623587fb058e826eb329a0be4b7c4da1ebb2d7a6ca"
 dependencies = [
  "dtoa",
  "itoa",

@@ -234,13 +234,14 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, BufferPoolConfig, Storage as _};
+    use crate::{
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
+        Storage as _,
+    };
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(
-            BufferPoolConfig::for_storage(),
-            &mut prometheus_client::registry::Registry::default(),
-        )
+        let mut registry = Registry::default();
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
     #[tokio::test]

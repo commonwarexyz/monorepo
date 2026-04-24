@@ -1,31 +1,19 @@
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics};
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+use commonware_runtime::{
+    telemetry::metrics::{status, CounterFamily, EncodeStruct, Gauge, MetricsExt as _},
+    Metrics as RuntimeMetrics,
 };
 
-/// Label for sequencer height metrics
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SequencerLabel {
-    /// Hex representation of the sequencer's public key
-    pub sequencer: String,
-}
-
-impl SequencerLabel {
-    /// Create a new sequencer label from a public key
-    pub fn from<P: PublicKey>(sequencer: &P) -> Self {
-        Self {
-            sequencer: sequencer.to_string(),
-        }
-    }
+/// Per-sequencer label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+pub struct Sequencer<P: PublicKey> {
+    pub sequencer: P,
 }
 
 /// Metrics for the [super::Engine]
-#[derive(Default)]
-pub struct Metrics {
+pub struct Metrics<P: PublicKey> {
     /// Number of broadcasts received by peer
-    pub peer: Family<SequencerLabel, Counter>,
+    pub peer: CounterFamily<Sequencer<P>>,
     /// Number of received messages by status
     pub receive: status::Counter,
     /// Number of `subscribe` requests by status
@@ -37,35 +25,15 @@ pub struct Metrics {
     pub waiters: Gauge,
 }
 
-impl Metrics {
+impl<P: PublicKey> Metrics<P> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "peer",
-            "Number of broadcasts received by peer",
-            metrics.peer.clone(),
-        );
-        context.register(
-            "receive",
-            "Number of received messages by status",
-            metrics.receive.clone(),
-        );
-        context.register(
-            "subscribe",
-            "Number of `subscribe` requests by status",
-            metrics.subscribe.clone(),
-        );
-        context.register(
-            "get",
-            "Number of `get` requests by status",
-            metrics.get.clone(),
-        );
-        context.register(
-            "waiters",
-            "Number of digests being awaited",
-            metrics.waiters.clone(),
-        );
-        metrics
+        Self {
+            peer: context.family("peer", "Number of broadcasts received by peer"),
+            receive: context.family("receive", "Number of received messages by status"),
+            subscribe: context.family("subscribe", "Number of `subscribe` requests by status"),
+            get: context.family("get", "Number of `get` requests by status"),
+            waiters: context.gauge("waiters", "Number of digests being awaited"),
+        }
     }
 }

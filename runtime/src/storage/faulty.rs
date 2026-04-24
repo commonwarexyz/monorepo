@@ -361,15 +361,14 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
+        telemetry::metrics::Registry,
         Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use rand::{rngs::StdRng, SeedableRng};
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(
-            BufferPoolConfig::for_storage(),
-            &mut prometheus_client::registry::Registry::default(),
-        )
+        let mut registry = Registry::default();
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
     /// Test harness with faulty storage wrapping memory storage.

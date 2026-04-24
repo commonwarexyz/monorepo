@@ -1,10 +1,6 @@
 //! Recording metrics with a status.
 
-use prometheus_client::{
-    encoding::{EncodeLabelSet, EncodeLabelValue},
-    metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
-};
-use std::sync::atomic::Ordering;
+use super::{raw, EncodeLabelSet, EncodeLabelValue, Registered};
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -29,19 +25,16 @@ pub enum Status {
     Timeout,
 }
 
-/// A counter metric with a status label.
-pub type Counter = Family<Label, DefaultCounter>;
+/// Raw family backing a status [`Counter`]. Construct this and pass it to
+/// [`crate::Metrics::register`].
+pub type Raw = raw::Family<Label, raw::Counter>;
 
-/// Trait providing convenience methods for `Counter`.
-pub trait CounterExt {
-    fn guard(&self, status: Status) -> CounterGuard;
-    fn inc(&self, status: Status);
-    fn inc_by(&self, status: Status, n: u64);
-}
+/// A registered counter metric with a status label.
+pub type Counter = Registered<Raw>;
 
-impl CounterExt for Counter {
+impl Counter {
     /// Create a new CounterGuard with a given status.
-    fn guard(&self, status: Status) -> CounterGuard {
+    pub fn guard(&self, status: Status) -> CounterGuard {
         CounterGuard {
             metric: self.clone(),
             status,
@@ -49,12 +42,12 @@ impl CounterExt for Counter {
     }
 
     /// Increment the metric with a given status.
-    fn inc(&self, status: Status) {
+    pub fn inc(&self, status: Status) {
         self.get_or_create(&Label { status }).inc();
     }
 
     /// Increment the metric with a given status.
-    fn inc_by(&self, status: Status, n: u64) {
+    pub fn inc_by(&self, status: Status, n: u64) {
         self.get_or_create(&Label { status }).inc_by(n);
     }
 }
@@ -81,29 +74,5 @@ impl CounterGuard {
 impl Drop for CounterGuard {
     fn drop(&mut self) {
         self.metric.inc(self.status);
-    }
-}
-
-/// Trait providing convenience methods for `Gauge`.
-pub trait GaugeExt {
-    /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy, returning the previous value if successful.
-    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error>;
-
-    /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
-    /// Returns the previous value.
-    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error>;
-}
-
-impl GaugeExt for Gauge {
-    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error> {
-        // Prevent casting if conversion is lossy
-        let val = val.try_into()?;
-        let out = self.set(val);
-        Ok(out)
-    }
-
-    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
-        let val = val.try_into()?;
-        Ok(self.inner().fetch_max(val, Ordering::Relaxed))
     }
 }

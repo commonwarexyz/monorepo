@@ -38,7 +38,6 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 pin-project.workspace = true
-prometheus-client.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 tracing.workspace = true
