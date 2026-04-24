@@ -172,6 +172,9 @@ x25519-dalek = "2.0.1"
 zeroize = "1.5.7"
 zstd = "0.13.2"
 
+[patch.crates-io]
+prometheus-client = { git = "https://github.com/patrick-ogrady/client_rust", rev = "a77924ba063d10b93e7685fb804d2826359a8403" }
+
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.
 overflow-checks = true
