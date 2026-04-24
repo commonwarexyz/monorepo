@@ -116,17 +116,9 @@ impl PrivateKey {
     ///
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
-    pub(super) fn vrf<const SENDER: bool>(
-        &self,
-        msg: &Summary,
-        other: &PublicKey,
-    ) -> Scalar {
+    pub(super) fn vrf<const SENDER: bool>(&self, msg: &Summary, other: &PublicKey) -> Scalar {
         let me = self.public();
-        let (sender, receiver) = if SENDER {
-            (&me, other)
-        } else {
-            (other, &me)
-        };
+        let (sender, receiver) = if SENDER { (&me, other) } else { (other, &me) };
         let (t0, t1) = point_hash(sender, receiver, msg);
         let s = self.inner.expose(|x| {
             let raw = other.point.clone() * x;
