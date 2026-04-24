@@ -322,6 +322,10 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        // During Drop, `self.inner` is still counted as a strong reference. If
+        // another clone exists, leave cleanup to the last observed owner. A
+        // concurrent pair of final drops can both see the other owner here, so
+        // registration also recovers stale Weak entries when re-registering.
         if Arc::strong_count(&self.inner) == 1 {
             self.inner.close(&self.inner);
         }
@@ -617,10 +621,9 @@ impl RegistryInner {
                     registration: Registration { inner },
                 };
             }
-            // The entry has no live registration owner. This should not happen
-            // for runtime-managed registrations, which unregister before their
-            // Weak stops upgrading, but removing the stale entry lets callers
-            // recover if a registry is abandoned before its handles are dropped.
+            // The key can outlive the registration when concurrent final drops
+            // each observe another owner and skip close. Treat that dead Weak
+            // as a stale registry entry and replace it below.
             self.drop_metric_entry(existing_id);
         }
         self.assert_family_matches(&name, &help, metric_type);
