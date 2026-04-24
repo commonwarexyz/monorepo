@@ -52,10 +52,7 @@
 use super::IoBufMut;
 use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
-    telemetry::metrics::{
-        raw::{Counter, Family, Gauge},
-        EncodeLabelSet, Register,
-    },
+    telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
@@ -404,38 +401,32 @@ struct SizeClassLabel {
 /// Metrics for the buffer pool.
 struct PoolMetrics {
     /// Number of tracked buffers currently created for the size class.
-    created: Family<SizeClassLabel, Gauge>,
+    created: GaugeFamily<SizeClassLabel>,
     /// Total number of failed allocations (pool exhausted).
-    exhausted_total: Family<SizeClassLabel, Counter>,
+    exhausted_total: CounterFamily<SizeClassLabel>,
     /// Total number of oversized allocation requests.
     oversized_total: Counter,
 }
 
 impl PoolMetrics {
     fn new(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            created: Family::default(),
-            exhausted_total: Family::default(),
-            oversized_total: Counter::default(),
-        };
-
-        registry.register(
-            "buffer_pool_created",
-            "Number of tracked buffers currently created for the pool",
-            metrics.created.clone(),
-        );
-        registry.register(
-            "buffer_pool_exhausted_total",
-            "Total number of failed allocations due to pool exhaustion",
-            metrics.exhausted_total.clone(),
-        );
-        registry.register(
-            "buffer_pool_oversized_total",
-            "Total number of allocation requests exceeding max buffer size",
-            metrics.oversized_total.clone(),
-        );
-
-        metrics
+        Self {
+            created: registry.register(
+                "buffer_pool_created",
+                "Number of tracked buffers currently created for the pool",
+                raw::Family::default(),
+            ),
+            exhausted_total: registry.register(
+                "buffer_pool_exhausted_total",
+                "Total number of failed allocations due to pool exhaustion",
+                raw::Family::default(),
+            ),
+            oversized_total: registry.register(
+                "buffer_pool_oversized_total",
+                "Total number of allocation requests exceeding max buffer size",
+                raw::Counter::default(),
+            ),
+        }
     }
 }
 

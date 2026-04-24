@@ -1,8 +1,5 @@
 use crate::{
-    telemetry::metrics::{
-        raw::{Counter, Gauge},
-        Register,
-    },
+    telemetry::metrics::{raw, Counter, Gauge, Register},
     Buf, Error, IoBufs, IoBufsMut,
 };
 use std::{
@@ -21,41 +18,33 @@ pub struct Metrics {
 impl Metrics {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
     fn new(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            open_blobs: Gauge::default(),
-            storage_reads: Counter::default(),
-            storage_read_bytes: Counter::default(),
-            storage_writes: Counter::default(),
-            storage_write_bytes: Counter::default(),
-        };
-
-        registry.register(
-            "open_blobs",
-            "Number of open blobs",
-            metrics.open_blobs.clone(),
-        );
-        registry.register(
-            "storage_reads",
-            "Total number of disk reads",
-            metrics.storage_reads.clone(),
-        );
-        registry.register(
-            "storage_read_bytes",
-            "Total amount of data read from disk",
-            metrics.storage_read_bytes.clone(),
-        );
-        registry.register(
-            "storage_writes",
-            "Total number of disk writes",
-            metrics.storage_writes.clone(),
-        );
-        registry.register(
-            "storage_write_bytes",
-            "Total amount of data written to disk",
-            metrics.storage_write_bytes.clone(),
-        );
-
-        metrics
+        Self {
+            open_blobs: registry.register(
+                "open_blobs",
+                "Number of open blobs",
+                raw::Gauge::default(),
+            ),
+            storage_reads: registry.register(
+                "storage_reads",
+                "Total number of disk reads",
+                raw::Counter::default(),
+            ),
+            storage_read_bytes: registry.register(
+                "storage_read_bytes",
+                "Total amount of data read from disk",
+                raw::Counter::default(),
+            ),
+            storage_writes: registry.register(
+                "storage_writes",
+                "Total number of disk writes",
+                raw::Counter::default(),
+            ),
+            storage_write_bytes: registry.register(
+                "storage_write_bytes",
+                "Total amount of data written to disk",
+                raw::Counter::default(),
+            ),
+        }
     }
 }
 
@@ -191,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metered_storage() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
@@ -201,7 +190,7 @@ mod tests {
     /// Test that metrics are updated correctly for basic operations.
     #[tokio::test]
     async fn test_metered_blob_metrics() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 

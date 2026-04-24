@@ -44,19 +44,19 @@
 
 pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
+    child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
     },
+    prefixed_name,
     storage::{
         audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
-        add_attribute,
-        raw::{Counter, Family, Gauge},
-        task::Label,
-        validate_label, Metric, Register, Registered, Registry,
+        add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
+        Metric, Register, Registered, Registry,
     },
     utils::{
         signal::{Signal, Stopper},
@@ -108,48 +108,35 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 #[derive(Debug)]
 struct Metrics {
     iterations: Counter,
-    tasks_spawned: Family<Label, Counter>,
-    tasks_running: Family<Label, Gauge>,
-    task_polls: Family<Label, Counter>,
-
-    network_bandwidth: Counter,
+    tasks_spawned: CounterFamily<Label>,
+    tasks_running: GaugeFamily<Label>,
+    task_polls: CounterFamily<Label>,
 }
 
 impl Metrics {
     pub fn init(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            iterations: Counter::default(),
-            task_polls: Family::default(),
-            tasks_spawned: Family::default(),
-            tasks_running: Family::default(),
-            network_bandwidth: Counter::default(),
-        };
-        registry.register(
-            "iterations",
-            "Total number of iterations",
-            metrics.iterations.clone(),
-        );
-        registry.register(
-            "tasks_spawned",
-            "Total number of tasks spawned",
-            metrics.tasks_spawned.clone(),
-        );
-        registry.register(
-            "tasks_running",
-            "Number of tasks currently running",
-            metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "task_polls",
-            "Total number of task polls",
-            metrics.task_polls.clone(),
-        );
-        registry.register(
-            "bandwidth",
-            "Total amount of data sent over network",
-            metrics.network_bandwidth.clone(),
-        );
-        metrics
+        Self {
+            iterations: registry.register(
+                "iterations",
+                "Total number of iterations",
+                raw::Counter::default(),
+            ),
+            tasks_spawned: registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                raw::Family::default(),
+            ),
+            tasks_running: registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+            task_polls: registry.register(
+                "task_polls",
+                "Total number of task polls",
+                raw::Family::default(),
+            ),
+        }
     }
 }
 
@@ -369,7 +356,7 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Arc<Mutex<Registry>>,
+    registry: Registry,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -964,7 +951,7 @@ impl Context {
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Arc::new(Mutex::new(registry)),
+            registry,
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -1041,7 +1028,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Arc::new(Mutex::new(registry)),
+            registry,
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1240,24 +1227,8 @@ impl crate::Metrics for Context {
     }
 
     fn with_label(&self, label: &str) -> Self {
-        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
-        validate_label(label);
-
-        // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
-        assert!(
-            !name.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
         Self {
-            name,
+            name: child_label(&self.name, label),
             ..self.clone()
         }
     }
@@ -1302,32 +1273,19 @@ impl crate::Metrics for Context {
                 hasher.update(v.as_bytes());
             }
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
         let metric = Arc::new(metric);
-        {
-            let mut registry = executor.registry.lock();
-            registry.register_external(
-                Arc::downgrade(&executor.registry),
-                prefixed_name,
-                help,
-                self.attributes.clone(),
-                metric,
-            )
-        }
+        executor.registry.register(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let encoded = executor.registry.lock().encode();
-        encoded
+        executor.registry.encode()
     }
 }
 

@@ -1,6 +1,6 @@
 //! Process metrics collection.
 
-use crate::telemetry::metrics::{raw::Gauge, GaugeExt, Register};
+use crate::telemetry::metrics::{raw, Gauge, GaugeExt, Register};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -23,27 +23,21 @@ pub struct Metrics {
 impl Metrics {
     /// Initialize process metrics and register them with the given registry.
     pub fn init(registry: &mut impl Register) -> Self {
-        let metrics = Self {
+        Self {
             pid: sysinfo::Pid::from_u32(std::process::id()),
-            rss: Gauge::default(),
-            virtual_memory: Gauge::default(),
+            rss: registry.register(
+                "process_rss",
+                "Resident set size of the current process",
+                raw::Gauge::default(),
+            ),
+            virtual_memory: registry.register(
+                "process_virtual_memory",
+                "Virtual memory size of the current process",
+                raw::Gauge::default(),
+            ),
 
             system: System::new(),
-        };
-
-        // Register all metrics
-        registry.register(
-            "process_rss",
-            "Resident set size of the current process",
-            metrics.rss.clone(),
-        );
-        registry.register(
-            "process_virtual_memory",
-            "Virtual memory size of the current process",
-            metrics.virtual_memory.clone(),
-        );
-
-        metrics
+        }
     }
 
     /// Update all process metrics.
@@ -85,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_process_metrics_init() {
-        let mut registry = crate::telemetry::metrics::Registry::new();
+        let mut registry = crate::telemetry::metrics::Registry::default();
         let mut metrics = Metrics::init(&mut registry);
 
         // Update metrics

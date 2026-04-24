@@ -1,5 +1,5 @@
 use crate::{
-    telemetry::metrics::{raw::Counter, Register},
+    telemetry::metrics::{raw, Counter, Register},
     IoBufs, SinkOf, StreamOf,
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -19,33 +19,28 @@ struct Metrics {
 
 impl Metrics {
     fn new(registry: &mut impl Register) -> Self {
-        let metrics = Self {
-            inbound_connections: Counter::default(),
-            outbound_connections: Counter::default(),
-            inbound_bandwidth: Counter::default(),
-            outbound_bandwidth: Counter::default(),
-        };
-        registry.register(
-            "inbound_connections",
-            "Number of connections created by dialing us",
-            metrics.inbound_connections.clone(),
-        );
-        registry.register(
-            "outbound_connections",
-            "Number of connections created by dialing others",
-            metrics.outbound_connections.clone(),
-        );
-        registry.register(
-            "inbound_bandwidth",
-            "Bandwidth used by receiving data from others",
-            metrics.inbound_bandwidth.clone(),
-        );
-        registry.register(
-            "outbound_bandwidth",
-            "Bandwidth used by sending data to others",
-            metrics.outbound_bandwidth.clone(),
-        );
-        metrics
+        Self {
+            inbound_connections: registry.register(
+                "inbound_connections",
+                "Number of connections created by dialing us",
+                raw::Counter::default(),
+            ),
+            outbound_connections: registry.register(
+                "outbound_connections",
+                "Number of connections created by dialing others",
+                raw::Counter::default(),
+            ),
+            inbound_bandwidth: registry.register(
+                "inbound_bandwidth",
+                "Bandwidth used by receiving data from others",
+                raw::Counter::default(),
+            ),
+            outbound_bandwidth: registry.register(
+                "outbound_bandwidth",
+                "Bandwidth used by sending data to others",
+                raw::Counter::default(),
+            ),
+        }
     }
 }
 

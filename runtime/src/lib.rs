@@ -57,7 +57,7 @@ stability_scope!(BETA {
     };
     use thiserror::Error;
 
-    pub(crate) use telemetry::metrics::METRICS_PREFIX;
+    pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
 
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
