@@ -276,12 +276,65 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
 }
 
 trait RegistrationGuard: Send + Sync {
-    fn close(&self, _registration: &Arc<dyn RegistrationGuard>) {}
+    fn release(&self, registration: &Arc<RegistrationInner>) {
+        registration.release_owner();
+    }
 }
 
 impl<G: Send + 'static> RegistrationGuard for GuardHolder<G> {}
 
 struct GuardHolder<G>(Mutex<G>);
+
+struct RegistrationInner {
+    guard: Box<dyn RegistrationGuard>,
+    // Counts logical Registration handles, not Arc strong references. The
+    // registry only holds Weak references, and duplicate registration may
+    // briefly upgrade one without taking ownership.
+    owners: Mutex<usize>,
+}
+
+impl RegistrationInner {
+    fn new<G>(guard: G) -> Arc<Self>
+    where
+        G: RegistrationGuard + 'static,
+    {
+        Arc::new(Self {
+            guard: Box::new(guard),
+            owners: Mutex::new(1),
+        })
+    }
+
+    fn acquire(inner: Arc<Self>) -> Option<Registration> {
+        let mut owners = inner.owners.lock();
+        if *owners == 0 {
+            return None;
+        }
+        *owners = owners.checked_add(1).expect("registration owners overflow");
+        drop(owners);
+        Some(Registration { inner })
+    }
+
+    fn release(&self, registration: &Arc<Self>) {
+        self.guard.release(registration);
+    }
+
+    fn release_owner(&self) -> bool {
+        let mut owners = self.owners.lock();
+        assert!(*owners > 0, "registration owner count underflow");
+        *owners -= 1;
+        *owners == 0
+    }
+
+    fn release_if_not_last_owner(&self) -> bool {
+        let mut owners = self.owners.lock();
+        assert!(*owners > 0, "registration owner count underflow");
+        if *owners == 1 {
+            return false;
+        }
+        *owners -= 1;
+        true
+    }
+}
 
 /// A shared lifecycle token for a [`Registered`] metric handle.
 ///
@@ -289,9 +342,15 @@ struct GuardHolder<G>(Mutex<G>);
 /// registration is dropped as well. Runtime-managed metrics use that drop to
 /// unregister themselves from the runtime registry, while external callers may
 /// attach any custom drop guard.
-#[derive(Clone)]
 pub struct Registration {
-    inner: Arc<dyn RegistrationGuard>,
+    inner: Arc<RegistrationInner>,
+}
+
+impl Clone for Registration {
+    fn clone(&self) -> Self {
+        RegistrationInner::acquire(Arc::clone(&self.inner))
+            .expect("live registration owner count missing")
+    }
 }
 
 impl Registration {
@@ -311,24 +370,18 @@ impl Registration {
         G: Send + 'static,
     {
         Self {
-            inner: Arc::new(GuardHolder(Mutex::new(guard))),
+            inner: RegistrationInner::new(GuardHolder(Mutex::new(guard))),
         }
     }
 
-    fn downgrade(&self) -> Weak<dyn RegistrationGuard> {
+    fn downgrade(&self) -> Weak<RegistrationInner> {
         Arc::downgrade(&self.inner)
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        // During Drop, `self.inner` is still counted as a strong reference. If
-        // another clone exists, leave cleanup to the last observed owner. A
-        // concurrent pair of final drops can both see the other owner here, so
-        // registration also recovers stale Weak entries when re-registering.
-        if Arc::strong_count(&self.inner) == 1 {
-            self.inner.close(&self.inner);
-        }
+        self.inner.release(&self.inner);
     }
 }
 
@@ -338,13 +391,17 @@ struct RuntimeRegistration {
 }
 
 impl RegistrationGuard for RuntimeRegistration {
-    fn close(&self, registration: &Arc<dyn RegistrationGuard>) {
+    fn release(&self, registration: &Arc<RegistrationInner>) {
+        if registration.release_if_not_last_owner() {
+            return;
+        }
         let Some(registry) = self.registry.upgrade() else {
+            registration.release_owner();
             return;
         };
         registry
             .lock()
-            .unregister_if_registration(self.id, registration);
+            .unregister_if_last_registration(self.id, registration);
     }
 }
 
@@ -448,7 +505,7 @@ struct PendingMetricEntry {
     attributes: MetricAttributes,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
-    registration: Weak<dyn RegistrationGuard>,
+    registration: Weak<RegistrationInner>,
 }
 
 pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
@@ -509,7 +566,7 @@ struct MetricEntry {
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
     /// Weak handle to the lifecycle token owned by the outstanding [`Registered<_>`].
-    registration: Weak<dyn RegistrationGuard>,
+    registration: Weak<RegistrationInner>,
     family_index: usize,
 }
 
@@ -600,37 +657,38 @@ impl RegistryInner {
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
-            if let Some(inner) = entry.registration.upgrade() {
-                if let Some(family) = self.families.get(&name) {
-                    assert_eq!(
-                        family.help, help,
-                        "metric family `{}` registered with inconsistent help text",
-                        name
-                    );
-                }
-                let existing_metric = Arc::clone(&entry.metric_any)
-                    .downcast::<M>()
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "duplicate metric `{}` with attributes {:?} registered with different type",
-                            key.0, key.1
-                        )
-                    });
-                return Registered {
-                    metric: existing_metric,
-                    registration: Registration { inner },
-                };
+            if let Some(family) = self.families.get(&name) {
+                assert_eq!(
+                    family.help, help,
+                    "metric family `{}` registered with inconsistent help text",
+                    name
+                );
             }
-            // The key can outlive the registration when concurrent final drops
-            // each observe another owner and skip close. Treat that dead Weak
-            // as a stale registry entry and replace it below.
-            self.drop_metric_entry(existing_id);
+            let existing_metric = Arc::clone(&entry.metric_any)
+                .downcast::<M>()
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "duplicate metric `{}` with attributes {:?} registered with different type",
+                        key.0, key.1
+                    )
+                });
+            // Runtime registrations release under this same mutex, so a keyed
+            // entry cannot have a closed lifecycle token.
+            let registration = entry
+                .registration
+                .upgrade()
+                .and_then(RegistrationInner::acquire)
+                .expect("metric key references closed registration");
+            return Registered {
+                metric: existing_metric,
+                registration,
+            };
         }
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
         let registration = Registration {
-            inner: Arc::new(RuntimeRegistration { id, registry }),
+            inner: RegistrationInner::new(RuntimeRegistration { id, registry }),
         };
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
@@ -759,22 +817,23 @@ impl RegistryInner {
         self.drop_metric_entry(id);
     }
 
-    fn unregister_if_registration(&mut self, id: u64, registration: &Arc<dyn RegistrationGuard>) {
+    fn unregister_if_last_registration(&mut self, id: u64, registration: &Arc<RegistrationInner>) {
         let Some(entry) = self
             .metrics
             .get(Self::metric_index(id))
             .and_then(Option::as_ref)
         else {
+            registration.release_owner();
             return;
         };
         let registration_weak = Arc::downgrade(registration);
         if !entry.registration.ptr_eq(&registration_weak) {
+            registration.release_owner();
             return;
         }
-        if Arc::strong_count(registration) != 1 {
-            return;
+        if registration.release_owner() {
+            self.drop_metric_entry(id);
         }
-        self.drop_metric_entry(id);
     }
 
     fn drop_metric_entry(&mut self, id: u64) {
@@ -1000,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_registration_does_not_remove_reused_metric_id() {
+    fn test_closed_registration_does_not_remove_reused_metric_id() {
         let registry = Registry::new();
         let key: MetricKey = ("votes".to_string(), Vec::new());
 
@@ -1014,17 +1073,8 @@ mod tests {
             let registry = registry.inner.lock();
             *registry.keys.get(&key).expect("metric key missing")
         };
-        let original_registration = {
-            let registry = registry.inner.lock();
-            registry
-                .metric_ref(original_id)
-                .registration
-                .upgrade()
-                .expect("registration missing")
-        };
 
-        registry.inner.lock().drop_metric_entry(original_id);
-        drop(original);
+        registry.unregister(original_id);
 
         let replacement = registry.register(
             key.0.clone(),
@@ -1043,10 +1093,7 @@ mod tests {
             "replacement should safely reuse the freed metric id"
         );
 
-        registry
-            .inner
-            .lock()
-            .unregister_if_registration(original_id, &original_registration);
+        drop(original);
 
         let encoded = registry.encode();
         assert!(
@@ -1304,9 +1351,8 @@ mod tests {
     #[test]
     fn test_register_drop_race_does_not_panic() {
         // Concurrently re-registers and drops the same metric key from multiple
-        // threads. Before the fix, a register call could see the key present
-        // with a Weak that no longer upgrades (last handle mid-drop), and panic
-        // with "registration missing for live metric".
+        // threads. Before explicit owner accounting, concurrent final drops
+        // could leave the key present with a closed registration.
         let registry = Registry::new();
         let threads: Vec<_> = (0..8)
             .map(|_| {
