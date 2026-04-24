@@ -28,7 +28,7 @@ use crate::{
     qmdb::{sync::compact::Target, Error},
     Context,
 };
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_codec::{Decode as _, Encode as _, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{sequence::prefixed_u64::U64, sync::RwLock};
 
@@ -122,6 +122,65 @@ pub(crate) fn write_serve_state_metadata<E, F, D>(
     metadata.put(proof_key(slot), serve_state.commit_proof.encode().to_vec());
 }
 
+/// Validate that a decoded commit floor does not point past the commit it authenticates.
+///
+/// The inactivity floor of a commit must sit at or below the commit's own location. A higher
+/// floor would reference operations that do not exist yet, which indicates either disk corruption
+/// when reloading a persisted witness or malformed compact-sync input when validating reconstructed
+/// state from a remote source.
+pub(crate) fn validate_inactivity_floor<F: Family>(
+    inactivity_floor_loc: Location<F>,
+    last_commit_loc: Location<F>,
+) -> Result<(), Error<F>> {
+    if inactivity_floor_loc > last_commit_loc {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    }
+    Ok(())
+}
+
+/// Validate every unapplied ancestor floor, then the tip floor, against the current db floor.
+///
+/// Compact immutable and keyless batches store ancestor metadata newest-first so batch construction
+/// can append in lockstep with the parent chain. Validation must therefore walk the slices in
+/// reverse to recover the original oldest-to-newest commit order, matching the per-commit floor
+/// checks performed by the full database variants.
+pub(crate) fn validate_ancestor_floors<F: Family>(
+    starting_floor: Location<F>,
+    db_size: u64,
+    ancestor_batch_ends: &[u64],
+    ancestor_floors: &[Location<F>],
+    tip_floor: Location<F>,
+    tip_commit_loc: Location<F>,
+) -> Result<(), Error<F>> {
+    debug_assert_eq!(ancestor_batch_ends.len(), ancestor_floors.len());
+
+    let mut prev_floor = starting_floor;
+    // Ancestors are stored newest-first, so walk in reverse to validate them oldest-first.
+    for i in (0..ancestor_batch_ends.len()).rev() {
+        let ancestor_end = ancestor_batch_ends[i];
+        // Ancestors at or below the current db size are already committed locally.
+        if ancestor_end <= db_size {
+            continue;
+        }
+        let ancestor_floor = ancestor_floors[i];
+        let ancestor_commit_loc = Location::new(ancestor_end - 1);
+        if ancestor_floor < prev_floor {
+            return Err(Error::FloorRegressed(ancestor_floor, prev_floor));
+        }
+        if ancestor_floor > ancestor_commit_loc {
+            return Err(Error::FloorBeyondSize(ancestor_floor, ancestor_commit_loc));
+        }
+        prev_floor = ancestor_floor;
+    }
+    if tip_floor < prev_floor {
+        return Err(Error::FloorRegressed(tip_floor, prev_floor));
+    }
+    if tip_floor > tip_commit_loc {
+        return Err(Error::FloorBeyondSize(tip_floor, tip_commit_loc));
+    }
+    Ok(())
+}
+
 /// Rebuild the in-memory serve cache from the active slot's persisted witness.
 ///
 /// This is the authoritative recovery path after reopen and rewind. It:
@@ -155,9 +214,11 @@ where
         .read_metadata_key(&proof_key(slot))
         .await
         .ok_or(Error::DataCorrupted("missing compact witness"))?;
-    // `usize::MAX` means "do not impose an additional digest-count limit beyond structural
-    // validation while decoding this persisted proof".
-    let commit_proof = Proof::<F, H::Digest>::decode_cfg(proof_bytes.as_ref(), &usize::MAX)
+    // Every encoded digest is at least `D::SIZE` bytes on the wire, so `proof_bytes.len() /
+    // D::SIZE` is a hard upper bound on the digest count. Using this as the decode cap prevents a
+    // malformed length prefix from forcing a large preallocation.
+    let max_digests = proof_bytes.len() / H::Digest::SIZE;
+    let commit_proof = Proof::<F, H::Digest>::decode_cfg(proof_bytes.as_ref(), &max_digests)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     let root = merkle.root();
     let leaf_count = commit_proof.leaves;
@@ -181,6 +242,7 @@ where
     });
     let (last_commit_metadata, inactivity_floor_loc) =
         decode_commit_op(commit_op_bytes.as_ref(), commit_codec_config)?;
+    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     let serve_state = CachedServeState {
         root,
         leaf_count,

@@ -34,6 +34,10 @@ pub enum Error {
     #[error("response channel closed for request {request_id}")]
     ResponseChannelClosed { request_id: u64 },
 
+    /// Received a malformed response that could not be decoded.
+    #[error("invalid response from server")]
+    InvalidResponse,
+
     /// Target update channel error
     #[error("target update channel error: {reason}")]
     TargetUpdateChannel { reason: String },
@@ -50,9 +54,6 @@ impl Error {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::Database(_) => ErrorCode::DatabaseError,
             Self::Network(_) => ErrorCode::NetworkError,
-            Self::RequestChannelClosed | Self::ResponseChannelClosed { .. } => {
-                ErrorCode::InternalError
-            }
             _ => ErrorCode::InternalError,
         }
     }

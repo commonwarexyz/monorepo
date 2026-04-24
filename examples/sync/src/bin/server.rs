@@ -353,7 +353,12 @@ async fn handle_get_compact_state<DB>(
 ) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<Family = mmr::Family, Op = DB::Operation, Digest = Key>,
+    Arc<AsyncRwLock<DB>>: compact::Resolver<
+        Family = mmr::Family,
+        Op = DB::Operation,
+        Digest = Key,
+        Error = compact::ServeError<mmr::Family, Key>,
+    >,
 {
     state.request_counter.inc();
 
@@ -361,7 +366,12 @@ where
         .await
         .map_err(|err| {
             warn!(?err, "failed to serve compact state");
-            Error::InvalidRequest(err.to_string())
+            match err {
+                compact::ServeError::Database(err) => Error::Database(err),
+                compact::ServeError::InvalidTarget(_)
+                | compact::ServeError::MissingSource
+                | compact::ServeError::StaleTarget { .. } => Error::InvalidRequest(err.to_string()),
+            }
         })?;
 
     Ok(wire::GetCompactStateResponse {
@@ -407,7 +417,12 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<Family = mmr::Family, Op = DB::Operation, Digest = Key>,
+    Arc<AsyncRwLock<DB>>: compact::Resolver<
+        Family = mmr::Family,
+        Op = DB::Operation,
+        Digest = Key,
+        Error = compact::ServeError<mmr::Family, Key>,
+    >,
 {
     const LISTENING_MESSAGE: &'static str =
         "compact server listening and continuously adding operations";
@@ -680,7 +695,12 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + Send,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<Family = mmr::Family, Op = DB::Operation, Digest = Key>,
+    Arc<AsyncRwLock<DB>>: compact::Resolver<
+        Family = mmr::Family,
+        Op = DB::Operation,
+        Digest = Key,
+        Error = compact::ServeError<mmr::Family, Key>,
+    >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;
     run_server::<DB, E, CompactMode>(context, config, database).await

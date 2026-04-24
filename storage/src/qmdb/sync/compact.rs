@@ -105,10 +105,10 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
         let leaf_count = Location::<F>::read(buf)?;
-        if !leaf_count.is_valid() {
+        if !leaf_count.is_valid() || leaf_count == 0 {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::compact::Target",
-                "leaf_count out of valid range",
+                "leaf_count must be in 1..=MAX_LEAVES",
             ));
         }
         Ok(Self { root, leaf_count })
@@ -134,6 +134,9 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The source database returned an error while building compact state.
     #[error("compact source database error: {0}")]
     Database(#[from] qmdb::Error<F>),
+    /// The caller requested a target that compact sync cannot serve.
+    #[error("invalid compact target: {0}")]
+    InvalidTarget(&'static str),
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
@@ -299,6 +302,11 @@ where
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
     // from the current tip commit plus the frontier pins at the requested tree size.
     let leaf_count = target.leaf_count;
+    if leaf_count == 0 {
+        return Err(ServeError::InvalidTarget(
+            "compact target missing final commit",
+        ));
+    }
     let last_commit_loc = Location::new(*leaf_count - 1);
     let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
         .await
@@ -692,3 +700,23 @@ impl_compact_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
 impl_compact_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
 impl_compact_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+
+#[cfg(test)]
+mod tests {
+    use super::Target;
+    use crate::merkle::mmr;
+    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_cryptography::{sha256::Digest, Hasher as _};
+
+    #[test]
+    fn test_target_decode_rejects_zero_leaf_count() {
+        let unused_root = commonware_cryptography::Sha256::hash(b"unused");
+        let encoded = Target::<mmr::Family, Digest> {
+            root: unused_root,
+            leaf_count: crate::merkle::Location::new(0),
+        }
+        .encode();
+
+        assert!(Target::<mmr::Family, Digest>::decode(encoded).is_err());
+    }
+}

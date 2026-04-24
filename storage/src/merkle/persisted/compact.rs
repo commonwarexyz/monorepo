@@ -132,6 +132,13 @@ const fn node_prefix(slot: u8) -> u8 {
 }
 
 impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
+    fn validate_persisted_leaves(leaves: Location<F>) -> Result<(), Error<F>> {
+        if !leaves.is_valid() {
+            return Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"));
+        }
+        Ok(())
+    }
+
     /// Read the active slot pointer, defaulting to 0 if absent.
     fn read_gen_ptr(metadata: &Metadata<E, U64, Vec<u8>>) -> Result<Option<u8>, Error<F>> {
         let Some(raw) = metadata.get(&U64::new(GEN_PTR_PREFIX, 0)) else {
@@ -155,7 +162,9 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
             .as_slice()
             .try_into()
             .map_err(|_| Error::DataCorrupted("slot size is not 8 bytes"))?;
-        Ok(Some(Location::new(u64::from_be_bytes(bytes))))
+        let leaves = Location::new(u64::from_be_bytes(bytes));
+        Self::validate_persisted_leaves(leaves)?;
+        Ok(Some(leaves))
     }
 
     /// Remove all pin entries for a given slot.
@@ -250,6 +259,7 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<Self, Error<F>> {
+        Self::validate_persisted_leaves(leaves)?;
         if pinned_nodes.len() != F::nodes_to_pin(leaves).count() {
             return Err(Error::InvalidPinnedNodes);
         }
@@ -497,7 +507,10 @@ impl<F: Family, E: Context, D: Digest> Merkle<F, E, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard as StandardHasher, mmb, mmr};
+    use crate::{
+        merkle::{hasher::Standard as StandardHasher, mmb, mmr},
+        metadata::{Config as MConfig, Metadata},
+    };
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
 
@@ -728,6 +741,50 @@ mod tests {
             assert_eq!(merkle.root(), root_after_first);
 
             merkle.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_reopen_rejects_invalid_persisted_leaf_count() {
+        deterministic::Runner::default().start(|context| async move {
+            let hasher = StandardHasher::<Sha256>::new();
+            let partition = "compact-invalid-leaf-count";
+            let cfg = Config {
+                partition: partition.into(),
+                thread_pool: None,
+            };
+
+            let mut merkle =
+                TestMerkle::<mmr::Family>::init(context.with_label("first"), &hasher, cfg.clone())
+                    .await
+                    .unwrap();
+            append_and_sync(&mut merkle, &[b"a"]).await;
+            let slot = merkle.active_slot();
+            drop(merkle);
+
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.with_label("tamper"),
+                MConfig {
+                    partition: partition.into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            metadata.put(
+                U64::new(size_prefix(slot), 0),
+                (mmr::Family::MAX_LEAVES.as_u64() + 1)
+                    .to_be_bytes()
+                    .to_vec(),
+            );
+            metadata.sync().await.unwrap();
+
+            let reopened =
+                TestMerkle::<mmr::Family>::init(context.with_label("second"), &hasher, cfg).await;
+            assert!(matches!(
+                reopened,
+                Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))
+            ));
         });
     }
 }

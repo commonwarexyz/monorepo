@@ -113,7 +113,10 @@ where
     pub(super) base_size: u64,
     pub(super) total_size: u64,
     pub(super) db_size: u64,
+    /// Ancestor totals in newest-first order. Pair with `ancestor_floors[i]`.
     pub(super) ancestor_batch_ends: Vec<u64>,
+    /// Floor each ancestor committed to; `[i]` matches `ancestor_batch_ends[i]`.
+    pub(super) ancestor_floors: Vec<Location<F>>,
     pub(super) new_inactivity_floor_loc: Location<F>,
     pub(super) _key: PhantomData<K>,
 }
@@ -214,10 +217,13 @@ where
             .with_mem(|mem| merkle_batch.merkleize(mem, &hasher));
 
         let mut ancestor_batch_ends = Vec::new();
+        let mut ancestor_floors = Vec::new();
         if let Some(parent) = &self.parent {
             ancestor_batch_ends.push(parent.total_size);
+            ancestor_floors.push(parent.new_inactivity_floor_loc);
             for batch in parent.ancestors() {
                 ancestor_batch_ends.push(batch.total_size);
+                ancestor_floors.push(batch.new_inactivity_floor_loc);
             }
         }
 
@@ -229,6 +235,7 @@ where
             total_size,
             db_size: self.db_size,
             ancestor_batch_ends,
+            ancestor_floors,
             new_inactivity_floor_loc: inactivity_floor,
             _key: PhantomData,
         })
@@ -308,6 +315,7 @@ where
         }
         let leaf_count = merkle.leaves();
         let last_commit_loc = Location::<F>::new(*leaf_count - 1);
+        compact_witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
         let serve_state = CachedServeState {
             root: merkle.root(),
             leaf_count,
@@ -461,6 +469,7 @@ where
             total_size: committed_size,
             db_size: committed_size,
             ancestor_batch_ends: Vec::new(),
+            ancestor_floors: Vec::new(),
             new_inactivity_floor_loc: self.inactivity_floor_loc,
             _key: PhantomData,
         })
@@ -474,8 +483,10 @@ where
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
-    /// - [`Error::FloorRegressed`] if the batch's inactivity floor is below the current floor.
-    /// - [`Error::FloorBeyondSize`] if the batch's inactivity floor exceeds its commit location.
+    /// - [`Error::FloorRegressed`] if any unapplied commit's floor is below the running floor
+    ///   (walking ancestors oldest-first, then the tip).
+    /// - [`Error::FloorBeyondSize`] if any unapplied commit's floor exceeds its own commit
+    ///   location.
     pub fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V>>,
@@ -491,19 +502,17 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        if batch.new_inactivity_floor_loc < self.inactivity_floor_loc {
-            return Err(Error::FloorRegressed(
-                batch.new_inactivity_floor_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
+
         let tip_commit_loc = Location::new(batch.total_size - 1);
-        if batch.new_inactivity_floor_loc > tip_commit_loc {
-            return Err(Error::FloorBeyondSize(
-                batch.new_inactivity_floor_loc,
-                tip_commit_loc,
-            ));
-        }
+        // Per-commit floor validation; see `compact_witness::validate_ancestor_floors`.
+        compact_witness::validate_ancestor_floors(
+            self.inactivity_floor_loc,
+            db_size,
+            &batch.ancestor_batch_ends,
+            &batch.ancestor_floors,
+            batch.new_inactivity_floor_loc,
+            tip_commit_loc,
+        )?;
 
         let start_loc = self.last_commit_loc + 1;
         self.merkle.apply_batch(&batch.merkle_batch)?;
@@ -633,17 +642,35 @@ mod tests {
         partition: &str,
         key: MetadataKey,
     ) {
-        let mut metadata = Metadata::<_, MetadataKey, Vec<u8>>::init(
-            context.with_label("meta_tamper"),
+        let mut metadata = open_metadata(context, partition).await;
+        let mut bytes = metadata.get(&key).cloned().expect("metadata entry missing");
+        *bytes.last_mut().expect("metadata entry empty") ^= 0x01;
+        metadata.put(key, bytes);
+        metadata.sync().await.unwrap();
+    }
+
+    async fn open_metadata(
+        context: deterministic::Context,
+        partition: &str,
+    ) -> Metadata<deterministic::Context, MetadataKey, Vec<u8>> {
+        Metadata::<_, MetadataKey, Vec<u8>>::init(
+            context.with_label("meta_write"),
             MConfig {
                 partition: partition.into(),
                 codec_config: ((0..).into(), ()),
             },
         )
         .await
-        .unwrap();
-        let mut bytes = metadata.get(&key).cloned().expect("metadata entry missing");
-        *bytes.last_mut().expect("metadata entry empty") ^= 0x01;
+        .unwrap()
+    }
+
+    async fn overwrite_metadata_key(
+        context: deterministic::Context,
+        partition: &str,
+        key: MetadataKey,
+        bytes: Vec<u8>,
+    ) {
+        let mut metadata = open_metadata(context, partition).await;
         metadata.put(key, bytes);
         metadata.sync().await.unwrap();
     }
@@ -786,6 +813,34 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_compact_rejects_regressed_ancestor_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db::<mmr::Family>(
+                context.with_label("db"),
+                "immutable-regressed-ancestor-floor",
+            )
+            .await;
+
+            let parent = db
+                .new_batch()
+                .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                .merkleize(&db, None, Location::new(1));
+            let child = parent
+                .new_batch::<Sha256>()
+                .set(Sha256::hash(&[2]), Sha256::fill(2u8))
+                .merkleize(&db, None, Location::new(0));
+
+            assert!(matches!(
+                db.apply_batch(child),
+                Err(Error::FloorRegressed(new, prev))
+                    if new == Location::new(0) && prev == Location::new(1)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_compact_rewind_restores_commit_metadata_and_floor() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
@@ -904,6 +959,54 @@ mod tests {
                 .unwrap();
             let reopened = TestDb::<mmr::Family>::init_from_merkle(merkle, ()).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_reopen_rejects_commit_floor_beyond_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-invalid-persisted-floor";
+            let mut db = open_db::<mmr::Family>(context.with_label("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[7]), Sha256::fill(7u8))
+                    .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1)),
+            )
+            .unwrap();
+            db.commit().await.unwrap();
+            let slot = db.merkle.active_slot();
+            drop(db);
+            let oversized_floor = Location::new(10);
+
+            overwrite_metadata_key(
+                context.with_label("tamper"),
+                partition,
+                crate::qmdb::compact_witness::commit_op_key(slot),
+                Operation::<mmr::Family, Digest, FixedEncoding<Digest>>::Commit(
+                    Some(Sha256::fill(0xaa)),
+                    oversized_floor,
+                )
+                .encode()
+                .to_vec(),
+            )
+            .await;
+
+            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _> =
+                crate::merkle::compact::Merkle::init(
+                    context.with_label("reopen"),
+                    &StandardHasher::<Sha256>::new(),
+                    crate::merkle::compact::Config {
+                        partition: partition.into(),
+                        thread_pool: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(merkle, ()).await;
+            assert!(matches!(
+                reopened,
+                Err(Error::DataCorrupted("invalid compact witness"))
+            ));
         });
     }
 
