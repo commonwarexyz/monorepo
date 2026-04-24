@@ -409,9 +409,8 @@ impl<B: Blob> Append<B> {
     /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
     /// already validated that `offset + buf.len()` is within the blob's logical size.
     ///
-    /// The page cache is consulted first so a hot stream of `try_read_sync` calls cannot
-    /// barge past writers queued on the buffer lock; only reads that miss the cache attempt
-    /// `try_read` on the tip buffer.
+    /// The page cache is consulted first to minimize the risk of writer starvation from a
+    /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         if self.cache_ref.read_cached(self.id, buf, offset) == buf.len() {
             return true;
