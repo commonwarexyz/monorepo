@@ -18,8 +18,10 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::CounterFamily, Clock, ContextCell, Handle, IoBuf, IoBufs,
-    Listener as _, Metrics, Network as RNetwork, Quota, Spawner,
+    spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
+    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
+    Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{

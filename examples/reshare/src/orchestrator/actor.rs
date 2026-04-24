@@ -23,7 +23,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt as _, MetricsExt as _},
+    telemetry::metrics::{Gauge, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};

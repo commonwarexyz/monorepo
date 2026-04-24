@@ -87,6 +87,24 @@ pub trait MetricsExt: crate::Metrics {
     {
         self.register(name, help, raw::Histogram::new(buckets))
     }
+
+    /// Register a native counter or gauge family with the runtime.
+    fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
+    where
+        N: Into<String>,
+        H: Into<String>,
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        self.register(name, help, raw::Family::<S, M>::default())
+    }
 }
 
 impl<T: crate::Metrics> MetricsExt for T {}
