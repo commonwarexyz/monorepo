@@ -6,25 +6,25 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
-#[cfg(feature = "iouring-network")]
 use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
-};
-use crate::{
+    child_label,
     network::metered::Network as MeteredNetwork,
+    prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
-        add_attribute,
-        raw, CounterFamily, GaugeFamily,
-        task::Label,
-        Metric, Register, Registered, Registry,
+        add_attribute, raw, task::Label, CounterFamily, GaugeFamily, Metric, Register, Registered,
+        Registry,
     },
     utils::{self, signal::Stopper, supervision::Tree, Panicker},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    child_label, prefixed_name, Spawner as _, StreamOf, METRICS_PREFIX,
+    Spawner as _, StreamOf, METRICS_PREFIX,
+};
+#[cfg(feature = "iouring-network")]
+use crate::{
+    iouring,
+    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -358,6 +358,12 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
+        // Create a new registry
+        let mut registry = Registry::new();
+        let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
+
+        // Initialize runtime
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let mut builder = Builder::new_multi_thread();
         builder
             .worker_threads(self.cfg.worker_threads)
@@ -372,111 +378,94 @@ impl crate::Runner for Runner {
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
-        // Create a new registry
-        let mut registry = Registry::new();
-        let (metrics, network_buffer_pool, storage_buffer_pool, storage, network) = {
-            let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(&mut runtime_registry);
+        runtime.spawn(process.collect(tokio::time::sleep));
 
-            // Initialize runtime
-            let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            self.cfg.resolved_network_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            self.cfg.resolved_storage_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
+        );
 
-            // Collect process metrics.
-            //
-            // We prefer to collect process metrics outside of `Context` because
-            // we are using `runtime_registry` rather than the one provided by `Context`.
-            let process = MeteredProcess::init(&mut runtime_registry);
-            runtime.spawn(process.collect(tokio::time::sleep));
-
-            // Initialize buffer pools
-            let network_buffer_pool = BufferPool::new(
-                self.cfg.resolved_network_buffer_pool_config(),
-                &mut runtime_registry.sub_registry("network_buffer_pool"),
-            );
-            let storage_buffer_pool = BufferPool::new(
-                self.cfg.resolved_storage_buffer_pool_config(),
-                &mut runtime_registry.sub_registry("storage_buffer_pool"),
-            );
-
-            // Initialize storage
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "iouring-storage")] {
-                    let mut iouring_registry =
-                        runtime_registry.sub_registry("iouring_storage");
-                    let storage = MeteredStorage::new(
-                        IoUringStorage::start(
-                            IoUringConfig {
-                                storage_directory: self.cfg.storage_directory.clone(),
-                                iouring_config: Default::default(),
-                                thread_stack_size: self.cfg.thread_stack_size,
-                            },
-                            &mut iouring_registry,
-                            storage_buffer_pool.clone(),
-                        ),
-                        &mut runtime_registry,
-                    );
-                } else {
-                    let storage = MeteredStorage::new(
-                        TokioStorage::new(
-                            TokioStorageConfig::new(
-                                self.cfg.storage_directory.clone(),
-                                self.cfg.maximum_buffer_size,
-                            ),
-                            storage_buffer_pool.clone(),
-                        ),
-                        &mut runtime_registry,
-                    );
-                }
-            }
-
-            // Initialize network
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "iouring-network")] {
-                    let mut iouring_registry =
-                        runtime_registry.sub_registry("iouring_network");
-                    let config = IoUringNetworkConfig {
-                        tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                        zero_linger: self.cfg.network_cfg.zero_linger,
-                        read_write_timeout: self.cfg.network_cfg.read_write_timeout,
-                        iouring_config: iouring::Config {
-                            // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                            size: IOURING_NETWORK_SIZE,
-                            max_request_timeout: self.cfg.network_cfg.read_write_timeout,
-                            shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
-                            ..Default::default()
+        // Initialize storage
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-storage")] {
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_storage");
+                let storage = MeteredStorage::new(
+                    IoUringStorage::start(
+                        IoUringConfig {
+                            storage_directory: self.cfg.storage_directory.clone(),
+                            iouring_config: Default::default(),
+                            thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        thread_stack_size: self.cfg.thread_stack_size,
-                        ..Default::default()
-                    };
-                    let network = MeteredNetwork::new(
-                        IoUringNetwork::start(
-                            config,
-                            &mut iouring_registry,
-                            network_buffer_pool.clone(),
-                        )
-                        .unwrap(),
-                        &mut runtime_registry,
-                    );
-                } else {
-                    let config = TokioNetworkConfig::default()
-                        .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                        .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                        .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                        .with_zero_linger(self.cfg.network_cfg.zero_linger);
-                    let network = MeteredNetwork::new(
-                        TokioNetwork::new(config, network_buffer_pool.clone()),
-                        &mut runtime_registry,
-                    );
-                }
+                        &mut iouring_registry,
+                        storage_buffer_pool.clone(),
+                    ),
+                    &mut runtime_registry,
+                );
+            } else {
+                let storage = MeteredStorage::new(
+                    TokioStorage::new(
+                        TokioStorageConfig::new(
+                            self.cfg.storage_directory.clone(),
+                            self.cfg.maximum_buffer_size,
+                        ),
+                        storage_buffer_pool.clone(),
+                    ),
+                    &mut runtime_registry,
+                );
             }
+        }
 
-            (
-                metrics,
-                network_buffer_pool,
-                storage_buffer_pool,
-                storage,
-                network,
-            )
-        };
+        // Initialize network
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-network")] {
+                let mut iouring_registry =
+                    runtime_registry.sub_registry("iouring_network");
+                let config = IoUringNetworkConfig {
+                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                    zero_linger: self.cfg.network_cfg.zero_linger,
+                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
+                    iouring_config: iouring::Config {
+                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
+                        size: IOURING_NETWORK_SIZE,
+                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
+                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        ..Default::default()
+                    },
+                    thread_stack_size: self.cfg.thread_stack_size,
+                    ..Default::default()
+                };
+                let network = MeteredNetwork::new(
+                    IoUringNetwork::start(
+                        config,
+                        &mut iouring_registry,
+                        network_buffer_pool.clone(),
+                    )
+                    .unwrap(),
+                    &mut runtime_registry,
+                );
+            } else {
+                let config = TokioNetworkConfig::default()
+                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
+                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
+                let network = MeteredNetwork::new(
+                    TokioNetwork::new(config, network_buffer_pool.clone()),
+                    &mut runtime_registry,
+                );
+            }
+        }
 
         // Initialize executor
         let executor = Arc::new(Executor {

@@ -52,9 +52,7 @@
 use super::IoBufMut;
 use crate::{
     iobuf::aligned::{AlignedBuffer, PooledBufMut},
-    telemetry::metrics::{
-        raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register,
-    },
+    telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;

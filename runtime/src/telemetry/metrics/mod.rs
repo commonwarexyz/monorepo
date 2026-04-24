@@ -565,13 +565,7 @@ impl Registry {
         M: Metric,
     {
         let mut inner = self.inner.lock();
-        inner.register(
-            Arc::downgrade(&self.inner),
-            name,
-            help,
-            attributes,
-            metric,
-        )
+        inner.register(Arc::downgrade(&self.inner), name, help, attributes, metric)
     }
 
     pub fn unregister(&self, id: u64) {
@@ -897,12 +891,8 @@ impl Register for Scope {
         let name = prefixed_name(&self.prefix, name);
         let help = help.to_string();
         let metric = Arc::new(metric);
-        self.registry.register_with_attributes(
-            name,
-            help,
-            Vec::new(),
-            metric,
-        )
+        self.registry
+            .register_with_attributes(name, help, Vec::new(), metric)
     }
 
     fn sub_registry(&mut self, prefix: &str) -> Scope {
