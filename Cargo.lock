@@ -1131,6 +1131,7 @@ name = "commonware-coding-fuzz"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-codec",
  "commonware-coding",
  "commonware-cryptography",
  "commonware-parallel",
