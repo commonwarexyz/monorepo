@@ -1,6 +1,6 @@
 use crate::{
     signal,
-    telemetry::metrics::{Metric, Registered},
+    telemetry::metrics::{raw, EncodeLabelSetTrait, EncodeMetric, FamilyValue, Metric, Registered},
     Error, Handle,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -167,6 +167,23 @@ where
         metric: M,
     ) -> Registered<M> {
         self.as_present().register(name, help, metric)
+    }
+
+    fn register_family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
+    where
+        N: Into<String>,
+        H: Into<String>,
+        S: Clone
+            + std::hash::Hash
+            + Eq
+            + EncodeLabelSetTrait
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+        M: FamilyValue + Default + EncodeMetric,
+    {
+        self.as_present().register_family(name, help)
     }
 
     fn encode(&self) -> String {

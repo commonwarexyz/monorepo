@@ -13,7 +13,7 @@ pub(crate) const METRICS_PREFIX: &str = "runtime";
 
 pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 pub use counter::{Counter as RawCounter, CounterValue};
-pub use family::{Family, FamilyValue};
+pub use family::{Family as RawFamily, FamilyValue};
 pub use gauge::{Gauge as RawGauge, GaugeValue};
 pub use prometheus_client::{
     collector, encoding,
@@ -32,7 +32,9 @@ pub use prometheus_client::{
 /// Underlying metric types. Used when constructing a metric to pass to
 /// [`crate::Metrics::register`].
 pub mod raw {
-    pub use super::{histogram::Histogram, Family, RawCounter as Counter, RawGauge as Gauge};
+    pub use super::{
+        histogram::Histogram, RawCounter as Counter, RawFamily as Family, RawGauge as Gauge,
+    };
 }
 
 use commonware_utils::sync::Mutex;
@@ -57,10 +59,12 @@ pub type Counter = Registered<raw::Counter>;
 pub type Gauge = Registered<raw::Gauge>;
 /// A registered histogram metric.
 pub type Histogram = Registered<raw::Histogram>;
+/// A registered metric family keyed by `L`.
+pub type Family<L, M> = Registered<raw::Family<L, M>>;
 /// A registered family of counters keyed by `L`.
-pub type CounterFamily<L> = Registered<raw::Family<L, raw::Counter>>;
+pub type CounterFamily<L> = Family<L, raw::Counter>;
 /// A registered family of gauges keyed by `L`.
-pub type GaugeFamily<L> = Registered<raw::Family<L, raw::Gauge>>;
+pub type GaugeFamily<L> = Family<L, raw::Gauge>;
 
 /// One-line constructors for the common metric types.
 pub trait MetricsExt: crate::Metrics {
@@ -88,7 +92,7 @@ pub trait MetricsExt: crate::Metrics {
     }
 
     /// Register a native counter or gauge family with the runtime.
-    fn family<N, H, S, M>(&self, name: N, help: H) -> Registered<raw::Family<S, M>>
+    fn family<N, H, S, M>(&self, name: N, help: H) -> Family<S, M>
     where
         N: Into<String>,
         H: Into<String>,
@@ -102,7 +106,7 @@ pub trait MetricsExt: crate::Metrics {
             + 'static,
         M: FamilyValue + Default + EncodeMetric,
     {
-        self.register(name, help, raw::Family::<S, M>::default())
+        self.register_family(name, help)
     }
 }
 
@@ -1068,7 +1072,7 @@ impl Register for Registry {
         M: FamilyValue + Default + EncodeMetric,
     {
         validate_label(name);
-        let family = Family::<S, M>::default();
+        let family = raw::Family::<S, M>::default();
         Self::register_family(
             self,
             name.to_string(),
@@ -1109,7 +1113,7 @@ impl Register for Scope {
         M: FamilyValue + Default + EncodeMetric,
     {
         validate_label(name);
-        let family = Family::<S, M>::default();
+        let family = raw::Family::<S, M>::default();
         Registry::register_family(
             &self.registry,
             prefixed_name(&self.prefix, name),
