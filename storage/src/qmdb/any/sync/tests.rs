@@ -838,7 +838,7 @@ where
     });
 }
 
-/// Test that prune-only target updates are rejected when the authenticated state does not advance.
+/// Test that prune-only target updates are rejected as backward target movement.
 pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -889,11 +889,13 @@ where
         update_sender.send(first_target).await.unwrap();
         update_sender.send(second_target).await.unwrap();
 
-        match client.step().await {
-            Err(sync::Error::Engine(sync::EngineError::SyncTargetRootUnchanged)) => {}
-            Err(err) => panic!("expected SyncTargetRootUnchanged, got {err:?}"),
-            Ok(_) => panic!("prune-only update should be rejected"),
-        }
+        let result = client.step().await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(
+                sync::EngineError::SyncTargetMovedBackward { .. }
+            ))
+        ));
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
