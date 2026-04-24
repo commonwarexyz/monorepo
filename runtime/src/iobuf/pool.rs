@@ -718,13 +718,33 @@ impl BufferPoolThreadCache {
             class.global.put(slot, buffer);
             return;
         }
-        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
-            cache.push(TlsSizeClassCacheEntry {
-                buffer,
-                class,
-                slot,
-            });
-        });
+
+        let class_id = class.class_id;
+        let thread_cache_capacity = class.thread_cache_capacity;
+        let mut entry = Some((class, buffer));
+
+        // Returning a pooled buffer can happen from arbitrary Drop code,
+        // including during thread-local destruction. Use `try_with` so a
+        // buffer dropped after this TLS key is destroyed can fall back to the
+        // global freelist instead of panicking.
+        if Self::TLS_SIZE_CLASS_CACHES
+            .try_with(|bins| {
+                Self::with_cache(bins, class_id, thread_cache_capacity, |cache| {
+                    let (class, buffer) =
+                        entry.take().expect("entry must be returned exactly once");
+
+                    cache.push(TlsSizeClassCacheEntry {
+                        buffer,
+                        class,
+                        slot,
+                    });
+                });
+            })
+            .is_err()
+        {
+            let (class, buffer) = entry.expect("entry must remain available if TLS access fails");
+            class.global.put(slot, buffer);
+        }
     }
 
     /// Takes a buffer from the current thread's local cache for the given
@@ -746,28 +766,29 @@ impl BufferPoolThreadCache {
                 });
         }
 
-        Self::with_cache(class.class_id, class.thread_cache_capacity, |cache| {
-            cache.pop(class)
+        Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
+            Self::with_cache(bins, class.class_id, class.thread_cache_capacity, |cache| {
+                cache.pop(class)
+            })
         })
     }
 
     /// Accesses the current thread's local cache for `class_id`, creating it
     /// lazily on first use, and invokes `f` on it.
-    #[inline]
+    #[inline(always)]
     fn with_cache<R>(
+        bins: &UnsafeCell<Vec<Option<TlsSizeClassCache>>>,
         class_id: usize,
         capacity: usize,
         f: impl FnOnce(&mut TlsSizeClassCache) -> R,
     ) -> R {
-        Self::TLS_SIZE_CLASS_CACHES.with(|bins| {
-            // SAFETY: this TLS value is only ever accessed by the current thread.
-            let bins = unsafe { &mut *bins.get() };
-            if class_id >= bins.len() {
-                bins.resize_with(class_id + 1, || None);
-            }
-            let cache = bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(capacity));
-            f(cache)
-        })
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let bins = unsafe { &mut *bins.get() };
+        if class_id >= bins.len() {
+            bins.resize_with(class_id + 1, || None);
+        }
+        let cache = bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(capacity));
+        f(cache)
     }
 }
 
