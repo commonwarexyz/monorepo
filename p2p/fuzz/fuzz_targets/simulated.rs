@@ -183,11 +183,6 @@ fn fuzz(input: FuzzInput) {
                     // Clamp message size to not exceed max (accounting for channel overhead)
                     let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
-                    // Skip if receiver hasn't registered this channel - they won't be able to receive
-                    if !channels.contains_key(&(to_idx, channel_id)) {
-                        continue;
-                    }
-
                     // Skip if sender channel not registered
                     let Some((sender, _)) = channels.get_mut(&(from_idx, channel_id)) else {
                         continue;
@@ -200,22 +195,22 @@ fn fuzz(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
-                    let sent = sender
+                    let accepted = sender
                         .send(
                             Recipients::One(peer_pks[to_idx].clone()),
                             message.clone(),
                             true,
                         )
-                        .await
-                        .is_ok();
+                        .await;
 
-                    // Track message as expected only if send was accepted
-                    // Note: Message may still be dropped by unreliable link
-                    if sent {
-                        expected_msgs
-                            .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
-                            .or_default()
-                            .push_back(message);
+                    // Track the message only if the network accepted this recipient.
+                    if let Ok(accepted) = accepted {
+                        if accepted.iter().any(|pk| pk == &peer_pks[to_idx]) {
+                            expected_msgs
+                                .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
+                                .or_default()
+                                .push_back(message);
+                        }
                     }
                 }
 
