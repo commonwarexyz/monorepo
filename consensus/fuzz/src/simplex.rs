@@ -14,6 +14,9 @@ use commonware_cryptography::{
 };
 use commonware_runtime::deterministic;
 
+#[cfg(feature = "mocks")]
+use crate::certificate_mock;
+
 pub trait Simplex: 'static
 where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
@@ -114,6 +117,31 @@ impl Simplex for SimplexSecp256r1 {
         n: u32,
     ) -> Fixture<Self::Scheme> {
         secp256r1::fixture(context, namespace, n)
+    }
+}
+
+/// Mock certificate scheme built on the Ed25519 participant key. Uses the
+/// ledger-backed mock from `commonware_cryptography::certificate::mocks`
+/// (via the `impl_certificate_mock!` macro in
+/// [`crate::certificate_mock`]) so fuzz runs exercise the consensus
+/// pipeline without paying real BLS/Ed25519/secp256r1 signature costs.
+#[cfg(feature = "mocks")]
+pub struct SimplexCertificateMock;
+
+#[cfg(feature = "mocks")]
+impl Simplex for SimplexCertificateMock {
+    // `ATTRIBUTABLE=false` makes `invariants::get_signature_count` return
+    // `None` early instead of trying to decode a `Signers` bitmap from the
+    // mock's encoded certificate (which doesn't start with one).
+    type Scheme = certificate_mock::Scheme<Ed25519PublicKey, false, true, true>;
+    type Elector = RoundRobin;
+
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        certificate_mock::fixture_with::<false, true, true, _>(context, namespace, n)
     }
 }
 

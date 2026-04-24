@@ -9,7 +9,7 @@
 
 MBF_FAULTS ?= 0 # number of faulty nodes
 
-MBF_TRACE_GEN_TARGET ?= simplex_ed25519_quint_honest
+MBF_TRACE_GEN_TARGET ?= simplex_mock_cert_quint_honest
 MBF_TRACE_GEN_FUZZ_RUNS ?= -1
 MBF_TRACE_GEN_CORPUS ?= ../fuzz/corpus/$(MBF_TRACE_GEN_TARGET)
 MBF_TRACE_GEN_SRC ?= $(FUZZ_TRACES_ROOT)/$(MBF_TRACE_GEN_TARGET)_$(TRACE_SELECTION_STRATEGY)

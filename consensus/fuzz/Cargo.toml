@@ -8,11 +8,15 @@ license.workspace = true
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = ["mocks"]
+mocks = []
+
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
-commonware-cryptography.workspace = true
+commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p = { workspace = true, features = ["mocks"] }
@@ -214,6 +218,13 @@ bench = false
 [[bin]]
 name = "simplex_ed25519_quint_tlc_honest"
 path = "fuzz_targets/simplex_ed25519_quint_tlc_honest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_mock_cert_quint_honest"
+path = "fuzz_targets/simplex_mock_cert_quint_honest.rs"
 test = false
 doc = false
 bench = false

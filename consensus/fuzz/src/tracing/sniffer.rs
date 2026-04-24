@@ -8,16 +8,44 @@
 
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::simplex::types::{Attributable, Certificate, Vote};
-use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{
+    certificate::Scheme as CertificateScheme, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+};
 use commonware_p2p::{Message, Receiver};
 use commonware_utils::{sync::Mutex, Participant};
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
-/// The ed25519 simplex scheme used in tests.
-type S = commonware_consensus::simplex::scheme::ed25519::Scheme;
-type Ed25519Vote = Vote<S, Sha256Digest>;
-type Ed25519Certificate = Certificate<S, Sha256Digest>;
+/// Hook used by the sniffer to extract the list of signers from a
+/// certificate after decoding. The Ed25519 scheme exposes a `Signers`
+/// bitmap directly on the certificate; the mock scheme's certificate is
+/// an opaque `U64` that carries no signer info, so the mock impl returns
+/// the full participant set as an over-approximation (preserves
+/// quorum-size semantics for the TLC replay, gives up who-specifically-
+/// signed attribution which the mock discards by design).
+pub trait TraceableScheme: CertificateScheme<PublicKey = PublicKey> {
+    fn certificate_signers(
+        cert: &Self::Certificate,
+        participants: &[PublicKey],
+    ) -> Vec<Participant>;
+}
+
+impl TraceableScheme for commonware_consensus::simplex::scheme::ed25519::Scheme {
+    fn certificate_signers(cert: &Self::Certificate, _: &[PublicKey]) -> Vec<Participant> {
+        cert.signers.iter().collect()
+    }
+}
+
+#[cfg(feature = "mocks")]
+impl<const A: bool, const B: bool, const C: bool> TraceableScheme
+    for crate::certificate_mock::Scheme<PublicKey, A, B, C>
+{
+    fn certificate_signers(_cert: &Self::Certificate, participants: &[PublicKey]) -> Vec<Participant> {
+        (0..participants.len())
+            .map(|i| Participant::new(i as u32))
+            .collect()
+    }
+}
 
 /// Identifies which network channel a receiver is sniffing.
 pub enum ChannelKind {
@@ -133,7 +161,7 @@ fn format_block(digest: &Sha256Digest) -> String {
 }
 
 /// Extracts a structured [`TracedVote`] from a decoded vote.
-fn extract_vote(vote: &Ed25519Vote) -> TracedVote {
+fn extract_vote<S: TraceableScheme>(vote: &Vote<S, Sha256Digest>) -> TracedVote {
     match vote {
         Vote::Notarize(n) => TracedVote::Notarize {
             view: n.proposal.round.view().get(),
@@ -155,25 +183,35 @@ fn extract_vote(vote: &Ed25519Vote) -> TracedVote {
 }
 
 /// Extracts a structured [`TracedCert`] from a decoded certificate.
-fn extract_cert(cert: &Ed25519Certificate, sender_id: &str) -> TracedCert {
+fn extract_cert<S: TraceableScheme>(
+    cert: &Certificate<S, Sha256Digest>,
+    participants: &[PublicKey],
+    sender_id: &str,
+) -> TracedCert {
+    let signers_of = |c: &S::Certificate| -> Vec<String> {
+        S::certificate_signers(c, participants)
+            .into_iter()
+            .map(participant_id)
+            .collect()
+    };
     match cert {
         Certificate::Notarization(n) => TracedCert::Notarization {
             view: n.proposal.round.view().get(),
             parent: n.proposal.parent.get(),
             block: format_block(&n.proposal.payload),
-            signers: n.certificate.signers.iter().map(participant_id).collect(),
+            signers: signers_of(&n.certificate),
             ghost_sender: sender_id.to_string(),
         },
         Certificate::Nullification(n) => TracedCert::Nullification {
             view: n.round.view().get(),
-            signers: n.certificate.signers.iter().map(participant_id).collect(),
+            signers: signers_of(&n.certificate),
             ghost_sender: sender_id.to_string(),
         },
         Certificate::Finalization(f) => TracedCert::Finalization {
             view: f.proposal.round.view().get(),
             parent: f.proposal.parent.get(),
             block: format_block(&f.proposal.payload),
-            signers: f.certificate.signers.iter().map(participant_id).collect(),
+            signers: signers_of(&f.certificate),
             ghost_sender: sender_id.to_string(),
         },
     }
@@ -181,16 +219,20 @@ fn extract_cert(cert: &Ed25519Certificate, sender_id: &str) -> TracedCert {
 
 /// A receiver wrapper that intercepts consensus messages and logs them
 /// in quint spec format before forwarding to the inner receiver.
-pub struct SniffingReceiver<R> {
+pub struct SniffingReceiver<R, S: TraceableScheme> {
     inner: R,
     channel: ChannelKind,
     node_id: String,
     participants: Vec<PublicKey>,
-    cert_codec_cfg: usize,
+    cert_codec_cfg: <S::Certificate as commonware_codec::Read>::Cfg,
     trace: Arc<Mutex<TraceLog>>,
+    _scheme: PhantomData<fn() -> S>,
 }
 
-impl<R> SniffingReceiver<R> {
+impl<R, S: TraceableScheme> SniffingReceiver<R, S>
+where
+    <S::Certificate as commonware_codec::Read>::Cfg: Default,
+{
     pub fn new(
         inner: R,
         channel: ChannelKind,
@@ -198,7 +240,30 @@ impl<R> SniffingReceiver<R> {
         participants: Vec<PublicKey>,
         trace: Arc<Mutex<TraceLog>>,
     ) -> Self {
-        let cert_codec_cfg = participants.len();
+        Self::with_cfg(
+            inner,
+            channel,
+            node_id,
+            participants,
+            <S::Certificate as commonware_codec::Read>::Cfg::default(),
+            trace,
+        )
+    }
+}
+
+impl<R, S: TraceableScheme> SniffingReceiver<R, S> {
+    /// Construct a sniffer with an explicit certificate codec config. Use
+    /// this when the scheme's certificate codec config can't be produced
+    /// from `Default` (e.g. aggregated schemes that need the participant
+    /// count). For the common `Cfg: Default` case, prefer [`Self::new`].
+    pub fn with_cfg(
+        inner: R,
+        channel: ChannelKind,
+        node_id: String,
+        participants: Vec<PublicKey>,
+        cert_codec_cfg: <S::Certificate as commonware_codec::Read>::Cfg,
+        trace: Arc<Mutex<TraceLog>>,
+    ) -> Self {
         Self {
             inner,
             channel,
@@ -206,11 +271,12 @@ impl<R> SniffingReceiver<R> {
             participants,
             cert_codec_cfg,
             trace,
+            _scheme: PhantomData,
         }
     }
 }
 
-impl<R> fmt::Debug for SniffingReceiver<R> {
+impl<R, S: TraceableScheme> fmt::Debug for SniffingReceiver<R, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SniffingReceiver")
             .field("node_id", &self.node_id)
@@ -218,10 +284,11 @@ impl<R> fmt::Debug for SniffingReceiver<R> {
     }
 }
 
-impl<R> Receiver for SniffingReceiver<R>
+impl<R, S> Receiver for SniffingReceiver<R, S>
 where
     R: Receiver<PublicKey = PublicKey>,
     R::Error: Send + Sync,
+    S: TraceableScheme,
 {
     type Error = R::Error;
     type PublicKey = PublicKey;
@@ -232,23 +299,23 @@ where
 
         match self.channel {
             ChannelKind::Vote => {
-                if let Ok(vote) = Ed25519Vote::decode(payload.clone()) {
+                if let Ok(vote) = Vote::<S, Sha256Digest>::decode(payload.clone()) {
                     let structured = TraceEntry::Vote {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
-                        vote: extract_vote(&vote),
+                        vote: extract_vote::<S>(&vote),
                     };
                     self.trace.lock().structured.push(structured);
                 }
             }
             ChannelKind::Certificate => {
                 if let Ok(cert) =
-                    Ed25519Certificate::decode_cfg(payload.clone(), &self.cert_codec_cfg)
+                    Certificate::<S, Sha256Digest>::decode_cfg(payload.clone(), &self.cert_codec_cfg)
                 {
                     let structured = TraceEntry::Certificate {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
-                        cert: extract_cert(&cert, &sender_id),
+                        cert: extract_cert::<S>(&cert, &self.participants, &sender_id),
                     };
                     self.trace.lock().structured.push(structured);
                 }

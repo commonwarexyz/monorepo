@@ -1,5 +1,7 @@
 pub mod apalache;
 pub mod bounds;
+#[cfg(feature = "mocks")]
+pub mod certificate_mock;
 pub mod disrupter;
 pub mod invariants;
 pub mod ist;
@@ -47,6 +49,8 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
+#[cfg(feature = "mocks")]
+pub use simplex::SimplexCertificateMock;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,

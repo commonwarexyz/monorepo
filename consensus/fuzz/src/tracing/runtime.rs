@@ -2,6 +2,13 @@ use super::{
     data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
 };
+
+/// `SniffingReceiver` pre-applied to the Ed25519 scheme. Every path in
+/// this file except the generic `run_quint_honest_tracing_for` uses
+/// Ed25519 concretely; this alias saves every call site from repeating
+/// the full turbofish.
+type Ed25519Sniffer<R> =
+    SniffingReceiver<R, commonware_consensus::simplex::scheme::ed25519::Scheme>;
 use crate::{
     disrupter::Disrupter,
     invariants, simplex,
@@ -945,14 +952,14 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 );
 
             let node_id = format!("n{}", idx);
-            let sniffing_vote_primary = SniffingReceiver::new(
+            let sniffing_vote_primary = Ed25519Sniffer::new(
                 vote_receiver_primary,
                 ChannelKind::Vote,
                 node_id.clone(),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert_primary = SniffingReceiver::new(
+            let sniffing_cert_primary = Ed25519Sniffer::new(
                 certificate_receiver_primary,
                 ChannelKind::Certificate,
                 node_id,
@@ -1049,14 +1056,14 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             );
             secondary_actor.start();
 
-            let sniffing_vote_secondary = SniffingReceiver::new(
+            let sniffing_vote_secondary = Ed25519Sniffer::new(
                 vote_receiver_secondary,
                 ChannelKind::Vote,
                 format!("n{}", idx),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert_secondary = SniffingReceiver::new(
+            let sniffing_cert_secondary = Ed25519Sniffer::new(
                 certificate_receiver_secondary,
                 ChannelKind::Certificate,
                 format!("n{}", idx),
@@ -1108,14 +1115,14 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             let (cert_sender, cert_receiver) = cert_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
 
-            let sniffing_vote = SniffingReceiver::new(
+            let sniffing_vote = Ed25519Sniffer::new(
                 vote_receiver,
                 ChannelKind::Vote,
                 node_id.clone(),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert = SniffingReceiver::new(
+            let sniffing_cert = Ed25519Sniffer::new(
                 cert_receiver,
                 ChannelKind::Certificate,
                 node_id,
@@ -1265,14 +1272,14 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             let (cert_sender, cert_receiver) = cert_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
 
-            let sniffing_vote = SniffingReceiver::new(
+            let sniffing_vote = Ed25519Sniffer::new(
                 vote_receiver,
                 ChannelKind::Vote,
                 node_id.clone(),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert = SniffingReceiver::new(
+            let sniffing_cert = Ed25519Sniffer::new(
                 cert_receiver,
                 ChannelKind::Certificate,
                 node_id,
@@ -1358,14 +1365,14 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             let (cert_sender, cert_receiver) = cert_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
 
-            let sniffing_vote = SniffingReceiver::new(
+            let sniffing_vote = Ed25519Sniffer::new(
                 vote_receiver,
                 ChannelKind::Vote,
                 node_id.clone(),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert = SniffingReceiver::new(
+            let sniffing_cert = Ed25519Sniffer::new(
                 cert_receiver,
                 ChannelKind::Certificate,
                 node_id,
@@ -1533,14 +1540,14 @@ async fn build_honest_trace_data(
         let (cert_sender, cert_receiver) = cert_network;
         let (resolver_sender, resolver_receiver) = resolver_network;
 
-        let sniffing_vote = SniffingReceiver::new(
+        let sniffing_vote = Ed25519Sniffer::new(
             vote_receiver,
             ChannelKind::Vote,
             node_id.clone(),
             participants.clone(),
             trace.clone(),
         );
-        let sniffing_cert = SniffingReceiver::new(
+        let sniffing_cert = Ed25519Sniffer::new(
             cert_receiver,
             ChannelKind::Certificate,
             node_id,
@@ -1638,8 +1645,27 @@ async fn build_honest_trace_data(
     }
 }
 
-/// Run consensus with all honest nodes and quint tracing.
+/// Run consensus with all honest nodes and quint tracing, using the
+/// Ed25519 certificate scheme.
 pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    run_quint_honest_tracing_for::<SimplexEd25519>(
+        "simplex_ed25519_quint_honest",
+        input,
+        corpus_bytes,
+    );
+}
+
+/// Generic honest-only tracing entry point. `label` selects the per-target
+/// artifact subdirectory under the trace root (e.g.
+/// `simplex_mock_cert_quint_honest`) so parallel runs with different
+/// certificate schemes don't clobber each other's traces or corpora.
+pub fn run_quint_honest_tracing_for<P: simplex::Simplex>(
+    label: &'static str,
+    input: FuzzInput,
+    corpus_bytes: &[u8],
+) where
+    P::Scheme: super::sniffer::TraceableScheme,
+{
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -1659,7 +1685,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         };
 
         let (oracle, participants, schemes, mut registrations) =
-            crate::setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+            crate::setup_network::<P>(&mut context, &tracing_input).await;
 
         let trace = Arc::new(Mutex::new(TraceLog::default()));
         let relay = Arc::new(relay::Relay::new());
@@ -1678,14 +1704,14 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             let (cert_sender, cert_receiver) = cert_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
 
-            let sniffing_vote = SniffingReceiver::new(
+            let sniffing_vote = SniffingReceiver::<_, P::Scheme>::new(
                 vote_receiver,
                 ChannelKind::Vote,
                 node_id.clone(),
                 participants.clone(),
                 trace.clone(),
             );
-            let sniffing_cert = SniffingReceiver::new(
+            let sniffing_cert = SniffingReceiver::<_, P::Scheme>::new(
                 cert_receiver,
                 ChannelKind::Certificate,
                 node_id,
@@ -1764,7 +1790,7 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
 
         let replayed = invariants::extract_replayed(&reporters, config.n as usize);
         let states = invariants::extract(&reporters, config.n as usize);
-        invariants::check::<SimplexEd25519>(config.n, &states);
+        invariants::check::<P>(config.n, &states);
         invariants::check_vote_invariants(&replayed, config.faults as usize);
         let reporter_states = encode_reporter_states(replayed, config.faults as usize);
 
@@ -1782,12 +1808,6 @@ pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             reporter_states,
         };
 
-        persist_trace_if_selected(
-            "simplex_ed25519_quint_honest",
-            &hash_hex,
-            &trace_data,
-            false,
-            corpus_bytes,
-        );
+        persist_trace_if_selected(label, &hash_hex, &trace_data, false, corpus_bytes);
     });
 }
