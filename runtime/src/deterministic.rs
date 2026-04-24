@@ -1274,7 +1274,7 @@ impl crate::Metrics for Context {
             }
         });
         let metric = Arc::new(metric);
-        executor.registry.register_with_attributes(
+        executor.registry.register(
             prefixed_name(&self.name, &name),
             help,
             self.attributes.clone(),

@@ -554,7 +554,7 @@ impl Registry {
         }
     }
 
-    pub(crate) fn register_with_attributes<M>(
+    pub(crate) fn register<M>(
         &self,
         name: String,
         help: String,
@@ -868,7 +868,8 @@ pub trait Register {
 impl Register for Registry {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M> {
         validate_label(name);
-        self.register_with_attributes(
+        Registry::register(
+            self,
             name.to_string(),
             help.to_string(),
             Vec::new(),
@@ -891,8 +892,7 @@ impl Register for Scope {
         let name = prefixed_name(&self.prefix, name);
         let help = help.to_string();
         let metric = Arc::new(metric);
-        self.registry
-            .register_with_attributes(name, help, Vec::new(), metric)
+        Registry::register(&self.registry, name, help, Vec::new(), metric)
     }
 
     fn sub_registry(&mut self, prefix: &str) -> Scope {
@@ -1018,7 +1018,7 @@ mod tests {
         let registry = Registry::new();
         let key: MetricKey = ("votes".to_string(), Vec::new());
 
-        let original = registry.register_with_attributes(
+        let original = registry.register(
             key.0.clone(),
             "vote count".to_string(),
             Vec::new(),
@@ -1040,7 +1040,7 @@ mod tests {
         registry.inner.lock().drop_metric_entry(original_id);
         drop(original);
 
-        let replacement = registry.register_with_attributes(
+        let replacement = registry.register(
             key.0.clone(),
             "vote count".to_string(),
             Vec::new(),
@@ -1123,7 +1123,7 @@ mod tests {
     fn register_counter(registry: &Registry, name: &str, help: &str, value: u64) -> Counter {
         let counter = raw::Counter::<u64>::default();
         counter.inc_by(value);
-        registry.register_with_attributes(
+        registry.register(
             name.to_string(),
             help.to_string(),
             Vec::new(),
@@ -1167,7 +1167,7 @@ mod tests {
         let _requests = register_counter(&registry, "requests", "request count", 3);
         let histogram = raw::Histogram::new([0.1, 1.0, 10.0]);
         histogram.observe(0.5);
-        let _histogram = registry.register_with_attributes(
+        let _histogram = registry.register(
             "latency".to_string(),
             "latency seconds".to_string(),
             Vec::new(),
@@ -1197,7 +1197,7 @@ mod tests {
         let registry = Registry::default();
         let c1 = raw::Counter::<u64>::default();
         c1.inc();
-        let _c1 = registry.register_with_attributes(
+        let _c1 = registry.register(
             "votes".to_string(),
             "vote count".to_string(),
             vec![("epoch".to_string(), "1".to_string())],
@@ -1205,7 +1205,7 @@ mod tests {
         );
         let c2 = raw::Counter::<u64>::default();
         c2.inc_by(2);
-        let _c2 = registry.register_with_attributes(
+        let _c2 = registry.register(
             "votes".to_string(),
             "vote count".to_string(),
             vec![("epoch".to_string(), "2".to_string())],
@@ -1248,7 +1248,7 @@ mod tests {
         // `encode_omit_empty` behavior.
         let registry = Registry::default();
         let empty_family = raw::Family::<Vec<(String, String)>, raw::Counter>::default();
-        let _empty_family = registry.register_with_attributes(
+        let _empty_family = registry.register(
             "votes".to_string(),
             "vote count".to_string(),
             Vec::new(),
@@ -1282,19 +1282,19 @@ mod tests {
         histogram.observe(0.5);
 
         let ours = Registry::default();
-        let _latency = ours.register_with_attributes(
+        let _latency = ours.register(
             "latency".to_string(),
             "request latency seconds".to_string(),
             Vec::new(),
             Arc::new(histogram.clone()),
         );
-        let _level = ours.register_with_attributes(
+        let _level = ours.register(
             "level".to_string(),
             "current level".to_string(),
             Vec::new(),
             Arc::new(gauge.clone()),
         );
-        let _votes = ours.register_with_attributes(
+        let _votes = ours.register(
             "votes".to_string(),
             "number of votes".to_string(),
             Vec::new(),
@@ -1327,7 +1327,8 @@ mod tests {
                 let mut registry = registry.clone();
                 std::thread::spawn(move || {
                     for _ in 0..2000 {
-                        let handle = registry.register(
+                        let handle = Register::register(
+                            &mut registry,
                             "votes",
                             "vote count",
                             raw::Counter::<u64>::default(),
