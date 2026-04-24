@@ -1,10 +1,13 @@
 use super::{Error, Receiver, Sender};
-use crate::{authenticated::UnboundedMailbox, Address, Channel};
+use crate::{
+    authenticated::UnboundedMailbox, Address, AddressableTrackedPeers, Channel,
+    PeerSetSubscription, TrackedPeers,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
-    ordered::{Map, Set},
+    ordered::Map,
 };
 use rand_distr::Normal;
 use std::time::Duration;
@@ -19,14 +22,14 @@ pub enum Message<P: PublicKey, E: Clock> {
     },
     Track {
         id: u64,
-        peers: Set<P>,
+        peers: TrackedPeers<P>,
     },
     PeerSet {
         id: u64,
-        response: oneshot::Sender<Option<Set<P>>>,
+        response: oneshot::Sender<Option<TrackedPeers<P>>>,
     },
     Subscribe {
-        sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+        response: oneshot::Sender<PeerSetSubscription<P>>,
     },
     SubscribeConnected {
         response: oneshot::Sender<ring::Receiver<Vec<P>>>,
@@ -243,12 +246,12 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    fn track(&self, id: u64, peers: Set<P>) {
+    fn track(&self, id: u64, peers: TrackedPeers<P>) {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
-    /// Get the peers for a given id.
-    async fn peer_set(&self, id: u64) -> Option<Set<P>> {
+    /// Get the primary and secondary peers for a given ID.
+    async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
         self.sender
             .0
             .request(|response| Message::PeerSet { id, response })
@@ -257,10 +260,15 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.sender.0.send_lossy(Message::Subscribe { sender });
-        receiver
+    async fn subscribe(&self) -> PeerSetSubscription<P> {
+        self.sender
+            .0
+            .request(|response| Message::Subscribe { response })
+            .await
+            .unwrap_or_else(|| {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            })
     }
 }
 
@@ -289,20 +297,21 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        self.oracle.subscribe().await
     }
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
-        self.oracle.track(id, peers);
+    async fn track<R>(&mut self, id: u64, peers: R)
+    where
+        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.oracle.track(id, peers.into());
     }
 }
 
@@ -337,21 +346,26 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<P> {
+        self.oracle.subscribe().await
     }
 }
 
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
-    async fn track(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+    async fn track<R>(&mut self, id: u64, peers: R)
+    where
+        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+    {
         // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.track(id, peers.into_keys());
+        let peers = peers.into();
+        self.oracle.track(
+            id,
+            TrackedPeers::new(peers.primary.into_keys(), peers.secondary.into_keys()),
+        );
     }
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {

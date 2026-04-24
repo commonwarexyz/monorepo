@@ -102,7 +102,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.
@@ -504,7 +504,7 @@ mod tests {
     use super::*;
     use crate::{
         simulated::{self, Link, Network, Oracle},
-        Recipients,
+        Manager as _, Provider as _, Recipients,
     };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -512,6 +512,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
+    use commonware_utils::{ordered::Set, NZUsize};
     use std::{num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
@@ -531,7 +532,7 @@ mod tests {
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
@@ -549,6 +550,14 @@ mod tests {
         a: PublicKey,
         b: PublicKey,
     ) {
+        let mut manager = oracle.manager();
+        let peers = manager.peer_set(0).await.unwrap_or_default();
+        manager
+            .track(
+                0,
+                Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
+            )
+            .await;
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }

@@ -275,7 +275,7 @@ description = "Some description"`;
 
   it("should use default description when missing", () => {
     const cargoToml = `[package]
-name = "commonware-test"`;
+name = "commonware-invariants"`;
 
     const info = parseCrateInfo(cargoToml, "test");
     expect(info.description).toBe("No description available");

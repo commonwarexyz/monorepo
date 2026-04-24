@@ -18,7 +18,11 @@ hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
 n_cases = 65536
 hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
 
-["commonware_consensus::marshal::ingress::handler::tests::conformance::CodecConformance<Request<B>>"]
+["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<ReedSolomon<Sha256>,Sha256>>"]
+n_cases = 65536
+hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
+
+["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Request<D>>"]
 n_cases = 65536
 hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
 
@@ -141,6 +145,10 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Vote<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
+
+["commonware_consensus::types::tests::conformance::CodecConformance<Commitment>"]
+n_cases = 65536
+hash = "4cc05ec53b515415070f3634ad2b56677c2a938f596ffc99f7909f24e06a8c99"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Epoch>"]
 n_cases = 65536

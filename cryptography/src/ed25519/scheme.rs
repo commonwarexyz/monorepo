@@ -348,7 +348,9 @@ pub struct Batch {
 }
 
 #[cfg(feature = "std")]
-impl BatchVerifier<PublicKey> for Batch {
+impl BatchVerifier for Batch {
+    type PublicKey = PublicKey;
+
     fn new() -> Self {
         Self {
             verifier: ed25519_consensus::batch::Verifier::new(),
@@ -763,6 +765,12 @@ mod tests {
             &Signature::decode(bad_signature.as_ref()).unwrap()
         ));
         assert!(!batch.verify(&mut test_rng()));
+    }
+
+    #[test]
+    fn batch_verify_empty() {
+        let batch = Batch::new();
+        assert!(batch.verify(&mut test_rng()));
     }
 
     #[test]

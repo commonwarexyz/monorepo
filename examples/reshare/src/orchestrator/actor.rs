@@ -6,8 +6,8 @@ use crate::{
     BLOCKS_PER_EPOCH,
 };
 use commonware_consensus::{
-    marshal,
-    simplex::{self, elector::Config as Elector, scheme, types::Context},
+    marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -38,7 +38,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -46,7 +46,7 @@ where
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
-    pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
     pub strategy: T,
 
     pub muxer_size: usize,
@@ -66,7 +66,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -77,7 +77,7 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
     provider: Provider<S, C>,
     strategy: T,
 
@@ -98,7 +98,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest>,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,
@@ -149,7 +149,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(votes, certificates, resolver,).await)
+        spawn_cell!(self.context, self.run(votes, certificates, resolver,))
     }
 
     async fn run(
@@ -321,14 +321,15 @@ where
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 

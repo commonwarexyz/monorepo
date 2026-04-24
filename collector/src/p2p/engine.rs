@@ -20,7 +20,7 @@ use commonware_utils::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<E, B, Rq, Rs, P, M, H>
@@ -113,7 +113,7 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(requests, responses).await)
+        spawn_cell!(self.context, self.run(requests, responses))
     }
 
     async fn run(
@@ -206,8 +206,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        warn!(?err, ?peer, "blocking peer");
-                        self.blocker.block(peer).await;
+                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid request");
                         continue;
                     }
                 };
@@ -231,8 +230,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        warn!(?err, ?peer, "blocking peer");
-                        self.blocker.block(peer).await;
+                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid response");
                         continue;
                     }
                 };

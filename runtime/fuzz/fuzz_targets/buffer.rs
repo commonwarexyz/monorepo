@@ -39,11 +39,7 @@ enum FuzzOperation {
         cache_page_size: u16,
         cache_capacity: u16,
     },
-    ReadExact {
-        size: u16,
-    },
-    ReadExactRandomBuf {
-        buf: Vec<u8>,
+    Read {
         size: u16,
     },
     ReadSeekTo {
@@ -200,23 +196,13 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                FuzzOperation::ReadExact { size } => {
+                FuzzOperation::Read { size } => {
                     if let Some(ref mut reader) = read_buffer {
                         let size = (size as usize).clamp(0, MAX_SIZE);
                         let current_pos = reader.position();
                         if current_pos.checked_add(size as u64).is_some() {
-                            let mut buf = vec![0u8; size];
-                            let _ = reader.read_exact(&mut buf, size).await;
+                            let _ = reader.read(size).await;
                         }
-                    }
-                }
-
-                FuzzOperation::ReadExactRandomBuf { mut buf, size } => {
-                    if size > buf.len() as u16 {
-                        continue;
-                    }
-                    if let Some(ref mut reader) = read_buffer {
-                        let _ = reader.read_exact(&mut buf, size as usize).await;
                     }
                 }
 

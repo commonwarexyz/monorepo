@@ -4,17 +4,18 @@ use commonware_utils::{NZUsize, NZU16};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
+use shard_selection::SELECTIONS;
 
-mod no_coding;
 mod reed_solomon;
+mod shard_selection;
 mod zoda;
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
+            for conc in [1, 8] {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
@@ -32,6 +33,7 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                 data
                             },
                             |data| {
+                                // Encode data
                                 if conc > 1 {
                                     S::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
@@ -49,96 +51,81 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
 
 pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
+            for conc in [1, 8] {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
-                c.bench_function(
-                    &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
-                    |b| {
-                        b.iter_batched(
-                            || {
-                                // Generate random data
-                                let mut data = vec![0u8; data_length];
-                                rng.fill_bytes(&mut data);
+                for selection in SELECTIONS {
+                    let sel = selection.label();
+                    c.bench_function(
+                        &format!(
+                            "{name}/msg_len={data_length} chunks={chunks} conc={conc} shard_selection={sel}"
+                        ),
+                        |b| {
+                            b.iter_batched(
+                                || {
+                                    // Generate random data
+                                    let mut data = vec![0u8; data_length];
+                                    rng.fill_bytes(&mut data);
 
-                                // Encode data
-                                let (commitment, mut shards) = if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
-                                } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
-                                };
+                                    // Encode data
+                                    let (commitment, shards) = if conc > 1 {
+                                        S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                    } else {
+                                        S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    };
 
-                                let my_shard = shards.pop().unwrap();
-                                let reshards = shards
-                                    .into_iter()
-                                    .enumerate()
-                                    .take(min as usize)
-                                    .map(|(i, shard)| {
-                                        let (_, _, reshard) =
-                                            S::reshard(&config, &commitment, i as u16, shard)
-                                                .unwrap();
-                                        reshard
-                                    })
-                                    .collect::<Vec<_>>();
+                                    let indices = selection.indices(min);
+                                    let selected_shards: Vec<(u16, _)> = indices
+                                        .iter()
+                                        .map(|&i| {
+                                            (i, shards[i as usize].clone())
+                                        })
+                                        .collect();
 
-                                (commitment, my_shard, reshards)
-                            },
-                            |(commitment, my_shard, reshards)| {
-                                let (checking_data, _, _) = S::reshard(
-                                    &config,
-                                    &commitment,
-                                    config.minimum_shards.get() + config.extra_shards.get() - 1,
-                                    my_shard,
-                                )
-                                .unwrap();
-                                let checked_shards = reshards
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, reshard)| {
-                                        S::check(
+                                    let checked_shards: Vec<_> = selected_shards
+                                        .iter()
+                                        .map(|(idx, shard)| {
+                                            S::check(&config, &commitment, *idx, shard).unwrap()
+                                        })
+                                        .collect();
+
+                                    (commitment, checked_shards)
+                                },
+                                |(commitment, checked_shards)| {
+                                    // Decode data
+                                    if conc > 1 {
+                                        S::decode(
                                             &config,
                                             &commitment,
-                                            &checking_data,
-                                            i as u16,
-                                            reshard,
+                                            checked_shards.iter(),
+                                            &strategy,
+                                        )
+                                            .unwrap()
+                                    } else {
+                                        S::decode(
+                                            &config,
+                                            &commitment,
+                                            checked_shards.iter(),
+                                            &Sequential,
                                         )
                                         .unwrap()
-                                    })
-                                    .collect::<Vec<_>>();
-                                if conc > 1 {
-                                    S::decode(
-                                        &config,
-                                        &commitment,
-                                        checking_data,
-                                        &checked_shards,
-                                        &strategy,
-                                    )
-                                    .unwrap()
-                                } else {
-                                    S::decode(
-                                        &config,
-                                        &commitment,
-                                        checking_data,
-                                        &checked_shards,
-                                        &Sequential,
-                                    )
-                                    .unwrap()
-                                }
-                            },
-                            BatchSize::SmallInput,
-                        );
-                    },
-                );
+                                    }
+                                },
+                                BatchSize::SmallInput,
+                            );
+                        },
+                    );
+                }
             }
         }
     }
 }
 
-criterion_main!(reed_solomon::benches, no_coding::benches, zoda::benches);
+criterion_main!(reed_solomon::benches, zoda::benches);

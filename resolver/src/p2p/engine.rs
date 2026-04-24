@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    provider: D,
+    peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     blocker: B,
@@ -128,7 +128,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                provider: cfg.provider,
+                peer_provider: cfg.peer_provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
@@ -149,13 +149,11 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let peer_set_subscription = &mut self.provider.subscribe().await;
-
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
             (),
@@ -163,6 +161,7 @@ impl<
             network.0,
             network.1,
         );
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -196,15 +195,13 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, all)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
-                // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
-                // reconcile with all tracked peers).
-                if self.last_peer_set_id < Some(id) {
-                    self.last_peer_set_id = Some(id);
-                    self.fetcher.reconcile(all.as_ref());
+                if self.last_peer_set_id < Some(update.index) {
+                    self.last_peer_set_id = Some(update.index);
+                    self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },
             // Handle active deadline
@@ -437,7 +434,7 @@ impl<
 
         // If the data is invalid, we need to block the peer and try again
         // (blocking the peer also removes any targets associated with it)
-        self.blocker.block(peer.clone()).await;
+        commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);

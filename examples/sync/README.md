@@ -2,7 +2,7 @@
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
 
-Continuously synchronize state between a server and client with [qmdb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/any/struct.Any.html) and [qmdb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/immutable/struct.Immutable.html)
+Continuously synchronize state between a server and client with [qmdb::any](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/any/index.html), [qmdb::current](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/index.html), or [qmdb::immutable](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/immutable/index.html) databases.
 
 ## Components
 
@@ -36,7 +36,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 ```
 
 Server options:
-- `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
+- `--db <any|current|immutable>`: Database type to use (default: any)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
@@ -55,7 +55,7 @@ cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir 
 ```
 
 Client options:
-- `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
+- `--db <any|current|immutable>`: Database type to use (default: any)
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
@@ -117,7 +117,7 @@ curl http://localhost:9090/metrics
 4. **Sync Iteration Loop**: For each sync iteration:
    - **Database Initialization**: Client opens a new database (or reopens existing one)
    - **Connection**: Client establishes connection to server
-   - **Initial Sync Target**: Client requests server metadata to determine sync target (inactivity floor, size, and root digest)
+   - **Initial Sync Target**: Client requests server metadata to determine sync target (sync boundary, size, and root digest)
    - **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
    - **Sync Completion**: Client continues until all operations are applied and state matches server's target
    - **Database Closure**: Client closes the database to prepare for next iteration

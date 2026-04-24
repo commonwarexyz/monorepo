@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Minimal Extractable Value</title>
+    <meta name="description" content="A threshold encryption scheme is a
+cryptographic primitive that allows users to encrypt messages to a
+committee of n parties such that any t out of n members can
+non-interactively decrypt the message.">
+    <meta name="author" content="Guru Vamsi Policharla">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/bte" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/bte.png" />
+    <meta property="og:title" content="Minimal Extractable Value" />
+    <meta property="og:description" content="A threshold encryption
+scheme is a cryptographic primitive that allows users to encrypt
+messages to a committee of n parties such that any t out of n members
+can non-interactively decrypt the message." />
+    <meta property="article:author" content="Guru Vamsi Policharla" />
+    <meta property="article:published_time" content="2026-04-17T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-04-17T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/bte" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/bte" />
+    <meta property="twitter:title" content="Minimal Extractable
+Value" />
+    <meta property="twitter:description" content="A threshold encryption
+scheme is a cryptographic primitive that allows users to encrypt
+messages to a committee of n parties such that any t out of n members
+can non-interactively decrypt the message." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/bte.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/gvamsip" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Minimal Extractable Value</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/gvamsip">Guru
+Vamsi Policharla</a></div>
+                        <div class="date">April 17th, 2026</div>
+        </div>
+        <p>A threshold encryption scheme is a cryptographic primitive
+        that allows users to encrypt messages to a committee of <span
+        class="math inline">\(n\)</span> parties such that <em>any</em>
+        <span class="math inline">\(t\)</span> out of <span
+        class="math inline">\(n\)</span> members can
+        <em>non-interactively</em> decrypt the message.</p>
+        <p>A popular application of threshold encryption is encrypted
+        mempools, to protect the privacy of pending transactions. Users
+        encrypt transactions to a validator set, who wait to finalize
+        them before decryption. However, decrypting <span
+        class="math inline">\(B\)</span> ciphertexts requires <span
+        class="math inline">\(O(nB)\)</span> communication to broadcast
+        the decryption shares to the network. This can be orders of
+        magnitude larger than the block itself!</p>
+        <p><a href="https://eprint.iacr.org/2024/669"><em>Batched</em>
+        Threshold Encryption (BTE)</a> addresses this communication
+        bottleneck. It enables the committee to decrypt a <em>batch</em>
+        of <span class="math inline">\(B\)</span> ciphertexts using
+        sub-linear communication <span
+        class="math inline">\(o(nB)\)</span>. A long line of work has
+        shown that it’s in fact possible to design BTE schemes with
+        communication complexity <span
+        class="math inline">\(O(n)\)</span> which is
+        <em>independent</em> of the batch size.</p>
+        <p>Up until recently, all constructions of BTE suffered from one
+        of two issues:</p>
+        <ul>
+        <li><strong><em>Epoch restriction</em></strong>: ciphertexts
+        must be encrypted to a certain batch number (epoch). Failure to
+        be included in the chosen epoch would result in the ciphertext
+        never being decrypted.</li>
+        <li><strong><em>Censorship issues</em></strong>: users must pick
+        a <em>position</em> in the batch. This leaves transactions
+        vulnerable to censorship: an attacker can outbid a victim for a
+        conflicting position and thereby block inclusion of the victim’s
+        transaction.</li>
+        </ul>
+        <p>These issues have been addressed, with some caveats:</p>
+        <ul>
+        <li><a href="https://eprint.iacr.org/2025/2032">FPTX25</a>
+        increases the CRS size to <span
+        class="math inline">\(O(kB)\)</span> where <span
+        class="math inline">\(k\)</span> is the number of batches that
+        can be decrypted before the public key must be refreshed. The
+        setup is a simple DKG protocol and the decryption complexity is
+        <span class="math inline">\(O(B\log^2{B})\)</span>.</li>
+        <li><a href="https://eprint.iacr.org/2026/674">BNRT26</a> uses
+        partial fraction techniques to avoid the epoch restriction and
+        censorship issues but comes at the cost of a more complicated
+        setup phase which requires secure inversions in MPC and the size
+        of secret keys held by each party to grow with the batch size.
+        Although the current version of the <a
+        href="https://eprint.iacr.org/archive/2026/674/20260406:214807">paper</a>
+        describes a construction with <span
+        class="math inline">\(O(B^2)\)</span> decryption complexity, the
+        authors have communicated privately to us that they have a more
+        efficient decryption algorithm with <span
+        class="math inline">\(O(B\log{B})\)</span> complexity.</li>
+        </ul>
+        <h2 id="our-construction">Our Construction</h2>
+        <p>We now describe a simple construction of BTE where the CPA
+        ciphertext size is <span class="math inline">\(|\mathbb{G}_1| +
+        |\mathsf{msg}|\)</span>. On the BLS12-381 curve, this amounts to
+        48 bytes + <span class="math inline">\(|\mathsf{msg}|\)</span>,
+        which is only 16 bytes longer than threshold ElGamal. The
+        construction can be made CCA secure with a ZK proof, increasing
+        the ciphertext size by <span
+        class="math inline">\(2|\mathbb{F}|\)</span> (64 bytes).</p>
+        <p>Similar to <a
+        href="https://eprint.iacr.org/2026/674">BNRT26</a>, the setup
+        phase requires secure multiplications in MPC and the size of
+        secret keys held by each party grows with the batch size.
+        However, <a href="https://eprint.iacr.org/2026/674">BNRT26</a>
+        has a larger CPA ciphertext size of <span
+        class="math inline">\(2|\mathbb{G}_1| + |\mathsf{msg}|\)</span>
+        and a Schnorr-style proof for CCA security adds <span
+        class="math inline">\(3|\mathbb{F}|\)</span> bytes.</p>
+        <p>For simplicity, we first describe the CPA-secure core of the
+        construction for a single server. We then explain how to add CCA
+        security via a ZK proof and how to thresholdize the scheme.</p>
+        <ul>
+        <li><p>A trusted party runs the setup protocol and publishes the
+        encryption key together with the punctured powers-of-<span
+        class="math inline">\(\tau\)</span> values needed for
+        decryption:</p>
+        <p><span class="math display">\[
+        \mathsf{ek} := [\tau^{B+1}]_T
+        \qquad\text{and}\qquad
+        \mathsf{dk} := \left(\{h_j :=
+        [\tau^j]_2\}_{j\in[2B]\setminus\{B+1\}}\right)
+        \]</span></p></li>
+        <li><p>Encryption is then just an ElGamal-style ciphertext:</p>
+        <p><span class="math display">\[
+        \mathsf{ct} := \left([k]_1,\; m + [k\tau^{B+1}]_T\right)
+        \]</span></p></li>
+        <li><p>To decrypt a batch <span
+        class="math inline">\((\mathsf{ct}_i)_{i\in[B]}\)</span>, let
+        <span
+        class="math inline">\(\mathsf{ct}_i=(\mathsf{ct}_{i,1},\mathsf{ct}_{i,2})\)</span>.
+        It is then sufficient to publish:</p>
+        <p><span class="math display">\[
+        \mathsf{pd} := \sum_{i\in[B]} \tau^i\cdot \mathsf{ct}_{i,1}
+        = \left[\sum_{i\in[B]} k_i\tau^i\right]_1
+        \]</span></p></li>
+        <li><p>One can then decrypt the <span
+        class="math inline">\(i\)</span>-th ciphertext by computing:</p>
+        <p><span class="math display">\[
+        [k_i \tau^{B+1}]_T
+        = \mathsf{pd}\circ h_{B+1-i}
+        - \sum_{\substack{\ell\in[B]\\\ell\ne i}}
+        \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
+        \]</span></p>
+        <p><span class="math display">\[
+        m_i = \mathsf{ct}_{i,2} - [k_i \tau^{B+1}]_T
+        \]</span></p></li>
+        </ul>
+        <p><strong>CCA Security:</strong> To make the scheme CCA-secure,
+        we can augment each ciphertext with a straight-line
+        simulation-extractable NIZK proof of knowledge of <span
+        class="math inline">\(k\)</span> with <span
+        class="math inline">\(\mathsf{ct}_{i,2}\)</span> as the tag:
+        <span class="math display">\[
+        \pi_i := \left\{k \mid \mathsf{ct}_{i,1} = [k]_1 \wedge
+        \mathsf{ct}_{i,2} \right\}
+        \]</span></p>
+        <p><strong>Thresholdization:</strong> To thresholdize this
+        scheme, we secret share <span
+        class="math inline">\(\{\tau^i\}_{i\in[B]}\)</span> among the
+        <span class="math inline">\(N\)</span> servers. Concretely, let
+        server <span class="math inline">\(j\)</span> hold shares <span
+        class="math inline">\((\sigma^i_j)_{i\in[B]}\)</span> of <span
+        class="math inline">\((\tau^i)_{i\in[B]}\)</span> and return the
+        partial decryption</p>
+        <p><span class="math display">\[
+          \mathsf{pd}_j := \sum_{i\in[B]} \sigma_j^i\cdot
+        \mathsf{ct}_{i,1}
+          \]</span></p>
+        <p>Given any set <span class="math inline">\(T\)</span> of <span
+        class="math inline">\(t\)</span> valid partial decryptions, one
+        can reconstruct the aggregate value <span
+        class="math inline">\(\mathsf{pd}\)</span> in the exponent via
+        Lagrange interpolation:</p>
+        <p><span class="math display">\[
+          \mathsf{pd} = \sum_{j\in T} \lambda_j \mathsf{pd}_j
+          \]</span></p>
+        <p>where <span class="math inline">\((\lambda_j)_{j\in
+        T}\)</span> are the Lagrange coefficients for the shares indexed
+        by <span class="math inline">\(T\)</span>.</p>
+        <p>To additionally enable verification of these shares publicly,
+        we can publish <span class="math inline">\(\{v_j^i :=
+        [\sigma_j^i]_2\}_{(i,j)\in[B]\times[N]}\)</span> as part of the
+        trusted setup. Correctness of partial decryptions can then be
+        verified by checking whether</p>
+        <p><span class="math display">\[
+          \mathsf{pd}_j \circ g_2 = \sum_{i\in[B]}
+        \mathsf{ct}_{i,1}\circ v_j^i
+          \]</span></p>
+        <p>A more formal presentation can be found in the <a
+        href="https://eprint.iacr.org/2026/760">paper</a>.</p>
+        <h2 id="accelerating-decryption-via-fft">Accelerating Decryption
+        via FFT</h2>
+        <p>For the <span class="math inline">\(i\)</span>-th ciphertext,
+        decryption computes <span class="math display">\[
+        z_i = \mathsf{pd}\circ h_{B+1-i}
+        - \sum_{\substack{\ell\in[B]\\ \ell \ne i}}
+        \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
+        \]</span> The bottleneck in decryption is computing the
+        cross-term <span class="math display">\[
+        C_i := \sum_{\substack{\ell\in[B]\\ \ell \ne i}}
+        \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
+        \]</span> If we compute each <span
+        class="math inline">\(C_i\)</span> independently, then we end up
+        doing <span class="math inline">\(\Theta(B^2)\)</span> pairings
+        overall.</p>
+        <p>The key observation is that this sum has a convolution
+        structure and a Fourier Transform can be used to speed up
+        decryption. Concretely, we form a zero-padded length-<span
+        class="math inline">\(2B\)</span> sequence <span
+        class="math inline">\((a_i)_{i\in[2B]}\)</span> <span
+        class="math display">\[
+        a_i :=
+        \begin{cases}
+        \mathsf{ct}_{i,1} &amp; \text{for } i\in[B],\\
+        0 &amp; \text{for } i\in\{B+1,\ldots,2B\},
+        \end{cases}
+        \]</span> and a length-<span class="math inline">\(2B\)</span>
+        sequence <span class="math inline">\((b_d)_{d=-B}^{B-1}\)</span>
+        <span class="math display">\[
+        b_d :=
+        \begin{cases}
+        h_{B+1+d} &amp; \text{for }
+        d\in\{-(B-1),\ldots,-1,1,\ldots,B-1\},\\
+        0 &amp; \text{for } d\in\{-B,0\}.
+        \end{cases}
+        \]</span></p>
+        <p>Then:</p>
+        <ol type="1">
+        <li>Take an FFT of the <span
+        class="math inline">\(\mathbb{G}_1\)</span> sequence.</li>
+        <li>Take an FFT of the <span
+        class="math inline">\(\mathbb{G}_2\)</span> sequence (this can
+        be preprocessed, since it depends only on the public parameters
+        and not on the ciphertexts).</li>
+        <li>Pair the transformed values pointwise.</li>
+        <li>Apply the inverse FFT in <span
+        class="math inline">\(\mathbb{G}_T\)</span>.</li>
+        </ol>
+        <p>This computes all of the cross-terms <span
+        class="math inline">\(C_i\)</span> using <span
+        class="math inline">\(O(B\log{B})\)</span> group operations and
+        <span class="math inline">\(O(B)\)</span> pairings.</p>
+        <h2 id="evaluation-and-discussion">Evaluation and
+        Discussion</h2>
+        <p>We implemented a prototype of the construction in Rust and
+        benchmarked the FFT-accelerated decryption on an M5 MacBook Pro
+        in single-threaded mode (available <a
+        href="https://github.com/commonwarexyz/simple-bte">here</a>).</p>
+        <div data-align="center">
+        <table>
+        <colgroup>
+        <col style="width: 34%" />
+        <col style="width: 12%" />
+        <col style="width: 29%" />
+        <col style="width: 23%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: center;">Batch size <span
+        class="math inline">\(B\)</span></th>
+        <th style="text-align: center;">Ours</th>
+        <th style="text-align: center;"><a
+        href="https://eprint.iacr.org/2025/2032">FPTX25</a></th>
+        <th style="text-align: center;"><a
+        href="https://eprint.iacr.org/2025/2115">ABD+25</a></th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">32</td>
+        <td style="text-align: center;">121.50 ms</td>
+        <td style="text-align: center;">100.7 ms</td>
+        <td style="text-align: center;">301 ms</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">128</td>
+        <td style="text-align: center;">593.63 ms</td>
+        <td style="text-align: center;">638.4 ms</td>
+        <td style="text-align: center;">1.4 s</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">512</td>
+        <td style="text-align: center;">2.80 s</td>
+        <td style="text-align: center;">5.39 s</td>
+        <td style="text-align: center;">6.6 s</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">2048</td>
+        <td style="text-align: center;">12.91 s</td>
+        <td style="text-align: center;">46.2 s</td>
+        <td style="text-align: center;">28.4 s</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p><em><a href="https://eprint.iacr.org/2026/674">BNRT26</a>
+        does not yet have a public implementation to compare against. We
+        expect decryption to scale well with parallelization but have
+        not yet implemented or benchmarked such an
+        implementation.</em></p>
+        <p><strong>Pipelined decryption.</strong> Observe that the
+        cross-term <span class="math inline">\(C_i\)</span> depends only
+        on the ciphertexts and public parameters – it does <em>not</em>
+        depend on the combined partial decryption <span
+        class="math inline">\(\mathsf{pd}\)</span>. This means the bulk
+        of the FFT work (the three FFTs and <span
+        class="math inline">\(2B\)</span> pairings) can be
+        <em>pipelined</em> as soon as the batch of ciphertexts is known,
+        without waiting for any partial decryptions. All that remains is
+        a lightweight finalization phase (<span
+        class="math inline">\(B\)</span> pairings + <span
+        class="math inline">\(B\)</span> group operations). We
+        benchmarked the split and found that at <span
+        class="math inline">\(B = 2048\)</span>, the finalization phase
+        only takes 1.05 s out of 12.91 s total.</p>
+        <div data-align="center">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Phase</th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        32\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        128\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        512\)</span></th>
+        <th style="text-align: center;"><span class="math inline">\(B =
+        2048\)</span></th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;">Pre-decrypt (ms)</td>
+        <td style="text-align: center;">105.31</td>
+        <td style="text-align: center;">528.25</td>
+        <td style="text-align: center;">2542.16</td>
+        <td style="text-align: center;">11864.87</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Finalize (ms)</td>
+        <td style="text-align: center;">16.19</td>
+        <td style="text-align: center;">65.38</td>
+        <td style="text-align: center;">262.41</td>
+        <td style="text-align: center;">1048.68</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p>Chop down the <a
+        href="https://www.paradigm.xyz/2020/08/ethereum-is-a-dark-forest">Dark
+        Forest</a>.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>

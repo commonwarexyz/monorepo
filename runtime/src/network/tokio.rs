@@ -16,14 +16,37 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
+impl Sink {
+    async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
+        self.sink
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+
+    async fn send_vectored(&mut self, bufs: &mut IoBufs) -> Result<(), Error> {
+        self.sink
+            .write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+}
+
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let write_timeout = self.write_timeout;
+        let bufs = bufs.into();
+        let send = async {
+            match bufs.try_into_single() {
+                Ok(buf) => self.send_single(buf.as_ref()).await,
+                Err(mut bufs) => self.send_vectored(&mut bufs).await,
+            }
+        };
+
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf.into()))
+        timeout(write_timeout, send)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
-        Ok(())
     }
 }
 
@@ -84,9 +107,9 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.cfg.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.cfg.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
@@ -123,18 +146,23 @@ pub struct Config {
     /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
     /// consider disabling it to send the packets as soon as possible to reduce latency.
     tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
-    so_linger: Option<Duration>,
-    /// Read timeout for connections, after which the connection will be closed
+    zero_linger: bool,
+    /// Read timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Stream::recv` call, not each underlying socket
+    /// read attempt.
     read_timeout: Duration,
-    /// Write timeout for connections, after which the connection will be closed
+    /// Write timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Sink::send` call, not each underlying socket
+    /// write attempt. If callers batch more bytes into one send, slow links may
+    /// require a larger timeout.
     write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
@@ -152,8 +180,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_so_linger(mut self, so_linger: Option<Duration>) -> Self {
-        self.so_linger = so_linger;
+    pub const fn with_zero_linger(mut self, zero_linger: bool) -> Self {
+        self.zero_linger = zero_linger;
         self
     }
     /// See [Config]
@@ -178,8 +206,8 @@ impl Config {
         self.tcp_nodelay
     }
     /// See [Config]
-    pub const fn so_linger(&self) -> Option<Duration> {
-        self.so_linger
+    pub const fn zero_linger(&self) -> bool {
+        self.zero_linger
     }
     /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
@@ -198,10 +226,10 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            tcp_nodelay: None,
-            so_linger: None,
+            tcp_nodelay: Some(true),
+            zero_linger: true,
             read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024, // 64 KB
         }
     }
@@ -251,9 +279,9 @@ impl crate::Network for Network {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.cfg.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.cfg.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }

@@ -160,11 +160,11 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, crate::Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
-        unsafe { buf.set_len(len) };
+        unsafe { bufs.set_len(len) };
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -176,16 +176,16 @@ impl crate::Blob for Blob {
         if offset + len > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.copy_from_slice(&content[offset..offset + len]);
-        Ok(buf)
+        bufs.copy_from_slice(&content[offset..offset + len]);
+        Ok(bufs)
     }
 
     async fn write_at(
         &self,
         offset: u64,
-        buf: impl Into<IoBufs> + Send,
+        bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        let buf = buf.into().coalesce();
+        let buf = bufs.into().coalesce();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;

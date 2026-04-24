@@ -105,7 +105,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
         resolver: &mut impl Resolver<Key = U64>,
     ) {
         if success {
-            // Certification passed - set floor to notarization if we have it
+            // Certification passed - set floor to notarization if we have it.
+            //
+            // This may occur before or after a nullification for the same view (and should always be favored).
+            // Finalization remains the stronger proof and can later supersede this floor at the same or higher view.
             if let Some(notarization) = self.notarizations.remove(&view) {
                 if view > self.floor_view() {
                     self.floor = Some(Certificate::Notarization(notarization));

@@ -9,10 +9,11 @@ use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, Sha256, Signer,
+    Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -43,13 +44,6 @@ impl Digestible for FuzzMessage {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
         Sha256::hash(&self.encode())
-    }
-}
-
-impl Committable for FuzzMessage {
-    type Commitment = commonware_cryptography::sha256::Digest;
-    fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.commitment)
     }
 }
 
@@ -87,15 +81,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        sender: Option<usize>,
-        commitment: [u8; 32],
-        digest: Option<[u8; 32]>,
+        digest: Digest,
     },
     Get {
         peer_index: usize,
-        sender: Option<usize>,
-        commitment: [u8; 32],
-        digest: Option<[u8; 32]>,
+        digest: Digest,
     },
     Sleep {
         duration_ms: u64,
@@ -113,14 +103,10 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
             }),
             1 => Ok(BroadcastAction::Subscribe {
                 peer_index: u.arbitrary()?,
-                sender: u.arbitrary()?,
-                commitment: u.arbitrary()?,
                 digest: u.arbitrary()?,
             }),
             2 => Ok(BroadcastAction::Get {
                 peer_index: u.arbitrary()?,
-                sender: u.arbitrary()?,
-                commitment: u.arbitrary()?,
                 digest: u.arbitrary()?,
             }),
             _ => Ok(BroadcastAction::Sleep {
@@ -187,26 +173,30 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
+        // Generate peer identities before building the network so the initial
+        // peer set can be seeded through the constructor.
+        let peers = input
+            .peer_seeds
+            .iter()
+            .map(|&seed| PrivateKey::from_seed(seed).public_key())
+            .collect::<Vec<_>>();
+
         // Create network
-        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
+        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
-        );
+            peers.clone(),
+        )
+        .await;
         network.start();
 
         // Create peers
-        let mut peers = Vec::new();
         let mut mailboxes: BTreeMap<PublicKey, Mailbox<PublicKey, FuzzMessage>> = BTreeMap::new();
-        for (i, &seed) in input.peer_seeds.iter().enumerate() {
-            // Create peer
-            let crypto = PrivateKey::from_seed(seed);
-            let public_key = crypto.public_key();
-            peers.push(public_key.clone());
-
+        for (i, public_key) in peers.iter().cloned().enumerate() {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
@@ -221,12 +211,13 @@ fn fuzz(input: FuzzInput) {
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
             };
 
             // Create engine
             let engine_context = context.with_label("peer").with_attribute("index", i);
             let (engine, mailbox) =
-                Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
+                Engine::<_, PublicKey, FuzzMessage, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
             engine.start((sender, receiver));
         }
@@ -256,51 +247,25 @@ fn fuzz(input: FuzzInput) {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
                         drop(mailbox.broadcast(resolved_recipients, message).await);
                     }
                 }
-                BroadcastAction::Subscribe {
-                    peer_index,
-                    sender,
-                    commitment,
-                    digest,
-                } => {
+                BroadcastAction::Subscribe { peer_index, digest } => {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        let sender_key = sender.map(|sender_idx| {
-                            let clamped_sender_idx = sender_idx % peers.len();
-                            peers[clamped_sender_idx].clone()
-                        });
-                        drop(
-                            mailbox
-                                .subscribe(sender_key, commitment.into(), digest.map(|d| d.into()))
-                                .await,
-                        );
+                        drop(mailbox.subscribe(digest).await);
                     }
                 }
-                BroadcastAction::Get {
-                    peer_index,
-                    sender,
-                    commitment,
-                    digest,
-                } => {
+                BroadcastAction::Get { peer_index, digest } => {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        let sender_key = sender.map(|sender_idx| {
-                            let clamped_sender_idx = sender_idx % peers.len();
-                            peers[clamped_sender_idx].clone()
-                        });
-                        drop(
-                            mailbox
-                                .get(sender_key, commitment.into(), digest.map(|d| d.into()))
-                                .await,
-                        );
+                        drop(mailbox.get(digest).await);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {

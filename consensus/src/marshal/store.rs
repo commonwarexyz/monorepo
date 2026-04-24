@@ -1,7 +1,7 @@
-//! Interface for a store of finalized blocks, used by [Actor](super::Actor).
+//! Interfaces for stores of finalized certificates and blocks.
 
 use crate::{simplex::types::Finalization, types::Height, Block};
-use commonware_cryptography::{certificate::Scheme, Committable, Digest};
+use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
@@ -9,9 +9,12 @@ use commonware_storage::{
 };
 use std::{error::Error, future::Future};
 
-/// Durable store for [Finalizations](Finalization) keyed by height and commitment.
+/// Durable store for [Finalizations](Finalization) keyed by height and block digest.
 pub trait Certificates: Send + Sync + 'static {
-    /// The type of commitment included in consensus certificates.
+    /// The type of [Digest] used for block digests.
+    type BlockDigest: Digest;
+
+    /// The type of [Digest] included in consensus certificates.
     type Commitment: Digest;
 
     /// The type of signing [Scheme] used by consensus.
@@ -20,7 +23,7 @@ pub trait Certificates: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
 
-    /// Buffer a finalization certificate for storage, keyed by height and commitment.
+    /// Buffer a finalization certificate for storage, keyed by height and block digest.
     ///
     /// The write is not durable until [sync](Self::sync) is called.
     ///
@@ -29,8 +32,8 @@ pub trait Certificates: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `height`: The application height for this finalization.
-    /// * `commitment`: The block commitment for this finalization.
+    /// * `height`: The application height associated with the finalization.
+    /// * `digest`: The block digest associated with the finalization.
     /// * `finalization`: The finalization certificate to store.
     ///
     /// # Returns
@@ -39,21 +42,21 @@ pub trait Certificates: Send + Sync + 'static {
     fn put(
         &mut self,
         height: Height,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a [Finalization] by height or commitment.
+    /// Retrieve a [Finalization] by height or corresponding block digest.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the application height or
-    /// its commitment.
+    /// its corresponding block digest.
     ///
     /// # Arguments
     ///
-    /// * `id`: The finalization identifier (height or commitment) to fetch.
+    /// * `id`: The finalization identifier (height or digest) to fetch.
     ///
     /// # Returns
     ///
@@ -61,7 +64,7 @@ pub trait Certificates: Send + Sync + 'static {
     #[allow(clippy::type_complexity)]
     fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> impl Future<
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
@@ -82,9 +85,12 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
+
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
 }
 
-/// Durable store for finalized [Blocks](Block) keyed by height and commitment.
+/// Durable store for finalized [Blocks](Block) keyed by height and block digest.
 pub trait Blocks: Send + Sync + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;
@@ -92,32 +98,36 @@ pub trait Blocks: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
 
-    /// Buffer a finalized block for storage, keyed by height and commitment.
+    /// Buffer a finalized block for storage, keyed by height and block digest.
     ///
     /// The write is not durable until [sync](Self::sync) is called.
     ///
     /// Implementations must ignore overwrites for an existing block at the same
     /// height or commitment.
+    ///
+    /// # Arguments
+    ///
+    /// * `block`: The finalized block, which provides its `height()` and `digest()`.
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a finalized block by height or commitment.
+    /// Retrieve a finalized block by height or block digest.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the block height or
-    /// its commitment.
+    /// its block digest.
     ///
     /// # Arguments
     ///
-    /// * `id`: The block identifier (height or commitment) to fetch.
+    /// * `id`: The block identifier (height or digest) to fetch.
     ///
     /// # Returns
     ///
     /// `Ok(Some(block))` if present, `Ok(None)` if missing, or `Err` on read failure.
     fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
@@ -170,14 +180,22 @@ pub trait Blocks: Send + Sync + 'static {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+
+    /// Retrieve the last (highest) index in the store.
+    ///
+    /// # Returns
+    /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.
+    fn last_index(&self) -> Option<Height>;
 }
 
-impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
+impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
 where
     E: BufferPooler + Storage + Metrics + Clock,
+    B: Digest,
     C: Digest,
     S: Scheme,
 {
+    type BlockDigest = B;
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
@@ -185,10 +203,10 @@ where
     async fn put(
         &mut self,
         height: Height,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        Archive::put(self, height.get(), commitment, finalization).await
+        Archive::put(self, height.get(), digest, finalization).await
     }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
@@ -197,7 +215,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -210,9 +228,14 @@ where
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
     }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
-impl<E, B> Blocks for immutable::Archive<E, B::Commitment, B>
+impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
 where
     E: BufferPooler + Storage + Metrics + Clock,
     B: Block,
@@ -221,7 +244,7 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        Archive::put(self, block.height().get(), block.commitment(), block).await
+        Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
@@ -230,7 +253,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -251,15 +274,21 @@ where
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
     }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
+    }
 }
 
-impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
+impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
 where
     T: Translator,
     E: BufferPooler + Storage + Metrics + Clock,
+    B: Digest,
     C: Digest,
     S: Scheme,
 {
+    type BlockDigest = B;
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
@@ -267,10 +296,10 @@ where
     async fn put(
         &mut self,
         height: Height,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        Archive::put(self, height.get(), commitment, finalization).await
+        Archive::put(self, height.get(), digest, finalization).await
     }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
@@ -279,7 +308,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -291,9 +320,14 @@ where
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
     }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        <Self as Archive>::ranges_from(self, from.get())
+            .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
-impl<T, E, B> Blocks for prunable::Archive<T, E, B::Commitment, B>
+impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
 where
     T: Translator,
     E: BufferPooler + Storage + Metrics + Clock,
@@ -303,7 +337,7 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        Archive::put(self, block.height().get(), block.commitment(), block).await
+        Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
@@ -312,7 +346,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -331,5 +365,9 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }

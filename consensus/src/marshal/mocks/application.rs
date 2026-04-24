@@ -1,5 +1,9 @@
 use crate::{marshal::Update, types::Height, Block, Reporter};
-use commonware_utils::{acknowledgement::Exact, sync::Mutex, Acknowledgement};
+use commonware_utils::{
+    acknowledgement::Exact,
+    sync::{Mutex, Notify},
+    Acknowledgement,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -10,8 +14,9 @@ use std::{
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<Height, B>>>,
     #[allow(clippy::type_complexity)]
-    tip: Arc<Mutex<Option<(Height, B::Commitment)>>>,
+    tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
+    notify: Arc<Notify>,
     auto_ack: bool,
 }
 
@@ -21,6 +26,7 @@ impl<B: Block> Default for Application<B> {
             blocks: Default::default(),
             tip: Default::default(),
             pending_acks: Default::default(),
+            notify: Arc::new(Notify::new()),
             auto_ack: true,
         }
     }
@@ -41,7 +47,7 @@ impl<B: Block> Application<B> {
     }
 
     /// Returns the tip.
-    pub fn tip(&self) -> Option<(Height, B::Commitment)> {
+    pub fn tip(&self) -> Option<(Height, B::Digest)> {
         *self.tip.lock()
     }
 
@@ -60,6 +66,16 @@ impl<B: Block> Application<B> {
         ack.acknowledge();
         Some(height)
     }
+
+    /// Waits for the next block to be dispatched, acknowledges it, and returns its height.
+    pub async fn acknowledged(&self) -> Height {
+        loop {
+            if let Some(height) = self.acknowledge_next() {
+                return height;
+            }
+            self.notify.notified().await;
+        }
+    }
 }
 
 impl<B: Block> Reporter for Application<B> {
@@ -74,10 +90,11 @@ impl<B: Block> Reporter for Application<B> {
                     ack_tx.acknowledge();
                 } else {
                     self.pending_acks.lock().push_back((height, ack_tx));
+                    self.notify.notify_one();
                 }
             }
-            Update::Tip(_, height, commitment) => {
-                *self.tip.lock() = Some((height, commitment));
+            Update::Tip(_, height, digest) => {
+                *self.tip.lock() = Some((height, digest));
             }
         }
     }

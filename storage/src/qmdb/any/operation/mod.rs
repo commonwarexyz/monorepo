@@ -1,35 +1,54 @@
 use crate::{
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::{any::value::ValueEncoding, operation::Committable},
 };
-use commonware_codec::{Codec, Encode as _};
-use commonware_utils::{hex, Array};
+use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_runtime::{Buf, BufMut};
+use commonware_utils::hex;
 use std::fmt;
 
 pub(crate) mod fixed;
 pub(crate) mod update;
 pub(crate) mod variable;
-pub(crate) use update::Update;
+pub use update::Update;
 
-const DELETE_CONTEXT: u8 = 0xD1;
-const UPDATE_CONTEXT: u8 = 0xD2;
-const COMMIT_CONTEXT: u8 = 0xD3;
+pub(crate) const DELETE_CONTEXT: u8 = 0xD1;
+pub(crate) const UPDATE_CONTEXT: u8 = 0xD2;
+pub(crate) const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
-pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
+pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
+pub type Unordered<F, K, V> = Operation<F, update::Unordered<K, V>>;
+
+/// Delegates Operation-level codec (Write, Read) to the value encoding.
+///
+/// Fixed and variable encodings have different wire formats. Fixed pads to a uniform size,
+/// variable does not. A single blanket `impl Write for Operation<F, S>` dispatches here, while the
+/// two impls of this trait (on FixedEncoding and VariableEncoding) live on different Self types
+/// and therefore do not overlap.
+pub trait OperationCodec<F: Family, S: Update<ValueEncoding = Self>>:
+    ValueEncoding + Sized
+{
+    type ReadCfg: Clone + Send + Sync + 'static;
+
+    fn write_operation(op: &Operation<F, S>, buf: &mut impl BufMut);
+    fn read_operation(
+        buf: &mut impl Buf,
+        cfg: &Self::ReadCfg,
+    ) -> Result<Operation<F, S>, CodecError>;
+}
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
-    Delete(K),
+pub enum Operation<F: Family, S: Update> {
+    Delete(S::Key),
     Update(S),
-    CommitFloor(Option<V::Value>, Location),
+    CommitFloor(Option<S::Value>, Location<F>),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
+impl<F: Family, S: Update> arbitrary::Arbitrary<'_> for Operation<F, S>
 where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    S::Key: for<'a> arbitrary::Arbitrary<'a>,
+    S::Value: for<'a> arbitrary::Arbitrary<'a>,
     S: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -43,14 +62,8 @@ where
     }
 }
 
-impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
-where
-    K: Array,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
-{
-    type Key = K;
+impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F, S> {
+    type Key = S::Key;
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
@@ -68,7 +81,7 @@ where
         matches!(self, Self::Delete(_))
     }
 
-    fn has_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<Location<F>> {
         match self {
             Self::CommitFloor(_, loc) => Some(*loc),
             _ => None,
@@ -76,27 +89,38 @@ where
     }
 }
 
-impl<K, V, S> Committable for Operation<K, V, S>
-where
-    K: Array,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
-{
+impl<F: Family, S: Update> Committable for Operation<F, S> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
+// Blanket Write via delegation.
+impl<F: Family, S: Update> Write for Operation<F, S>
 where
-    K: Array + fmt::Display,
-    V: ValueEncoding,
-    V::Value: Codec,
+    S::ValueEncoding: OperationCodec<F, S>,
 {
+    fn write(&self, buf: &mut impl BufMut) {
+        S::ValueEncoding::write_operation(self, buf)
+    }
+}
+
+// Blanket Read via delegation.
+impl<F: Family, S: Update> Read for Operation<F, S>
+where
+    S::ValueEncoding: OperationCodec<F, S>,
+{
+    type Cfg = <S::ValueEncoding as OperationCodec<F, S>>::ReadCfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        S::ValueEncoding::read_operation(buf, cfg)
+    }
+}
+
+impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
             Self::Update(payload) => payload.fmt(f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
@@ -120,6 +144,8 @@ mod tests {
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
 
+    type F = crate::merkle::mmr::Family;
+
     fn roundtrip<T>(value: &T, cfg: &<T as Read>::Cfg)
     where
         T: Codec + PartialEq + std::fmt::Debug,
@@ -135,7 +161,7 @@ mod tests {
     fn ordered_fixed_roundtrip() {
         type K = FixedBytes<4>;
         type V = u64;
-        type Op = Ordered<K, FixedEncoding<V>>;
+        type Op = Ordered<F, K, FixedEncoding<V>>;
 
         let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
         let update = Op::Update(update::Ordered {
@@ -143,8 +169,8 @@ mod tests {
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
         });
-        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
+        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new(5));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(7));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -156,11 +182,11 @@ mod tests {
     fn unordered_fixed_roundtrip() {
         type K = FixedBytes<4>;
         type V = u64;
-        type Op = Unordered<K, FixedEncoding<V>>;
+        type Op = Unordered<F, K, FixedEncoding<V>>;
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
         let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
-        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
+        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new(3));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -171,8 +197,8 @@ mod tests {
     fn ordered_variable_roundtrip() {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
-        type Op = Ordered<K, VariableEncoding<V>>;
-        let cfg = (RangeCfg::from(..), ());
+        type Op = Ordered<F, K, VariableEncoding<V>>;
+        let cfg = ((), (RangeCfg::from(..), ()));
 
         let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
         let update = Op::Update(update::Ordered {
@@ -180,9 +206,8 @@ mod tests {
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
         });
-        let commit_some =
-            Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));
+        let commit_some = Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new(9));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(10));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -194,15 +219,15 @@ mod tests {
     fn unordered_variable_roundtrip() {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
-        type Op = Unordered<K, VariableEncoding<V>>;
-        let cfg = (RangeCfg::from(..), ());
+        type Op = Unordered<F, K, VariableEncoding<V>>;
+        let cfg = ((), (RangeCfg::from(..), ()));
 
         let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
         let update = Op::Update(update::Unordered(
             FixedBytes::from([5, 5, 5, 5]),
             vec![7, 7, 7, 7],
         ));
-        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12));
+        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new(12));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -212,17 +237,24 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::qmdb::any::{
-            ordered::Operation as OrderedOperation, unordered::Operation as UnorderedOperation,
+        use crate::{
+            merkle::{mmb, mmr},
+            qmdb::any::{
+                ordered::Operation as OrderedOperation, unordered::Operation as UnorderedOperation,
+            },
         };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OrderedOperation<U64, FixedEncoding<U64>>>,
-            CodecConformance<OrderedOperation<U64, VariableEncoding<Vec<u8>>>>,
-            CodecConformance<UnorderedOperation<U64, FixedEncoding<U64>>>,
-            CodecConformance<UnorderedOperation<U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<OrderedOperation<mmr::Family, U64, FixedEncoding<U64>>>,
+            CodecConformance<OrderedOperation<mmr::Family, U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<UnorderedOperation<mmr::Family, U64, FixedEncoding<U64>>>,
+            CodecConformance<UnorderedOperation<mmr::Family, U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<OrderedOperation<mmb::Family, U64, FixedEncoding<U64>>>,
+            CodecConformance<OrderedOperation<mmb::Family, U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<UnorderedOperation<mmb::Family, U64, FixedEncoding<U64>>>,
+            CodecConformance<UnorderedOperation<mmb::Family, U64, VariableEncoding<Vec<u8>>>>,
         }
     }
 }

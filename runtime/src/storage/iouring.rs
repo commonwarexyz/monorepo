@@ -3,14 +3,13 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop
-//! running in another thread. Operation results are returned via a [commonware_utils::channel::oneshot] channel.
+//! I/O operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
+//! dedicated event loop running in another thread.
 //!
 //! ## Memory Safety
 //!
-//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
-//! Therefore, we ensure that the memory location is valid for the duration of the operation.
-//! That is, it doesn't move or go out of scope until the operation completes.
+//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
+//! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
 //! ## Feature Flag
 //!
@@ -19,25 +18,20 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
+//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd},
-    BufferPool, Error, IoBufs, IoBufsMut,
+    iouring::{self},
+    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    from_hex, hex,
-};
-use futures::executor::block_on;
-use io_uring::{opcode, types};
+use commonware_utils::{from_hex, hex};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -61,41 +55,48 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
-#[derive(Clone, Debug)]
 /// Configuration for a [Storage].
+#[derive(Clone, Debug)]
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Stack size for the dedicated io_uring worker thread.
+    pub thread_stack_size: usize,
 }
 
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_handle: iouring::Handle,
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
-
-        let storage = Self {
-            storage_directory: cfg.storage_directory.clone(),
-            io_sender,
-            pool,
-        };
-        let metrics = Arc::new(iouring::Metrics::new(registry));
+    pub fn start(cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
+        let Config {
+            storage_directory,
+            mut iouring_config,
+            thread_stack_size,
+        } = cfg;
 
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
-        cfg.iouring_config.single_issuer = true;
+        iouring_config.single_issuer = true;
 
-        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, receiver)));
+        let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
+
+        let storage = Self {
+            storage_directory,
+            io_handle,
+            pool,
+        };
+
+        utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
         storage
     }
 }
@@ -173,7 +174,7 @@ impl crate::Storage for Storage {
             partition.into(),
             name,
             file,
-            self.io_sender.clone(),
+            self.io_handle.clone(),
             self.pool.clone(),
         );
         Ok((blob, logical_len, blob_version))
@@ -234,7 +235,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_handle: iouring::Handle,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -245,25 +246,26 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             file: self.file.clone(),
-            io_sender: self.io_sender.clone(),
+            io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
         }
     }
 }
 
 impl Blob {
+    /// Construct a blob handle around an already-open file and shared io_uring loop.
     fn new(
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<iouring::Op>,
+        io_handle: iouring::Handle,
         pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
-            io_sender,
+            io_handle,
             pool,
         }
     }
@@ -278,145 +280,59 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut input_buf = buf.into();
+        let mut input_bufs = bufs.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
-        unsafe { input_buf.set_len(len) };
+        unsafe { input_bufs.set_len(len) };
 
         // For single buffers, read directly into them (zero-copy).
-        // For chunked buffers, use a temporary and copy to preserve the input structure.
-        let (mut io_buf, original_bufs) = match input_buf {
-            IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => {
-                // SAFETY: `len` bytes are filled via io_uring read loop below.
-                let tmp = unsafe { self.pool.alloc_len(len) };
-                (tmp, Some(bufs))
-            }
+        // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
+        let (io_buf, original_bufs) = if input_bufs.is_single() {
+            (input_bufs.coalesce(), None)
+        } else {
+            // SAFETY: `len` bytes are filled via io_uring read loop below.
+            let tmp = unsafe { self.pool.alloc_len(len) };
+            (tmp, Some(input_bufs))
         };
 
-        let fd = types::Fd(self.file.as_raw_fd());
-        let mut bytes_read = 0;
-        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_read < len {
-            // Figure out how much is left to read and where to read into.
-            //
-            // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
-            // `bytes_read` is always < `len` due to the loop condition, so
-            // `add(bytes_read)` stays within bounds and `len - bytes_read`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
-            let remaining_len = len - bytes_read;
-            let offset = offset + bytes_read as u64;
 
-            // Create an operation to do the read
-            let op = opcode::Read::new(fd, ptr, remaining_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            io_sender
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Read(io_buf)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                })
-                .await
-                .map_err(|_| Error::ReadFailed)?;
-
-            // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            io_buf = match got_buf {
-                Some(OpBuffer::Read(b)) => b,
-                _ => return Err(Error::ReadFailed),
-            };
-            if should_retry(result) {
-                continue;
-            }
-
-            // A non-positive return value indicates an error.
-            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
-            if op_bytes_read == 0 {
-                // A return value of 0 indicates EOF, which shouldn't happen because we
-                // aren't done reading into `buf`. See `man pread`.
-                return Err(Error::BlobInsufficientLength);
-            }
-            bytes_read += op_bytes_read;
+        // Zero-length reads succeed trivially without submitting to the ring.
+        if len == 0 {
+            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
-        // Return the same buffer structure as input
+        let io_buf = self
+            .io_handle
+            .read_at(self.file.clone(), offset, len, io_buf)
+            .await
+            .map_err(|(_, err)| err)?;
+
         match original_bufs {
-            None => Ok(IoBufsMut::Single(io_buf)),
-            Some(bufs) => {
-                // Copy from temporary buffer to the original chunked buffers
-                let mut result = IoBufsMut::Chunked(bufs);
-                result.copy_from_slice(io_buf.as_ref());
-                Ok(result)
+            None => Ok(io_buf.into()),
+            Some(mut bufs) => {
+                bufs.copy_from_slice(io_buf.as_ref());
+                Ok(bufs)
             }
         }
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        // Convert to contiguous IoBuf for io_uring write
-        // (zero-copy if single buffer, copies if multiple)
-        let mut buf = buf.into().coalesce();
-        let fd = types::Fd(self.file.as_raw_fd());
-        let mut bytes_written = 0;
-        let buf_len = buf.len();
-        let io_sender = self.io_sender.clone();
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let bufs = bufs.into();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_written < buf_len {
-            // Figure out how much is left to write and where to write from.
-            //
-            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
-            // `bytes_written` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
-            let remaining_len = buf_len - bytes_written;
-            let offset = offset + bytes_written as u64;
 
-            // Create an operation to do the write
-            let op = opcode::Write::new(fd, ptr, remaining_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            io_sender
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Write(buf)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-
-            // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = match got_buf {
-                Some(OpBuffer::Write(b)) => b,
-                _ => return Err(Error::WriteFailed),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // A negative return value indicates an error.
-            let op_bytes_written: usize =
-                return_value.try_into().map_err(|_| Error::WriteFailed)?;
-
-            bytes_written += op_bytes_written;
+        if !bufs.has_remaining() {
+            return Ok(());
         }
-        Ok(())
+
+        self.io_handle
+            .write_at(self.file.clone(), offset, bufs)
+            .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -430,52 +346,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        loop {
-            // Create an operation to do the sync
-            let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            self.io_sender
-                .clone()
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: None,
-                    fd: Some(OpFd::File(self.file.clone())),
-                })
-                .await
-                .map_err(|_| {
-                    Error::BlobSyncFailed(
-                        self.partition.clone(),
-                        hex(&self.name),
-                        IoError::other("failed to send work"),
-                    )
-                })?;
-
-            // Wait for the result
-            let (return_value, _) = receiver.await.map_err(|_| {
-                Error::BlobSyncFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other("failed to read result"),
-                )
-            })?;
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // If the return value is negative, it indicates an error.
-            if return_value < 0 {
-                return Err(Error::BlobSyncFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other(format!("error code: {return_value}")),
-                ));
-            }
-
-            return Ok(());
-        }
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
@@ -483,22 +357,36 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, Blob, BufferPool, BufferPoolConfig, Storage as _,
+        storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig,
+        IoBuf, IoBufMut, Storage as _,
     };
-    use rand::{Rng as _, SeedableRng as _};
-    use std::env;
+    use std::{
+        env,
+        ffi::OsString,
+        os::{
+            fd::{FromRawFd, IntoRawFd},
+            unix::{ffi::OsStringExt, net::UnixStream},
+        },
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
-    // Helper for creating test storage
+    static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    /// Build a fresh storage instance rooted in a unique temporary directory.
     fn create_test_storage() -> (Storage, PathBuf) {
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        let storage_directory =
-            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
+        let storage_directory = env::temp_dir().join(format!(
+            "commonware_iouring_storage_{}_{}",
+            std::process::id(),
+            NEXT_STORAGE_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&storage_directory);
 
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
+                thread_stack_size: thread::system_thread_stack_size(),
             },
             &mut Registry::default(),
             pool,
@@ -506,8 +394,21 @@ mod tests {
         (storage, storage_directory)
     }
 
+    /// Build a fresh temporary directory without starting a storage loop.
+    fn create_test_directory() -> PathBuf {
+        let storage_directory = env::temp_dir().join(format!(
+            "commonware_iouring_storage_{}_{}",
+            std::process::id(),
+            NEXT_STORAGE_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        std::fs::create_dir_all(&storage_directory).unwrap();
+        storage_directory
+    }
+
     #[tokio::test]
     async fn test_iouring_storage() {
+        // Verify the io_uring storage backend satisfies the shared storage trait suite.
         let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
@@ -515,6 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
+        // Verify header creation, logical offsets, resize, reopen, and corruption recovery.
         let (storage, storage_directory) = create_test_storage();
 
         // Test 1: New blob returns logical size 0 and correct application version
@@ -609,6 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_magic_mismatch() {
+        // Verify opening a blob with an invalid runtime header fails as corrupt.
         let (storage, storage_directory) = create_test_storage();
 
         // Create the partition directory
@@ -620,10 +523,426 @@ mod tests {
         std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
 
         // Opening should fail with corrupt error
-        let result = storage.open("partition", b"bad_magic").await;
-        assert!(
-            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
+        let err = storage
+            .open("partition", b"bad_magic")
+            .await
+            .err()
+            .expect("bad magic should fail");
+        assert!(err
+            .to_string()
+            .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_vectored_write_partial_progress() {
+        // Verify multi-buffer writes survive partial progress and preserve byte order.
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, _) = storage.open("partition", b"vectest").await.unwrap();
+        blob.resize(200).await.unwrap();
+
+        // Write multiple buffers in one vectored call.
+        let mut bufs = crate::IoBufs::default();
+        bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
+        bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
+        blob.write_at(0, bufs).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Read back and verify.
+        let data = blob.read_at(0, 160).await.unwrap().coalesce();
+        assert_eq!(&data.as_ref()[..80], &[0xAAu8; 80]);
+        assert_eq!(&data.as_ref()[80..], &[0xBBu8; 80]);
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_read_at_reports_eof_when_blob_is_too_short() {
+        // Verify read-at returns `BlobInsufficientLength` when the kernel reports EOF mid-read.
+        let (storage, storage_directory) = create_test_storage();
+
+        // Persist fewer bytes than the upcoming read requests so the wrapper
+        // encounters EOF after the header-adjusted offset has already started reading.
+        let (blob, _) = storage.open("partition", b"short").await.unwrap();
+        blob.write_at(0, b"abc".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // The wrapper should surface this as an insufficient-length error instead
+        // of silently returning a short buffer.
+        let err = blob.read_at(0, 5).await.unwrap_err();
+        assert_eq!(err.to_string(), "blob insufficient length");
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_read_at_buf_preserves_multichunk_layout() {
+        // Verify multi-chunk caller buffers keep their shape after the temporary-buffer fallback.
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
+        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Use a two-chunk destination so the read path must rebuild the original
+        // chunk layout after reading through a temporary contiguous buffer.
+        let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(5), IoBufMut::with_capacity(6)]);
+        let read = blob.read_at_buf(0, 11, bufs).await.unwrap();
+        // The result should keep the split layout rather than collapsing to one buffer.
+        assert!(!read.is_single());
+        assert_eq!(read.coalesce(), b"hello world");
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_zero_length_read_and_write_short_circuit() {
+        // Verify zero-length reads and writes complete without touching the ring.
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, size) = storage.open("partition", b"empty").await.unwrap();
+        assert_eq!(size, 0);
+
+        // Zero-length operations should succeed immediately and preserve the empty blob.
+        blob.write_at(0, IoBufs::default()).await.unwrap();
+        blob.write_at(0, IoBuf::default()).await.unwrap();
+        blob.write_at(0, Vec::<u8>::new()).await.unwrap();
+        let empty = blob.read_at(0, 0).await.unwrap();
+        assert!(empty.is_empty());
+        let _ = blob
+            .read_at_buf(0, 0, IoBufsMut::from(IoBufMut::with_capacity(8)))
+            .await
+            .unwrap();
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_non_file_entries() {
+        // Verify partition scans reject unexpected directory contents as corruption.
+        let (storage, storage_directory) = create_test_storage();
+
+        // Inject a nested directory where `scan` expects only regular blob files.
+        let partition = storage_directory.join("partition");
+        std::fs::create_dir_all(partition.join("nested")).unwrap();
+
+        // The wrapper should treat the partition as corrupt rather than silently skipping it.
+        let err = storage.scan("partition").await.unwrap_err();
+        assert_eq!(err.to_string(), "partition corrupt: partition");
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_remove_reports_missing_targets() {
+        // Verify wrapper-level remove errors distinguish missing partitions from missing blobs.
+        let (storage, storage_directory) = create_test_storage();
+
+        // Removing a missing partition should fail before any blob-specific path logic runs.
+        let err = storage.remove("missing", None).await.unwrap_err();
+        assert_eq!(err.to_string(), "partition missing: missing");
+
+        // Once the partition exists, removing an absent blob should surface the
+        // more specific `BlobMissing` error instead.
+        std::fs::create_dir_all(storage_directory.join("partition")).unwrap();
+        let err = storage
+            .remove("partition", Some(b"missing"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "blob missing: partition/6d697373696e67");
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_scan_ignores_non_utf8_file_names() {
+        // Verify partition scans ignore entries whose names cannot be represented as UTF-8.
+        let (storage, storage_directory) = create_test_storage();
+
+        let partition = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        // Create a valid file entry with a non-UTF8 name so `scan` exercises
+        // the branch that skips names it cannot decode.
+        let invalid_name = OsString::from_vec(vec![0xff, 0xfe, 0xfd]);
+        std::fs::write(partition.join(invalid_name), []).unwrap();
+
+        let scanned = storage.scan("partition").await.unwrap();
+        assert!(scanned.is_empty());
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_non_hex_file_names() {
+        // Verify partition scans reject UTF-8 entries that are not valid blob names.
+        let (storage, storage_directory) = create_test_storage();
+
+        let partition = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        // Create a file whose name is valid UTF-8 but not valid hex.
+        std::fs::write(partition.join("not-hex"), []).unwrap();
+
+        let err = storage.scan("partition").await.unwrap_err();
+        assert_eq!(err.to_string(), "partition corrupt: partition");
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_open_reports_partition_creation_failure() {
+        // Verify opening a blob reports partition-creation failures when the
+        // configured storage root is not a directory.
+        let storage_directory = create_test_directory();
+        let storage_root = storage_directory.join("root-file");
+        std::fs::write(&storage_root, b"not a directory").unwrap();
+
+        // Start storage against the invalid root so `open` reaches the
+        // filesystem setup path under realistic wrapper code.
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let storage = Storage::start(
+            Config {
+                storage_directory: storage_root.clone(),
+                iouring_config: Default::default(),
+                thread_stack_size: utils::thread::system_thread_stack_size(),
+            },
+            &mut Registry::default(),
+            pool,
         );
+
+        let err = storage
+            .open("partition", b"blob")
+            .await
+            .err()
+            .expect("invalid storage root should fail");
+        assert_eq!(err.to_string(), "partition creation failed: partition");
+
+        let _ = std::fs::remove_file(&storage_root);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_open_reports_blob_open_failure_for_directory_path() {
+        // Verify opening a blob reports `BlobOpenFailed` when the blob path
+        // already exists as a directory instead of a regular file.
+        let storage_directory = create_test_directory();
+        let partition = storage_directory.join("partition");
+        let blob_name = hex(b"blob");
+
+        // Pre-create the would-be blob path as a directory so `OpenOptions`
+        // fails once the wrapper reaches the open call.
+        std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
+
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let storage = Storage::start(
+            Config {
+                storage_directory: storage_directory.clone(),
+                iouring_config: Default::default(),
+                thread_stack_size: utils::thread::system_thread_stack_size(),
+            },
+            &mut Registry::default(),
+            pool,
+        );
+
+        let err = storage
+            .open("partition", b"blob")
+            .await
+            .err()
+            .expect("opening a directory as a blob should fail");
+        assert!(err
+            .to_string()
+            .starts_with(&format!("blob open failed: partition/{blob_name} error:")));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_offset_overflow_guards() {
+        // Verify logical offsets are checked before any filesystem or io_uring work.
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"overflow").await.unwrap();
+
+        // Each operation adds the runtime header size internally, so using the
+        // maximum logical offset must fail before any request is submitted.
+        assert_eq!(
+            blob.read_at(u64::MAX, 1).await.unwrap_err().to_string(),
+            "offset overflow"
+        );
+        assert_eq!(
+            blob.write_at(u64::MAX, b"x".to_vec())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "offset overflow"
+        );
+        assert_eq!(
+            blob.resize(u64::MAX).await.unwrap_err().to_string(),
+            "offset overflow"
+        );
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_read_and_write_report_handle_disconnect() {
+        // Verify read/write wrappers report channel disconnects before any work
+        // reaches the io_uring loop.
+        let storage_directory = create_test_directory();
+        let path = storage_directory.join("disconnected");
+        let file = File::create(&path).unwrap();
+
+        // Drop the loop immediately so the handle behaves like a dead
+        // backend while the blob handle still exists.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        drop(io_loop);
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+
+        // Read and write should fail through their wrapper-specific error enums
+        // when the submission channel has already been disconnected.
+        assert_eq!(
+            blob.read_at(0, 1).await.unwrap_err().to_string(),
+            "read failed"
+        );
+        assert_eq!(
+            blob.write_at(0, b"x".to_vec())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "write failed"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_sync_dir_reports_missing_directory() {
+        // Verify directory fsync reports missing paths through the open-failure wrapper.
+        let storage_directory = create_test_directory();
+        let missing = storage_directory.join("missing");
+
+        let err = sync_dir(&missing).expect_err("missing directory should fail");
+        assert!(err.to_string().starts_with(&format!(
+            "blob open failed: {}/directory error:",
+            missing.to_string_lossy()
+        )));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_sync_reports_handle_disconnect() {
+        // Verify the storage wrapper maps submission-channel disconnects to
+        // `BlobSyncFailed(..., "failed to send work")`.
+        let storage_directory = create_test_directory();
+        let path = storage_directory.join("disconnected");
+        let file = File::create(&path).unwrap();
+
+        // Construct a blob handle whose handle has already lost its loop so
+        // the wrapper must synthesize the disconnect error locally.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        drop(io_loop);
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
+        let err = blob
+            .sync()
+            .await
+            .expect_err("sync should fail without a loop");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_resize_reports_kernel_error() {
+        // Verify resize preserves its storage-specific wrapper when the
+        // underlying descriptor is a socket rather than a regular file.
+        let storage_directory = create_test_directory();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        // SAFETY: `into_raw_fd` transfers ownership of the socket fd into `File`.
+        let file = unsafe { File::from_raw_fd(socket.into_raw_fd()) };
+
+        // `set_len` on a socket-backed file descriptor should fail in the
+        // kernel, letting the wrapper expose `BlobResizeFailed`.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        drop(io_loop);
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let err = blob
+            .resize(0)
+            .await
+            .expect_err("resize should fail on a socket fd");
+        assert!(err.to_string().starts_with(&format!(
+            "blob resize failed: partition/{} error:",
+            hex(b"blob")
+        )));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_sync_reports_kernel_error() {
+        // Verify completed sync CQE failures round-trip through the storage wrapper.
+        let storage_directory = create_test_directory();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        // SAFETY: `into_raw_fd` transfers ownership of the socket fd into `File`.
+        let file = unsafe { File::from_raw_fd(socket.into_raw_fd()) };
+
+        // Run a real loop so the request reaches the kernel and fails there
+        // rather than through the wrapper's disconnected-submit path.
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let handle = std::thread::spawn(move || io_loop.run());
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter.clone(), pool);
+        // The request should reach the kernel and come back as a wrapped sync failure.
+        let err = blob
+            .sync()
+            .await
+            .expect_err("sync should fail on a socket fd");
+        let message = err.to_string();
+        assert!(message.starts_with(&format!(
+            "blob sync failed: partition/{} error:",
+            hex(b"blob")
+        )));
+        assert_ne!(
+            message,
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
+
+        drop(blob);
+        drop(submitter);
+        // Joining the loop proves the live backend path shut down cleanly after the error.
+        handle.join().unwrap();
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

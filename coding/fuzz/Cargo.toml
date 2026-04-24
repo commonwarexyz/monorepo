@@ -30,13 +30,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "no_coding"
-path = "fuzz_targets/no_coding.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "zoda"
 path = "fuzz_targets/zoda.rs"
 test = false

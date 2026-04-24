@@ -217,63 +217,174 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
+    /// Notification sent to subscribers when a peer set changes.
+    #[derive(Clone, Debug)]
+    pub struct PeerSetUpdate<P: PublicKey> {
+        /// The index of the peer set that changed.
+        pub index: u64,
+        /// The primary and secondary peers in the new set.
+        pub latest: TrackedPeers<P>,
+        /// Union of primary and secondary peers across all tracked peer sets.
+        pub all: TrackedPeers<P>,
+    }
+
+    /// Alias for the subscription type returned by [`Provider::subscribe`].
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
+
+    /// Primary and secondary peers provided together to [`Manager::track`].
+    ///
+    /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
+    /// deduplicates overlapping keys, storing them as primary only.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct TrackedPeers<P: PublicKey> {
+        /// Peers eligible for primary-only policies.
+        pub primary: Set<P>,
+        /// Peers eligible for secondary-only policies.
+        pub secondary: Set<P>,
+    }
+
+    impl<P: PublicKey> TrackedPeers<P> {
+        pub const fn new(primary: Set<P>, secondary: Set<P>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Set<P>) -> Self {
+            Self::new(primary, Set::default())
+        }
+
+        /// Returns the deduplicated union of primary and secondary peers.
+        pub fn union(self) -> Set<P> {
+            Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary))
+        }
+    }
+
+    impl<P: PublicKey> From<Set<P>> for TrackedPeers<P> {
+        fn from(primary: Set<P>) -> Self {
+            Self::primary(primary)
+        }
+    }
+
+    impl<P: PublicKey> Default for TrackedPeers<P> {
+        fn default() -> Self {
+            Self::new(Set::default(), Set::default())
+        }
+    }
+
+    /// Primary and secondary peers provided together to [`AddressableManager::track`].
+    ///
+    /// The same public key may appear in both maps. [`AddressableManager::track`]
+    /// deduplicates overlapping keys, storing them as primary only.
+    #[derive(Clone, Debug)]
+    pub struct AddressableTrackedPeers<P: PublicKey> {
+        /// Addresses for peers eligible for primary-only policies.
+        pub primary: Map<P, Address>,
+        /// Addresses for peers eligible for secondary-only policies.
+        pub secondary: Map<P, Address>,
+    }
+
+    impl<P: PublicKey> AddressableTrackedPeers<P> {
+        pub const fn new(primary: Map<P, Address>, secondary: Map<P, Address>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Map<P, Address>) -> Self {
+            Self::new(primary, Map::default())
+        }
+    }
+
+    impl<P: PublicKey> From<Map<P, Address>> for AddressableTrackedPeers<P> {
+        fn from(primary: Map<P, Address>) -> Self {
+            Self::primary(primary)
+        }
+    }
+
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
-        /// Fetch the ordered set of peers for a given ID.
+        /// Fetch the primary and secondary peers tracked at the given ID.
         fn peer_set(
             &mut self,
             id: u64,
-        ) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
+        ) -> impl Future<Output = Option<TrackedPeers<Self::PublicKey>>> + Send;
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver that will receive tuples of:
-        /// - The peer set ID
-        /// - The peers in the new set
-        /// - All currently tracked peers (union of recent peer sets)
-        #[allow(clippy::type_complexity)]
+        /// Returns a receiver of [`PeerSetUpdate`] notifications. Each update's
+        /// `latest` reflects how [`Manager::track`] stored the set: a peer listed in
+        /// both roles appears only under `latest.primary`. The `all` field aggregates
+        /// across tracked sets with the same rule (secondary excludes keys present as primary).
         fn subscribe(
             &mut self,
-        ) -> impl Future<
-            Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
-        > + Send;
+        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Track a peer set with the given ID and peers.
+        /// Track a primary and secondary peer set with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are
+        /// tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
-            &mut self,
-            id: u64,
-            peers: Set<Self::PublicKey>,
-        ) -> impl Future<Output = ()> + Send;
+        ///
+        /// Callers may pass either a list of primary peers or a [`TrackedPeers`] value containing both primary and secondary peers.
+        ///
+        /// Overlapping keys in [`TrackedPeers`] are allowed; they are deduplicated as primary only.
+        ///
+        /// ## Active Peers
+        ///
+        /// The most recently registered peer set (highest ID) is considered the
+        /// active set. Implementations use the active set to decide which peers to
+        /// maintain connections with and which to disconnect from.
+        ///
+        /// ## Primary vs Secondary Peers
+        ///
+        /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
+        /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
+        /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// often both gossiping data to them and answering requests from them).
+        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        where
+            R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
-        /// Track a peer set with the given ID and peer<PublicKey, Address> pairs.
+        /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are
+        /// tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
-            &mut self,
-            id: u64,
-            peers: Map<Self::PublicKey, Address>,
-        ) -> impl Future<Output = ()> + Send;
+        ///
+        /// Callers may pass either a list of primary peers or a [`AddressableTrackedPeers`] value containing
+        /// both primary and secondary peers.
+        ///
+        /// The same key may appear in both maps; see [`AddressableTrackedPeers`].
+        ///
+        /// ## Active Peers
+        ///
+        /// The most recently registered peer set (highest ID) is considered the
+        /// active set. Implementations use the active set to decide which peers to
+        /// maintain connections with and which to disconnect from.
+        ///
+        /// ## Primary vs Secondary Peers
+        ///
+        /// In p2p networks, there are often two tiers of peers: ones that help "drive progress" and ones that want to
+        /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
+        /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
+        /// often both gossiping data to them and answering requests from them).
+        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        where
+            R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
 
         /// Update addresses for multiple peers without creating a new peer set.
         ///
-        /// For each peer that is tracked and has a changed address:
+        /// For each primary or secondary peer with a changed address:
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
@@ -292,3 +403,42 @@ stability_scope!(BETA {
         fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
     }
 });
+
+/// Logs a warning and blocks a peer in a single call.
+///
+/// This macro combines a [`tracing::warn!`] with a [`Blocker::block`] call
+/// to ensure consistent logging at every block site. The peer is always
+/// included as a `peer` field in the log output.
+///
+/// # Examples
+///
+/// ```ignore
+/// block!(self.blocker, sender, "invalid message");
+/// block!(self.blocker, sender, ?err, "invalid ack signature");
+/// block!(self.blocker, sender, %view, "blocking peer for epoch mismatch");
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! block {
+    ($blocker:expr, $peer:expr, $($arg:tt)+) => {
+        let peer = $peer;
+        tracing::warn!(peer = ?peer, $($arg)+);
+        #[allow(clippy::disallowed_methods)]
+        $blocker.block(peer).await;
+    };
+}
+
+/// Block a peer without logging.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test helper that bypasses the block! macro"
+)]
+#[cfg(test)]
+pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
+    blocker.block(peer).await;
+}

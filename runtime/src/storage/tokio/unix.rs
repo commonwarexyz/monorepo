@@ -1,8 +1,17 @@
 use super::Header;
-use crate::{BufferPool, Error, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
-use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
+use std::{
+    fs::File,
+    io::IoSlice,
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    sync::Arc,
+};
 use tokio::task;
+
+// Cap iovec batch size: larger iovecs reduce syscall count but increase
+// per-write kernel setup overhead.
+const IOVEC_BATCH_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub struct Blob {
@@ -21,6 +30,52 @@ impl Blob {
             pool,
         }
     }
+
+    fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
+        file.write_all_at(buf, offset)?;
+        Ok(())
+    }
+
+    fn write_vectored_at(file: &File, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
+        while bufs.has_remaining() {
+            let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
+            let io_slices_len = bufs.chunks_vectored(&mut io_slices);
+            assert!(
+                io_slices_len > 0,
+                "chunks_vectored should produce at least one slice when bufs has remaining"
+            );
+
+            // std::os::unix::fs::FileExt::write_vectored_at is unstable:
+            // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
+            // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+            // `slices` points to valid readable buffers held alive for this syscall.
+            let ret = unsafe {
+                libc::pwritev(
+                    file.as_raw_fd(),
+                    io_slices.as_ptr().cast::<libc::iovec>(),
+                    io_slices_len as i32,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                )
+            };
+
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
+            }
+
+            let bytes_written = ret as usize;
+            if bytes_written == 0 {
+                return Err(Error::WriteFailed);
+            }
+            bufs.advance(bytes_written);
+            offset += bytes_written as u64;
+        }
+
+        Ok(())
+    }
 }
 
 impl crate::Blob for Blob {
@@ -32,45 +87,42 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_exact below.
-        unsafe { buf.set_len(len) };
+        unsafe { bufs.set_len(len) };
         let file = self.file.clone();
         let pool = self.pool.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        task::spawn_blocking(move || match buf {
-            IoBufsMut::Single(mut single) => {
-                // Read directly into the single buffer (zero-copy)
-                file.read_exact_at(single.as_mut(), offset)?;
-                Ok(IoBufsMut::Single(single))
-            }
-            IoBufsMut::Chunked(chunks) => {
-                // Read into a temporary buffer and copy to preserve the chunked structure
+        task::spawn_blocking(move || {
+            if let Some(buf) = bufs.as_single_mut() {
+                // Read directly into the single buffer (zero-copy).
+                file.read_exact_at(buf.as_mut(), offset)?;
+            } else {
+                // Read into a temporary contiguous buffer and copy back to preserve structure.
                 // SAFETY: `len` bytes are filled via read_exact_at below.
                 let mut temp = unsafe { pool.alloc_len(len) };
                 file.read_exact_at(temp.as_mut(), offset)?;
-                let mut bufs = IoBufsMut::Chunked(chunks);
                 bufs.copy_from_slice(temp.as_ref());
-                Ok(bufs)
             }
+            Ok(bufs)
         })
         .await
         .map_err(|_| Error::ReadFailed)?
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = buf.into();
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let bufs = bufs.into();
         let file = self.file.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        task::spawn_blocking(move || {
-            file.write_all_at(buf.coalesce().as_ref(), offset)?;
-            Ok(())
+        task::spawn_blocking(move || match bufs.try_into_single() {
+            Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
+            Err(bufs) => Self::write_vectored_at(&file, offset, bufs),
         })
         .await
         .map_err(|_| Error::WriteFailed)?

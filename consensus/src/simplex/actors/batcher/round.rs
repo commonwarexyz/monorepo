@@ -18,7 +18,6 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRngCore;
-use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -42,7 +41,7 @@ pub struct Round<
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
 
-    /// Whether we've already received and forwarded the leader's proposal.
+    /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
 
     /// Cached certificates for this view.
@@ -114,8 +113,7 @@ impl<
     pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer for unknown participant");
-            self.blocker.block(sender).await;
+            commonware_p2p::block!(self.blocker, sender, "unknown participant");
             return false;
         };
 
@@ -124,8 +122,7 @@ impl<
             Vote::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer for notarize signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "notarize signer mismatch");
                     return false;
                 }
 
@@ -137,11 +134,9 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer for conflicting notarize");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                         } else if previous != &notarize {
-                            warn!(?sender, "blocking peer for invalid signature");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }
@@ -158,8 +153,7 @@ impl<
             Vote::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer for nullify signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify signer mismatch");
                     return false;
                 }
 
@@ -169,8 +163,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer for nullify after finalize");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
 
@@ -178,8 +171,7 @@ impl<
                 match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
-                            warn!(?sender, "blocking peer for conflicting nullify");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
                         }
                         false
                     }
@@ -196,8 +188,7 @@ impl<
             Vote::Finalize(finalize) => {
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer for finalize signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize signer mismatch");
                     return false;
                 }
 
@@ -207,8 +198,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer for finalize after nullify");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
 
@@ -220,11 +210,9 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer for conflicting finalize");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                         } else if previous != &finalize {
-                            warn!(?sender, "blocking peer for invalid signature");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }
@@ -360,19 +348,52 @@ impl<
         self.verifier.verify_finalizes(rng, strategy)
     }
 
-    /// Returns true if the leader was active in this round.
+    /// Returns true if `signer` has a nullify vote in this round.
+    pub fn has_nullify(&self, signer: Participant) -> bool {
+        self.pending_votes.has_nullify(signer)
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
     ///
-    /// We use pending votes to determine activeness because we only verify the first
-    /// `2f+1` votes. If we used verified, we would always consider the slowest `f` peers offline.
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
     ///
-    /// This approach does mean, however, that we may consider a peer active that has sent an invalid
-    /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
-    /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
-    /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
-    pub fn is_active(&self, leader: Participant) -> bool {
-        self.pending_votes.has_notarize(leader)
-            || self.pending_votes.has_nullify(leader)
-            || self.pending_votes.has_finalize(leader)
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
+        if self
+            .pending_votes
+            .notarize(participant)
+            .is_some_and(|vote| &vote.proposal == proposal)
+        {
+            return false;
+        }
+
+        self.pending_votes
+            .finalize(participant)
+            .is_none_or(|vote| &vote.proposal != proposal)
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
+    pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
+        (0..self.participants.len())
+            .map(Participant::from_usize)
+            .filter(|&p| self.is_missing_voter(proposal, p))
+            .collect()
     }
 
     /// Stores a verified vote for certificate construction.

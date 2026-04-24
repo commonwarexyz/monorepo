@@ -1,6 +1,7 @@
 use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
+use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +53,15 @@ pub struct EncodedData {
 }
 
 impl EncodedData {
+    /// Assert the outbound message's `channel` is registered.
+    pub fn validate_channel<V>(self, rate_limits: &HashMap<u64, V>) -> Self {
+        assert!(
+            rate_limits.contains_key(&self.channel),
+            "outbound message on invalid channel"
+        );
+        self
+    }
+
     /// Encode `Payload::Data` bytes in-place as:
     /// `prefix || channel || message_len || message`.
     pub fn new(pool: &BufferPool, prefix: u8, channel: Channel, mut message: IoBufs) -> Self {

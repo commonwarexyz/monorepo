@@ -543,23 +543,7 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 }
 
 #[cfg(feature = "mocks")]
-pub mod mocks {
-    //! Mocks for certificate signing schemes.
-
-    /// A fixture containing identities, identity private keys, per-participant
-    /// signing schemes, and a single verifier scheme.
-    #[derive(Clone, Debug)]
-    pub struct Fixture<S> {
-        /// A sorted vector of participant public identity keys.
-        pub participants: Vec<crate::ed25519::PublicKey>,
-        /// A sorted vector of participant private identity keys (matching order with `participants`).
-        pub private_keys: Vec<crate::ed25519::PrivateKey>,
-        /// A vector of per-participant scheme instances (matching order with `participants`).
-        pub schemes: Vec<S>,
-        /// A single scheme verifier.
-        pub verifier: S,
-    }
-}
+pub mod mocks;
 
 #[cfg(test)]
 mod tests {

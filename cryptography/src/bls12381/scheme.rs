@@ -368,7 +368,9 @@ pub struct Batch {
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl BatchVerifier<PublicKey> for Batch {
+impl BatchVerifier for Batch {
+    type PublicKey = PublicKey;
+
     fn new() -> Self {
         Self {
             publics: Vec::new(),
@@ -480,6 +482,12 @@ mod tests {
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
         assert!(display.contains("REDACTED"));
+    }
+
+    #[test]
+    fn batch_verify_empty() {
+        let batch = Batch::new();
+        assert!(batch.verify(&mut test_rng()));
     }
 
     #[cfg(feature = "arbitrary")]

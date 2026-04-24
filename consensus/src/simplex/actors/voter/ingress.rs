@@ -1,4 +1,10 @@
-use crate::simplex::types::{Certificate, Proposal};
+use crate::{
+    simplex::{
+        metrics::TimeoutReason,
+        types::{Certificate, Proposal},
+    },
+    types::View,
+};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 
@@ -6,6 +12,8 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
+    /// Signal that the current view should timeout (if not already).
+    Timeout(View, TimeoutReason),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -27,6 +35,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a leader's proposal.
     pub async fn proposal(&mut self, proposal: Proposal<D>) {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
+    }
+
+    /// Signal that the current view should timeout (if not already).
+    pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
+        self.sender.send_lossy(Message::Timeout(view, reason)).await;
     }
 
     /// Send a recovered certificate.

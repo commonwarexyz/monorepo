@@ -8,15 +8,15 @@ use crate::authenticated::{
         types::{self, InfoVerifier},
     },
     mailbox::UnboundedMailbox,
-    relay::Relay,
+    relay::{recv_prioritized, Prioritized, Relay},
     Mailbox,
 };
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter,
-    Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink,
+    Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -32,6 +32,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
+    send_batch_size: usize,
     info_verifier: InfoVerifier<C>,
 
     max_bit_vec: u64,
@@ -58,6 +59,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 context,
                 mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
+                send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
@@ -73,50 +75,92 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         )
     }
 
-    /// Unpack outbound `msg` and assert the underlying `channel` is registered.
-    fn validate_outbound_msg<V>(
-        msg: Option<EncodedData>,
-        rate_limits: &HashMap<u64, V>,
-    ) -> Result<EncodedData, Error> {
-        let encoded = match msg {
-            Some(encoded) => encoded,
-            None => return Err(Error::PeerDisconnected),
+    /// Converts a control message into an outbound metric/payload pair.
+    ///
+    /// Returns `Err` for `Kill` so the caller can terminate the connection.
+    fn prepare_control(
+        peer: &C,
+        msg: Message<C>,
+        pool: &commonware_runtime::BufferPool,
+    ) -> Result<(metrics::Message, IoBufs), Error> {
+        let (metric, payload) = match msg {
+            Message::BitVec(bit_vec) => (
+                metrics::Message::new_bit_vec(peer),
+                types::Payload::BitVec(bit_vec),
+            ),
+            Message::Peers(peers) => (
+                metrics::Message::new_peers(peer),
+                types::Payload::Peers(peers),
+            ),
+            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
         };
-        assert!(
-            rate_limits.contains_key(&encoded.channel),
-            "outbound message on invalid channel"
-        );
-        Ok(encoded)
+        Ok((metric, payload.encode_with_pool(pool)))
     }
 
-    /// Creates a message from a payload, then sends and increments metrics.
-    async fn send_payload<Si: Sink>(
-        pool: &BufferPool,
-        sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
-        payload: types::Payload<C>,
-    ) -> Result<(), Error> {
-        let msg = payload.encode_with_pool(pool);
-        sender.send(msg).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
-        Ok(())
+    /// Converts pre-encoded data into an outbound metric/payload pair.
+    fn prepare_data<V>(
+        peer: &C,
+        msg: EncodedData,
+        rate_limits: &HashMap<u64, V>,
+    ) -> (metrics::Message, IoBufs) {
+        let encoded = msg.validate_channel(rate_limits);
+        (
+            metrics::Message::new_data(peer, encoded.channel),
+            encoded.payload,
+        )
     }
 
-    /// Sends pre-encoded bytes directly to the stream.
-    async fn send_encoded<Si: Sink>(
-        sender: &mut Sender<Si>,
+    /// Records the send metric and appends the payload to the batch.
+    fn push_batched(
         sent_messages: &Family<metrics::Message, Counter>,
+        batch: &mut Vec<IoBufs>,
         metric: metrics::Message,
         payload: IoBufs,
-    ) -> Result<(), Error> {
-        sender.send(payload).await.map_err(Error::SendFailed)?;
+    ) {
         sent_messages.get_or_create(&metric).inc();
+        batch.push(payload);
+    }
+
+    /// Drains already-queued messages into `batch`.
+    ///
+    /// Priority order: control > high > low. Only consumes messages that are
+    /// already ready (via `try_recv`), so this reduces runtime write calls
+    /// without introducing a per-connection timer or extra buffering latency.
+    #[allow(clippy::too_many_arguments)]
+    fn extend_send_many<V>(
+        peer: &C,
+        batch_size: usize,
+        batch: &mut Vec<IoBufs>,
+        control: &mut mpsc::Receiver<Message<C>>,
+        pool: &commonware_runtime::BufferPool,
+        high: &mut mpsc::Receiver<EncodedData>,
+        low: &mut mpsc::Receiver<EncodedData>,
+        rate_limits: &HashMap<u64, V>,
+        sent_messages: &Family<metrics::Message, Counter>,
+    ) -> Result<(), Error> {
+        while batch.len() < batch_size {
+            if let Ok(msg) = control.try_recv() {
+                let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
+                Self::push_batched(sent_messages, batch, metric, payload);
+                continue;
+            }
+            if let Ok(msg) = high.try_recv() {
+                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, payload);
+                continue;
+            }
+            if let Ok(msg) = low.try_recv() {
+                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, payload);
+                continue;
+            }
+            break;
+        }
         Ok(())
     }
 
     pub async fn run<O: Sink, I: Stream>(
-        mut self,
+        self,
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
@@ -135,14 +179,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let pool = self.context.network_buffer_pool().clone();
 
         // Send greeting first before any other messages
-        Self::send_payload(
-            &pool,
-            &mut conn_sender,
-            &self.sent_messages,
-            metrics::Message::new_greeting(&peer),
-            types::Payload::Greeting(greeting),
-        )
-        .await?;
+        self.sent_messages
+            .get_or_create(&metrics::Message::new_greeting(&peer))
+            .inc();
+        conn_sender
+            .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
+            .await
+            .map_err(Error::SendFailed)?;
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> =
@@ -156,6 +199,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     let mut deadline = context.current();
 
                     // Enter into the main loop
+                    let mut batch = Vec::with_capacity(self.send_batch_size);
+                    let (control, high, low) = &mut (self.control, self.high, self.low);
                     select_loop! {
                         context,
                         on_stopped => {},
@@ -166,50 +211,35 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        Some(msg) = self.control.recv() else {
-                            return Err(Error::PeerDisconnected);
-                        } => {
+                        // Await any outbound message (control, high, or low), then
+                        // drain already-queued messages into a single runtime write.
+                        // Priority order: control > high > low.
+                        msg = recv_prioritized(control, high, low) => {
                             let (metric, payload) = match msg {
-                                Message::BitVec(bit_vec) => (
-                                    metrics::Message::new_bit_vec(&peer),
-                                    types::Payload::BitVec(bit_vec),
-                                ),
-                                Message::Peers(peers) => (
-                                    metrics::Message::new_peers(&peer),
-                                    types::Payload::Peers(peers),
-                                ),
-                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                                Prioritized::Closed => return Err(Error::PeerDisconnected),
+                                Prioritized::Control(msg) => {
+                                    Self::prepare_control(&peer, msg, &pool)?
+                                }
+                                Prioritized::Data(encoded) => {
+                                    Self::prepare_data(&peer, encoded, &rate_limits)
+                                }
                             };
-                            Self::send_payload(
+                            Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
+                            Self::extend_send_many(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                control,
                                 &pool,
-                                &mut conn_sender,
+                                high,
+                                low,
+                                &rate_limits,
                                 &self.sent_messages,
-                                metric,
-                                payload,
-                            )
-                            .await?;
-                        },
-                        msg_high = self.high.recv() => {
-                            // Data is already pre-encoded, just forward to stream
-                            let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_data(&peer, encoded.channel),
-                                encoded.payload,
-                            )
-                            .await?;
-                        },
-                        msg_low = self.low.recv() => {
-                            // Data is already pre-encoded, just forward to stream
-                            let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_data(&peer, encoded.channel),
-                                encoded.payload,
-                            )
-                            .await?;
+                            )?;
+                            conn_sender
+                                .send_many(batch.drain(..))
+                                .await
+                                .map_err(Error::SendFailed)?;
                         },
                     }
 
@@ -329,7 +359,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         }
                     }
 
-
                     match msg {
                         types::Payload::Data(data) => {
                             // Send message to application using non-blocking try_send.
@@ -402,7 +431,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -416,6 +445,7 @@ mod tests {
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {
             mailbox_size: 10,
+            send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
             max_peer_set_size: 128,
             peer_gossip_max_count: 10,
@@ -813,6 +843,7 @@ mod tests {
             // Create peer config with our metric
             let config = Config {
                 mailbox_size: 10,
+                send_batch_size: NZUsize!(8),
                 gossip_bit_vec_frequency: Duration::from_secs(30),
                 max_peer_set_size: 128,
                 peer_gossip_max_count: 10,

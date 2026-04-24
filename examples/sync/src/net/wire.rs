@@ -1,17 +1,20 @@
 use crate::net::{ErrorResponse, RequestId};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, IsUnit, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    mmr::{self, Location, Proof},
     qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
+
+/// Maximum number of pinned nodes (one per MMR peak, bounded by max tree height).
+pub const MAX_PINNED_NODES: usize = 64;
 
 /// Request for operations from the server.
 #[derive(Debug)]
@@ -20,6 +23,7 @@ pub struct GetOperationsRequest {
     pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
+    pub include_pinned_nodes: bool,
 }
 
 /// Response with operations and proof.
@@ -31,6 +35,7 @@ where
     pub request_id: RequestId,
     pub proof: Proof<D>,
     pub operations: Vec<Op>,
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// Request for sync target from server.
@@ -46,7 +51,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: Target<D>,
+    pub target: Target<mmr::Family, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -79,7 +84,8 @@ where
 
 impl<Op, D> super::Message for Message<Op, D>
 where
-    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
+    Op: Encode + Read + Send + Sync + 'static,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -136,7 +142,8 @@ where
 
 impl<Op, D> Read for Message<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -163,6 +170,7 @@ impl Write for GetOperationsRequest {
         self.op_count.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
+        (self.include_pinned_nodes as u8).write(buf);
     }
 }
 
@@ -172,6 +180,7 @@ impl EncodeSize for GetOperationsRequest {
             + self.op_count.encode_size()
             + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
+            + 1u8.encode_size()
     }
 }
 
@@ -179,20 +188,8 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let op_count = u64::read(buf)?;
-        let Some(op_count) = Location::new(op_count) else {
-            return Err(CodecError::Invalid(
-                "GetOperationsRequest",
-                "op_count exceeds MAX_LOCATION",
-            ));
-        };
-        let start_loc = u64::read(buf)?;
-        let Some(start_loc) = Location::new(start_loc) else {
-            return Err(CodecError::Invalid(
-                "GetOperationsRequest",
-                "start_loc exceeds MAX_LOCATION",
-            ));
-        };
+        let op_count = Location::read(buf)?;
+        let start_loc = Location::read(buf)?;
         let max_ops = u64::read(buf)?;
         let Some(max_ops) = NonZeroU64::new(max_ops) else {
             return Err(CodecError::Invalid(
@@ -200,11 +197,13 @@ impl Read for GetOperationsRequest {
                 "max_ops cannot be zero",
             ));
         };
+        let include_pinned_nodes = u8::read(buf)? != 0;
         Ok(Self {
             request_id,
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         })
     }
 }
@@ -230,6 +229,15 @@ where
         self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
+        match &self.pinned_nodes {
+            Some(nodes) => {
+                1u8.write(buf);
+                nodes.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
     }
 }
 
@@ -239,13 +247,21 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size()
+            + self.proof.encode_size()
+            + self.operations.encode_size()
+            + 1u8.encode_size()
+            + self
+                .pinned_nodes
+                .as_ref()
+                .map_or(0, |nodes| nodes.encode_size())
     }
 }
 
 impl<Op, D> Read for GetOperationsResponse<Op, D>
 where
-    Op: Read<Cfg = ()>,
+    Op: Read,
+    Op::Cfg: IsUnit,
     D: Digest,
 {
     type Cfg = ();
@@ -254,12 +270,20 @@ where
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+            Vec::<Op>::read_cfg(buf, &(range_cfg, Op::Cfg::default()))?
+        };
+        let has_pinned_nodes = u8::read(buf)? != 0;
+        let pinned_nodes = if has_pinned_nodes {
+            let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
+            Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
+        } else {
+            None
         };
         Ok(Self {
             request_id,
             proof,
             operations,
+            pinned_nodes,
         })
     }
 }
@@ -310,7 +334,7 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = Target::<D>::read_cfg(buf, &())?;
+        let target = Target::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }

@@ -4,17 +4,15 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::Location,
-    qmdb::{
-        current::{ordered::fixed::Db as Current, FixedConfig as Config},
-        store::LogStore as _,
-    },
+    journal::contiguous::fixed::Config as FConfig,
+    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Graftable, Location},
+    qmdb::current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     num::{NonZeroU16, NonZeroU64},
 };
 
@@ -22,6 +20,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -79,83 +78,102 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MMR_ITEMS_PER_BLOB: u64 = 11;
+const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
-fn fuzz(data: FuzzInput) {
+async fn commit_pending<F: Graftable>(
+    db: &mut Db<F>,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+) {
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = batch.merkleize(db, None).await.unwrap();
+    db.apply_batch(merkleized)
+        .await
+        .expect("commit should not fail");
+    db.commit().await.expect("commit fsync should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+}
+
+fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
+    let suffix = suffix.to_string();
+    let operations = data.operations.clone();
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
+        let page_cache = CacheRef::from_pooler(
+            &context,
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let cfg = Config {
-            mmr_journal_partition: "fuzz-current-mmr-journal".into(),
-            mmr_metadata_partition: "fuzz-current-mmr-metadata".into(),
-            mmr_items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
-            mmr_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            log_journal_partition: "fuzz-current-log-journal".into(),
-            log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
-            log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
+            merkle_config: MerkleConfig {
+                journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
+                metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
+                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: format!("fuzz-current-ord-{suffix}-log-journal"),
+                items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                page_cache,
+            },
+            grafted_metadata_partition: format!("fuzz-current-ord-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
-            page_cache: CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
-            thread_pool: None,
         };
 
-        let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
+        let mut db: Db<F> = Db::init(context.clone(), cfg)
             .await
-            .expect("Failed to initialize Current database").into_mutable();
+            .expect("Failed to initialize Current database");
 
-        let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
-        let mut all_keys = std::collections::HashSet::new();
-        let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = Location::new(1).unwrap();
+        // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
+        // track uncommitted mutations.
+        let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_deletes: HashSet<RawKey> = HashSet::new();
+        let mut all_keys = HashSet::new();
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+        let mut committed_op_count = Location::<F>::new(1);
 
-        for op in &data.operations {
+        for op in &operations {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    let empty = db.is_empty();
-                    db.write_batch([(k, Some(v))]).await.expect("update should not fail");
-                    let result = expected_state.insert(*key, *value);
+                    pending_writes.push((k, Some(v)));
+                    pending_deletes.remove(key);
+                    pending_inserts.insert(*key, *value);
                     all_keys.insert(*key);
-                    uncommitted_ops += 1;
-                    if !empty && result.is_none() {
-                        // Account for the previous key update
-                        uncommitted_ops += 1;
-                    }
-                    let actual_count = db.bounds().await.end;
-                    let expected_count = last_committed_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count} (last_known={last_committed_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
                 }
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    db.write_batch([(k, None)]).await.expect("delete should not fail");
-                    if expected_state.remove(key).is_some() {
-                        all_keys.insert(*key);
-                        uncommitted_ops += 1;
-                        if expected_state.keys().len() != 0 {
-                            uncommitted_ops += 1;
-                        }
-                    }
+                    pending_writes.push((k, None));
+                    pending_inserts.remove(key);
+                    pending_deletes.insert(*key);
                 }
 
                 CurrentOperation::Get { key } => {
                     let k = Key::new(*key);
                     let result = db.get(&k).await.expect("get should not fail");
 
-                    // Verify against expected state
-                    match expected_state.get(key) {
+                    // Verify against committed state only.
+                    match committed_state.get(key) {
                         Some(expected_value) => {
-                            // Key should exist with this value
                             let v = result.expect("get should not fail");
                             let v_bytes: &[u8; 32] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
@@ -168,7 +186,6 @@ fn fuzz(data: FuzzInput) {
                         }
                     }
 
-                    // Track that we accessed this key
                     all_keys.insert(*key);
                 }
 
@@ -179,62 +196,73 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.bounds().await.end;
-                    let expected_count = last_committed_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count}, got {actual_count}");
+                    let actual = db.bounds().await.end;
+                    assert_eq!(
+                        actual, committed_op_count,
+                        "Op count mismatch: expected {committed_op_count}, got {actual}"
+                    );
                 }
 
                 CurrentOperation::Commit => {
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.bounds().await.end;
-                    uncommitted_ops = 0;
-                    db = clean_db.into_mutable();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
                 }
 
                 CurrentOperation::Prune => {
-                    let mut merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    merkleized_db.prune(merkleized_db.inactivity_floor_loc()).await.expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
+                    db.prune(db.sync_boundary()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
-                    let clean_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let _root = clean_db.root();
-                    db = clean_db.into_mutable();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
+                    let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
                     let current_op_count = db.bounds().await.end;
+                    if current_op_count == 0 {
+                        continue;
+                    }
 
-                    if current_op_count > 0 {
-                        let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                        let current_root = merkleized_db.root();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
+                    let current_root = db.root();
 
-                        // Adjust start_loc and max_ops to be within the valid range
-                        let start_loc = Location::new(start_loc % *current_op_count).unwrap();
+                    let current_op_count = db.bounds().await.end;
+                    let start_loc = Location::<F>::new(start_loc % *current_op_count);
 
-                        let oldest_loc = merkleized_db.inactivity_floor_loc();
-                        if start_loc >= oldest_loc {
-                            let (proof, ops, chunks) = merkleized_db
-                                .range_proof(&mut hasher, start_loc, *max_ops)
-                                .await
-                                .expect("Range proof should not fail");
+                    let oldest_loc = db.sync_boundary();
+                    if start_loc >= oldest_loc {
+                        let (proof, ops, chunks) = db
+                            .range_proof(&mut hasher, start_loc, *max_ops)
+                            .await
+                            .expect("Range proof should not fail");
 
-                            assert!(
-                                Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    &mut hasher,
-                                    &proof,
-                                    start_loc,
-                                    &ops,
-                                    &chunks,
-                                    &current_root
-                                ),
-                                "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
-                            );
-                        }
-                        db = merkleized_db.into_mutable();
+                        assert!(
+                            Db::<F>::verify_range_proof(
+                                &mut hasher,
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &current_root
+                            ),
+                            "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
+                        );
                     }
                 }
 
@@ -243,12 +271,17 @@ fn fuzz(data: FuzzInput) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
 
-                    let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = merkleized_db.root();
+                    let current_op_count = db.bounds().await.end;
+                    let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
+                    let root = db.root();
 
-                    if let Ok((range_proof, ops, chunks)) = merkleized_db
+                    if let Ok((range_proof, ops, chunks)) = db
                         .range_proof(&mut hasher, start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
@@ -256,7 +289,7 @@ fn fuzz(data: FuzzInput) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
-                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            assert!(!Db::<F>::verify_range_proof(
                                 &mut hasher,
                                 &bad_proof,
                                 start_loc,
@@ -268,7 +301,7 @@ fn fuzz(data: FuzzInput) {
 
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
-                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            assert!(!Db::<F>::verify_range_proof(
                                 &mut hasher,
                                 &range_proof,
                                 start_loc,
@@ -278,19 +311,22 @@ fn fuzz(data: FuzzInput) {
                             ), "proof with bad chunks should not verify");
                         }
                     }
-                    db = merkleized_db.into_mutable();
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let current_root = merkleized_db.root();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
+                    let current_root = db.root();
 
-                    match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
+                    match db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
-                            let value = merkleized_db.get(&k).await.expect("get should not fail").expect("key should exist");
-                            let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
+                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let verification_result = Db::<F>::verify_key_value_proof(
                                 &mut hasher,
                                 k,
                                 value,
@@ -300,24 +336,27 @@ fn fuzz(data: FuzzInput) {
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
-                            assert!(!expected_state.contains_key(key), "Proof generation failed for existing key {key:?}");
+                            assert!(!committed_state.contains_key(key), "Proof generation failed for existing key {key:?}");
                         }
                         Err(e) => {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
-                    db = merkleized_db.into_mutable();
                 }
 
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let current_root = merkleized_db.root();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().await.end;
+                    let current_root = db.root();
 
-                    match merkleized_db.exclusion_proof(&mut hasher, &k).await {
+                    match db.exclusion_proof(&mut hasher, &k).await {
                         Ok(proof) => {
-                            let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
+                            let verification_result = Db::<F>::verify_exclusion_proof(
                                 &mut hasher,
                                 &k,
                                 &proof,
@@ -326,25 +365,30 @@ fn fuzz(data: FuzzInput) {
                             assert!(verification_result, "Exclusion proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyExists) => {
-                            assert!(expected_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
+                            assert!(committed_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
                         }
                         Err(e) => {
                             panic!("Unexpected error during exclusion proof generation: {e:?}");
                         }
                     }
-                    db = merkleized_db.into_mutable();
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
-        let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
+        // Final commit to ensure all pending operations are persisted.
+        if !pending_writes.is_empty() {
+            commit_pending(
+                &mut db, &mut pending_writes, &mut committed_state,
+                &mut pending_inserts, &mut pending_deletes,
+            ).await;
+        }
+
 
         for key in &all_keys {
             let k = Key::new(*key);
-            let result = clean_db.get(&k).await.expect("Final get should not fail");
+            let result = db.get(&k).await.expect("Final get should not fail");
 
-            match expected_state.get(key) {
+            match committed_state.get(key) {
                 Some(expected_value) => {
                     assert!(result.is_some(), "Lost value for key {key:?} at end");
                     let actual_value = result.expect("Should have value");
@@ -357,10 +401,11 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        clean_db.destroy().await.expect("Destroy should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "mmr");
+    fuzz_family::<mmb::Family>(&input, "mmb");
 });

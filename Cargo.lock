@@ -19,6 +19,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.3.4",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -987,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1010,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-codec",
  "commonware-cryptography",
@@ -1026,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-broadcast",
@@ -1041,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1061,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1077,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1089,21 +1102,22 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
  "criterion",
  "num-rational",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1114,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-coding",
@@ -1127,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "commonware-codec",
@@ -1146,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1163,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-conformance-macros",
  "commonware-macros",
@@ -1175,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance-macros"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1184,13 +1198,14 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-coding",
  "commonware-conformance",
  "commonware-consensus",
  "commonware-cryptography",
@@ -1209,6 +1224,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rand_distr",
+ "rayon",
  "rstest",
  "thiserror 2.0.17",
  "tracing",
@@ -1217,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1240,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -1252,6 +1268,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
@@ -1266,7 +1283,6 @@ dependencies = [
  "num-rational",
  "num-traits",
  "p256 0.13.2",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1280,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1302,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1325,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "colored",
@@ -1347,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1368,8 +1384,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-invariants"
+version = "2026.4.0"
+dependencies = [
+ "arbitrary",
+ "commonware-macros",
+ "commonware-utils",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "commonware-log"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1392,10 +1420,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "commonware-macros-impl",
- "commonware-utils",
  "futures",
  "futures-timer",
  "tokio",
@@ -1405,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1416,24 +1443,34 @@ dependencies = [
 
 [[package]]
 name = "commonware-math"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
- "proptest",
+ "criterion",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
 
 [[package]]
+name = "commonware-math-fuzz"
+version = "2026.4.0"
+dependencies = [
+ "arbitrary",
+ "commonware-math",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-p2p"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1462,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1478,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-parallel"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1488,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-reshare"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1517,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1540,12 +1577,13 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "axum",
  "bytes",
  "cfg-if",
+ "clap",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
@@ -1568,6 +1606,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rayon",
+ "serde_json",
  "sha2 0.10.9",
  "sysinfo",
  "thiserror 2.0.17",
@@ -1579,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1589,8 +1628,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "arbitrary",
  "bytes",
@@ -1619,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1634,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -1653,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1669,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1691,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1719,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "2026.2.0"
+version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -4725,6 +4765,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest 0.10.7",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -5121,9 +5171,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",

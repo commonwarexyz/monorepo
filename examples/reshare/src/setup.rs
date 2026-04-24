@@ -1,4 +1,5 @@
 //! Local network setup.
+use crate::dkg::MAX_SUPPORTED_MODE;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
@@ -55,7 +56,7 @@ impl ParticipantConfig {
             let bytes = from_hex(raw).expect("invalid hex string");
             Output::<MinSig, PublicKey>::decode_cfg(
                 &mut bytes.as_slice(),
-                &NZU32!(max_participants_per_round),
+                &(NZU32!(max_participants_per_round), MAX_SUPPORTED_MODE),
             )
             .expect("failed to decode polynomial")
         })

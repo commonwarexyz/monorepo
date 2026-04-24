@@ -1,10 +1,7 @@
-//! P2P resolver initialization and config.
+//! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::{
-    marshal::ingress::handler::{self, Handler},
-    Block,
-};
-use commonware_cryptography::PublicKey;
+use crate::marshal::resolver::handler;
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
@@ -13,12 +10,19 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P: PublicKey, C: Provider<PublicKey = P>, B: Blocker<PublicKey = P>> {
+pub struct Config<P, C, B>
+where
+    P: PublicKey,
+    C: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+{
     /// The public key to identify this node.
     pub public_key: P,
 
     /// The provider of peers that can be consulted for fetching data.
-    pub provider: C,
+    ///
+    /// We only fetch data from peers in `latest.primary` (see [commonware_p2p::Provider]).
+    pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.
     pub blocker: B,
@@ -43,29 +47,29 @@ pub struct Config<P: PublicKey, C: Provider<PublicKey = P>, B: Blocker<PublicKey
 }
 
 /// Initialize a P2P resolver.
-pub fn init<E, C, Bl, B, S, R, P>(
+pub fn init<E, C, B, D, S, R, P>(
     ctx: &E,
-    config: Config<P, C, Bl>,
+    config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
-    mpsc::Receiver<handler::Message<B>>,
-    p2p::Mailbox<handler::Request<B>, P>,
+    mpsc::Receiver<handler::Message<D>>,
+    p2p::Mailbox<handler::Request<D>, P>,
 )
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
-    Bl: Blocker<PublicKey = P>,
-    B: Block,
+    B: Blocker<PublicKey = P>,
+    D: Digest,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (handler, receiver) = mpsc::channel(config.mailbox_size);
-    let handler = Handler::new(handler);
+    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         ctx.with_label("resolver"),
         p2p::Config {
-            provider: config.provider,
+            peer_provider: config.peer_provider,
             blocker: config.blocker,
             consumer: handler.clone(),
             producer: handler,

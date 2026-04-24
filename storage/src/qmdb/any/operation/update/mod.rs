@@ -1,5 +1,5 @@
-use crate::qmdb::any::value::ValueEncoding;
-use commonware_utils::Array;
+use crate::qmdb::{any::value::ValueEncoding, operation::Key};
+use commonware_codec::CodecShared;
 use std::fmt;
 
 mod sealed {
@@ -13,9 +13,21 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync {
+pub trait Update: sealed::Sealed + Clone + Send + Sync {
+    /// The key type.
+    type Key: Key;
+
+    /// The value type.
+    type Value: CodecShared + Clone;
+
+    /// The value encoding (fixed or variable).
+    type ValueEncoding: ValueEncoding<Value = Self::Value>;
+
     /// The updated key.
-    fn key(&self) -> &K;
+    fn key(&self) -> &Self::Key;
+
+    /// The updated value.
+    fn value(&self) -> &Self::Value;
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -68,7 +80,7 @@ mod tests {
             next_key: FixedBytes::from([4, 3, 2, 1]),
         };
 
-        roundtrip(&upd, &(RangeCfg::from(..), ()));
+        roundtrip(&upd, &((), (RangeCfg::from(..), ())));
     }
 
     #[test]
@@ -91,7 +103,7 @@ mod tests {
             vec![10, 11, 12, 13],
         );
 
-        roundtrip(&upd, &(RangeCfg::from(..), ()));
+        roundtrip(&upd, &((), (RangeCfg::from(..), ())));
     }
 
     #[cfg(feature = "arbitrary")]

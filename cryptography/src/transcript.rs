@@ -3,7 +3,7 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-use crate::{Signer, Verifier};
+use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -273,16 +273,50 @@ impl Transcript {
     /// - signing the operations that have been performed on the transcript,
     /// - or, equivalently, signing randomness or a summary extracted from the transcript.
     pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
-        // Note: We pass an empty namespace here, since the namespace may be included
-        // within the transcript summary already via `Self::new`.
-        s.sign(b"", self.summarize().hash.as_bytes())
+        self.summarize().sign(s)
     }
 
     /// Verify a signature produced by [Transcript::sign].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        self.summarize().verify(v, sig)
+    }
+
+    /// Append a signature produced by [Transcript::sign] to a batch verifier.
+    pub fn add_to_batch<B: BatchVerifier>(
+        &self,
+        batch: &mut B,
+        public_key: &B::PublicKey,
+        signature: &<B::PublicKey as Verifier>::Signature,
+    ) -> bool {
+        self.summarize().add_to_batch(batch, public_key, signature)
+    }
+}
+
+impl Summary {
+    /// Use a signer to create a signature over this summary.
+    pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
         // Note: We pass an empty namespace here, since the namespace may be included
-        // within the transcript summary already via `Self::new`.
-        v.verify(b"", self.summarize().hash.as_bytes(), sig)
+        // within the transcript summary already via `Transcript::new`.
+        s.sign(b"", self.as_ref())
+    }
+
+    /// Verify a signature produced by [Summary::sign].
+    pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Transcript::new`.
+        v.verify(b"", self.as_ref(), sig)
+    }
+
+    /// Append a signature produced by [Summary::sign] to a batch verifier.
+    pub fn add_to_batch<B: BatchVerifier>(
+        &self,
+        batch: &mut B,
+        public_key: &B::PublicKey,
+        signature: &<B::PublicKey as Verifier>::Signature,
+    ) -> bool {
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Transcript::new`.
+        batch.add(b"", self.as_ref(), public_key, signature)
     }
 }
 
@@ -380,7 +414,9 @@ impl arbitrary::Arbitrary<'_> for Summary {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ed25519;
     use commonware_codec::{DecodeExt as _, Encode};
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_namespace_affects_summary() {
@@ -481,6 +517,38 @@ mod test {
     fn test_summary_encode_roundtrip() {
         let s = Transcript::new(b"test").summarize();
         assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
+    }
+
+    #[test]
+    fn test_summary_sign_verify_matches_transcript() {
+        let sk = ed25519::PrivateKey::from_seed(7);
+        let pk = sk.public_key();
+        let mut transcript = Transcript::new(b"test");
+        transcript.commit(b"DATA".as_slice());
+        let summary = transcript.summarize();
+
+        let sig = summary.sign(&sk);
+        assert_eq!(sig, transcript.sign(&sk));
+        assert!(summary.verify(&pk, &sig));
+        assert!(transcript.verify(&pk, &sig));
+    }
+
+    #[test]
+    fn test_summary_add_to_batch_matches_transcript() {
+        let sk = ed25519::PrivateKey::from_seed(7);
+        let pk = sk.public_key();
+        let mut transcript = Transcript::new(b"test");
+        transcript.commit(b"DATA".as_slice());
+        let summary = transcript.summarize();
+        let sig = transcript.sign(&sk);
+
+        let mut summary_batch = ed25519::Batch::new();
+        assert!(summary.add_to_batch(&mut summary_batch, &pk, &sig));
+        let mut transcript_batch = ed25519::Batch::new();
+        assert!(transcript.add_to_batch(&mut transcript_batch, &pk, &sig));
+
+        assert!(summary_batch.verify(&mut test_rng()));
+        assert!(transcript_batch.verify(&mut test_rng()));
     }
 
     #[test]

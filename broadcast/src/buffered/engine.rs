@@ -1,41 +1,35 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    ordered::Set,
+};
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
-struct Waiter<P, Dd, M> {
-    /// The peer sending the message.
-    peer: Option<P>,
-
-    /// The digest of the message.
-    digest: Option<Dd>,
-
+struct Waiter<M> {
     /// The responder to send the message to.
     responder: oneshot::Sender<M>,
 }
 
-/// A pair of commitment and digest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Pair<Dc, Dd> {
-    /// The commitment of the message.
-    commitment: Dc,
-
-    /// The digest of the message.
-    digest: Dd,
+/// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
+enum InsertMessageResult {
+    Inserted,
+    Duplicate,
+    Ineligible,
 }
 
 /// Instance of the main engine for the module.
@@ -45,11 +39,13 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<
+pub struct Engine<E, P, M, D>
+where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
-    M: Committable + Digestible + Codec,
-> {
+    M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
+{
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -77,31 +73,32 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
-    #[allow(clippy::type_complexity)]
-    waiters: BTreeMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
+    waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
+
+    /// Provider for peer set changes.
+    peer_provider: D,
 
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
-    /// All cached messages by commitment and digest.
-    ///
-    /// We store messages outside of the deques to minimize memory usage
-    /// when receiving duplicate messages.
-    items: BTreeMap<M::Commitment, BTreeMap<M::Digest, M>>,
+    /// All cached messages by digest.
+    items: BTreeMap<M::Digest, M>,
 
-    /// A LRU cache of the latest received identities and digests from each peer.
+    /// A LRU cache of the latest received digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    #[allow(clippy::type_complexity)]
-    deques: BTreeMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
+    deques: BTreeMap<P, VecDeque<M::Digest>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
     counts: BTreeMap<M::Digest, usize>,
+
+    /// Latest primary peer set allowed to keep buffered messages resident.
+    latest_primary_peers: Set<P>,
 
     ////////////////////////////////////////
     // Metrics
@@ -110,15 +107,16 @@ pub struct Engine<
     metrics: metrics::Metrics,
 }
 
-impl<
-        E: BufferPooler + Clock + Spawner + Metrics,
-        P: PublicKey,
-        M: Committable + Digestible + Codec,
-    > Engine<E, P, M>
+impl<E, P, M, D> Engine<E, P, M, D>
+where
+    E: BufferPooler + Clock + Spawner + Metrics,
+    P: PublicKey,
+    M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
@@ -136,6 +134,8 @@ impl<
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            latest_primary_peers: Set::default(),
+            peer_provider: cfg.peer_provider,
             metrics,
         };
 
@@ -147,7 +147,7 @@ impl<
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
@@ -158,6 +158,7 @@ impl<
             network.0,
             network.1,
         );
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -168,6 +169,14 @@ impl<
             },
             on_stopped => {
                 debug!("shutdown");
+            },
+            // Handle peer set subscription messages
+            Some(update) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                // Evict by latest primary only; see buffered module docs.
+                self.update_latest_primary_peers(update.latest.primary);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox_receiver.recv() else {
@@ -183,23 +192,13 @@ impl<
                     self.handle_broadcast(&mut sender, recipients, message, responder)
                         .await;
                 }
-                Message::Subscribe {
-                    peer,
-                    commitment,
-                    digest,
-                    responder,
-                } => {
+                Message::Subscribe { digest, responder } => {
                     trace!("mailbox: subscribe");
-                    self.handle_subscribe(peer, commitment, digest, responder);
+                    self.handle_subscribe(digest, responder);
                 }
-                Message::Get {
-                    peer,
-                    commitment,
-                    digest,
-                    responder,
-                } => {
+                Message::Get { digest, responder } => {
                     trace!("mailbox: get");
-                    self.handle_get(peer, commitment, digest, responder);
+                    self.handle_get(digest, responder);
                 }
             },
             // Handle incoming messages
@@ -246,7 +245,8 @@ impl<
         responder: oneshot::Sender<Vec<P>>,
     ) {
         // Store the message, continue even if it was already stored
-        let _ = self.insert_message(self.public_key.clone(), msg.clone());
+        let digest = msg.digest();
+        let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
         let sent_to = sender
@@ -259,93 +259,46 @@ impl<
         responder.send_lossy(sent_to);
     }
 
-    /// Searches through all maintained messages for a match.
-    fn find_messages(
-        &mut self,
-        peer: &Option<P>,
-        commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        all: bool,
-    ) -> Vec<M> {
-        match peer {
-            // Only consider messages from the peer filter
-            Some(s) => self
-                .deques
-                .get(s)
-                .into_iter()
-                .flat_map(|dq| dq.iter())
-                .filter(|pair| pair.commitment == commitment)
-                .filter_map(|pair| {
-                    self.items
-                        .get(&pair.commitment)
-                        .and_then(|m| m.get(&pair.digest))
-                })
-                .cloned()
-                .collect(),
-
-            // Search by commitment
-            None => self.items.get(&commitment).map_or_else(
-                // If there are no messages for the commitment, return an empty vector
-                Vec::new,
-                |msgs| match digest {
-                    // If a digest is provided, return whatever matches it.
-                    Some(dg) => msgs.get(&dg).cloned().into_iter().collect(),
-
-                    // If no digest was provided, return `all` messages for the commitment.
-                    None if all => msgs.values().cloned().collect(),
-                    None => msgs.values().next().cloned().into_iter().collect(),
-                },
-            ),
-        }
-    }
-
     /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    fn handle_subscribe(
-        &mut self,
-        peer: Option<P>,
-        commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        responder: oneshot::Sender<M>,
-    ) {
+    fn handle_subscribe(&mut self, digest: M::Digest, responder: oneshot::Sender<M>) {
         // Check if the message is already in the cache
-        let mut items = self.find_messages(&peer, commitment, digest, false);
-        if let Some(item) = items.pop() {
+        if let Some(item) = self.items.get(&digest).cloned() {
             self.respond_subscribe(responder, item);
             return;
         }
 
         // Store the responder
-        self.waiters.entry(commitment).or_default().push(Waiter {
-            peer,
-            digest,
-            responder,
-        });
+        self.waiters
+            .entry(digest)
+            .or_default()
+            .push(Waiter { responder });
     }
 
     /// Handles a `get` request from the application.
-    fn handle_get(
-        &mut self,
-        peer: Option<P>,
-        commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        responder: oneshot::Sender<Vec<M>>,
-    ) {
-        let items = self.find_messages(&peer, commitment, digest, true);
-        self.respond_get(responder, items);
+    fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<M>>) {
+        let item = self.items.get(&digest).cloned();
+        self.respond_get(responder, item);
     }
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        if !self.insert_message(peer.clone(), msg) {
-            debug!(?peer, "message already stored");
-            self.metrics.receive.inc(Status::Dropped);
-            return;
+        let digest = msg.digest();
+        match self.insert_message(peer.clone(), digest, msg) {
+            InsertMessageResult::Inserted => {
+                self.metrics.receive.inc(Status::Success);
+            }
+            InsertMessageResult::Duplicate => {
+                debug!(?peer, "message already stored");
+                self.metrics.receive.inc(Status::Dropped);
+            }
+            InsertMessageResult::Ineligible => {
+                debug!(?peer, "message from peer outside latest.primary not cached");
+                self.metrics.receive.inc(Status::Dropped);
+            }
         }
-
-        self.metrics.receive.inc(Status::Success);
     }
 
     ////////////////////////////////////////
@@ -354,46 +307,19 @@ impl<
 
     /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the message was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and message cache, potentially evicting an old message.
-    fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        // Get the commitment and digest of the message
-        let pair = Pair {
-            commitment: msg.commitment(),
-            digest: msg.digest(),
-        };
-
-        // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(mut waiters) = self.waiters.remove(&pair.commitment) {
-            let mut i = 0;
-            while i < waiters.len() {
-                // Get the peer and digest filters
-                let Waiter {
-                    peer: peer_filter,
-                    digest: digest_filter,
-                    responder: _,
-                } = &waiters[i];
-
-                // Keep the waiter if either filter does not match
-                if peer_filter.as_ref().is_some_and(|s| s != &peer)
-                    || digest_filter.is_some_and(|d| d != pair.digest)
-                {
-                    i += 1;
-                    continue;
-                }
-
-                // Filters match, so fulfill the subscription and drop the entry.
-                //
-                // The index `i` is intentionally not incremented here to check
-                // the element that was swapped into position `i`.
-                let responder = waiters.swap_remove(i).responder;
-                self.respond_subscribe(responder, msg.clone());
+    /// Waiters are notified even when a sender is not eligible to keep a
+    /// buffered cache entry resident.
+    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
+        // Send the message to the waiters, if any
+        if let Some(waiters) = self.waiters.remove(&digest) {
+            for waiter in waiters {
+                self.respond_subscribe(waiter.responder, msg.clone());
             }
+        }
 
-            // Re-insert if any waiters remain for this commitment
-            if !waiters.is_empty() {
-                self.waiters.insert(pair.commitment, waiters);
-            }
+        // Only peers listed in `latest.primary` may buffer
+        if self.latest_primary_peers.position(&peer).is_none() {
+            return InsertMessageResult::Ineligible;
         }
 
         // Get the relevant deque for the peer
@@ -403,29 +329,25 @@ impl<
             .or_insert_with(|| VecDeque::with_capacity(self.deque_size + 1));
 
         // If the message is already in the deque, move it to the front and return early
-        if let Some(i) = deque.iter().position(|d| *d == pair) {
+        if let Some(i) = deque.iter().position(|d| *d == digest) {
             if i != 0 {
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
             }
-            return false;
+            return InsertMessageResult::Duplicate;
         };
 
-        // - Insert the message into the peer cache
+        // - Insert the digest into the peer cache
         // - Increment the item count
         // - Insert the message if-and-only-if the new item count is 1
-        deque.push_front(pair);
+        deque.push_front(digest);
         let count = self
             .counts
-            .entry(pair.digest)
+            .entry(digest)
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
-            let existing = self
-                .items
-                .entry(pair.commitment)
-                .or_default()
-                .insert(pair.digest, msg);
+            let existing = self.items.insert(digest, msg);
             assert!(existing.is_none());
         }
 
@@ -435,23 +357,23 @@ impl<
             // Decrement the item count
             // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
-            let count = self
-                .counts
-                .entry(stale.digest)
-                .and_modify(|c| *c = c.checked_sub(1).unwrap())
-                .or_insert_with(|| unreachable!());
-            if *count == 0 {
-                let existing = self.counts.remove(&stale.digest);
-                assert!(existing == Some(0));
-                let identities = self.items.get_mut(&stale.commitment).unwrap();
-                identities.remove(&stale.digest); // Must have existed
-                if identities.is_empty() {
-                    self.items.remove(&stale.commitment);
-                }
-            }
+            decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
-        true
+        InsertMessageResult::Inserted
+    }
+
+    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+        for (peer, deque) in self
+            .deques
+            .extract_if(.., |peer, _| peers.position(peer).is_none())
+        {
+            debug!(?peer, digests = deque.len(), "evicting disconnected peer");
+            for digest in deque {
+                decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
+            }
+        }
+        self.latest_primary_peers = peers;
     }
 
     ////////////////////////////////////////
@@ -484,10 +406,10 @@ impl<
         });
     }
 
-    /// Respond to a waiter with an optional message.
+    /// Respond to a get request.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
-        let found = !msg.is_empty();
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+        let found = msg.is_some();
         self.metrics.get.inc(if responder.send_lossy(msg) {
             if found {
                 Status::Success
@@ -497,5 +419,23 @@ impl<
         } else {
             Status::Dropped
         });
+    }
+}
+
+/// Decrement a digest refcount and evict it from cache when no references remain.
+fn decrement_digest_refcount<D: Ord, M>(
+    counts: &mut BTreeMap<D, usize>,
+    items: &mut BTreeMap<D, M>,
+    digest: &D,
+) {
+    let should_remove = {
+        let count = counts.get_mut(digest).expect("count must exist");
+        *count = count.checked_sub(1).expect("count must be > 0");
+        *count == 0
+    };
+    if should_remove {
+        let existing = counts.remove(digest);
+        assert!(existing == Some(0));
+        items.remove(digest);
     }
 }

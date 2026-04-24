@@ -9,14 +9,23 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
 ///
-/// # Warning
+/// # Epocher and Provider Coverage
 ///
-/// Any height the marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If the epocher
-/// cannot map a height to an epoch, or the provider cannot supply a scheme for
-/// that epoch, the marshal will silently drop the sync request. Callers are
-/// responsible for ensuring both are configured for the full range of heights
-/// they intend to sync.
+/// Any height marshal is asked to sync must be covered by both the
+/// [epocher](Self::epocher) and the [provider](Self::provider). If
+/// either returns `None` for a requested height, resolved requests will
+/// be acknowledged and then dropped. If no longer needed (say a duplicate request
+/// for a height we've long since processed), this drop is harmless. However, failing
+/// to provide either the epocher or the provider for a height we still require to
+/// process the canonical chain will lead marshal to stall (acknowledged requests
+/// may not be retried).
+///
+/// ## Safe Pruning
+///
+/// Applications may prune epocher/provider entries once the last processed
+/// height passes a prune target. The last processed height can be
+/// derived from an `Update::Block` at height `H` as
+/// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
 pub struct Config<B, P, ES, T>
 where
     B: Block,

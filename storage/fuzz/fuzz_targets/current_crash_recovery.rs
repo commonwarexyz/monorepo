@@ -14,11 +14,9 @@ use commonware_runtime::{
     Metrics as _, Runner,
 };
 use commonware_storage::{
-    mmr::Location,
-    qmdb::{
-        current::{unordered::variable::Db as Current, VariableConfig},
-        store::LogStore as _,
-    },
+    journal::contiguous::variable::Config as VConfig,
+    merkle::{journaled::Config as MerkleConfig, mmb, mmr, Graftable, Location},
+    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64};
@@ -36,7 +34,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type CleanDb = Current<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -77,7 +75,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     #[arbitrary(with = bounded_items_per_blob)]
-    mmr_items_per_blob: u64,
+    merkle_items_per_blob: u64,
     #[arbitrary(with = bounded_items_per_blob)]
     log_items_per_blob: u64,
     #[arbitrary(with = bounded_write_buffer)]
@@ -94,41 +92,105 @@ fn make_config(
     suffix: &str,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    mmr_items_per_blob: u64,
+    merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
-) -> VariableConfig<TwoCap, ()> {
+) -> VariableConfig<TwoCap, ((), ())> {
+    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        mmr_journal_partition: format!("crash-mmr-journal-{suffix}"),
-        mmr_metadata_partition: format!("crash-mmr-metadata-{suffix}"),
-        mmr_items_per_blob: NZU64!(mmr_items_per_blob),
-        mmr_write_buffer: write_buffer,
-        log_partition: format!("crash-log-{suffix}"),
-        log_items_per_blob: NZU64!(log_items_per_blob),
-        log_write_buffer: write_buffer,
-        log_compression: None,
-        log_codec_config: (),
-        grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
+        merkle_config: MerkleConfig {
+            journal_partition: format!("crash-merkle-journal-{suffix}"),
+            metadata_partition: format!("crash-merkle-metadata-{suffix}"),
+            items_per_blob: NZU64!(merkle_items_per_blob),
+            write_buffer,
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: VConfig {
+            partition: format!("crash-log-{suffix}"),
+            items_per_section: NZU64!(log_items_per_blob),
+            write_buffer,
+            compression: None,
+            codec_config: ((), ()),
+            page_cache,
+        },
+        grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
-        page_cache: CacheRef::from_pooler(ctx, page_size, page_cache_size),
-        thread_pool: None,
     }
 }
 
-fn fuzz(input: FuzzInput) {
+/// Remove affected keys from committed since their recovered value is unknown.
+fn forget_pending(
+    pending: &HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for key in pending.keys() {
+        committed.remove(key);
+    }
+}
+
+/// Merge pending changes into committed after a successful commit.
+fn apply_pending(
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for (k, v) in pending.drain() {
+        match v {
+            Some(val) => {
+                committed.insert(k, val);
+            }
+            None => {
+                committed.remove(&k);
+            }
+        }
+    }
+}
+
+/// Commit pending writes. Returns `true` on success, `false` on error.
+async fn commit_pending<F: Graftable>(
+    db: &mut Db<F>,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) -> bool {
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = match batch.merkleize(db, None).await {
+        Ok(m) => m,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return false;
+        }
+    };
+    let result = db.apply_batch(merkleized).await;
+    if result.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    if db.commit().await.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    apply_pending(pending, committed);
+    true
+}
+
+fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     if input.operations.is_empty() {
         return;
     }
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let mmr_items_per_blob = input.mmr_items_per_blob;
+    let merkle_items_per_blob = input.merkle_items_per_blob;
     let log_items_per_blob = input.log_items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
-    let operations = input.operations;
-    let suffix = format!("current_{}", input.seed);
+    let operations = input.operations.clone();
+    let suffix = format!("{suffix_base}_{}", input.seed);
 
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let runner = deterministic::Runner::new(cfg);
@@ -139,14 +201,14 @@ fn fuzz(input: FuzzInput) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let db = CleanDb::init(
+            let mut db: Db<F> = Db::init(
                 ctx.with_label("db"),
                 make_config(
                     &ctx,
                     &suffix,
                     page_size,
                     page_cache_size,
-                    mmr_items_per_blob,
+                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),
@@ -163,70 +225,49 @@ fn fuzz(input: FuzzInput) {
 
             // Active KV pairs after the last successful commit.
             let mut committed: HashMap<RawKey, RawValue> = HashMap::new();
-            // Uncommitted changes since the last commit. None = delete, Some = update.
+            // Uncommitted changes since the last commit. None = delete, Some = upsert.
             let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
 
-            let mut db = Some(db.into_mutable());
+            // Accumulate writes until Commit, matching the intended
+            // pending/committed separation.
+            let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                let Some(mut current) = db.take() else {
-                    break;
-                };
-
                 match op {
                     CurrentOperation::Update { key, value } => {
-                        let k = Key::new(*key);
-                        let v = Value::new(*value);
-                        if current.write_batch([(k, Some(v))]).await.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
-                        db = Some(current);
                     }
                     CurrentOperation::Delete { key } => {
-                        let k = Key::new(*key);
-                        if current.write_batch([(k, None)]).await.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
-                        db = Some(current);
                     }
                     CurrentOperation::Commit => {
-                        let Ok((durable_db, _)) = current.commit(None).await else {
-                            // A failed commit may have partially persisted
-                            // pending operations.
-                            // Remove affected keys from committed since their
-                            // recovered value is unknown.
-                            for key in pending.keys() {
-                                committed.remove(key);
-                            }
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
                             break;
-                        };
-                        // Data is durable. Merge pending into committed.
-                        for (k, v) in pending.drain() {
-                            match v {
-                                Some(val) => {
-                                    committed.insert(k, val);
-                                }
-                                None => {
-                                    committed.remove(&k);
-                                }
-                            }
                         }
-                        let Ok(clean_db) = durable_db.into_merkleized().await else {
-                            break;
-                        };
-                        db = Some(clean_db.into_mutable());
                     }
                     CurrentOperation::Prune => {
-                        let Ok(mut merkleized_db) = current.into_merkleized().await else {
-                            break;
-                        };
-                        let floor = merkleized_db.inactivity_floor_loc();
-                        if merkleized_db.prune(floor).await.is_err() {
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
                             break;
                         }
-                        db = Some(merkleized_db.into_mutable());
+                        if db.prune(db.sync_boundary()).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -242,14 +283,14 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db = CleanDb::init(
+            let mut db: Db<F> = Db::init(
                 ctx.with_label("recovered"),
                 make_config(
                     &ctx,
                     &suffix,
                     page_size,
                     page_cache_size,
-                    mmr_items_per_blob,
+                    merkle_items_per_blob,
                     log_items_per_blob,
                     write_buffer,
                 ),
@@ -277,45 +318,43 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    CleanDb::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
 
             // Verify range proofs over the recovered DB.
-            let floor = *db.inactivity_floor_loc();
-            let size = *db.size().await;
+            let floor = *db.sync_boundary();
+            let size = *db.bounds().await.end;
             for i in floor..size {
-                let loc = Location::new(i).unwrap();
+                let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
                     .range_proof(&mut hasher, loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    CleanDb::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
 
             // Verify the recovered DB is usable.
-            let mut db = db.into_mutable();
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            db.write_batch([(test_key, Some(test_value))])
+            let batch = db
+                .new_batch()
+                .write(test_key, Some(test_value))
+                .merkleize(&db, None)
                 .await
-                .expect("write_batch after recovery should succeed");
-
-            let (durable_db, _) = db
-                .commit(None)
+                .unwrap();
+            db.apply_batch(batch)
+                .await
+                .expect("apply_batch after recovery should succeed");
+            db.commit()
                 .await
                 .expect("commit after recovery should succeed");
-            let clean_db = durable_db
-                .into_merkleized()
-                .await
-                .expect("merkleize after recovery should succeed");
 
-            clean_db
-                .destroy()
+            db.destroy()
                 .await
                 .expect("destroy after recovery should succeed");
         }
@@ -323,5 +362,6 @@ fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "current-crash-mmr");
+    fuzz_family::<mmb::Family>(&input, "current-crash-mmb");
 });

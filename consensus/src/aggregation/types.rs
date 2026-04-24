@@ -324,7 +324,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble::<_, N3f1>(attestations.into_iter(), strategy)?;
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
 
         Some(Self { item, certificate })
     }

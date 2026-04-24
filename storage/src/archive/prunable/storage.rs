@@ -14,7 +14,7 @@ use commonware_runtime::{
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -115,8 +115,12 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
-    /// Maps index to position in index journal.
+    /// Maps index to its first position in the index journal.
     indices: BTreeMap<u64, u64>,
+
+    /// Additional positions for indices that have more than one entry.
+    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
+    extra_indices: BTreeMap<u64, Vec<u64>>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,
@@ -138,6 +142,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
+    /// Iterate over all positions for a given index (first + extras).
+    fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
+        self.indices.get(&index).into_iter().copied().chain(
+            self.extra_indices
+                .get(&index)
+                .into_iter()
+                .flat_map(|v| v.iter().copied()),
+        )
+    }
+
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
@@ -157,7 +171,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
-        let mut indices = BTreeMap::new();
+        let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
@@ -168,7 +183,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal)
-                indices.insert(entry.index, position);
+                match indices.entry(entry.index) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(position);
+                    }
+                    btree_map::Entry::Occupied(_) => {
+                        extra_indices.entry(entry.index).or_default().push(position);
+                    }
+                }
 
                 // Store index in keys
                 keys.insert(&entry.key, entry.index);
@@ -213,6 +235,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
+            extra_indices,
             intervals,
             keys,
             items_tracked,
@@ -228,9 +251,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Update metrics
         self.gets.inc();
 
-        // Get index location
+        // Get first position at this index
         let position = match self.indices.get(&index) {
-            Some(pos) => *pos,
+            Some(&position) => position,
             None => return Ok(None),
         };
 
@@ -260,24 +283,28 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 continue;
             }
 
-            // Get index location
-            let position = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-
-            // Fetch index entry from index journal to verify key
-            let section = self.section(*index);
-            let entry = self.oversized.get(section, position).await?;
-
-            // Verify key matches
-            if entry.key.as_ref() == key.as_ref() {
-                // Fetch value directly from blob storage (bypasses page cache)
-                let (value_offset, value_size) = entry.value_location();
-                let value = self
-                    .oversized
-                    .get_value(section, value_offset, value_size)
-                    .await?;
-                return Ok(Some(value));
+            // Get all positions at this index
+            if !self.indices.contains_key(index) {
+                return Err(Error::RecordCorrupted);
             }
-            self.unnecessary_reads.inc();
+            let section = self.section(*index);
+
+            for position in self.iter_positions(*index) {
+                // Fetch index entry from index journal to verify key
+                let entry = self.oversized.get(section, position).await?;
+
+                // Verify key matches
+                if entry.key.as_ref() == key.as_ref() {
+                    // Fetch value directly from blob storage (bypasses page cache)
+                    let (value_offset, value_size) = entry.value_location();
+                    let value = self
+                        .oversized
+                        .get_value(section, value_offset, value_size)
+                        .await?;
+                    return Ok(Some(value));
+                }
+                self.unnecessary_reads.inc();
+            }
         }
 
         Ok(None)
@@ -286,6 +313,54 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     fn has_index(&self, index: u64) -> bool {
         // Check if index exists
         self.indices.contains_key(&index)
+    }
+
+    async fn put_internal(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+        skip_if_index_exists: bool,
+    ) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if index < oldest_allowed {
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+        }
+
+        // Check for existing index when enforcing single-item semantics.
+        if skip_if_index_exists && self.indices.contains_key(&index) {
+            return Ok(());
+        }
+
+        // Write value and index entry atomically (glob first, then index)
+        let section = self.section(index);
+        let entry = Record::new(index, key.clone(), 0, 0);
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
+
+        // Store index location
+        match self.indices.entry(index) {
+            btree_map::Entry::Vacant(e) => {
+                e.insert(position);
+            }
+            btree_map::Entry::Occupied(_) => {
+                self.extra_indices.entry(index).or_default().push(position);
+            }
+        }
+
+        // Store interval
+        self.intervals.insert(index);
+
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
+
+        // Add section to pending
+        self.pending.insert(section);
+
+        // Update metrics
+        let _ = self.items_tracked.try_set(self.indices.len());
+        Ok(())
     }
 
     /// Prune `Archive` to the provided `min` (masked by the configured
@@ -326,6 +401,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 _ => break,
             };
             self.indices.remove(&next).unwrap();
+            self.extra_indices.remove(&next);
             self.indices_pruned.inc();
         }
 
@@ -348,38 +424,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     type Value = V;
 
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
-        }
-
-        // Check for existing index
-        if self.indices.contains_key(&index) {
-            return Ok(());
-        }
-
-        // Write value and index entry atomically (glob first, then index)
-        let section = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
-
-        // Store index location
-        self.indices.insert(index, position);
-
-        // Store interval
-        self.intervals.insert(index);
-
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
-
-        // Add section to pending
-        self.pending.insert(section);
-
-        // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        self.put_internal(index, key, data, true).await
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
@@ -422,6 +467,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
     }
@@ -432,6 +481,43 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    crate::archive::MultiArchive for Archive<T, E, K, V>
+{
+    async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
+        // Update metrics
+        self.gets.inc();
+
+        // Check if the index exists.
+        if !self.indices.contains_key(&index) {
+            return Ok(None);
+        }
+
+        // Get all positions at this index
+        let section = self.section(index);
+        let extra_count = self.extra_indices.get(&index).map_or(0, Vec::len);
+
+        let mut values = Vec::with_capacity(1 + extra_count);
+        for position in self.iter_positions(index) {
+            // Fetch index entry from index journal to verify key
+            let entry = self.oversized.get(section, position).await?;
+
+            // Fetch value directly from blob storage (bypasses page cache)
+            let (value_offset, value_size) = entry.value_location();
+            let value = self
+                .oversized
+                .get_value(section, value_offset, value_size)
+                .await?;
+            values.push(value);
+        }
+        Ok(Some(values))
+    }
+
+    async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        self.put_internal(index, key, data, false).await
     }
 }
 

@@ -3,11 +3,11 @@ use crate::{
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    kv,
+    Context,
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, IoBuf};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -386,7 +386,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
+pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -423,7 +423,7 @@ pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: Cod
     resizes: Counter,
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -431,11 +431,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(buf: &[u8]) -> Result<(Entry, Entry), Error> {
-        let mut buf1 = &buf[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &buf[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
+    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
+        let entry1 = Entry::read(&mut buf)?;
+        let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))
     }
 
@@ -444,7 +442,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let offset = Self::table_offset(table_index);
         let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
-        Self::parse_entries(read_buf.coalesce().as_ref())
+        Self::parse_entries(read_buf)
     }
 
     /// Recover a single table entry and update tracking.
@@ -510,10 +508,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
-            // Read both entries from the buffer
-            let mut buf = [0u8; Entry::FULL_SIZE];
-            reader.read_exact(&mut buf, Entry::FULL_SIZE).await?;
-            let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
+            // Read both entries from the buffer.
+            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(
@@ -1009,22 +1006,13 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = self
-            .table
-            .read_at(read_offset, chunk_bytes)
-            .await?
-            .coalesce();
+        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
-        for i in 0..chunk_size {
-            // Get the entry
-            let entry_offset = i as usize * Entry::FULL_SIZE;
-            let entry_end = entry_offset + Entry::FULL_SIZE;
-            let entry_buf = &read_buf.as_ref()[entry_offset..entry_end];
-
-            // Parse the two slots
-            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
+        for _ in 0..chunk_size {
+            // Parse the next two slots directly from the read stream.
+            let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
 
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);
@@ -1045,7 +1033,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
-        // Put the writes into the table
+        // Put the writes into the table.
+        let writes = IoBuf::from(writes);
         let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
         let new_write = self.table.write_at(new_offset, writes);
@@ -1159,27 +1148,6 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable
-    for Freezer<E, K, V>
-{
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(Identifier::Key(key)).await
-    }
-}
-
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable
-    for Freezer<E, K, V>
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.put(key, value).await?;
-        Ok(())
-    }
-}
-
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
@@ -1197,27 +1165,37 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
+    use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Metrics, Runner, Storage,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
         NZUsize, NZU16,
     };
 
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
+
     type TestFreezer = Freezer<Context, U64, u64>;
+
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
     fn assert_freezer_futures_are_send(freezer: &mut TestFreezer, key: U64) {
-        assert_gettable(freezer, &key);
-        assert_updatable(freezer, key, 0u64);
+        is_send(freezer.get(Identifier::Key(&key)));
+        is_send(freezer.put(key, 0u64));
     }
 
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
-        assert_send(freezer.destroy());
+        is_send(freezer.destroy());
     }
 
     #[test_traced]

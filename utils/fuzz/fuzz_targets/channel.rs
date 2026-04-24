@@ -64,8 +64,10 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    let _ = sender.send(*batch, d.clone()).await;
-                    in_flight += 1;
+                    match sender.send(*batch, d.clone()).await {
+                        Ok(_) => in_flight += 1,
+                        Err(_) => break,
+                    }
                 }
 
                 let _ = sender.watermark();

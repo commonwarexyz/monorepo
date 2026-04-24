@@ -172,10 +172,11 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Testing Strategy
 
-- Unit tests: Core logic validation
-- Integration tests: Cross-primitive interaction
-- Fuzz tests: Input validation and edge cases
-- MIRI tests: Memory safety verification for unsafe code
+- Property: Core logic and invariant validation (use "minifuzz" from the invariants crate)
+- Unit: Testing edge cases or particular scenarios.
+- Integration: Cross-primitive interaction
+- Fuzz: Extending property tests (cf. "Plan" pattern in dkg.rs or the math crate).
+- MIRI: Memory safety verification for unsafe code
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
 
@@ -742,6 +743,7 @@ pub enum Error {
 - Use `///` for public items with clear descriptions
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
+- Place explanatory comments above the logical code block they describe; do not split a single consecutive sequence with inline comments between adjacent lines.
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 

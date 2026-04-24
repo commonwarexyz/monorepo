@@ -70,7 +70,7 @@ impl<
                 allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
-                allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
+                peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
@@ -136,7 +136,7 @@ impl<
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(self) {
@@ -151,6 +151,7 @@ impl<
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
+                send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
@@ -192,7 +193,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                query_frequency: self.cfg.query_frequency,
+                peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );
@@ -200,26 +201,26 @@ impl<
 
         let mut shutdown = self.context.stopped();
 
-        // Wait for first actor to exit
+        // If any task completes, the network should stop
         info!("network started");
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping network");
             },
             tracker = &mut tracker_task => {
-                panic!("tracker exited unexpectedly: {tracker:?}");
+                debug!(?tracker, "tracker stopped, shutting down network");
             },
             router = &mut router_task => {
-                panic!("router exited unexpectedly: {router:?}");
+                debug!(?router, "router stopped, shutting down network");
             },
             spawner = &mut spawner_task => {
-                panic!("spawner exited unexpectedly: {spawner:?}");
+                debug!(?spawner, "spawner stopped, shutting down network");
             },
             listener = &mut listener_task => {
-                panic!("listener exited unexpectedly: {listener:?}");
+                debug!(?listener, "listener stopped, shutting down network");
             },
             dialer = &mut dialer_task => {
-                panic!("dialer exited unexpectedly: {dialer:?}");
+                debug!(?dialer, "dialer stopped, shutting down network");
             },
         }
     }

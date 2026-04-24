@@ -19,5 +19,35 @@ commonware_macros::stability_scope!(BETA {
     pub mod poly;
 });
 
-#[cfg(test)]
-pub(crate) mod test;
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) mod test;
+});
+
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(feature = "fuzz")]
+    pub mod fuzz {
+        use arbitrary::{Arbitrary, Unstructured};
+
+        #[derive(Debug, Arbitrary)]
+        pub enum Plan {
+            Poly(crate::poly::fuzz::Plan),
+            Algebra(crate::algebra::fuzz::Plan),
+            Goldilocks(crate::fields::goldilocks::fuzz::Plan),
+            Test(crate::test::fuzz::Plan),
+            Ntt(crate::ntt::fuzz::Plan),
+        }
+
+        impl Plan {
+            pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+                match self {
+                    Self::Poly(plan) => plan.run(u),
+                    Self::Algebra(plan) => plan.run(u),
+                    Self::Goldilocks(plan) => plan.run(u),
+                    Self::Test(plan) => plan.run(u),
+                    Self::Ntt(plan) => plan.run(u),
+                }
+            }
+        }
+    }
+});

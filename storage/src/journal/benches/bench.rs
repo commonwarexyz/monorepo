@@ -72,7 +72,7 @@ where
     for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);
         journal
-            .append(FixedBytes::new(arr))
+            .append(&FixedBytes::new(arr))
             .await
             .expect("failed to append data");
     }

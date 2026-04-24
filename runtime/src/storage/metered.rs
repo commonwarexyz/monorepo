@@ -148,20 +148,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let read = self.inner.read_at_buf(offset, len, buf).await?;
+        let read = self.inner.read_at_buf(offset, len, bufs).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
         Ok(read)
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = buf.into();
-        let buf_len = buf.remaining();
-        self.inner.write_at(offset, buf).await?;
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let bufs_len = bufs.remaining();
+        self.inner.write_at(offset, bufs).await?;
         self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(buf_len as u64);
+        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
         Ok(())
     }
 

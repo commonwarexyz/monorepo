@@ -295,7 +295,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
         // Update entry with actual location and write to index
         let entry_with_location = entry.with_location(offset, size);
-        let position = self.index.append(section, entry_with_location).await?;
+        let position = self.index.append(section, &entry_with_location).await?;
 
         Ok((position, offset, size))
     }
@@ -2761,7 +2761,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize - should recover without overflow panics
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.with_label("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
@@ -2785,7 +2785,6 @@ mod tests {
             // Verify we can still append to these large sections
             let new_value: TestValue = [0xAB; 16];
             let new_entry = TestEntry::new(999, 0, 0);
-            let mut oversized = oversized;
             oversized
                 .append(middle_section, new_entry, &new_value)
                 .await
@@ -2852,7 +2851,7 @@ mod tests {
 
             // Phase 4: Second recovery attempt should handle the inconsistent state
             // Index has 4 entries, but glob only supports 3.
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.with_label("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit after nested crash");
@@ -2876,7 +2875,6 @@ mod tests {
             // Verify append works after nested crash recovery
             let new_value: TestValue = [0xFF; 16];
             let new_entry = TestEntry::new(100, 0, 0);
-            let mut oversized = oversized;
             let (pos, offset, _size) = oversized
                 .append(1, new_entry, &new_value)
                 .await

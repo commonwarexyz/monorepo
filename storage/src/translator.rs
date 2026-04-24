@@ -1,6 +1,7 @@
 //! Primitive implementations of [Translator].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use commonware_utils::GOLDEN_RATIO;
+use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -21,15 +22,15 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
-/// A “do-nothing” hasher for `uint`.
+/// A lightweight hasher for translated `uint` keys.
 ///
 /// Most users typically store keys that are **already hashed** (shortened by the [Translator]).
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
-/// [std::collections::HashMap] this identity hasher instead:
+/// [std::collections::HashMap] this custom hasher instead:
 ///
 /// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
 ///   input into an internal field;
-/// * [Hasher::finish] returns that value unchanged.
+/// * [Hasher::finish] returns that value multiplied by a mixing constant.
 ///
 /// # Warning
 ///
@@ -71,7 +72,10 @@ impl Hasher for UintIdentity {
 
     #[inline]
     fn finish(&self) -> u64 {
-        self.value
+        // Multiply by the mixing constant to spread low-order bits across all 64 bits.
+        // Without this, hashbrown's h2 control bytes (top 7 bits) are all zero for small
+        // keys, defeating its SIMD fast-reject filter.
+        self.value.wrapping_mul(GOLDEN_RATIO)
     }
 }
 
@@ -124,7 +128,7 @@ define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
 define_cap_translator!(EightCap, 8, u64);
 
-/// Define a special array type for which we'll implement our own identity hasher. This avoids the
+/// Define a special array type for which we'll implement our own lightweight hasher. This avoids the
 /// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
 /// prefix.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -188,10 +192,106 @@ impl<const N: usize> BuildHasher for Cap<N> {
     }
 }
 
+/// Collision-resistant wrapper for any [Translator].
+///
+/// Hashes the full key with a per-instance secret seed before delegating to the inner translator.
+/// This makes translated-key collisions unpredictable to an adversary who
+/// does not know the seed, similar to how [std::collections::HashMap] uses
+/// [std::collections::hash_map::RandomState] to prevent HashDoS attacks. It can also be used to
+/// ensure uniform distribution of skewed keyspaces when used by non-hashing structures such as
+/// [crate::index].
+///
+/// # No Ordering
+///
+/// Hashing destroys lexicographic key ordering. Do not use [Hashed] with ordered indices when
+/// callers rely on translated-key adjacency matching original-key adjacency (e.g., exclusion proofs
+/// in the ordered QMDB). [Hashed] is safe for unordered indices and partitioned unordered indices.
+///
+/// # `no_std` Support
+///
+/// [Hashed::new] and [Default] are available only with this crate's `std` feature. They use
+/// [ahash::RandomState::new], which requires OS-provided randomness (the `runtime-rng` feature of
+/// `ahash`, enabled by `std` here). In `no_std` environments, use [Hashed::from_seed] with an
+/// externally-sourced random seed instead.
+///
+/// # No Stability Guarantees
+///
+/// [ahash::RandomState] is used as the underlying hasher. While `ahash` is robust, its exact
+/// algorithm might change across versions. As a result, transformed outputs are not stable across
+/// Rust versions or platforms. Treat this translator as an in-memory collision-hardening mechanism,
+/// not as a stable/persisted encoding.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_storage::translator::{Hashed, TwoCap, Translator};
+///
+/// # #[cfg(feature = "std")]
+/// # {
+/// // Random seed (production use, requires `std`):
+/// let t = Hashed::new(TwoCap);
+/// let _k = t.transform(b"hello");
+/// # }
+///
+/// // Deterministic seed (testing within the same toolchain/runtime):
+/// let t = Hashed::from_seed(42, TwoCap);
+/// assert_eq!(t.transform(b"hello"), t.transform(b"hello"));
+/// ```
+#[derive(Clone)]
+pub struct Hashed<T: Translator> {
+    random_state: ahash::RandomState,
+    inner: T,
+}
+
+#[cfg(feature = "std")]
+impl<T: Translator + Default> Default for Hashed<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Translator> Hashed<T> {
+    /// Create a new [Hashed] translator with a random seed.
+    #[cfg(feature = "std")]
+    pub fn new(inner: T) -> Self {
+        Self {
+            random_state: ahash::RandomState::new(),
+            inner,
+        }
+    }
+
+    /// Create a new [Hashed] translator with a specific seed.
+    pub const fn from_seed(seed: u64, inner: T) -> Self {
+        Self {
+            random_state: ahash::RandomState::with_seeds(seed, 0, 0, 0),
+            inner,
+        }
+    }
+}
+
+impl<T: Translator> Translator for Hashed<T> {
+    type Key = T::Key;
+
+    #[inline]
+    fn transform(&self, key: &[u8]) -> T::Key {
+        let hash_val = self.random_state.hash_one(key);
+        self.inner.transform(&hash_val.to_le_bytes())
+    }
+}
+
+impl<T: Translator> BuildHasher for Hashed<T> {
+    type Hasher = <T as BuildHasher>::Hasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        self.inner.build_hasher()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::Hasher;
+    use core::hash::Hasher;
 
     #[test]
     fn test_one_cap() {
@@ -267,10 +367,59 @@ mod tests {
     }
 
     #[test]
-    fn identity_hasher_works_on_small_slice() {
-        let mut h = UintIdentity::default();
-        h.write(b"abc");
-        assert_eq!(h.finish(), u64::from_le_bytes(cap::<8>(b"abc")));
+    fn identity_hasher_small_slices_differ() {
+        let hash = |bytes: &[u8]| {
+            let mut h = UintIdentity::default();
+            h.write(bytes);
+            h.finish()
+        };
+        assert_ne!(hash(b"abc"), hash(b"abd"));
+        assert_ne!(hash(b"a"), hash(b"b"));
+        assert_ne!(hash(b""), hash(b"a"));
+    }
+
+    #[test]
+    fn identity_hasher_sets_high_bits() {
+        // The mixing step must spread small values into the top 7 bits so that
+        // hashbrown's h2 SIMD filter is effective.
+        for i in [1u64, 7, 17, 255] {
+            let mut h = UintIdentity::default();
+            h.write_u64(i);
+            assert_ne!(h.finish() >> 57, 0, "high bits all zero for input {i}");
+        }
+    }
+
+    #[test]
+    fn identity_hasher_integer_writes_differ() {
+        let hash_u8 = |v: u8| {
+            let mut h = UintIdentity::default();
+            h.write_u8(v);
+            h.finish()
+        };
+        let hash_u16 = |v: u16| {
+            let mut h = UintIdentity::default();
+            h.write_u16(v);
+            h.finish()
+        };
+        let hash_u32 = |v: u32| {
+            let mut h = UintIdentity::default();
+            h.write_u32(v);
+            h.finish()
+        };
+        let hash_u64 = |v: u64| {
+            let mut h = UintIdentity::default();
+            h.write_u64(v);
+            h.finish()
+        };
+        assert_ne!(hash_u8(0), hash_u8(1));
+        assert_ne!(hash_u16(0), hash_u16(1));
+        assert_ne!(hash_u32(0), hash_u32(1));
+        assert_ne!(hash_u64(0), hash_u64(1));
+
+        // Same numeric value through different write widths must agree.
+        assert_eq!(hash_u8(7), hash_u16(7));
+        assert_eq!(hash_u16(7), hash_u32(7));
+        assert_eq!(hash_u32(7), hash_u64(7));
     }
 
     #[test]
@@ -278,5 +427,63 @@ mod tests {
     fn identity_hasher_panics_on_large_write_slice() {
         let mut h = UintIdentity::default();
         h.write(b"too big for an int");
+    }
+
+    #[test]
+    fn test_hashed_consistency() {
+        let t = Hashed::from_seed(42, TwoCap);
+        assert_eq!(t.transform(b"hello"), t.transform(b"hello"));
+        assert_eq!(t.transform(b""), t.transform(b""));
+        assert_eq!(t.transform(b"abcdef"), t.transform(b"abcdef"));
+    }
+
+    #[test]
+    fn test_hashed_seed_determinism() {
+        let t1 = Hashed::from_seed(42, TwoCap);
+        let t2 = Hashed::from_seed(42, TwoCap);
+        assert_eq!(t1.transform(b"hello"), t2.transform(b"hello"));
+        assert_eq!(t1.transform(b"world"), t2.transform(b"world"));
+    }
+
+    #[test]
+    fn test_hashed_seed_independence() {
+        let t1 = Hashed::from_seed(1, EightCap);
+        let t2 = Hashed::from_seed(2, EightCap);
+        // Different seeds should (with overwhelming probability) produce different outputs.
+        assert_ne!(t1.transform(b"hello"), t2.transform(b"hello"));
+    }
+
+    #[test]
+    fn test_hashed_prefix_collisions_avoided() {
+        // Without hashing, keys sharing a prefix collide. With hashing, they should not.
+        let t = Hashed::from_seed(99, TwoCap);
+        let k1 = t.transform(b"abXXX");
+        let k2 = t.transform(b"abYYY");
+        // The unhashed TwoCap would map both to the same value (first 2 bytes "ab").
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_hashed_all_cap_sizes() {
+        let t1 = Hashed::from_seed(7, OneCap);
+        assert_eq!(t1.transform(b"test"), t1.transform(b"test"));
+
+        let t4 = Hashed::from_seed(7, FourCap);
+        assert_eq!(t4.transform(b"test"), t4.transform(b"test"));
+
+        let t8 = Hashed::from_seed(7, EightCap);
+        assert_eq!(t8.transform(b"test"), t8.transform(b"test"));
+
+        let tc = Hashed::from_seed(7, Cap::<3>::new());
+        assert_eq!(tc.transform(b"test"), tc.transform(b"test"));
+    }
+
+    #[test]
+    fn test_hashed_random_seed() {
+        // Two instances with random seeds should (with overwhelming probability)
+        // produce different outputs.
+        let t1 = Hashed::new(EightCap);
+        let t2 = Hashed::new(EightCap);
+        assert_ne!(t1.transform(b"hello"), t2.transform(b"hello"));
     }
 }

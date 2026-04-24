@@ -76,9 +76,9 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::BoxFuture,
+    future::Either,
     task::{waker, ArcWake},
-    Future, FutureExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -210,6 +210,9 @@ pub struct Config {
     /// loop. This is useful to prevent starvation if some task never yields.
     cycle: Duration,
 
+    /// Time the runtime starts at.
+    start_time: SystemTime,
+
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
@@ -234,18 +237,23 @@ impl Config {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under Miri
                 let network_buffer_pool_cfg = BufferPoolConfig::for_network()
-                    .with_max_per_class(commonware_utils::NZUsize!(32));
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
                 let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
-                    .with_max_per_class(commonware_utils::NZUsize!(32));
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
             } else {
-                let network_buffer_pool_cfg = BufferPoolConfig::for_network();
-                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage();
+                let network_buffer_pool_cfg =
+                    BufferPoolConfig::for_network().with_thread_cache_disabled();
+                let storage_buffer_pool_cfg =
+                    BufferPoolConfig::for_storage().with_thread_cache_disabled();
             }
         }
 
         Self {
             rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
+            start_time: UNIX_EPOCH,
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
@@ -273,6 +281,11 @@ impl Config {
     /// See [Config]
     pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
+        self
+    }
+    /// See [Config]
+    pub const fn with_start_time(mut self, start_time: SystemTime) -> Self {
+        self.start_time = start_time;
         self
     }
     /// See [Config]
@@ -312,6 +325,10 @@ impl Config {
         self.cycle
     }
     /// See [Config]
+    pub const fn start_time(&self) -> SystemTime {
+        self.start_time
+    }
+    /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
@@ -337,6 +354,10 @@ impl Config {
         assert!(
             self.cycle >= SYSTEM_TIME_PRECISION,
             "cycle duration must be greater than or equal to system time precision"
+        );
+        assert!(
+            self.start_time >= UNIX_EPOCH,
+            "start time must be greater than or equal to unix epoch"
         );
     }
 }
@@ -878,7 +899,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    instrumented: bool,
+    traced: bool,
 }
 
 impl Clone for Context {
@@ -896,7 +917,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
-            instrumented: false,
+            traced: false,
         }
     }
 }
@@ -909,7 +930,7 @@ impl Context {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let start_time = UNIX_EPOCH;
+        let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
@@ -977,7 +998,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1049,7 +1070,7 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                instrumented: false,
+                traced: false,
             },
             executor,
             panicked,
@@ -1122,11 +1143,6 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn instrumented(mut self) -> Self {
-        self.instrumented = true;
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1138,9 +1154,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let is_instrumented = self.instrumented;
+        let traced = self.traced;
         self.execution = Execution::default();
-        self.instrumented = false;
+        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1149,14 +1165,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future: BoxFuture<'_, T> = if is_instrumented {
+        let future = if traced {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            f(self).instrument(span).boxed()
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
@@ -1230,6 +1246,10 @@ impl crate::ThreadPooler for Context {
 }
 
 impl crate::Metrics for Context {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+
     fn with_label(&self, label: &str) -> Self {
         // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
@@ -1269,8 +1289,34 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn label(&self) -> String {
-        self.name.clone()
+    fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        let weak = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            if let Some(exec) = weak.upgrade() {
+                exec.registry.lock().remove_scope(id);
+            }
+        }));
+        Self {
+            scope: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn with_span(&self) -> Self {
+        Self {
+            traced: true,
+            ..self.clone()
+        }
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
@@ -1323,29 +1369,6 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"encode", |_| {});
         let encoded = executor.registry.lock().encode();
         encoded
-    }
-
-    fn with_scope(&self) -> Self {
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
-
-        // If already scoped, inherit the existing scope
-        if self.scope.is_some() {
-            return self.clone();
-        }
-
-        // RAII guard removes the scoped registry when all clones drop.
-        let weak = self.executor.clone();
-        let scope_id = executor.registry.lock().create_scope();
-        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Some(exec) = weak.upgrade() {
-                exec.registry.lock().remove_scope(id);
-            }
-        }));
-        Self {
-            scope: Some(guard),
-            ..self.clone()
-        }
     }
 }
 
@@ -1894,6 +1917,38 @@ mod tests {
     }
 
     #[test]
+    fn test_recover_time_persists() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let duration_to_sleep = Duration::from_secs(10);
+
+        // Sleep for some time and recover the runtime
+        let (time_before_recovery, checkpoint) = executor.start_and_recover(|context| async move {
+            context.sleep(duration_to_sleep).await;
+            context.current()
+        });
+
+        // Check that the time advanced correctly before recovery
+        assert_eq!(
+            time_before_recovery.duration_since(UNIX_EPOCH).unwrap(),
+            duration_to_sleep
+        );
+
+        // Check that the time persists after recovery
+        let executor2 = Runner::from(checkpoint);
+        executor2.start(move |context| async move {
+            assert_eq!(context.current(), time_before_recovery);
+
+            // Advance time further
+            context.sleep(duration_to_sleep).await;
+            assert_eq!(
+                context.current().duration_since(UNIX_EPOCH).unwrap(),
+                duration_to_sleep * 2
+            );
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "executor still has weak references")]
     fn test_context_return() {
         // Initialize runtime
@@ -1921,6 +1976,32 @@ mod tests {
                 Duration::ZERO
             );
         });
+    }
+
+    #[test]
+    fn test_start_time() {
+        // Initialize runtime with default config
+        let executor_default = deterministic::Runner::default();
+        executor_default.start(|context| async move {
+            assert_eq!(context.current(), UNIX_EPOCH);
+        });
+
+        // Initialize runtime with custom start time
+        let start_time = UNIX_EPOCH + Duration::from_secs(100);
+        let cfg = Config::default().with_start_time(start_time);
+        let executor = deterministic::Runner::new(cfg);
+
+        executor.start(move |context| async move {
+            // Check that the time matches the custom start time
+            assert_eq!(context.current(), start_time);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "start time must be greater than or equal to unix epoch")]
+    fn test_bad_start_time() {
+        let cfg = Config::default().with_start_time(UNIX_EPOCH - Duration::from_secs(1));
+        deterministic::Runner::new(cfg);
     }
 
     #[cfg(not(feature = "external"))]

@@ -30,3 +30,7 @@ disallowed-macros = [
     { path = "futures::select", reason = "use commonware_macros::select! instead" },
     { path = "futures::select_biased", reason = "use commonware_macros::select! instead" },
 ]
+
+disallowed-methods = [
+    { path = "commonware_p2p::Blocker::block", reason = "use commonware_p2p::block! instead" },
+]

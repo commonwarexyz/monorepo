@@ -27,6 +27,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "qmdb_unordered_batch_root"
+path = "fuzz_targets/qmdb_unordered_batch_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "qmdb_ordered_operations"
 path = "fuzz_targets/qmdb_ordered_operations.rs"
 test = false
@@ -55,8 +62,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "mmr_operations"
-path = "fuzz_targets/mmr_operations.rs"
+name = "merkle_family_operations"
+path = "fuzz_targets/merkle_family_operations.rs"
 test = false
 doc = false
 bench = false
@@ -111,6 +118,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "current_mmb_prune_grow"
+path = "fuzz_targets/current_mmb_prune_grow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_unordered_batch_root"
+path = "fuzz_targets/current_unordered_batch_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "current_ordered_operations"
 path = "fuzz_targets/current_ordered_operations.rs"
 test = false
@@ -153,15 +174,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "translator_operations"
-path = "fuzz_targets/translator_operations.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "mmr_journaled"
-path = "fuzz_targets/mmr_journaled.rs"
+name = "merkle_journaled"
+path = "fuzz_targets/merkle_journaled.rs"
 test = false
 doc = false
 bench = false
@@ -197,13 +211,6 @@ bench = false
 [[bin]]
 name = "range_proof"
 path = "fuzz_targets/range_proof.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "extract_pinned_nodes"
-path = "fuzz_targets/extract_pinned_nodes.rs"
 test = false
 doc = false
 bench = false
@@ -251,8 +258,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "mmr_journaled_crash_recovery"
-path = "fuzz_targets/mmr_journaled_crash_recovery.rs"
+name = "merkle_journaled_crash_recovery"
+path = "fuzz_targets/merkle_journaled_crash_recovery.rs"
 test = false
 doc = false
 bench = false

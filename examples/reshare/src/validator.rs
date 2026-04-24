@@ -105,7 +105,7 @@ pub async fn run<S, L>(
     // Create a static resolver for marshal
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
-        provider: oracle.clone(),
+        peer_provider: oracle.clone(),
         blocker: oracle.clone(),
         mailbox_size: 200,
         initial: Duration::from_secs(1),
@@ -183,12 +183,12 @@ mod test {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
-        union, N3f1, TryCollect,
+        test_rng_seeded, union, N3f1, TryCollect,
     };
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{
-        collections::{BTreeMap, HashSet},
+        collections::{btree_map::Entry, BTreeMap, HashSet},
         future::Future,
         num::NonZeroU32,
         pin::Pin,
@@ -373,7 +373,7 @@ mod test {
             *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
-                provider: oracle.manager(),
+                peer_provider: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
                 mailbox_size: 200,
                 initial: Duration::from_secs(1),
@@ -519,6 +519,81 @@ mod test {
         failures: u64,
     }
 
+    /// Tracks observed DKG callbacks.
+    ///
+    /// Updates are not a durable per-participant log: the DKG actor persists
+    /// `epoch.next()` before invoking the callback, so a crash can cause the
+    /// harness to miss intermediate updates for that participant. The stable
+    /// invariants are that participant epochs strictly increase and that every
+    /// callback observed for the same epoch agrees on the result.
+    #[derive(Default)]
+    struct ProgressTracker {
+        outputs: BTreeMap<Epoch, Option<Output<MinSig, PublicKey>>>,
+        status: BTreeMap<PublicKey, Epoch>,
+        successes: u64,
+    }
+
+    impl ProgressTracker {
+        fn observe(
+            &mut self,
+            pk: PublicKey,
+            epoch: Epoch,
+            output: Option<Output<MinSig, PublicKey>>,
+        ) -> anyhow::Result<()> {
+            if let Some(previous) = self.status.get(&pk).filter(|previous| **previous >= epoch) {
+                return Err(anyhow!(
+                    "unexpected update epoch transition {previous:?} -> {epoch:?}"
+                ));
+            }
+
+            match self.outputs.entry(epoch) {
+                Entry::Occupied(existing) => {
+                    if existing.get().as_ref() != output.as_ref() {
+                        return Err(anyhow!(
+                            "mismatched outputs {:?} != {:?}",
+                            existing.get(),
+                            output
+                        ));
+                    }
+                }
+                Entry::Vacant(vacant) => {
+                    if output.is_some() {
+                        self.successes += 1;
+                    }
+                    vacant.insert(output);
+                }
+            }
+
+            self.status.insert(pk, epoch);
+            Ok(())
+        }
+
+        fn success_target_epoch(&self, success_target: u64) -> Option<Epoch> {
+            let index = success_target.checked_sub(1)?.try_into().ok()?;
+            self.outputs
+                .iter()
+                .filter_map(|(epoch, output)| output.as_ref().map(|_| *epoch))
+                .nth(index)
+        }
+
+        fn all_reached_success_target(&self, total: usize, success_target: u64) -> bool {
+            let Some(target_epoch) = self.success_target_epoch(success_target) else {
+                return false;
+            };
+            self.status.values().filter(|e| **e >= target_epoch).count() >= total
+        }
+
+        fn min_epoch(&self) -> Epoch {
+            self.status.values().min().copied().unwrap_or(Epoch::zero())
+        }
+    }
+
+    fn test_output(seed: u64) -> Output<MinSig, PublicKey> {
+        Team::reshare(test_rng_seeded(seed), 4, &[4])
+            .output
+            .expect("reshare output exists")
+    }
+
     impl Plan {
         async fn run_inner(self, mut ctx: deterministic::Context) -> anyhow::Result<PlanResult> {
             let (is_dkg, target) = match self.mode {
@@ -531,7 +606,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: NZUsize!(3),
                     max_size: 1024 * 1024,
                 },
             );
@@ -566,9 +641,7 @@ mod test {
             .await;
 
             // Set up crash ticker if needed (only for Random crashes)
-            let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
-            let mut status = BTreeMap::<PublicKey, Epoch>::new();
-            let mut successes = 0u64;
+            let mut progress = ProgressTracker::default();
             let mut failures = 0u64;
             let mut delayed_started = false;
             let mut delayed_acknowledged: HashSet<PublicKey> = HashSet::new();
@@ -586,7 +659,6 @@ mod test {
                 });
             }
 
-            let mut success_target_reached_epoch = None;
             loop {
                 select! {
                     update = updates_out.recv() => {
@@ -618,32 +690,11 @@ mod test {
                                 (epoch, Some(output))
                             }
                         };
-                        match status.get(&update.pk) {
-                            None if epoch.is_zero() => {}
-                            Some(e) if e.next() == epoch => {}
-                            other => return Err(anyhow!("unexpected update epoch {other:?}")),
-                        }
-                        status.insert(update.pk, epoch);
-
-                        // If this is a new output, increment successes
-                        if let Some(o) = outputs.get(epoch.get() as usize) {
-                            if o.as_ref() != output.as_ref() {
-                                return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
-                            }
-                        } else {
-                            if output.is_some() {
-                                successes += 1;
-                            }
-                            outputs.push(output);
-                        }
-
-                        // If we've reached the target number of successes, record the epoch (recall, epoch increases even after failure)
-                        if successes >= target {
-                            success_target_reached_epoch = Some(epoch);
-                        }
+                        progress.observe(update.pk, epoch, output)?;
 
                         // If all have reached the epoch, stop
-                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)).count() >= self.total as usize;
+                        let all_reached_epoch =
+                            progress.all_reached_success_target(self.total as usize, target);
                         let post_update = if all_reached_epoch {
                             PostUpdate::Stop
                         } else {
@@ -660,15 +711,15 @@ mod test {
                         } else {
                             self.total as usize - delayed.len()
                         };
-                        if status.len() < active_count {
+                        if progress.status.len() < active_count {
                             continue;
                         }
 
                         // Compute the minimum epoch that all active participants have reached
-                        let min_epoch = status.values().min().copied().unwrap_or(Epoch::zero());
-                        if successes >= target {
+                        let min_epoch = progress.min_epoch();
+                        if progress.successes >= target {
                             // Wait for all active participants to reach the target epoch
-                            if let Some(target_epoch) = success_target_reached_epoch {
+                            if let Some(target_epoch) = progress.success_target_epoch(target) {
                                 if min_epoch < target_epoch {
                                     continue;
                                 }
@@ -799,6 +850,74 @@ mod test {
             }
             Ok(result)
         }
+    }
+
+    #[test]
+    fn progress_tracker_allows_first_report_after_restart() {
+        let mut progress = ProgressTracker::default();
+        let first = PrivateKey::from_seed(0).public_key();
+        let restarted = PrivateKey::from_seed(1).public_key();
+
+        progress
+            .observe(first, Epoch::zero(), Some(test_output(0)))
+            .unwrap();
+        progress
+            .observe(restarted.clone(), Epoch::new(1), Some(test_output(1)))
+            .unwrap();
+        assert_eq!(progress.status.get(&restarted), Some(&Epoch::new(1)));
+    }
+
+    #[test]
+    fn progress_tracker_rejects_non_increasing_epochs() {
+        let mut progress = ProgressTracker::default();
+        let pk = PrivateKey::from_seed(0).public_key();
+
+        progress.observe(pk.clone(), Epoch::new(1), None).unwrap();
+        let err = progress
+            .observe(pk.clone(), Epoch::new(1), None)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unexpected update epoch transition"));
+
+        let err = progress.observe(pk, Epoch::zero(), None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unexpected update epoch transition"));
+    }
+
+    #[test]
+    fn progress_tracker_rejects_conflicting_epoch_results() {
+        let mut progress = ProgressTracker::default();
+        let first = PrivateKey::from_seed(0).public_key();
+        let second = PrivateKey::from_seed(1).public_key();
+
+        progress
+            .observe(first, Epoch::zero(), Some(test_output(0)))
+            .unwrap();
+        let err = progress
+            .observe(second, Epoch::zero(), Some(test_output(1)))
+            .unwrap_err();
+        assert!(err.to_string().contains("mismatched outputs"));
+    }
+
+    #[test]
+    fn progress_tracker_ignores_late_failures_when_tracking_success_target() {
+        let mut progress = ProgressTracker::default();
+        let first = PrivateKey::from_seed(0).public_key();
+        let second = PrivateKey::from_seed(1).public_key();
+        let third = PrivateKey::from_seed(2).public_key();
+
+        progress
+            .observe(first, Epoch::zero(), Some(test_output(0)))
+            .unwrap();
+        progress
+            .observe(second, Epoch::new(2), Some(test_output(2)))
+            .unwrap();
+        assert_eq!(progress.success_target_epoch(2), Some(Epoch::new(2)));
+
+        progress.observe(third, Epoch::new(1), None).unwrap();
+        assert_eq!(progress.success_target_epoch(2), Some(Epoch::new(2)));
     }
 
     #[test_group("slow")]
@@ -1359,7 +1478,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: NZUsize!(3),
                     max_size: 1024 * 1024,
                 },
             );

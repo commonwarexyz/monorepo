@@ -223,7 +223,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network).await)
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
@@ -370,8 +370,7 @@ impl<
                 let TipAck { ack, tip } = match msg {
                     Ok(peer_ack) => peer_ack,
                     Err(err) => {
-                        warn!(?err, ?sender, "ack decode failed, blocking peer");
-                        self.blocker.block(sender).await;
+                        commonware_p2p::block!(self.blocker, sender, ?err, "ack decode failed");
                         continue;
                     }
                 };
@@ -388,8 +387,12 @@ impl<
                 // Validate that we need to process the ack
                 if let Err(err) = self.validate_ack(&ack, &sender) {
                     if err.blockable() {
-                        warn!(?sender, ?err, "blocking peer for validation failure");
-                        self.blocker.block(sender).await;
+                        commonware_p2p::block!(
+                            self.blocker,
+                            sender,
+                            ?err,
+                            "ack validation failure"
+                        );
                     } else {
                         debug!(?sender, ?err, "ack validate failed");
                     }
@@ -928,7 +931,7 @@ impl<
         self.journal
             .as_mut()
             .expect("journal must be initialized")
-            .append(section, activity)
+            .append(section, &activity)
             .await
             .expect("unable to append to journal");
     }

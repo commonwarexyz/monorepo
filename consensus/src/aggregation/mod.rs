@@ -176,14 +176,16 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Registrations<PublicKey>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, mut oracle) = Network::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
-        );
+            fixture.participants.clone(),
+        )
+        .await;
         network.start();
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
@@ -353,6 +355,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -562,6 +565,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_byzantine_shutdown() {
         unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -766,6 +770,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(f2);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_shutdown_with_unsigned_height() {
         unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinPk, _>);
@@ -824,6 +829,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -934,6 +940,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_one_offline() {
         one_offline(bls12381_threshold::fixture::<MinPk, _>);

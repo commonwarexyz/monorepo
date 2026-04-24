@@ -1,54 +1,56 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::Sha256;
-use commonware_storage::mmr::{
-    mem::{CleanMmr, Config},
-    Location, Position, StandardHasher,
+use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_storage::merkle::{
+    hasher::Standard,
+    mem::{Config, Mem},
+    mmb, mmr, Family as MerkleFamily, Location,
 };
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    pruned_to_pos: u64,
+    // Raw `u64` so we also exercise `Mem::init`'s overflow / near-overflow rejection paths
+    // for each family (`Location<F>: Arbitrary` would silently clamp to `F::MAX_LEAVES`).
+    pruned_to: u64,
     nodes: Vec<[u8; 32]>,
     pinned_nodes: Vec<[u8; 32]>,
 }
 
-fn fuzz(input: FuzzInput) {
-    let nodes: Vec<_> = input
-        .nodes
-        .into_iter()
-        .map(<Sha256 as commonware_cryptography::Hasher>::Digest::from)
-        .collect();
-
-    let pinned_nodes: Vec<_> = input
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
+    let nodes: Vec<Digest> = input.nodes.iter().copied().map(Digest::from).collect();
+    let pinned_nodes: Vec<Digest> = input
         .pinned_nodes
-        .into_iter()
-        .map(<Sha256 as commonware_cryptography::Hasher>::Digest::from)
+        .iter()
+        .copied()
+        .map(Digest::from)
         .collect();
 
-    let config = Config {
+    let config = Config::<F, Digest> {
         nodes,
-        pruned_to_pos: Position::new(input.pruned_to_pos),
+        pruning_boundary: Location::<F>::new(input.pruned_to),
         pinned_nodes,
     };
 
-    let mut hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = CleanMmr::init(config, &mut hasher) else {
+    let hasher = Standard::<Sha256>::new();
+    let Ok(merkle) = Mem::<F, Digest>::init(config, &hasher) else {
         return;
     };
 
-    if input.pruned_to_pos == u64::MAX || input.pruned_to_pos == u64::MAX - 1 {
+    if input.pruned_to == u64::MAX || input.pruned_to == u64::MAX - 1 {
         return;
     }
 
-    let leaves = mmr.leaves();
+    let leaves = merkle.leaves();
     if leaves > 0 {
-        if let Some(start_loc) = Location::new(0) {
-            let _ = mmr.range_proof(start_loc..leaves);
-        }
+        let _ = merkle.range_proof(&hasher, Location::<F>::new(0)..leaves);
     }
+}
+
+fn fuzz(input: FuzzInput) {
+    fuzz_family::<mmr::Family>(&input);
+    fuzz_family::<mmb::Family>(&input);
 }
 
 fuzz_target!(|data: &[u8]| {

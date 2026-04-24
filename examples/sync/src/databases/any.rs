@@ -4,7 +4,8 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::{
@@ -15,32 +16,37 @@ use commonware_storage::{
             FixedConfig as Config,
         },
         operation::Committable,
-        store::LogStore,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
-/// Database type alias for the Clean state.
-pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
+/// Database type alias.
+pub type Database<E> = Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
+    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: "log-journal".into(),
-        log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(1024),
+        merkle_config: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FConfig {
+            partition: "log-journal".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
         translator: Translator::default(),
-        thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
     }
 }
 
@@ -48,6 +54,7 @@ impl<E> crate::databases::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
+    type Family = mmr::Family;
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
@@ -79,37 +86,33 @@ where
     }
 
     async fn add_operations(
-        self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<Self, commonware_storage::qmdb::Error> {
+    ) -> Result<(), qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(self);
+            return Ok(());
         }
-        let mut db = self.into_mutable();
-        let num_ops = operations.len();
 
-        for (i, operation) in operations.into_iter().enumerate() {
+        let mut batch = self.new_batch();
+        for operation in operations {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    db.write_batch([(key, Some(value))]).await?;
+                    batch = batch.write(key, Some(value));
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)]).await?;
+                    batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let (durable_db, _) = db.commit(metadata).await?;
-                    if i == num_ops - 1 {
-                        // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
-                    }
-                    // Not the last operation - continue in mutable state
-                    db = durable_db.into_mutable();
+                    let merkleized = batch.merkleize(self, metadata).await?;
+                    self.apply_batch(merkleized).await?;
+                    self.commit().await?;
+                    batch = self.new_batch();
                 }
             }
         }
-        panic!("operations should end with a commit");
+        Ok(())
     }
 
     fn root(&self) -> Key {
@@ -117,11 +120,11 @@ where
     }
 
     async fn size(&self) -> Location {
-        LogStore::bounds(self).await.end
+        self.bounds().await.end
     }
 
-    async fn inactivity_floor(&self) -> Location {
-        self.inactivity_floor_loc()
+    async fn sync_boundary(&self) -> Location {
+        self.sync_boundary()
     }
 
     fn historical_proof(
@@ -129,8 +132,16 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         self.historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {

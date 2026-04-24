@@ -186,14 +186,16 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Registrations<PublicKey>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, mut oracle) = Network::new_with_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: NZUsize!(1),
             },
-        );
+            fixture.participants.clone(),
+        )
+        .await;
         network.start();
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
@@ -383,6 +385,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -409,14 +412,16 @@ mod tests {
             let f = |mut context: deterministic::Context| async move {
                 let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-                let (network, mut oracle) = Network::new(
+                let (network, mut oracle) = Network::new_with_peers(
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
-                        tracked_peer_sets: None,
+                        tracked_peer_sets: NZUsize!(1),
                     },
-                );
+                    fixture.participants.clone(),
+                )
+                .await;
                 network.start();
 
                 let mut registrations =
@@ -470,6 +475,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -601,6 +607,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -708,6 +715,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_invalid_signature_injection() {
         invalid_signature_injection(bls12381_threshold::fixture::<MinPk, _>);
@@ -883,14 +891,16 @@ mod tests {
             participants.push(sequencer.public_key());
 
             // Create network
-            let (network, mut oracle) = Network::new(
+            let (network, mut oracle) = Network::new_with_peers(
                 context.with_label("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: NZUsize!(1),
                 },
-            );
+                participants.clone(),
+            )
+            .await;
             network.start();
 
             // Register all participants
@@ -1032,6 +1042,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_external_sequencer() {
         external_sequencer(bls12381_threshold::fixture::<MinPk, _>);

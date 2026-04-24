@@ -13,34 +13,26 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
-//! # Database States
+//! # Database Lifecycle
 //!
-//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
-//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//! All variants are modified through a batch API that follows a common pattern:
+//! 1. Create a batch from the database.
+//! 2. Stage mutations on the batch.
+//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//!    the Merkle root that would result from applying them.
+//! 4. Inspect the root or create child batches.
+//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
-//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//! The specific mutation methods vary by variant.
+//! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
+//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
+//! and `destroy()`.
 //!
-//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
-//! - `init()`                                      → `Clean`
-//! - `Clean.into_mutable()`                        → `Mutable`
-//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
-//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
-//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
-//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
+//! # Traits
 //!
-//! An authenticated database implements [store::LogStore] in every state, and keyed databases
-//! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
-//!
-//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
-//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
-//!
-//! Keyed databases additionally implement:
-//! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
+//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
+//! [crate::Persistable].
 //!
 //! # Acknowledgments
 //!
@@ -53,16 +45,17 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{mem::State as MerkleizationState, Location},
-    qmdb::{operation::Operation, store::State as DurabilityState},
+    merkle::{Family, Location},
+    qmdb::operation::Operation,
 };
-use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+#[cfg(test)]
+mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
@@ -71,18 +64,18 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 pub use verify::{
-    create_multi_proof, create_proof_store, create_proof_store_from_digests, extract_pinned_nodes,
-    verify_multi_proof, verify_proof, verify_proof_and_extract_digests,
+    create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
+    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    #[error("mmr error: {0}")]
-    Mmr(#[from] crate::mmr::Error),
+    #[error("merkle error: {0}")]
+    Merkle(#[from] crate::merkle::Error<F>),
 
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
@@ -94,7 +87,7 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
 
     #[error("operation pruned: {0}")]
-    OperationPruned(Location),
+    OperationPruned(Location<F>),
 
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
@@ -105,32 +98,43 @@ pub enum Error {
     KeyExists,
 
     #[error("unexpected data at location: {0}")]
-    UnexpectedData(Location),
+    UnexpectedData(Location<F>),
 
     #[error("location out of bounds: {0} >= {1}")]
-    LocationOutOfBounds(Location, Location),
+    LocationOutOfBounds(Location<F>, Location<F>),
 
     #[error("prune location {0} beyond minimum required location {1}")]
-    PruneBeyondMinRequired(Location, Location),
+    PruneBeyondMinRequired(Location<F>, Location<F>),
+
+    /// The batch was created from a different database state than the current one.
+    #[error(
+        "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
+    )]
+    StaleBatch {
+        db_size: u64,
+        batch_db_size: u64,
+        batch_base_size: u64,
+    },
+
+    /// The batch's inactivity floor is lower than the database's current floor.
+    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    FloorRegressed(Location<F>, Location<F>),
+
+    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
+    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
+    /// last readable commit from the journal.
+    #[error("floor beyond commit location: floor {0} > commit loc {1}")]
+    FloorBeyondSize(Location<F>, Location<F>),
 }
 
-impl From<crate::journal::authenticated::Error> for Error {
-    fn from(e: crate::journal::authenticated::Error) -> Self {
+impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
+    fn from(e: crate::journal::authenticated::Error<F>) -> Self {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Mmr(m) => Self::Mmr(m),
+            crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
         }
     }
 }
-
-/// Type alias for merkleized state of a QMDB.
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state of a QMDB.
-pub type Unmerkleized = crate::mmr::mem::Dirty;
-/// Type alias for durable state of a QMDB.
-pub type Durable = store::Durable;
-/// Type alias for non-durable state of a QMDB.
-pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -141,16 +145,17 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
-pub(super) async fn build_snapshot_from_log<C, I, F>(
-    inactivity_floor_loc: Location,
+pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
+    inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
-    mut callback: F,
-) -> Result<usize, Error>
+    mut callback: Fn,
+) -> Result<usize, Error<F>>
 where
-    C: Reader<Item: Operation>,
-    I: Index<Value = Location>,
-    F: FnMut(bool, Option<Location>),
+    F: crate::merkle::Family,
+    C: Reader<Item: Operation<F>>,
+    I: Index<Value = crate::merkle::Location<F>>,
+    Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
     let stream = reader
@@ -169,7 +174,7 @@ where
                     active_keys -= 1;
                 }
             } else if op.is_update() {
-                let new_loc = Location::new_unchecked(loc);
+                let new_loc = crate::merkle::Location::new(loc);
                 let old_loc = update_key(snapshot, reader, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
@@ -186,15 +191,16 @@ where
 
 /// Delete `key` from the snapshot if it exists, using a stable log reader, and return the
 /// previously associated location.
-async fn delete_key<I, R>(
+async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
-    key: &<R::Item as Operation>::Key,
-) -> Result<Option<Location>, Error>
+    key: &<R::Item as Operation<F>>::Key,
+) -> Result<Option<Location<F>>, Error<F>>
 where
-    I: Index<Value = Location>,
+    F: Family,
+    I: Index<Value = Location<F>>,
     R: Reader,
-    R::Item: Operation,
+    R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -202,7 +208,7 @@ where
     };
 
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op(reader, &mut cursor, key).await? else {
+    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key).await? else {
         return Ok(None);
     };
     cursor.delete();
@@ -211,16 +217,17 @@ where
 }
 
 /// Update `key` in the snapshot using a stable log reader, returning its old location if present.
-async fn update_key<I, R>(
+async fn update_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
-    key: &<R::Item as Operation>::Key,
-    new_loc: Location,
-) -> Result<Option<Location>, Error>
+    key: &<R::Item as Operation<F>>::Key,
+    new_loc: Location<F>,
+) -> Result<Option<Location<F>>, Error<F>>
 where
-    I: Index<Value = Location>,
+    F: Family,
+    I: Index<Value = Location<F>>,
     R: Reader,
-    R::Item: Operation,
+    R::Item: Operation<F>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -229,7 +236,7 @@ where
     };
 
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op(reader, &mut cursor, key).await? {
+    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key).await? {
         assert!(new_loc > loc);
         cursor.update(new_loc);
         return Ok(Some(loc));
@@ -247,14 +254,15 @@ where
 /// # Panics
 ///
 /// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
-async fn find_update_op<R>(
+async fn find_update_op<F, R>(
     reader: &R,
-    cursor: &mut impl Cursor<Value = Location>,
-    key: &<R::Item as Operation>::Key,
-) -> Result<Option<Location>, Error>
+    cursor: &mut impl Cursor<Value = Location<F>>,
+    key: &<R::Item as Operation<F>>::Key,
+) -> Result<Option<Location<F>>, Error<F>>
 where
+    F: Family,
     R: Reader,
-    R::Item: Operation,
+    R::Item: Operation<F>,
 {
     while let Some(&loc) = cursor.next() {
         let op = reader.read(*loc).await?;
@@ -273,11 +281,11 @@ where
 /// # Panics
 ///
 /// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
-fn update_known_loc<I: Index<Value = Location>>(
+fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
     snapshot: &mut I,
     key: &[u8],
-    old_loc: Location,
-    new_loc: Location,
+    old_loc: Location<F>,
+    new_loc: Location<F>,
 ) {
     let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
     assert!(
@@ -293,7 +301,11 @@ fn update_known_loc<I: Index<Value = Location>>(
 /// # Panics
 ///
 /// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
-fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], old_loc: Location) {
+fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
+    snapshot: &mut I,
+    key: &[u8],
+    old_loc: Location<F>,
+) {
     let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
@@ -303,20 +315,30 @@ fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], ol
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: Mutable<Item: Operation>> {
+pub(crate) struct FloorHelper<
+    'a,
+    F: Family,
+    I: Index<Value = Location<F>>,
+    C: Mutable<Item: Operation<F>>,
+> {
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
 }
 
-impl<I, C> FloorHelper<'_, I, C>
+impl<F, I, C> FloorHelper<'_, F, I, C>
 where
-    I: Index<Value = Location>,
-    C: Mutable<Item: Operation>,
+    F: Family,
+    I: Index<Value = Location<F>>,
+    C: Mutable<Item: Operation<F>>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the
     /// operation was moved.
-    async fn move_op_if_active(&mut self, op: C::Item, old_loc: Location) -> Result<bool, Error> {
+    async fn move_op_if_active(
+        &mut self,
+        op: C::Item,
+        old_loc: Location<F>,
+    ) -> Result<bool, Error<F>> {
         let Some(key) = op.key() else {
             return Ok(false); // operations without keys cannot be active
         };
@@ -331,11 +353,11 @@ where
             }
 
             // Update the operation's snapshot location to point to tip.
-            cursor.update(Location::new_unchecked(self.log.size().await));
+            cursor.update(Location::<F>::new(self.log.size().await));
         }
 
         // Apply the operation at tip.
-        self.log.append(op).await?;
+        self.log.append(&op).await?;
 
         Ok(true)
     }
@@ -349,11 +371,11 @@ where
     ///
     /// Expects there is at least one active operation above the inactivity floor, and panics
     /// otherwise.
-    async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
-    where
-        I: Index<Value = Location>,
-    {
-        let tip_loc = Location::new_unchecked(self.log.size().await);
+    async fn raise_floor(
+        &mut self,
+        mut inactivity_floor_loc: Location<F>,
+    ) -> Result<Location<F>, Error<F>> {
+        let tip_loc: Location<F> = Location::new(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

@@ -61,7 +61,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock();
 
@@ -70,7 +70,7 @@ impl SinkTrait for Sink {
                 return Err(Error::Closed);
             }
 
-            channel.buffer.put(buf.into());
+            channel.buffer.put(bufs.into());
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).

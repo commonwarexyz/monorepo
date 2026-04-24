@@ -1,87 +1,102 @@
 use crate::{
-    mmr::Location,
-    qmdb::any::{
-        operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        value::VariableEncoding,
-        VariableValue,
+    merkle::{Family, Location},
+    qmdb::{
+        any::{
+            operation::{
+                update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
+                UPDATE_CONTEXT,
+            },
+            value::VariableEncoding,
+            VariableValue,
+        },
+        operation::Key,
     },
 };
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::Array;
 
-impl<K, V, S> EncodeSize for Operation<K, VariableEncoding<V>, S>
+impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
 where
-    K: Array,
+    F: Family,
+    S::Key: Write + Read,
     V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + EncodeSize,
+    S: Update<Value = V, ValueEncoding = Self>
+        + Write
+        + Read<Cfg = (<S::Key as Read>::Cfg, <V as Read>::Cfg)>,
 {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(_) => K::SIZE,
-            Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
+    type ReadCfg = (<S::Key as Read>::Cfg, <V as Read>::Cfg);
 
-impl<K, V, S> Write for Operation<K, VariableEncoding<V>, S>
-where
-    K: Array + Codec,
-    V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
+    fn write_operation(op: &Operation<F, S>, buf: &mut impl BufMut) {
+        match op {
+            Operation::Delete(k) => {
                 DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
-            Self::Update(p) => {
+            Operation::Update(p) => {
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
             }
-            Self::CommitFloor(metadata, floor_loc) => {
+            Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
                 UInt(**floor_loc).write(buf);
             }
         }
     }
-}
 
-impl<K, V, S> Read for Operation<K, VariableEncoding<V>, S>
-where
-    K: Array + Codec,
-    V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
-{
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_operation(
+        buf: &mut impl Buf,
+        cfg: &Self::ReadCfg,
+    ) -> Result<Operation<F, S>, CodecError> {
         match u8::read(buf)? {
             DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                Ok(Self::Delete(key))
+                let key = S::Key::read_cfg(buf, &cfg.0)?;
+                Ok(Operation::Delete(key))
             }
             UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
-                Ok(Self::Update(payload))
+                Ok(Operation::Update(payload))
             }
             COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, cfg)?;
-                let floor_loc = UInt::read(buf)?;
-                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::any::operation::variable::Operation",
-                        "commit floor location overflow",
-                    )
-                })?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
+                let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
+                let floor_loc = Location::read(buf)?;
+                Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
+// EncodeSize for ordered variable operations.
+impl<F, K, V> EncodeSize for Operation<F, update::Ordered<K, VariableEncoding<V>>>
+where
+    F: Family,
+    K: Key + EncodeSize,
+    V: VariableValue,
+    update::Ordered<K, VariableEncoding<V>>: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(k) => k.encode_size(),
+            Self::Update(p) => p.encode_size(),
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+        }
+    }
+}
+
+// EncodeSize for unordered variable operations.
+impl<F, K, V> EncodeSize for Operation<F, update::Unordered<K, VariableEncoding<V>>>
+where
+    F: Family,
+    K: Key + EncodeSize,
+    V: VariableValue,
+    update::Unordered<K, VariableEncoding<V>>: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(k) => k.encode_size(),
+            Self::Update(p) => p.encode_size(),
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
     }
 }

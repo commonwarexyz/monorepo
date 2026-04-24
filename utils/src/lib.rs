@@ -8,7 +8,10 @@
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod rng;
-    pub use rng::{test_rng, test_rng_seeded, BytesRng};
+    pub use rng::{test_rng, test_rng_seeded, FuzzRng};
+
+    pub mod thread_local;
+    pub use thread_local::Cached;
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -29,9 +32,16 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod ordered;
+    pub mod range;
 
     use bytes::Buf;
     use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+
+    /// 64-bit golden-ratio-derived odd mixing constant.
+    ///
+    /// Equal to `floor(2^64 / phi)`. Because it is odd, multiplication by it
+    /// is a bijection modulo `2^64`.
+    pub const GOLDEN_RATIO: u64 = 0x9e37_79b9_7f4a_7c15;
 
     /// Represents a participant/validator index within a consensus committee.
     ///
@@ -120,7 +130,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Converts bytes to a hexadecimal string.
     pub fn hex(bytes: &[u8]) -> String {
-        let mut hex = String::new();
+        let mut hex = String::with_capacity(bytes.len() * 2);
         for byte in bytes.iter() {
             write!(hex, "{byte:02x}").expect("writing to string should never fail");
         }

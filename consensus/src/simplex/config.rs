@@ -12,8 +12,37 @@ use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
+/// Controls whether and how the engine proactively forwards certified blocks
+/// when entering the next view.
+///
+/// Forwarding is a best-effort liveness aid: when enabled, the batcher
+/// broadcasts only after we locally certify a proposal and enter the next
+/// view, avoiding sends for proposals that never pass certification.
+#[derive(Debug, Clone, Copy)]
+pub enum ForwardingPolicy {
+    /// Do nothing when a certified proposal becomes eligible for forwarding.
+    Disabled,
+    /// Forward the block to all participants that did not vote for the proposal.
+    ///
+    /// To only send to the leader of the newly entered view, see [ForwardingPolicy::SilentLeader].
+    SilentVoters,
+    /// Forward the block to the leader of the newly entered view if they did not
+    /// vote for the proposal.
+    ///
+    /// To forward to all participants that did not vote for the proposal, see [ForwardingPolicy::SilentVoters].
+    SilentLeader,
+}
+
+impl ForwardingPolicy {
+    /// Returns true if the policy is enabled.
+    pub const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
 /// Configuration for the consensus engine.
-pub struct Config<
+pub struct Config<S, L, B, D, A, R, F, T>
+where
     S: Scheme,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -22,7 +51,7 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
-> {
+{
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
@@ -86,13 +115,13 @@ pub struct Config<
     /// in a view.
     pub leader_timeout: Duration,
 
-    /// Amount of time to wait for a quorum of notarizations in a view
+    /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
-    pub notarization_timeout: Duration,
+    pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
-    pub nullify_retry: Duration,
+    pub timeout_retry: Duration,
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
@@ -110,6 +139,10 @@ pub struct Config<
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
+
+    /// Policy for proactively forwarding certified blocks when entering the
+    /// next view.
+    pub forwarding: ForwardingPolicy,
 }
 
 impl<
@@ -134,16 +167,16 @@ impl<
             "leader timeout must be greater than zero"
         );
         assert!(
-            self.notarization_timeout > Duration::default(),
-            "notarization timeout must be greater than zero"
+            self.certification_timeout > Duration::default(),
+            "certification timeout must be greater than zero"
         );
         assert!(
-            self.leader_timeout <= self.notarization_timeout,
-            "leader timeout must be less than or equal to notarization timeout"
+            self.leader_timeout <= self.certification_timeout,
+            "leader timeout must be less than or equal to certification timeout"
         );
         assert!(
-            self.nullify_retry > Duration::default(),
-            "nullify retry broadcast must be greater than zero"
+            self.timeout_retry > Duration::default(),
+            "timeout retry broadcast must be greater than zero"
         );
         assert!(
             !self.activity_timeout.is_zero(),

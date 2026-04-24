@@ -35,7 +35,7 @@ impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
     }
 
     pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network).await)
+        spawn_cell!(self.context, self.run(vote_network))
     }
 
     async fn run(self, vote_network: (impl Sender, impl Receiver)) {

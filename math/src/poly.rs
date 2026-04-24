@@ -1,6 +1,8 @@
-use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+use crate::algebra::{
+    msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
+};
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
@@ -11,6 +13,8 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -131,14 +135,40 @@ impl<K> Poly<K> {
         K: Space<R>,
     {
         // Contains 1, r, r^2, ...
+        let weights = powers(R::one(), r)
+            .take(self.len_usize())
+            .collect::<Vec<_>>();
+        K::msm(&self.coeffs, &weights, strategy)
+    }
+
+    /// Compute `sum_i a_i * self(b_i)`.
+    ///
+    /// This is more efficient than several calls to `eval_msm`, but produces the
+    /// same result.
+    ///
+    /// This returns `0` if the iterator is empty.
+    pub fn lin_comb_eval<'a, R: Ring + 'a>(
+        &self,
+        into_iter: impl IntoIterator<Item = (R, Cow<'a, R>)>,
+        strategy: &impl Strategy,
+    ) -> K
+    where
+        K: Space<R>,
+    {
+        // Contains a0 + a1 + ..., a0 b0 + a1 b1 + ..., a0 b0^2 + a1 b1^2 + ...
         let weights = {
+            let mut iter = into_iter.into_iter();
+            let Some((a0, b0)) = iter.next() else {
+                return K::zero();
+            };
+
             let len = self.len_usize();
-            let mut out = Vec::with_capacity(len);
-            out.push(R::one());
-            let mut acc = R::one();
-            for _ in 1..len {
-                acc *= r;
-                out.push(acc.clone());
+            let mut out: Vec<_> = powers(a0, b0.as_ref()).take(len).collect();
+            for (ai, bi) in iter {
+                powers(ai, bi.as_ref())
+                    .take(len)
+                    .zip(out.iter_mut())
+                    .for_each(|(c_j, o_j)| *o_j += &c_j);
             }
             out
         };
@@ -473,57 +503,231 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-mod fuzz {
+#[commonware_macros::stability(ALPHA)]
+impl<I: Clone + Ord, F: crate::algebra::FieldNTT> Interpolator<I, F> {
+    /// Create an interpolator for evaluation points at roots of unity.
+    ///
+    /// This uses the fast O(n log n) algorithm from [`crate::ntt::lagrange_coefficients`].
+    ///
+    /// Each `(I, u32)` pair maps an index `I` to an evaluation point `w^k` where `w` is
+    /// a primitive root of unity of order `next_power_of_two(total)`.
+    ///
+    /// Indices `k >= total` are ignored.
+    pub fn roots_of_unity(
+        total: NonZeroU32,
+        points: commonware_utils::ordered::BiMap<I, u32>,
+    ) -> Self {
+        let weights = <Map<I, F> as commonware_utils::TryFromIterator<(I, F)>>::try_from_iter(
+            crate::ntt::lagrange_coefficients(total, points.values().iter().copied())
+                .into_iter()
+                .filter_map(|(k, coeff)| Some((points.get_key(&k)?.clone(), coeff))),
+        )
+        .expect("points has already been deduped");
+        Self { weights }
+    }
+
+    /// Create an interpolator for evaluation points at roots of unity using naive O(n^2) algorithm.
+    ///
+    /// This computes the actual root of unity values and delegates to [`Interpolator::new`].
+    /// Useful for testing against [`Self::roots_of_unity`].
+    ///
+    /// Indices `k >= total` are ignored.
+    #[cfg(any(test, feature = "fuzz"))]
+    fn roots_of_unity_naive(
+        total: NonZeroU32,
+        points: commonware_utils::ordered::BiMap<I, u32>,
+    ) -> Self {
+        use crate::algebra::powers;
+
+        let total_u32 = total.get();
+        let size = (total_u32 as u64).next_power_of_two();
+        let lg_size = size.ilog2() as u8;
+        let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
+
+        let points: Vec<(I, u32)> = points.into_iter().filter(|(_, k)| *k < total_u32).collect();
+        let max_k = points.iter().map(|(_, k)| *k).max().unwrap_or(0) as usize;
+        let powers: Vec<_> = powers(F::one(), &w).take(max_k + 1).collect();
+
+        let eval_points = points
+            .into_iter()
+            .map(|(i, k)| (i, powers[k as usize].clone()));
+        Self::new(eval_points)
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+mod impl_arbitrary {
     use super::*;
     use arbitrary::Arbitrary;
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self {
-                coeffs: u.arbitrary()?,
-            })
+            let first = u.arbitrary()?;
+            let rest: Vec<F> = u.arbitrary()?;
+            let mut coeffs = NonEmptyVec::new(first);
+            coeffs.extend(rest);
+            Ok(Self { coeffs })
         }
     }
 }
 
-#[cfg(test)]
-mod test {
+#[commonware_macros::stability(ALPHA)]
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
-    use crate::test::{F, G};
-    use commonware_codec::Encode;
+    use crate::{
+        algebra::test_suites,
+        test::{F, G},
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
-    use proptest::{
-        prelude::{Arbitrary, BoxedStrategy, Strategy as _},
-        prop_assume, proptest,
-        sample::SizeRange,
+    use commonware_utils::{
+        ordered::{BiMap, Map},
+        TryFromIterator,
     };
 
-    impl Arbitrary for Poly<F> {
-        type Parameters = SizeRange;
-        type Strategy = BoxedStrategy<Self>;
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        Codec(Poly<F>),
+        EvalAdd(Poly<F>, Poly<F>, F),
+        EvalScale(Poly<F>, F, F),
+        EvalZero(Poly<F>),
+        EvalMsm(Poly<F>, F),
+        LinCombEval(Poly<F>, Vec<(F, F)>),
+        Interpolate(Poly<F>),
+        InterpolateWithZeroPoint(Poly<F>),
+        InterpolateWithZeroPointMiddle(Poly<F>),
+        TranslateScale(Poly<F>, F),
+        CommitEval(Poly<F>, F),
+        RootsOfUnityEqNaive(u16),
+        FuzzAdditive,
+        FuzzSpaceRing,
+    }
 
-        fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
-            let nonempty_size = if size.start() == 0 { size + 1 } else { size };
-            proptest::collection::vec(F::arbitrary(), nonempty_size)
-                .prop_map(Self::from_iter_unchecked)
-                .boxed()
+    impl Plan {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Codec(f) => {
+                    assert_eq!(
+                        &f,
+                        &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ()))
+                            .unwrap()
+                    );
+                }
+                Self::EvalAdd(f, g, x) => {
+                    assert_eq!(f.eval(&x) + &g.eval(&x), (f + &g).eval(&x));
+                }
+                Self::EvalScale(f, x, w) => {
+                    assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
+                }
+                Self::EvalZero(f) => {
+                    assert_eq!(&f.eval(&F::zero()), f.constant());
+                }
+                Self::EvalMsm(f, x) => {
+                    assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+                }
+                Self::LinCombEval(f, pairs) => {
+                    let naive_eval = pairs.iter().fold(F::zero(), |mut acc, (a, b)| {
+                        acc += &(*a * &f.eval(b));
+                        acc
+                    });
+                    let lin_comb = f.lin_comb_eval(
+                        pairs.iter().map(|(a, b)| (*a, Cow::Borrowed(b))),
+                        &Sequential,
+                    );
+                    assert_eq!(naive_eval, lin_comb);
+                }
+                Self::Interpolate(f) => {
+                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                        return Ok(());
+                    }
+                    let mut points = (0..f.required().get())
+                        .map(|i| F::from((i + 1) as u8))
+                        .collect::<Vec<_>>();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                    points.pop();
+                    assert_eq!(
+                        interpolator.interpolate(
+                            &Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()),
+                            &Sequential
+                        ),
+                        None
+                    );
+                }
+                Self::InterpolateWithZeroPoint(f) => {
+                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                        return Ok(());
+                    }
+                    let points: Vec<_> =
+                        (0..f.required().get()).map(|i| F::from(i as u8)).collect();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                }
+                Self::InterpolateWithZeroPointMiddle(f) => {
+                    if f == Poly::zero()
+                        || f.required().get() < 2
+                        || f.required().get() >= F::MAX as u32
+                    {
+                        return Ok(());
+                    }
+                    let n = f.required().get();
+                    let points: Vec<_> = (1..n)
+                        .map(|i| F::from(i as u8))
+                        .chain(core::iter::once(F::zero()))
+                        .collect();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                }
+                Self::TranslateScale(f, x) => {
+                    assert_eq!(f.translate(|c| x * c), f * &x);
+                }
+                Self::CommitEval(f, x) => {
+                    assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
+                }
+                Self::RootsOfUnityEqNaive(n) => {
+                    let n = (u32::from(n) % 256) + 1;
+                    let total = NonZeroU32::new(n).expect("n is in 1..=256");
+                    let points = BiMap::try_from_iter((0..n as usize).map(|i| (i, i as u32)))
+                        .expect("interpolation points should be bijective");
+                    let fast = Interpolator::<usize, crate::fields::goldilocks::F>::roots_of_unity(
+                        total,
+                        points.clone(),
+                    );
+                    let naive =
+                        Interpolator::<usize, crate::fields::goldilocks::F>::roots_of_unity_naive(
+                            total, points,
+                        );
+                    assert_eq!(fast.weights, naive.weights);
+                }
+                Self::FuzzAdditive => {
+                    test_suites::fuzz_additive::<Poly<F>>(u)?;
+                }
+                Self::FuzzSpaceRing => {
+                    test_suites::fuzz_space_ring::<F, Poly<F>>(u)?;
+                }
+            }
+            Ok(())
         }
     }
 
     #[test]
-    fn test_additive() {
-        crate::algebra::test_suites::test_additive(file!(), &Poly::<F>::arbitrary());
+    fn test_fuzz() {
+        commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
-
-    #[test]
-    fn test_space() {
-        crate::algebra::test_suites::test_space_ring(
-            file!(),
-            &F::arbitrary(),
-            &Poly::<F>::arbitrary(),
-        );
-    }
+}
+#[cfg(test)]
+mod test {
+    use super::{fuzz::Plan, *};
+    use crate::test::F;
+    use arbitrary::Unstructured;
 
     #[test]
     fn test_eq() {
@@ -544,80 +748,31 @@ mod test {
         assert!(!eq(&[2, 3], &[1, 2, 0]));
     }
 
-    proptest! {
-        #[test]
-        fn test_codec(f: Poly<F>) {
-            assert_eq!(&f, &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ())).unwrap())
+    #[test]
+    fn lin_comb_eval_edge_cases() {
+        fn poly(coeffs: &[u8]) -> Poly<F> {
+            Poly {
+                coeffs: coeffs.iter().copied().map(F::from).try_collect().unwrap(),
+            }
         }
 
-        #[test]
-        fn test_eval_add(f: Poly<F>, g: Poly<F>, x: F) {
-            assert_eq!(f.eval(&x) + &g.eval(&x), (f + &g).eval(&x));
+        fn pairs(values: &[(u8, u8)]) -> Vec<(F, F)> {
+            values
+                .iter()
+                .map(|(a, b)| (F::from(*a), F::from(*b)))
+                .collect()
         }
 
-        #[test]
-        fn test_eval_scale(f: Poly<F>, x: F, w: F) {
-            assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
-        }
-
-        #[test]
-        fn test_eval_zero(f: Poly<F>) {
-            assert_eq!(&f.eval(&F::zero()), f.constant());
-        }
-
-        #[test]
-        fn test_eval_msm(f: Poly<F>, x: F) {
-            assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
-        }
-
-        #[test]
-        fn test_interpolate(f: Poly<F>) {
-            // Make sure this isn't the zero polynomial.
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let mut points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-            points.pop();
-            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &Sequential).is_none());
-        }
-
-        #[test]
-        fn test_interpolate_with_zero_point(f: Poly<F>) {
-            // Use 0, 1, 2, ... as evaluation points (first point is zero)
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let points: Vec<_> = (0..f.required().get()).map(|i| F::from(i as u8)).collect();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-        }
-
-        #[test]
-        fn test_interpolate_with_zero_point_middle(f: Poly<F>) {
-            // Use 1, 2, ..., 0 as evaluation points (zero at last position)
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() >= 2);
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let n = f.required().get();
-            let points: Vec<_> = (1..n).map(|i| F::from(i as u8)).chain(core::iter::once(F::zero())).collect();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-        }
-
-        #[test]
-        fn test_translate_scale(f: Poly<F>, x: F) {
-            assert_eq!(f.translate(|c| x * c), f * &x);
-        }
-
-        #[test]
-        fn test_commit_eval(f: Poly<F>, x: F) {
-            assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
+        let cases = [
+            Plan::LinCombEval(poly(&[3, 5, 7]), vec![]),
+            Plan::LinCombEval(poly(&[11]), pairs(&[(2, 0), (3, 1), (5, 8)])),
+            Plan::LinCombEval(poly(&[4, 6, 8]), pairs(&[(2, 5), (7, 5), (3, 5)])),
+            Plan::LinCombEval(poly(&[9, 2, 3, 4]), pairs(&[(6, 0), (1, 0), (5, 7)])),
+            Plan::LinCombEval(poly(&[1, 2, 4, 8]), pairs(&[(3, 1), (7, 1), (2, 6)])),
+        ];
+        let mut u = Unstructured::new(&[]);
+        for case in cases {
+            case.run(&mut u).unwrap();
         }
     }
 
