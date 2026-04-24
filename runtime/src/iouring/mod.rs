@@ -336,6 +336,7 @@ impl Handle {
     }
 
     /// Submit a logical recv request and wait for its completion.
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     pub async fn recv(
         &self,
@@ -377,6 +378,7 @@ impl Handle {
     }
 
     /// Submit a logical positioned read request and wait for its completion.
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn read_at(
         &self,
