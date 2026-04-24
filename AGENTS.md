@@ -801,7 +801,7 @@ pub trait PrivateKeyExt: PrivateKey {
 
 ### Actor Messaging
 
-- Actors must not block inline waiting for a response from another actor. This includes awaiting `sender.request(...)` or `request::pending(...)` from inside an actor loop. It can deadlock when bounded channels fill, especially if the recipient can also block waiting for an acknowledgement from the sender.
+- Actors must not block inline waiting for a response from another actor. This includes awaiting `sender.request(...)`, `sender.request_or(...)`, or `sender.request_or_default(...)` from inside an actor loop. It can deadlock when bounded channels fill, especially if the recipient can also block waiting for an acknowledgement from the sender.
 - Prefer fire-and-forget actor messages, or enqueue pending responses and poll them alongside the actor mailbox with `select!`/`select_loop!`.
 
 ### Test Organization

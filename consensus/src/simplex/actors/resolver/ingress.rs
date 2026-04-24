@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot, request},
+    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     sequence::U64,
 };
 
@@ -71,13 +71,16 @@ impl Consumer for Handler {
     type Failure = ();
 
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        request::pending(&self.sender, move |response| HandlerMessage::Deliver {
-            view: View::new(key.into()),
-            data: value,
-            response,
-        })
-        .await
-        .unwrap_or(false)
+        self.sender
+            .request_or(
+                move |response| HandlerMessage::Deliver {
+                    view: View::new(key.into()),
+                    data: value,
+                    response,
+                },
+                false,
+            )
+            .await
     }
 
     async fn failed(&mut self, _: Self::Key, _: Self::Failure) {

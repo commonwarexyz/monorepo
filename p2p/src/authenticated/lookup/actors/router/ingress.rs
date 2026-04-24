@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, oneshot, request, ring},
+    channel::{fallible::AsyncFallibleExt, oneshot, ring},
     NZUsize,
 };
 
@@ -90,14 +90,15 @@ impl<P: PublicKey> Messenger<P> {
         // Build Data and encode Message::Data once for all recipients
         let encoded = types::Message::encode_data(&self.pool, channel, message);
 
-        request::pending(&self.sender.0, move |success| Message::Content {
-            recipients,
-            encoded,
-            priority,
+        self.sender
+            .0
+            .request_or_default(|success| Message::Content {
+                recipients,
+                encoded,
+                priority,
                 success,
             })
             .await
-            .unwrap_or_default()
     }
 }
 
