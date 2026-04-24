@@ -14,7 +14,7 @@ use commonware_storage::{
 };
 use commonware_sync::{
     any, crate_version, current,
-    databases::{parse_legacy_database_type, DatabaseType, SyncMode},
+    databases::{DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
     net::{ErrorCode, Resolver},
     Error, Key,
@@ -431,15 +431,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             Arg::new("family")
                 .long("family")
                 .value_name("any|current|immutable|keyless")
-                .help("Database family to use for the selected mode (defaults to 'any')."),
-        )
-        .arg(
-            Arg::new("db")
-                .long("db")
-                .value_name("LEGACY")
-                .help("Deprecated hidden alias for --family.")
-                .hide(true)
-                .conflicts_with("family"),
+                .help("Database family to use for the selected mode.")
+                .default_value("any"),
         )
         .arg(
             Arg::new("server")
@@ -504,16 +497,11 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .unwrap()
         .parse::<SyncMode>()
         .map_err(|e| format!("Invalid sync mode: {e}"))?;
-    let family = if let Some(legacy_db) = matches.get_one::<String>("db") {
-        let (family, _legacy_storage) = parse_legacy_database_type(legacy_db)
-            .map_err(|e| format!("Invalid legacy database type: {e}"))?;
-        family
-    } else {
-        matches
-            .get_one::<String>("family")
-            .map_or(Ok(DatabaseType::Any), |value| value.parse::<DatabaseType>())
-            .map_err(|e| format!("Invalid database family: {e}"))?
-    };
+    let family = matches
+        .get_one::<String>("family")
+        .unwrap()
+        .parse::<DatabaseType>()
+        .map_err(|e| format!("Invalid database family: {e}"))?;
     if !family.supports_client_mode(sync_mode) {
         return Err(format!(
             "Database family '{}' is not supported in '{}' mode",

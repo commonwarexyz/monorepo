@@ -52,7 +52,11 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig>
 }
 
 /// Create deterministic test operations for demonstration purposes.
-/// Generates Set operations and periodic Commit operations.
+///
+/// Generates Set operations and periodic Commit operations for bootstrapping the example
+/// database. When later appending demo operations onto an already-running database,
+/// `add_operations` recomputes each commit floor from the live db state so repeated growth keeps
+/// the floor monotonic.
 pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
@@ -109,7 +113,8 @@ where
                 Operation::Set(key, value) => {
                     batch = batch.set(key, value);
                 }
-                Operation::Commit(metadata, floor) => {
+                Operation::Commit(metadata, _floor) => {
+                    let floor = self.inactivity_floor_loc();
                     let merkleized = batch.merkleize(self, metadata, floor);
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;

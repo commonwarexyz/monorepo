@@ -43,7 +43,7 @@ cargo run --bin server -- --mode compact --family immutable --storage compact
 Server options:
 - `--mode <full|compact>`: Sync mode to demonstrate (default: `full`)
 - `--family <any|current|immutable|keyless>`: Database family to use for the selected mode (default: `any`)
-- `--storage <full|compact>`: Backing storage used by compact-mode servers (default: `full` when omitted in compact mode)
+- `--storage <full|compact>`: Backing storage used by compact-mode servers. Only valid with `--mode compact`; when omitted there, `full` is used
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})

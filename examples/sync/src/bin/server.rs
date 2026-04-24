@@ -18,10 +18,7 @@ use commonware_storage::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any, crate_version, current,
-    databases::{
-        parse_legacy_database_type, CompactSyncable, DatabaseType, ExampleDatabase, StorageKind,
-        SyncMode, Syncable,
-    },
+    databases::{CompactSyncable, DatabaseType, ExampleDatabase, StorageKind, SyncMode, Syncable},
     immutable, immutable_compact, keyless, keyless_compact,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
@@ -831,21 +828,16 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             Arg::new("family")
                 .long("family")
                 .value_name("any|current|immutable|keyless")
-                .help("Database family to use for the selected mode (defaults to 'any')."),
-        )
-        .arg(
-            Arg::new("db")
-                .long("db")
-                .value_name("LEGACY")
-                .help("Deprecated hidden alias for --family.")
-                .hide(true)
-                .conflicts_with("family"),
+                .help("Database family to use for the selected mode.")
+                .default_value("any"),
         )
         .arg(
             Arg::new("storage")
                 .long("storage")
                 .value_name("full|compact")
-                .help("Backing storage used by compact-mode servers (defaults to 'full').")
+                .help(
+                    "Backing storage used by compact-mode servers. Only valid with `--mode compact`; when omitted there, `full` is used.",
+                )
                 .required(false),
         )
         .arg(
@@ -902,33 +894,14 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .get_one::<String>("mode")
         .unwrap()
         .parse::<SyncMode>()?;
-    let (family, legacy_storage) = if let Some(legacy_db) = matches.get_one::<String>("db") {
-        parse_legacy_database_type(legacy_db)?
-    } else {
-        (
-            matches
-                .get_one::<String>("family")
-                .map_or(Ok(DatabaseType::Any), |value| value.parse::<DatabaseType>())?,
-            None,
-        )
-    };
-    let explicit_storage = matches
+    let family = matches
+        .get_one::<String>("family")
+        .unwrap()
+        .parse::<DatabaseType>()?;
+    let storage = matches
         .get_one::<String>("storage")
         .map(|value| value.parse::<StorageKind>())
         .transpose()?;
-    let storage = match (legacy_storage, explicit_storage) {
-        (Some(legacy), Some(explicit)) if legacy != explicit => {
-            return Err(format!(
-                "legacy --db value implies storage '{}' but --storage was '{}'",
-                legacy.as_str(),
-                explicit.as_str()
-            )
-            .into());
-        }
-        (Some(legacy), _) => Some(legacy),
-        (None, Some(explicit)) => Some(explicit),
-        (None, None) => None,
-    };
     match sync_mode {
         SyncMode::Full => {
             if storage.is_some() {

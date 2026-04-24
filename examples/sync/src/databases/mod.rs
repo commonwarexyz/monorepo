@@ -126,22 +126,6 @@ impl StorageKind {
     }
 }
 
-/// Parse hidden legacy `--db` values for backward compatibility.
-pub fn parse_legacy_database_type(s: &str) -> Result<(DatabaseType, Option<StorageKind>), String> {
-    match s.to_lowercase().as_str() {
-        "any" => Ok((DatabaseType::Any, None)),
-        "current" => Ok((DatabaseType::Current, None)),
-        "immutable" => Ok((DatabaseType::Immutable, None)),
-        "keyless" => Ok((DatabaseType::Keyless, None)),
-        "immutable-compact" => Ok((DatabaseType::Immutable, Some(StorageKind::Compact))),
-        "keyless-compact" => Ok((DatabaseType::Keyless, Some(StorageKind::Compact))),
-        _ => Err(format!(
-            "Invalid legacy database type: '{s}'. Must be 'any', 'current', 'immutable', \
-             'keyless', 'immutable-compact', or 'keyless-compact'",
-        )),
-    }
-}
-
 /// Common surface shared by all database adapters used by the sync example binaries.
 ///
 /// This is intentionally the smallest shared interface: enough to create test data, mutate the
@@ -225,7 +209,7 @@ pub trait CompactSyncable: ExampleDatabase {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_legacy_database_type, DatabaseType, StorageKind, SyncMode};
+    use super::{DatabaseType, SyncMode};
 
     #[test]
     fn test_supported_client_mode_matrix() {
@@ -248,21 +232,5 @@ mod tests {
         assert!(!DatabaseType::Current.supports_compact_storage());
         assert!(DatabaseType::Immutable.supports_compact_storage());
         assert!(DatabaseType::Keyless.supports_compact_storage());
-    }
-
-    #[test]
-    fn test_legacy_database_type_mapping() {
-        assert_eq!(
-            parse_legacy_database_type("immutable").unwrap(),
-            (DatabaseType::Immutable, None)
-        );
-        assert_eq!(
-            parse_legacy_database_type("immutable-compact").unwrap(),
-            (DatabaseType::Immutable, Some(StorageKind::Compact))
-        );
-        assert_eq!(
-            parse_legacy_database_type("keyless-compact").unwrap(),
-            (DatabaseType::Keyless, Some(StorageKind::Compact))
-        );
     }
 }
