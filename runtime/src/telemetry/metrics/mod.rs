@@ -314,10 +314,6 @@ impl RegistrationInner {
         Some(Registration { inner })
     }
 
-    fn registration_dropped(&self, registration: &Arc<Self>) {
-        self.guard.registration_dropped(registration);
-    }
-
     fn release(&self) -> bool {
         let mut claims = self.claims.lock();
         assert!(*claims > 0, "registration claim count underflow");
@@ -372,7 +368,7 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.inner.registration_dropped(&self.inner);
+        self.inner.guard.registration_dropped(&self.inner);
     }
 }
 
