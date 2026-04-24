@@ -2454,7 +2454,6 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None).await;
-
             assert_no_timeout(&mut context, &mut voter_receiver, view).await;
 
             // Build proposal and leader's vote
