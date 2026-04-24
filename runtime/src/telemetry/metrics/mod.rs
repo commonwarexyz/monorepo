@@ -390,9 +390,7 @@ impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
 
 type MetricAttributes = Vec<(Cow<'static, str>, Cow<'static, str>)>;
 type MetricKey = (String, MetricAttributes);
-type SampleEncoder = dyn Fn(&mut String, &str, &[(Cow<'static, str>, Cow<'static, str>)]) -> Result<(), std::fmt::Error>
-    + Send
-    + Sync;
+type SampleEncoder = dyn Fn(&mut String) -> Result<(), std::fmt::Error> + Send + Sync;
 
 struct PendingMetricEntry {
     family_name: String,
@@ -420,14 +418,18 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     }
 }
 
-fn create_sample_encoder<M>(metric: Arc<M>) -> Box<SampleEncoder>
+fn create_sample_encoder<M>(
+    name: String,
+    labels: MetricAttributes,
+    metric: Arc<M>,
+) -> Box<SampleEncoder>
 where
     M: Metric,
 {
-    Box::new(move |samples, name, labels| {
-        let mut registry = registry::Registry::with_labels(labels.iter().cloned());
-        registry.register(name, "", SharedMetric(metric.clone()));
+    let mut registry = registry::Registry::with_labels(labels.into_iter());
+    registry.register(name, "", SharedMetric(metric));
 
+    Box::new(move |samples| {
         let mut encoded = String::new();
         encode(&mut encoded, &registry).expect("encoding temporary metric registry failed");
         for line in encoded.lines() {
@@ -550,7 +552,7 @@ impl RegistryInner {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
-        let encode_samples = create_sample_encoder(metric.clone());
+        let encode_samples = create_sample_encoder(name.clone(), attributes.clone(), metric.clone());
         let key = (name.clone(), attributes.clone());
         if let Some(existing_id) = self.keys.get(&key).copied() {
             let entry = self.metric_ref(existing_id);
@@ -765,12 +767,11 @@ impl RegistryInner {
     pub fn encode(&self) -> String {
         let mut output = String::new();
         let mut samples = String::new();
-        for (name, family) in &self.families {
+        for family in self.families.values() {
             samples.clear();
             for metric_id in &family.metric_ids {
                 let metric = self.metric_ref(*metric_id);
-                (metric.encode_samples)(&mut samples, name, &metric.attributes)
-                    .expect("encoding live metric samples failed");
+                (metric.encode_samples)(&mut samples).expect("encoding live metric samples failed");
             }
             // Suppress the HELP/TYPE descriptor when the family produced no
             // samples (e.g. a `Family<S, M>` with no child entries). Matches
